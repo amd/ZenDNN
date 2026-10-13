@@ -171,7 +171,7 @@ inline constexpr int kDecodeNTileInt8 = 256;
 /// helpers (`fill_ntile_expert_order`) and the round-info stack
 /// array in `execute_rounds` (group_matmul_n_tile.cpp).
 ///
-/// `flat_n_tile` runs a BF16 MoE call, or one whose weights only the
+/// `flat_n_tile` runs a BF16/FP16 MoE call, or one whose weights only the
 /// custom kernel can read, with more experts as consecutive slices of at
 /// most this many, so neither the planner nor the custom kernel (whose
 /// `CallContext::kMaxExperts` must be at least this) sees a larger count
@@ -206,7 +206,7 @@ inline constexpr int kNTilePlanMaxExperts = 256;
 //                        and ALGO 3 runs the Rounds path on every
 //                        shape that survives the structural gates.
 //                        A call that must stay on the custom kernel
-//                        (a BF16 MoE call, or weights only the kernel
+//                        (a BF16/FP16 MoE call, or weights only the kernel
 //                        can read) skips it, as it skips
 //                        `!ntile_viable`.
 //

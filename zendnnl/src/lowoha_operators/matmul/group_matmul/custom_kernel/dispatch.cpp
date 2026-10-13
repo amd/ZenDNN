@@ -580,16 +580,17 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
     // Weight-cache mode drives how the CK pack is stored:
     //   0 → no cache: pack into per-call caller-owned buffers (LRU bypass).
     //   1 → out-of-place cache: pack into an LRU-owned buffer.
-    //   2 → in-place (default): bf16/even-K packs are written back into the caller's
-    //       weight buffer (saves a packed buffer); int8 (compensation row
-    //       makes the pack larger than the raw weight) and odd-K bf16 fall
-    //       back to the out-of-place cache inside get_or_pack_weight_*.
+    //   2 → in-place (default): bf16/even-K and contiguous f16 packs are
+    //       written back into the caller's weight buffer (saves a packed
+    //       buffer); int8 (compensation row makes the pack larger than the
+    //       raw weight) and odd-K bf16 fall back to the out-of-place cache
+    //       inside get_or_pack_weight_*.
     // NOTE: reaching here with WC==2 means one of three things:
     //   * pinned ALGO 3 + custom-kernel — each weight has a single consumer,
     //     so the CK pack mutates it in place (`ck_in_place` below is true);
-    //   * an AUTO call holding the custom-kernel in-place licence — a BF16
-    //     MoE call whose phases both run ALGO 3 and whose AOCL reorders are
-    //     capped to out-of-place, so the CK pack is again the single mutator
+    //   * an AUTO call holding the custom-kernel in-place licence — a
+    //     BF16/FP16 MoE call whose phases both run ALGO 3 and whose AOCL
+    //     reorders are capped out-of-place, so CK is the single mutator
     //     (`ck_in_place` is true); or
     //   * any other AUTO call in mixed in-place mode — the grouped dispatcher
     //     kept WC=2 but also set `grp_auto_mixed_inplace`, reserving the one
@@ -1155,7 +1156,9 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
                     /*interleave_split_halves=*/interleave_split_halves,
                     &out.packed_ptrs_f16[i],
                     /*was_hit_out=*/&was_hit_unused,
-                    /*disable_cache=*/cache_off);
+                    /*disable_cache=*/cache_off,
+                    /*in_place=*/ck_in_place,
+                    /*wei_buffer_capacity_bytes=*/0);
             if (pst != status_t::success) {
                 return refuse("weight_pack_failed",
                         "get_or_pack_weight_f16 returned failure — "

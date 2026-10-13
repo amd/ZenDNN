@@ -770,11 +770,11 @@ void clear_fused_moe_scratch();
  * `secondary_params` lets fused-MoE treat Op1 and Op2 as one weight pool.
  * Returns true only when this call is authorised to register the single
  * in-place AOCL mutation used by mixed prompt/decode caching.
- * `auto_algo3_layer` (`grp_matmul_auto_algo3_call`) marks a BF16 MoE call;
+ * `auto_algo3_layer` (`grp_matmul_auto_algo3_call`) marks a BF16/FP16 MoE call;
  * when the process keeps mixed mode and no phase can send the call off
  * ALGO 3, `*ck_inplace_licence` reports that, if the call runs ALGO 3, its
- * custom-kernel pack may be written in place and every other layout of it
- * must stay out-of-place.
+ * AOCL layouts must stay out-of-place and its custom-kernel pack may use
+ * in-place storage where that family supports it (BF16 and FP16).
  */
 bool prepare_grouped_auto_weight_cache(std::vector<matmul_params> &params,
         bool custom_kernel_effective,

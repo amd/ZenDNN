@@ -275,6 +275,10 @@ inline constexpr const char *kGrpMatmulErrPrepackedNoCk
 /// the raw weight.
 inline constexpr const char *kGrpMatmulErrPackedInPlaceNoCk
         = "error_packed_in_place_no_ck";
+/// WC=2 cannot safely serve a BF16/FP16 MoE layer when a phase override
+/// splits a non-AUTO global pin across different weight-layout owners.
+inline constexpr const char *kGrpMatmulErrWc2PhaseSplitUnsupported
+        = "error_wc2_global_phase_split_unsupported";
 /// ALGO 3 could not leave dst defined: a per-thread scratch allocation failed,
 /// or a fused-epilogue layout invariant was violated.  `flat_n_tile` logs the
 /// specific reason; the sentinel only has to fail the call.
@@ -362,7 +366,7 @@ inline int executed_algo_from_gemm_mode(const char *mode) {
 // `n_tile/group_matmul_n_tile_planner.hpp` (re-included by the
 // public N-tile header `n_tile/group_matmul_n_tile.hpp`) with the
 // other N-tile-specific constants.  The auto-selector still reads it
-// for its rule-0 capacity exit to ALGO 1, which a BF16 layer of several
+// for its rule-0 capacity exit to ALGO 1, which a BF16/FP16 layer of several
 // experts skips because ALGO 3 slices such a call; the dispatcher
 // includes the public N-tile header directly to call `flat_n_tile()`,
 // so the symbol remains visible unchanged.
@@ -486,8 +490,9 @@ inline bool get_grp_matmul_ntile_flat_parallel() {
 //   prompt outcome to safe W4A8, with every other prompt using ALGO 1.
 //   AUTO_DECODE_ALGO default = 3 (flat_n_tile and its default refinements).
 //
-// A BF16 layer of at least two experts (`grp_matmul_auto_algo3_layer`) runs
-// ALGO 3 in both phases instead while its phase is unset.
+// A BF16 or FP16 layer of at least two experts
+// (`grp_matmul_auto_algo3_layer`) runs ALGO 3 in both phases instead while
+// its phase is unset.
 //
 // Accepted explicit values are {0,1,2,3,4,5,6}:
 // scheduler identities beyond that set:
@@ -629,33 +634,38 @@ inline bool grp_matmul_auto_decode_algo_is_set() {
     return get_grp_matmul_auto_decode_setting().pins_generic_policy();
 }
 
-/// Does unpinned AUTO run this layer on ALGO 3 in both phases?  Only a
-/// BF16 layer (bf16 source and weight) of at least two experts does: the
-/// custom kernel serves both of its phases from one pack.  A single-expert
-/// call, such as a routed `matmul_direct`, and a layer of any other dtype
-/// keep the shape rules of `auto_select_algo`, so their prompt and decode
-/// may run different ALGOs.  `layer_experts` counts the pool (`total_matmul`
-/// under the framework opt-in), so a call with one active expert of a larger
-/// pool stays with its layer.
-inline bool grp_matmul_auto_algo3_layer(bool bf16, int layer_experts) {
-    return bf16 && layer_experts >= 2;
+/// Does unpinned AUTO run this layer on ALGO 3 in both phases?  BF16 and
+/// FP16 layers of at least two experts do: the custom kernel serves both
+/// phases from one family-specific pack.  A single-expert call, such as a
+/// routed `matmul_direct`, and every other dtype keep the shape rules of
+/// `auto_select_algo`, so their prompt and decode may run different ALGOs.
+/// `layer_experts` counts the pool (`total_matmul` under the framework
+/// opt-in), so a call with one active expert of a larger pool stays with its
+/// layer.
+inline bool grp_matmul_auto_algo3_layer(
+        bool supported_float_family, int layer_experts) {
+    return supported_float_family && layer_experts >= 2;
 }
 
 /// `grp_matmul_auto_algo3_layer` for one call: every active expert is
-/// bf16 x bf16 on a weight the caller did not AOCL-prepack (such a weight
-/// keeps the AOCL prompt path).
+/// uniformly bf16 x bf16 or f16 x f16 on a weight the caller did not
+/// AOCL-prepack (such a weight keeps the AOCL prompt path).
 inline bool grp_matmul_auto_algo3_call(
         const std::vector<int> &M, const std::vector<matmul_params> &params) {
     if (params.size() < M.size()) { return false; }
     bool any_active = false;
+    data_type_t layer_dtype = data_type_t::none;
     for (size_t i = 0; i < M.size(); ++i) {
         if (M[i] <= 0) { continue; }
         const auto &p = params[i];
-        if (p.dtypes.src != data_type_t::bf16
-                || p.dtypes.wei != data_type_t::bf16
+        const data_type_t dt = p.dtypes.src;
+        if ((dt != data_type_t::bf16 && dt != data_type_t::f16)
+                || p.dtypes.wei != dt
+                || (layer_dtype != data_type_t::none && layer_dtype != dt)
                 || is_aocl_prepacked_weight(p)) {
             return false;
         }
+        layer_dtype = dt;
         any_active = true;
     }
     int layer_experts = static_cast<int>(M.size());
@@ -663,7 +673,56 @@ inline bool grp_matmul_auto_algo3_call(
         layer_experts = std::max(
                 layer_experts, static_cast<int>(params[0].total_matmul));
     }
-    return any_active && grp_matmul_auto_algo3_layer(true, layer_experts);
+    return any_active
+            && grp_matmul_auto_algo3_layer(
+                    layer_dtype != data_type_t::none, layer_experts);
+}
+
+/// Statically-known scheduler after phase-over-global precedence, or 0 when
+/// the phase request is shape-dependent (`=0`, `=4`, or qualified `=5`).
+inline int grp_matmul_static_algo_for_phase(grp_matmul_phase phase) {
+    const auto setting = get_grp_matmul_auto_phase_setting(phase);
+    if (setting.has_explicit_request()) {
+        if (!setting.pins_generic_policy()) return 0;
+        const int algo = setting.generic_effective_algo;
+        return (algo == 0 || algo == kGrpMatmulAlgoExpertParallel) ? 0 : algo;
+    }
+    const int global = get_grp_matmul_algo();
+    return is_grp_matmul_generic_algo(global) ? global : 0;
+}
+
+/// A non-AUTO global pin is unsupported under WC=2 when higher-precedence
+/// phase policy can select different/unknown layout owners.
+inline bool grp_matmul_wc2_global_phase_split_unsupported() {
+    if (get_grp_matmul_algo() == kGrpMatmulAlgoAuto) return false;
+    const int prompt
+            = grp_matmul_static_algo_for_phase(grp_matmul_phase::prompt);
+    const int decode
+            = grp_matmul_static_algo_for_phase(grp_matmul_phase::decode);
+    return prompt == 0 || decode == 0 || prompt != decode;
+}
+
+/// Call-level form of the policy above. Each weight pool is considered
+/// independently so fused MoE covers both W13 and W2: a pool is hazardous only
+/// when it is an eligible BF16/FP16 ALGO-3 layer and at least one active weight
+/// can actually use WC=2.
+inline bool grp_matmul_wc2_global_phase_split_unsupported_for_call(
+        const std::vector<int> &M, const std::vector<matmul_params> &params,
+        const std::vector<matmul_params> *secondary_params = nullptr) {
+    if (matmul_config_t::instance().get_weight_cache() != 2
+            || !grp_matmul_wc2_global_phase_split_unsupported()) {
+        return false;
+    }
+    const auto pool_is_hazardous = [&](const std::vector<matmul_params> &pool) {
+        if (!grp_matmul_auto_algo3_call(M, pool)) return false;
+        for (size_t i = 0; i < M.size() && i < pool.size(); ++i) {
+            if (M[i] > 0 && pool[i].weight_cache_type >= 2) return true;
+        }
+        return false;
+    };
+    return pool_is_hazardous(params)
+            || (secondary_params != nullptr
+                    && pool_is_hazardous(*secondary_params));
 }
 
 /// Can this phase be ruled OUT of ALGO 3 for the whole process?
@@ -702,7 +761,7 @@ inline bool grp_matmul_phase_pinned_to_algo3(grp_matmul_phase phase) {
     return setting.pins_generic_policy() && setting.generic_effective_algo == 3;
 }
 
-/// Can this phase of a `grp_matmul_auto_algo3_layer` layer run an
+/// Can this phase of a BF16/FP16 `grp_matmul_auto_algo3_layer` run an
 /// n_tile_safe call on an ALGO other than 3?  Unset, it runs ALGO 3.  A pin
 /// other than 3 can; the legacy cascade (`=0`) and an `=5` pin may pick
 /// another ALGO, so they count.
@@ -712,8 +771,8 @@ inline bool grp_matmul_phase_can_leave_algo3(grp_matmul_phase phase) {
 }
 
 /// Does AUTO keep both phases of a `grp_matmul_auto_algo3_layer` layer on
-/// ALGO 3?  The custom-kernel pack is then the only layout of a weight the
-/// kernel serves, and no AOCL DLP layout of the layer is written in place.
+/// ALGO 3?  Its custom-kernel pack is then shared by both phases, and no
+/// AOCL DLP layout of the layer is written in place.
 inline bool grp_matmul_auto_algo3_only(bool auto_algo3_layer) {
     return auto_algo3_layer
             && !grp_matmul_phase_can_leave_algo3(grp_matmul_phase::prompt)
@@ -744,9 +803,9 @@ inline bool grp_matmul_auto_algo3_only(bool auto_algo3_layer) {
 ///     layout.  An UNSET prompt must stay reachable: Rule 0.7 sends it to
 ///     ALGO 1, which is precisely the case the warm exists for.
 ///
-/// A `grp_matmul_auto_algo3_layer` layer runs both unset phases on ALGO 3,
-/// so either target has a reader only when a pin sends some phase off
-/// ALGO 3, and the ALGO 3 arena only while some phase can still reach it.
+/// A BF16/FP16 `grp_matmul_auto_algo3_layer` runs both unset phases on
+/// ALGO 3, so either target has a reader only when a pin sends some phase
+/// off ALGO 3, and the ALGO 3 arena only while some phase can still reach it.
 inline bool grp_matmul_cross_warm_target_reachable(
         int current_algo, bool auto_algo3_layer) {
     if (!auto_algo3_layer) {
@@ -1443,7 +1502,7 @@ inline bool grp_matmul_custom_kernel_effective(const ParamsVec &params,
 //   cache regime that auto-select would route the OTHER phase to in the
 //   same process, so a deployment that fires only prompt during warmup
 //   still arrives at decode with both regimes warm — no first-decode-
-//   call prepack spike.  A BF16 layer of several experts runs both unset
+//   call prepack spike.  A BF16/FP16 layer of several experts runs both unset
 //   phases on ALGO 3, so for it this only fires when an
 //   `AUTO_{PROMPT,DECODE}_ALGO` pin splits them
 //   (`grp_matmul_cross_warm_target_reachable`).

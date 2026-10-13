@@ -286,6 +286,50 @@ void pack_f16_simple(const float16_t *weight, int K, int N, int ldb,
     }
 }
 
+// Exact inverse of `pack_f16_simple_impl`; used to rebuild raw FP16 weights
+// after an in-place pack when another pack layout is requested.
+template <bool Interleave>
+inline void unpack_f16_simple_impl(const float16_t *packed, int K, int N,
+        int ldb, int pack_nr, bool transB, float16_t *weight) {
+    const int n_blocks = N / pack_nr;
+    const size_t ldb_z = static_cast<size_t>(ldb);
+    const int I = N / 2;
+    if constexpr (!Interleave) (void)I;
+
+    for (int o_blk = 0; o_blk < n_blocks; ++o_blk) {
+        const float16_t *blk_base
+                = packed + static_cast<size_t>(o_blk) * K * pack_nr;
+        const int n_base = o_blk * pack_nr;
+        for (int k = 0; k < K; ++k) {
+            const float16_t *k_base
+                    = blk_base + static_cast<size_t>(k) * pack_nr;
+            for (int n = 0; n < pack_nr; ++n) {
+                const int col_pack = n_base + n;
+                const int col_canon = Interleave
+                        ? ((col_pack & 1) ? (I + (col_pack >> 1))
+                                          : (col_pack >> 1))
+                        : col_pack;
+                const size_t off = transB
+                        ? static_cast<size_t>(col_canon) * ldb_z + k
+                        : static_cast<size_t>(k) * ldb_z + col_canon;
+                weight[off] = k_base[n];
+            }
+        }
+    }
+}
+
+void unpack_f16_simple(const float16_t *packed, int K, int N, int ldb,
+        int pack_nr, bool transB, bool interleave_split_halves,
+        float16_t *weight) {
+    if (interleave_split_halves) {
+        unpack_f16_simple_impl<true>(
+                packed, K, N, ldb, pack_nr, transB, weight);
+    } else {
+        unpack_f16_simple_impl<false>(
+                packed, K, N, ldb, pack_nr, transB, weight);
+    }
+}
+
 // ── Shared per-process cache state (see doc-block below) ────────────
 // Pulled out of `get_or_pack_weight_bf16()` so
 // `clear_custom_kernel_pack_cache()` can reach the same singleton.
@@ -334,6 +378,11 @@ struct Bf16PackCacheEntry {
     bool in_place = false;
 };
 
+struct F16PackCacheEntry {
+    std::shared_ptr<void> packed_owner;
+    bool in_place = false;
+};
+
 lru_cache_t<Key_matmul, Bf16PackCacheEntry> &pack_cache_singleton() {
     static lru_cache_t<Key_matmul, Bf16PackCacheEntry> pack_cache(
             std::numeric_limits<uint32_t>::max());
@@ -344,13 +393,11 @@ std::mutex &pack_mutex_singleton() {
     return pack_mutex;
 }
 
-// ── In-place image registry (bf16) ────────────────────────────────
-// An in-place pack rewrites the caller's weight buffer into the VNNI image
-// and caches an `in_place` entry under the key it packed with, so a later
-// lookup of THAT key is served from the buffer.  A lookup under any other key
-// -- the other interleave layout, another pack_nr -- misses, and a miss packs
-// FROM the buffer, which no longer holds the raw weight.  The image is the
-// same size as the raw weight, so nothing downstream could tell.
+// ── In-place image registry (BF16 and FP16) ───────────────────────
+// An in-place pack rewrites the caller's weight buffer into a family-specific
+// image and caches an `in_place` entry under the key it packed with, so a
+// later lookup of THAT key is served from the buffer.  A lookup under another
+// layout key rebuilds the matching raw dtype before packing out of place.
 //
 // Recording the layout each buffer was rewritten with lets a miss rebuild the
 // raw weight from the image instead of reading the image as raw, and lets the
@@ -360,6 +407,8 @@ std::mutex &pack_mutex_singleton() {
 // Cleared with the pack cache, for the same reason the AOCL mutation
 // registry is: once the entries are gone a later allocation can reuse an
 // address and must not inherit a stale verdict.
+enum class InPlaceImageFamily : uint8_t { kBf16, kF16 };
+
 struct InPlaceImage {
     int K = 0;
     int N = 0;
@@ -368,6 +417,7 @@ struct InPlaceImage {
     bool transB = false;
     bool interleave = false;
     size_t bytes = 0;
+    InPlaceImageFamily family = InPlaceImageFamily::kBf16;
 };
 std::mutex &in_place_images_mutex() {
     static std::mutex m;
@@ -415,10 +465,17 @@ bool find_in_place_image(
     return true;
 }
 
-void clear_in_place_images() {
+void clear_in_place_images(InPlaceImageFamily family) {
     std::lock_guard<std::mutex> lock(in_place_images_mutex());
-    in_place_images().clear();
-    g_in_place_image_count.store(0, std::memory_order_release);
+    auto &images = in_place_images();
+    for (auto it = images.begin(); it != images.end();) {
+        if (it->second.family == family) {
+            it = images.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    g_in_place_image_count.store(images.size(), std::memory_order_release);
 }
 
 // Packs `weight` into `packed`.  When an in-place pack rewrote `weight`, the
@@ -434,6 +491,13 @@ status_t pack_bf16_from_source(const bfloat16_t *weight, int K, int N, int ldb,
         pack_bf16_vnni(weight, K, N, ldb, pack_nr, transB,
                 interleave_split_halves, packed);
         return status_t::success;
+    }
+    if (img.family != InPlaceImageFamily::kBf16) {
+        log_error(
+                "custom_kernel pack: BF16 request received an FP16 in-place "
+                "image for weight=",
+                static_cast<const void *>(weight));
+        return status_t::failure;
     }
     if (interior) {
         log_error("custom_kernel pack: weight=",
@@ -471,6 +535,68 @@ status_t pack_bf16_from_source(const bfloat16_t *weight, int K, int N, int ldb,
     static const bool s_log = apilog_verbose_enabled();
     if (s_log) {
         apilog_verbose("[GRP_MATMUL.PACK FROM_IN_PLACE_IMAGE] weight=",
+                static_cast<const void *>(weight),
+                " image_pack_nr=", img.pack_nr,
+                " image_interleave=", (img.interleave ? 1 : 0),
+                " pack_nr=", pack_nr,
+                " interleave=", (interleave_split_halves ? 1 : 0));
+    }
+    return status_t::success;
+}
+
+status_t pack_f16_from_source(const float16_t *weight, int K, int N, int ldb,
+        int pack_nr, bool transB, bool interleave_split_halves,
+        float16_t *packed) {
+    InPlaceImage img;
+    bool interior = false;
+    if (!find_in_place_image(weight, img, &interior)) {
+        pack_f16_simple(weight, K, N, ldb, pack_nr, transB,
+                interleave_split_halves, packed);
+        return status_t::success;
+    }
+    if (img.family != InPlaceImageFamily::kF16) {
+        log_error(
+                "custom_kernel pack f16: FP16 request received a BF16 "
+                "in-place image for weight=",
+                static_cast<const void *>(weight));
+        return status_t::failure;
+    }
+    if (interior) {
+        log_error("custom_kernel pack f16: weight=",
+                static_cast<const void *>(weight),
+                " points inside an in-place packed image.  The raw weight "
+                "cannot be rebuilt from part of an image.");
+        return status_t::failure;
+    }
+    const size_t extent
+            = static_cast<size_t>(img.K) * static_cast<size_t>(img.N);
+    const size_t rows = static_cast<size_t>(transB ? N : K);
+    const size_t cols = static_cast<size_t>(transB ? K : N);
+    const size_t footprint = (rows - 1) * static_cast<size_t>(ldb) + cols;
+    if (footprint > extent) {
+        log_error("custom_kernel pack f16: weight=",
+                static_cast<const void *>(weight),
+                " holds an in-place packed image of ", extent,
+                " elements, but this request reads ", footprint, " (K=", K,
+                " N=", N, " ldb=", ldb,
+                ").  The raw weight cannot be rebuilt beyond the image.");
+        return status_t::failure;
+    }
+    const size_t raw_bytes = extent * sizeof(float16_t);
+    void *raw = zendnnl_aligned_alloc(64, (raw_bytes + 63) & ~size_t {63});
+    if (raw == nullptr) {
+        log_error("custom_kernel pack f16: aligned_alloc failed for ",
+                raw_bytes, " bytes while rebuilding an in-place packed weight");
+        return status_t::failure;
+    }
+    unpack_f16_simple(weight, img.K, img.N, img.ldb, img.pack_nr, img.transB,
+            img.interleave, static_cast<float16_t *>(raw));
+    pack_f16_simple(static_cast<const float16_t *>(raw), K, N, ldb, pack_nr,
+            transB, interleave_split_halves, packed);
+    zendnnl_aligned_free(raw);
+    static const bool s_log = apilog_verbose_enabled();
+    if (s_log) {
+        apilog_verbose("[GRP_MATMUL.PACK FROM_IN_PLACE_IMAGE F16] weight=",
                 static_cast<const void *>(weight),
                 " image_pack_nr=", img.pack_nr,
                 " image_interleave=", (img.interleave ? 1 : 0),
@@ -760,13 +886,11 @@ std::mutex &pack_mutex_singleton_int8() {
     return pack_mutex;
 }
 
-// Separate singleton from the BF16 / INT8 packs — different LRU
-// instance so f16 entries cannot drift into a bf16 / int8 lookup and
-// vice-versa even if the cache-key marker logic ever regressed.  Type
-// stays `void *` so all three caches share the same `lru_cache_t`
-// template instantiation — the per-pack getter casts on input / output.
-lru_cache_t<Key_matmul, void *> &pack_cache_singleton_f16() {
-    static lru_cache_t<Key_matmul, void *> pack_cache(
+// Separate singleton from the BF16 / INT8 packs.  The explicit entry type
+// distinguishes an LRU-owned out-of-place buffer from an in-place image in
+// caller storage, which the cache must never free.
+lru_cache_t<Key_matmul, F16PackCacheEntry> &pack_cache_singleton_f16() {
+    static lru_cache_t<Key_matmul, F16PackCacheEntry> pack_cache(
             std::numeric_limits<uint32_t>::max());
     return pack_cache;
 }
@@ -1124,7 +1248,8 @@ status_t get_or_pack_weight_bf16(const bfloat16_t *weight, int K, int N,
                                 /*in_place=*/true});
                 record_in_place_image(weight,
                         InPlaceImage {K, N, ldb, pack_nr, transB,
-                                interleave_split_halves, bytes});
+                                interleave_split_halves, bytes,
+                                InPlaceImageFamily::kBf16});
                 *out_packed = weight;
                 return status_t::success;
             }
@@ -1255,7 +1380,8 @@ void free_owned_packed_weight(const bfloat16_t *packed) {
 // here and are not duplicated.
 status_t get_or_pack_weight_f16(const float16_t *weight, int K, int N, int ldb,
         int pack_nr, bool transB, bool interleave_split_halves,
-        const float16_t **out_packed, bool *was_hit_out, bool disable_cache) {
+        const float16_t **out_packed, bool *was_hit_out, bool disable_cache,
+        bool in_place, size_t wei_buffer_capacity_bytes) {
 
     if (was_hit_out != nullptr) *was_hit_out = false;
 
@@ -1308,8 +1434,12 @@ status_t get_or_pack_weight_f16(const float16_t *weight, int K, int N, int ldb,
                     bytes_aligned, " bytes");
             return status_t::failure;
         }
-        pack_f16_simple(weight, K, N, ldb, pack_nr, transB,
-                interleave_split_halves, static_cast<float16_t *>(raw));
+        if (pack_f16_from_source(weight, K, N, ldb, pack_nr, transB,
+                    interleave_split_halves, static_cast<float16_t *>(raw))
+                != status_t::success) {
+            zendnnl_aligned_free(raw);
+            return status_t::failure;
+        }
         *out_packed = static_cast<const float16_t *>(raw);
         return status_t::success;
     }
@@ -1346,12 +1476,13 @@ status_t get_or_pack_weight_f16(const float16_t *weight, int K, int N, int ldb,
             extra_hash);
     key.ldb = static_cast<unsigned>(ldb);
 
-    if (void *cached_pack = nullptr; pack_cache.try_get(key, cached_pack)) {
-        // No `in_place` entry to decode here (contrast the bf16 HIT path
-        // above): the F16 pack family has no in-place (WC=2) mode, so a
-        // cache HIT always yields a valid out-of-place packed pointer.
-        *out_packed = static_cast<const float16_t *>(cached_pack);
+    auto serve_cached = [&](const F16PackCacheEntry &cached) {
+        *out_packed = cached.in_place
+                ? weight
+                : static_cast<const float16_t *>(cached.packed_owner.get());
         if (was_hit_out != nullptr) *was_hit_out = true;
+    };
+    auto log_hit = [&]() {
         if (s_pack_log) {
             apilog_verbose("[GRP_MATMUL.PACK HIT F16] weight=", weight,
                     " K=", K, " N=", N, " ldb=", ldb,
@@ -1359,29 +1490,103 @@ status_t get_or_pack_weight_f16(const float16_t *weight, int K, int N, int ldb,
                     " interleave=", (interleave_split_halves ? 1 : 0),
                     " pack_nr=", pack_nr);
         }
+    };
+    auto log_miss = [&]() {
+        if (s_pack_log) {
+            apilog_verbose("[GRP_MATMUL.PACK MISS F16] weight=", weight,
+                    " K=", K, " N=", N, " ldb=", ldb,
+                    " transB=", (transB ? 1 : 0),
+                    " interleave=", (interleave_split_halves ? 1 : 0),
+                    " pack_nr=", pack_nr);
+        }
+    };
+
+    if (in_place) {
+        std::lock_guard<std::mutex> lock(pack_mutex_singleton_f16());
+        if (F16PackCacheEntry cached; pack_cache.try_get(key, cached)) {
+            serve_cached(cached);
+            log_hit();
+            return status_t::success;
+        }
+
+        log_miss();
+        const size_t plain_bytes = static_cast<size_t>(K)
+                * static_cast<size_t>(N) * sizeof(float16_t);
+        const bool inplace_layout_ok = (ldb == (transB ? K : N));
+        InPlaceImage existing;
+        const bool can_in_place = !find_in_place_image(weight, existing)
+                && inplace_layout_ok
+                && wei_inplace_fits(
+                        bytes, bytes, plain_bytes, wei_buffer_capacity_bytes);
+        if (can_in_place) {
+            void *tmp = zendnnl_aligned_alloc(alignment, bytes_aligned);
+            if (tmp != nullptr) {
+                pack_f16_simple(weight, K, N, ldb, pack_nr, transB,
+                        interleave_split_halves, static_cast<float16_t *>(tmp));
+                std::memcpy(const_cast<float16_t *>(weight), tmp, bytes);
+                zendnnl_aligned_free(tmp);
+                pack_cache.add(key,
+                        F16PackCacheEntry {/*packed_owner=*/ {},
+                                /*in_place=*/true});
+                record_in_place_image(weight,
+                        InPlaceImage {K, N, ldb, pack_nr, transB,
+                                interleave_split_halves, bytes,
+                                InPlaceImageFamily::kF16});
+                *out_packed = weight;
+                return status_t::success;
+            }
+            log_error(
+                    "custom_kernel pack f16 (in-place): interim "
+                    "aligned_alloc failed for ",
+                    bytes_aligned, " bytes; falling back to out-of-place");
+        }
+
+        void *raw = zendnnl_aligned_alloc(alignment, bytes_aligned);
+        if (raw == nullptr) {
+            log_error("custom_kernel pack f16: aligned_alloc failed for ",
+                    bytes_aligned, " bytes");
+            return status_t::failure;
+        }
+        if (pack_f16_from_source(weight, K, N, ldb, pack_nr, transB,
+                    interleave_split_halves, static_cast<float16_t *>(raw))
+                != status_t::success) {
+            zendnnl_aligned_free(raw);
+            return status_t::failure;
+        }
+        std::shared_ptr<void> packed_owner(raw, aligned_pack_deleter {});
+        pack_cache.add(
+                key, F16PackCacheEntry {packed_owner, /*in_place=*/false});
+        *out_packed = static_cast<const float16_t *>(raw);
         return status_t::success;
     }
 
-    if (s_pack_log) {
-        apilog_verbose("[GRP_MATMUL.PACK MISS F16] weight=", weight, " K=", K,
-                " N=", N, " ldb=", ldb, " transB=", (transB ? 1 : 0),
-                " interleave=", (interleave_split_halves ? 1 : 0),
-                " pack_nr=", pack_nr);
-    }
-    void *raw = zendnnl_aligned_alloc(alignment, bytes_aligned);
-    if (raw == nullptr) {
-        log_error("custom_kernel pack f16: aligned_alloc failed for ",
-                bytes_aligned, " bytes");
-        return status_t::failure;
-    }
+    {
+        std::lock_guard<std::mutex> lock(pack_mutex_singleton_f16());
+        if (F16PackCacheEntry cached; pack_cache.try_get(key, cached)) {
+            serve_cached(cached);
+            log_hit();
+            return status_t::success;
+        }
 
-    pack_f16_simple(weight, K, N, ldb, pack_nr, transB, interleave_split_halves,
-            static_cast<float16_t *>(raw));
-    void *winner = pack_cache.get_or_add(key, raw);
-    if (winner != raw) { zendnnl_aligned_free(raw); }
-
-    *out_packed = static_cast<const float16_t *>(winner);
-    return status_t::success;
+        log_miss();
+        void *raw = zendnnl_aligned_alloc(alignment, bytes_aligned);
+        if (raw == nullptr) {
+            log_error("custom_kernel pack f16: aligned_alloc failed for ",
+                    bytes_aligned, " bytes");
+            return status_t::failure;
+        }
+        if (pack_f16_from_source(weight, K, N, ldb, pack_nr, transB,
+                    interleave_split_halves, static_cast<float16_t *>(raw))
+                != status_t::success) {
+            zendnnl_aligned_free(raw);
+            return status_t::failure;
+        }
+        std::shared_ptr<void> packed_owner(raw, aligned_pack_deleter {});
+        pack_cache.add(
+                key, F16PackCacheEntry {packed_owner, /*in_place=*/false});
+        *out_packed = static_cast<const float16_t *>(raw);
+        return status_t::success;
+    }
 }
 
 void free_owned_packed_weight_f16(const float16_t *packed) {
@@ -1393,6 +1598,7 @@ void clear_custom_kernel_pack_cache_f16() {
     std::lock_guard<std::mutex> lock(pack_mutex_singleton_f16());
     auto &pack_cache = pack_cache_singleton_f16();
     pack_cache.clear();
+    clear_in_place_images(InPlaceImageFamily::kF16);
     static const bool s_pack_log = apilog_verbose_enabled();
     if (s_pack_log) {
         apilog_verbose("[GRP_MATMUL.PACK cleared F16] Pack cache cleared");
@@ -1420,7 +1626,7 @@ void clear_custom_kernel_pack_cache() {
     std::lock_guard<std::mutex> lock(pack_mutex_singleton());
     auto &pack_cache = pack_cache_singleton();
     pack_cache.clear();
-    clear_in_place_images();
+    clear_in_place_images(InPlaceImageFamily::kBf16);
     // Rare event (explicit cache clear); still gated for consistency
     // with HIT/MISS so all pack-related APILOG lines share the same
     // enable criterion (gated on the verbose level).
@@ -1977,9 +2183,8 @@ status_t prepack_weight_into_f16(const float16_t *weight, int K, int N, int ldb,
                 " smaller than minimum row stride (", min_ldb, ")");
         return status_t::failure;
     }
-    pack_f16_simple(weight, K, N, ldb, pack_nr, transB, interleave_split_halves,
-            static_cast<float16_t *>(dst));
-    return status_t::success;
+    return pack_f16_from_source(weight, K, N, ldb, pack_nr, transB,
+            interleave_split_halves, static_cast<float16_t *>(dst));
 }
 
 size_t packed_weight_size_s4(int K, int N, int pack_nr, int group_size) {

@@ -213,15 +213,12 @@ struct PrepackParams {
     // Runtime CK acceptance matrix (as of the silu/gelu fused-CK PR):
     //   * `none`                                — always accepted
     //                                              (plain matmul tile).
-    //   * `swiglu_oai_mul` + BF16 dst           — accepted; caller-
-    //                                              side interleaved
-    //                                              W13.
-    //   * `silu_and_mul`   + BF16 dst + no bias — accepted; prepack
-    //                                              re-interleaves
-    //                                              split-halves W13.
-    //   * `gelu_and_mul`   + BF16 dst + no bias — accepted (same
-    //                                              prepack permutation
-    //                                              as silu).
+    //   * `swiglu_oai_mul` + family dst         — accepted; caller-side
+    //                                              interleaved W13.
+    //   * `silu_and_mul`   + family dst + no bias — accepted; prepack
+    //                                                re-interleaves W13.
+    //   * `gelu_and_mul`   + family dst + no bias — accepted with the
+    //                                                same permutation.
     //   * gated-act + FP32 dst, or gated-act + bias — refused at runtime;
     //                                              `ck_eligible` mirrors
     //                                              the refusal here.
@@ -237,15 +234,15 @@ struct PrepackParams {
     // of `ck_eligible` still applies).
     grp_matmul_gated_act_t act = grp_matmul_gated_act_t::none;
 
-    // Gated-activation intermediate dtype.  Runtime CK requires bf16
-    // when `act != none`; for plain GEMM (`act == none`) the field is
-    // ignored.  Default `none` means "no activation in flight" (legacy).
+    // Gated-activation intermediate dtype. Runtime CK requires the family's
+    // store dtype when `act != none` (bf16 for BF16/INT8/W4A8, f16 for
+    // native FP16); plain GEMM ignores it.
     data_type_t act_dtype = data_type_t::none;
 
     // Per-expert bias dtype from the call contract at `params[0]`. Runtime CK
-    // supports `none / bf16 / f32` only; warming CK pack arena under any other
-    // bias dtype prefills entries the runtime never reads. Default `none` is
-    // the safe no-bias case.
+    // supports `none / bf16 / f32 / f16`; warming under another dtype prefills
+    // entries the runtime never reads. Split-halves silu/gelu still refuse
+    // non-null bias. Default `none` is the safe no-bias case.
     data_type_t bias_dtype = data_type_t::none;
 
     // DQ-INT8 discriminators — mirror of the runtime
@@ -260,7 +257,7 @@ struct PrepackParams {
     //     `dynamic_quant == false`.
     //
     // Folded into the fingerprint by `prepack.cpp::fingerprint` so a
-    // bf16-only warmed config does not alias a DQ-INT8 one at the
+    // floating-family warmed config does not alias a DQ-INT8 one at the
     // same `(weight, K, N, scheduling_algo)`.  Read by
     // `ck_eligible_bf16` / `ck_eligible_int8` to decide which family
     // (if any) is engaged.
@@ -306,9 +303,9 @@ struct PrepackParams {
     /// copy the runtime would then hit and keep resident.
     size_t wei_buffer_capacity_bytes = 0;
 
-    /// The custom kernel runs this call and may write its bf16 pack into the
-    /// caller's buffer (`prepare_for_call`'s in-place rule), so the warm
-    /// writes the other experts' packs there too.  Set by the ALGO 3 call
+    /// The custom kernel runs this call and may write its BF16 or FP16 pack
+    /// into the caller's buffer (`prepare_for_call`'s in-place rule), so the
+    /// warm writes the other experts' packs there too. Set by the ALGO 3 call
     /// site; acted on only where a WC=2 warm runs at all
     /// (`should_warm_weight_cache`).
     bool ck_in_place = false;

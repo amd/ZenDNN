@@ -412,7 +412,7 @@ inline bool get_grp_n_tile_fused_act() {
 //     = 256`).  Stack-array bound on the planner; demoting to
 //     Sequential is the only safe recourse.  Auto-select rule 0 also
 //     captures this upstream by routing to ALGO 1.  `flat_n_tile`
-//     slices a larger BF16 MoE call, or one whose weights only the
+//     slices a larger BF16/FP16 MoE call, or one whose weights only the
 //     custom kernel can read, so neither reaches the planner.
 //
 //   * F3 narrow-N escape — only reachable when the strict-stable
@@ -1113,13 +1113,13 @@ inline void fill_ntile_expert_order(int *out, int &out_size, int max_size,
 /// `"flat_n_tile_fused_swiglu_oai"`, or `"flat_n_tile_fused_swiglu_oai_custom"`.
 /// The caller is expected to thread this through to its own
 /// gemm_mode_out so benchdnn / profiler output reveals whether the
-/// custom BF16 microkernel engaged.
+/// custom microkernel engaged.
 ///
-/// A BF16 MoE call, or one whose weights only the custom kernel can read,
-/// with more than `kNTilePlanMaxExperts` experts runs as consecutive
-/// expert slices of at most that many; `gemm_mode_out`
-/// then names the last slice's path, or the first failing slice's
-/// `error_` sentinel, after which no further slice runs.
+/// A BF16/FP16 MoE call, or one whose weights only the custom kernel can
+/// read, with more than `kNTilePlanMaxExperts` experts runs as consecutive
+/// expert slices of at most that many; `gemm_mode_out` then names the last
+/// slice's path, or the first failing slice's `error_` sentinel, after which
+/// no further slice runs.
 ///
 /// `ck_weight_cache_mode` is the weight-cache mode the custom kernel packs
 /// with: the least of the process mode and every expert's per-call

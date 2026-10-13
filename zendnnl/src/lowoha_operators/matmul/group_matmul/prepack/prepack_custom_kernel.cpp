@@ -177,8 +177,8 @@ status_t warm_pack_all_custom_kernel_experts(
     // the raw weights BEFORE the AOCL full-weight prompt reorder mutates the
     // buffer in place (see prepack.cpp); `in_place` is then false, so this
     // pack never mutates the weight.  Under custom-kernel in-place the pack
-    // is the weight's only layout, and `in_place` writes a bf16 pack into
-    // the caller's buffer exactly as the runtime would.
+    // is the weight's only layout, and `in_place` writes a BF16 or FP16 pack
+    // into the caller's buffer exactly as the runtime would.
     if (!should_warm_weight_cache(effective_cache_type)) {
         return bail("weight_cache_disabled");
     }
@@ -203,10 +203,9 @@ status_t warm_pack_all_custom_kernel_experts(
 
     int att = 0, ok = 0, hits = 0, misses = 0, skip = 0;
 #if defined(_OPENMP)
-    // BF16 and INT8 misses pack under their family mutex, so only the F16
-    // and S4 families, which pack outside any lock, gain from a team.
-    const bool lock_free_pack = dtype_family == WarmDtypeFamily::kF16
-            || dtype_family == WarmDtypeFamily::kS4;
+    // BF16, FP16 and INT8 pack under their family mutex. Only S4 packs
+    // outside a family lock and benefits from an expert-level OMP team.
+    const bool lock_free_pack = dtype_family == WarmDtypeFamily::kS4;
     const int pack_threads = lock_free_pack
             ? static_cast<int>(std::min(
                       bound, static_cast<size_t>(omp_get_max_threads())))
@@ -286,7 +285,8 @@ status_t warm_pack_all_custom_kernel_experts(
                     static_cast<const float16_t *>(weight[i]), K[i], N[i],
                     ldb[i], pack_nr, transB_c[i] != 0,
                     /*interleave_split_halves=*/interleave_split_halves,
-                    &packed_ignored, &was_hit);
+                    &packed_ignored, &was_hit, /*disable_cache=*/false,
+                    in_place);
         } else {
             const bfloat16_t *packed_ignored = nullptr;
             pst = ck::get_or_pack_weight_bf16(

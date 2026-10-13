@@ -46,6 +46,9 @@
 
 #include <gtest/gtest.h>
 
+#include <omp.h>
+
+#include <algorithm>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -57,6 +60,7 @@ namespace {
 
 namespace ck = ck_test::ck;
 namespace mt = moe_test_utils;
+using mt::bfloat16_t;
 using mt::float16_t;
 using zendnnl::common::data_type_t;
 using zendnnl::lowoha::matmul::grp_matmul_gated_act_t;
@@ -103,6 +107,8 @@ inline ck_test::PrepCallCase f16_case(const char *label) {
 // ------------------------------------------------------------------
 TEST(CkPackF16, PrepareReportsPlanPackNr) {
     CK_SKIP_IF_NO_F16_ISA();
+    WeightCacheOverride wc_out_of_place(1);
+    ::reset_grp_matmul_caches();
     mt::CustomKernelNROverride nr_guard(0);
     for (int N : {32, 64, 96, 128, 256, 512, 1024, 1536, 2880, 5760}) {
         ck_test::PrepCallCase c
@@ -127,6 +133,7 @@ TEST(CkPackF16, PrepareReportsPlanPackNr) {
 // ------------------------------------------------------------------
 TEST(CkPackF16, SecondPrepareHitsCacheSamePackedPtr) {
     CK_SKIP_IF_NO_F16_ISA();
+    WeightCacheOverride wc_out_of_place(1);
     // Reset the process-wide pack caches before this test -- the
     // "same weight ptr + shape -> same packed pointer" assertion only
     // holds when the f16 cache starts empty (heap-address reuse across
@@ -156,6 +163,8 @@ TEST(CkPackF16, SecondPrepareHitsCacheSamePackedPtr) {
 // ------------------------------------------------------------------
 TEST(CkPackF16, DistinctWeightPointersProduceDistinctPacks) {
     CK_SKIP_IF_NO_F16_ISA();
+    WeightCacheOverride wc_out_of_place(1);
+    ::reset_grp_matmul_caches();
     ck_test::PrepCallCase c = f16_case("f16_distinct_weight_ptrs");
 
     ck_test::PrepCallStorage s1, s2;
@@ -188,6 +197,7 @@ TEST(CkPackF16, DistinctWeightPointersProduceDistinctPacks) {
 // ------------------------------------------------------------------
 TEST(CkPackF16, SiluGeluInterleavedPackMatchesSwigluBytes) {
     CK_SKIP_IF_NO_F16_ISA();
+    WeightCacheOverride wc_out_of_place(1);
     ::reset_grp_matmul_caches();
 
     constexpr int kK = 64;
@@ -400,38 +410,20 @@ TEST(CkPackF16NoCache, ResetReassignsPackedAliasAfterRepack) {
                "a stale or freed pointer.";
 }
 
-// ------------------------------------------------------------------
-// ZENDNNL_MATMUL_WEIGHT_CACHE=2 (in-place mode) fallthrough, f16 path.
-// The F16 pack family has NO in-place mode (unlike bf16 even-K, which
-// writes the pack back into the caller's weight buffer and caches a
-// nullptr sentinel under WC=2).  `get_or_pack_weight_f16` has no
-// `in_place` parameter, so a WC=2 request must TRANSPARENTLY fall
-// through to the out-of-place LRU.  This pins that contract (documented
-// on `CallContext::owned_packed_ptrs_f16` / `get_or_pack_weight_f16`)
-// so a future refactor that adds an f16 in-place path can't silently
-// change it without updating this test.  Asserts:
-//   1) CK still ENGAGES (no refuse -> no DLP fallback).
-//   2) `owned_packed_ptrs_f16[0]` stays nullptr -- WC=2 is NOT the
-//      cache-off (WC=0) mode, so no caller-owned buffer is allocated;
-//      the pack lives in the LRU.
-//   3) The packed pointer does NOT alias the caller's weight buffer --
-//      the pack is out-of-place, not written in place into `weight`.
-//   4) A second prepare on the same (weight ptr, K, N, ldb) HITs the
-//      LRU and returns the SAME packed pointer (out-of-place cache is
-//      live, not bypassed).
-TEST(CkPackF16WeightCache2, FallsThroughToOutOfPlaceLru) {
+// WC=2 writes a contiguous FP16 pack into the caller's buffer.  The cache
+// records an in-place entry, so later prepares return the same caller pointer
+// without giving CallContext ownership of it.
+TEST(CkPackF16WeightCache2, PacksIntoCallerBuffer) {
     CK_SKIP_IF_NO_F16_ISA();
     ::reset_grp_matmul_caches();
     WeightCacheOverride wc_inplace(2);
 
-    ck_test::PrepCallCase c = f16_case("f16_wc2_falls_through_to_out_of_place");
+    ck_test::PrepCallCase c = f16_case("f16_wc2_in_place");
     ck_test::PrepCallStorage storage;
     ck::CallContext kctx_a;
     ASSERT_EQ(ck_test::run_prepare(c, storage, kctx_a),
             zendnnl::error_handling::status_t::success)
-            << "prepare_for_call must succeed under WEIGHT_CACHE=2 -- the f16 "
-               "family has no in-place mode, so WC=2 falls through to the "
-               "out-of-place LRU, it does NOT refuse CK.";
+            << "prepare_for_call must succeed under WEIGHT_CACHE=2";
     EXPECT_TRUE(kctx_a.enabled)
             << "kctx.enabled must remain true under WEIGHT_CACHE=2";
     ASSERT_NE(kctx_a.packed_ptrs_f16[0], nullptr);
@@ -441,33 +433,262 @@ TEST(CkPackF16WeightCache2, FallsThroughToOutOfPlaceLru) {
             = static_cast<const void *>(storage.wei_f16_storage.data());
 
     EXPECT_EQ(kctx_a.owned_packed_ptrs_f16[0], nullptr)
-            << "owned_packed_ptrs_f16[0] must stay null under WEIGHT_CACHE=2 "
-               "-- "
-               "caller-owned buffers are the WC=0 (cache-off) path only; a "
-               "non-null value would mean the f16 pack mistakenly took a "
-               "caller-owned/in-place route.";
-    EXPECT_NE(static_cast<const void *>(kctx_a.packed_ptrs_f16[0]), weight_ptr)
-            << "packed_ptrs_f16[0] must NOT alias the caller's weight buffer "
-               "under WEIGHT_CACHE=2 -- the f16 pack is out-of-place; aliasing "
-               "the weight buffer would mean an (unsupported) in-place write-"
-               "back sentinel leaked into the f16 path.";
+            << "the cache must not give CallContext ownership of caller memory";
+    EXPECT_EQ(static_cast<const void *>(kctx_a.packed_ptrs_f16[0]), weight_ptr);
+    EXPECT_TRUE(ck::weight_packed_in_place(weight_ptr));
 
-    // Second prepare (same weight ptr + shape) must HIT the out-of-place
-    // LRU and return the same packed pointer.
-    ck::CallContext kctx_b;
-    ASSERT_EQ(ck_test::run_prepare(c, storage, kctx_b),
-            zendnnl::error_handling::status_t::success);
-    ASSERT_EQ(static_cast<const void *>(storage.wei_f16_storage.data()),
-            weight_ptr)
-            << "test precondition: the reused storage kept the same weight "
-               "buffer address across prepares";
-    EXPECT_EQ(kctx_b.packed_ptrs_f16[0], kctx_a.packed_ptrs_f16[0])
-            << "second prepare under WEIGHT_CACHE=2 produced a different f16 "
-               "packed pointer -- the out-of-place LRU should have served the "
-               "warmed entry for the same (weight ptr, K, N, ldb).";
-    EXPECT_EQ(kctx_b.owned_packed_ptrs_f16[0], nullptr)
-            << "owned_packed_ptrs_f16[0] must stay null on the WC=2 cache HIT "
-               "as well.";
+    ::reset_grp_matmul_caches();
+}
+
+namespace f16_in_place {
+
+using zendnnl::error_handling::status_t;
+
+std::vector<float16_t> make_weight(size_t elems) {
+    std::vector<float16_t> w(elems);
+    for (size_t i = 0; i < w.size(); ++i) {
+        w[i] = float16_t(static_cast<float>(i % 251) * 0.03125f - 3.0f);
+    }
+    return w;
+}
+
+std::vector<char> reference_pack(const std::vector<float16_t> &raw, int K,
+        int N, int ldb, int pack_nr, bool transB, bool interleave) {
+    std::vector<char> out(ck::packed_weight_size_f16(K, N, pack_nr));
+    EXPECT_EQ(ck::prepack_weight_into_f16(raw.data(), K, N, ldb, pack_nr,
+                      transB, interleave, out.data()),
+            status_t::success);
+    return out;
+}
+
+const float16_t *pack(const std::vector<float16_t> &w, int K, int N, int ldb,
+        int pack_nr, bool transB, bool interleave, bool disable_cache,
+        bool want_in_place) {
+    const float16_t *out = nullptr;
+    EXPECT_EQ(ck::get_or_pack_weight_f16(w.data(), K, N, ldb, pack_nr, transB,
+                      interleave, &out, /*was_hit_out=*/nullptr, disable_cache,
+                      want_in_place),
+            status_t::success);
+    return out;
+}
+
+void expect_other_layouts_rebuilt(int K, int N, bool transB) {
+    ::reset_grp_matmul_caches();
+    const int ldb = transB ? K : N;
+    std::vector<float16_t> w = make_weight(static_cast<size_t>(K) * N);
+    const std::vector<float16_t> raw = w;
+    const size_t bytes = static_cast<size_t>(K) * N * sizeof(float16_t);
+
+    const float16_t *image = pack(w, K, N, ldb, /*pack_nr=*/32, transB,
+            /*interleave=*/false, /*disable_cache=*/false,
+            /*want_in_place=*/true);
+    ASSERT_EQ(image, w.data());
+    ASSERT_TRUE(ck::weight_packed_in_place(w.data()));
+    EXPECT_EQ(0,
+            std::memcmp(image,
+                    reference_pack(raw, K, N, ldb, 32, transB, false).data(),
+                    bytes));
+    const std::vector<float16_t> image_bytes = w;
+
+    for (const int pack_nr : {32, 64}) {
+        for (const bool interleave : {false, true}) {
+            if (pack_nr == 32 && !interleave) { continue; }
+            SCOPED_TRACE("pack_nr=" + std::to_string(pack_nr)
+                    + " interleave=" + std::to_string(interleave));
+            const std::vector<char> ref = reference_pack(
+                    raw, K, N, ldb, pack_nr, transB, interleave);
+
+            const float16_t *cached = pack(w, K, N, ldb, pack_nr, transB,
+                    interleave, /*disable_cache=*/false,
+                    /*want_in_place=*/true);
+            ASSERT_NE(cached, w.data()) << "an image was rewritten twice";
+            EXPECT_EQ(0, std::memcmp(cached, ref.data(), bytes));
+
+            const float16_t *owned = pack(w, K, N, ldb, pack_nr, transB,
+                    interleave, /*disable_cache=*/true,
+                    /*want_in_place=*/false);
+            ASSERT_NE(owned, nullptr);
+            EXPECT_EQ(0, std::memcmp(owned, ref.data(), bytes));
+            ck::free_owned_packed_weight_f16(owned);
+
+            std::vector<char> into(ck::packed_weight_size_f16(K, N, pack_nr));
+            ASSERT_EQ(ck::prepack_weight_into_f16(w.data(), K, N, ldb, pack_nr,
+                              transB, interleave, into.data()),
+                    status_t::success);
+            EXPECT_EQ(0, std::memcmp(into.data(), ref.data(), bytes));
+        }
+    }
+    EXPECT_EQ(0,
+            std::memcmp(w.data(), image_bytes.data(),
+                    image_bytes.size() * sizeof(float16_t)))
+            << "the image changed after it was written";
+    EXPECT_EQ(pack(w, K, N, ldb, 32, transB, false, false, true), w.data());
+
+    ::reset_grp_matmul_caches();
+    EXPECT_FALSE(ck::weight_packed_in_place(w.data()));
+}
+
+} // namespace f16_in_place
+
+TEST(CkPackF16InPlace, OtherLayoutsArePackedFromTheRebuiltWeight) {
+    f16_in_place::expect_other_layouts_rebuilt(
+            /*K=*/63, /*N=*/128, /*transB=*/false);
+}
+
+TEST(CkPackF16InPlace, OtherLayoutsArePackedFromTheRebuiltTransposedWeight) {
+    f16_in_place::expect_other_layouts_rebuilt(
+            /*K=*/63, /*N=*/128, /*transB=*/true);
+}
+
+TEST(CkPackF16InPlace, OddKStillPacksInPlace) {
+    ::reset_grp_matmul_caches();
+    constexpr int K = 63, N = 128;
+    std::vector<float16_t> w
+            = f16_in_place::make_weight(static_cast<size_t>(K) * N);
+    const float16_t *out = f16_in_place::pack(w, K, N, N, 32, false, false,
+            /*disable_cache=*/false, /*want_in_place=*/true);
+    EXPECT_EQ(out, w.data());
+    EXPECT_TRUE(ck::weight_packed_in_place(w.data()));
+    ::reset_grp_matmul_caches();
+}
+
+TEST(CkPackF16InPlace, OutOfPlaceEntryIsNeverRewrittenInPlace) {
+    ::reset_grp_matmul_caches();
+    constexpr int K = 64, N = 128;
+    std::vector<float16_t> w
+            = f16_in_place::make_weight(static_cast<size_t>(K) * N);
+    const std::vector<float16_t> raw = w;
+
+    const float16_t *oop = f16_in_place::pack(w, K, N, N, 32, false, false,
+            /*disable_cache=*/false, /*want_in_place=*/false);
+    ASSERT_NE(oop, nullptr);
+    ASSERT_NE(oop, w.data());
+    const float16_t *wc2 = f16_in_place::pack(w, K, N, N, 32, false, false,
+            /*disable_cache=*/false, /*want_in_place=*/true);
+    EXPECT_EQ(wc2, oop);
+    EXPECT_FALSE(ck::weight_packed_in_place(w.data()));
+    EXPECT_EQ(0,
+            std::memcmp(w.data(), raw.data(), raw.size() * sizeof(float16_t)));
+    ::reset_grp_matmul_caches();
+}
+
+TEST(CkPackF16InPlace, ClearDoesNotLeaveAStaleAddressVerdict) {
+    ::reset_grp_matmul_caches();
+    constexpr int K = 64, N = 128;
+    std::vector<float16_t> w
+            = f16_in_place::make_weight(static_cast<size_t>(K) * N);
+    ASSERT_EQ(f16_in_place::pack(w, K, N, N, 32, false, false, false, true),
+            w.data());
+    ASSERT_TRUE(ck::weight_packed_in_place(w.data()));
+
+    ck::clear_custom_kernel_pack_cache_f16();
+    EXPECT_FALSE(ck::weight_packed_in_place(w.data()));
+    // Simulate allocator address reuse by restoring a different raw image at
+    // the exact same address before the next model/layer is packed.
+    const auto replacement
+            = f16_in_place::make_weight(static_cast<size_t>(K) * N);
+    std::copy(replacement.rbegin(), replacement.rend(), w.begin());
+    const std::vector<float16_t> new_raw = w;
+    const auto ref
+            = f16_in_place::reference_pack(new_raw, K, N, N, 32, false, false);
+    ASSERT_EQ(f16_in_place::pack(w, K, N, N, 32, false, false, false, true),
+            w.data());
+    EXPECT_EQ(0,
+            std::memcmp(w.data(), ref.data(),
+                    static_cast<size_t>(K) * N * sizeof(float16_t)));
+    EXPECT_TRUE(ck::weight_packed_in_place(w.data()));
+    ::reset_grp_matmul_caches();
+}
+
+TEST(CkPackF16InPlace, StridedAndInteriorViewsAreRefusedSafely) {
+    ::reset_grp_matmul_caches();
+    using f16_in_place::status_t;
+    constexpr int K = 64, N = 128;
+
+    std::vector<float16_t> padded
+            = f16_in_place::make_weight(static_cast<size_t>(K) * (N + 8));
+    const std::vector<float16_t> raw = padded;
+    const float16_t *strided = f16_in_place::pack(padded, K, N, N + 8, 32,
+            false, false, /*disable_cache=*/false, /*want_in_place=*/true);
+    ASSERT_NE(strided, nullptr);
+    EXPECT_NE(strided, padded.data());
+    EXPECT_EQ(0,
+            std::memcmp(
+                    padded.data(), raw.data(), raw.size() * sizeof(float16_t)));
+
+    std::vector<float16_t> w
+            = f16_in_place::make_weight(static_cast<size_t>(K) * N);
+    ASSERT_EQ(f16_in_place::pack(w, K, N, N, 32, false, false, false, true),
+            w.data());
+    const float16_t *oversized = nullptr;
+    EXPECT_EQ(ck::get_or_pack_weight_f16(w.data(), K, N, N + 32, 32, false,
+                      false, &oversized, nullptr, false, true),
+            status_t::failure);
+    const float16_t *rows = w.data() + static_cast<size_t>(K / 2) * N;
+    EXPECT_TRUE(ck::weight_packed_in_place(rows));
+    const float16_t *out = nullptr;
+    EXPECT_EQ(ck::get_or_pack_weight_f16(rows, K / 2, N, N, 32, false, false,
+                      &out, nullptr, false, true),
+            status_t::failure);
+    ::reset_grp_matmul_caches();
+}
+
+TEST(CkPackF16InPlace, RegistryKeepsFamiliesSeparate) {
+    ::reset_grp_matmul_caches();
+    using f16_in_place::status_t;
+    constexpr int K = 64, N = 128;
+
+    std::vector<bfloat16_t> bf16(static_cast<size_t>(K) * N, bfloat16_t(0.5f));
+    const bfloat16_t *bf16_out = nullptr;
+    ASSERT_EQ(ck::get_or_pack_weight_bf16(bf16.data(), K, N, N, 32, false,
+                      false, &bf16_out, nullptr, false, true),
+            status_t::success);
+    ASSERT_EQ(bf16_out, bf16.data());
+
+    const float16_t *wrong_family = nullptr;
+    EXPECT_EQ(ck::get_or_pack_weight_f16(
+                      reinterpret_cast<const float16_t *>(bf16.data()), K, N, N,
+                      32, false, false, &wrong_family, nullptr, false, true),
+            status_t::failure);
+
+    std::vector<float16_t> f16
+            = f16_in_place::make_weight(static_cast<size_t>(K) * N);
+    ASSERT_EQ(f16_in_place::pack(f16, K, N, N, 32, false, false, false, true),
+            f16.data());
+    ck::clear_custom_kernel_pack_cache_f16();
+    EXPECT_FALSE(ck::weight_packed_in_place(f16.data()));
+    EXPECT_TRUE(ck::weight_packed_in_place(bf16.data()));
+    ck::clear_custom_kernel_pack_cache();
+    EXPECT_FALSE(ck::weight_packed_in_place(bf16.data()));
+}
+
+TEST(CkPackF16InPlace, ConcurrentFirstPackPublishesOneImage) {
+    ::reset_grp_matmul_caches();
+    using f16_in_place::status_t;
+    constexpr int K = 63, N = 128, Calls = 16;
+    std::vector<float16_t> w
+            = f16_in_place::make_weight(static_cast<size_t>(K) * N);
+    const std::vector<float16_t> raw = w;
+    std::vector<const float16_t *> out(Calls, nullptr);
+    std::vector<status_t> status(Calls, status_t::failure);
+
+#pragma omp parallel for num_threads(8)
+    for (int i = 0; i < Calls; ++i) {
+        status[i] = ck::get_or_pack_weight_f16(w.data(), K, N, N, 32, false,
+                false, &out[i], nullptr, false, true);
+    }
+
+    for (int i = 0; i < Calls; ++i) {
+        EXPECT_EQ(status[i], status_t::success) << "call " << i;
+        EXPECT_EQ(out[i], w.data()) << "call " << i;
+    }
+    const auto ref
+            = f16_in_place::reference_pack(raw, K, N, N, 32, false, false);
+    EXPECT_EQ(0,
+            std::memcmp(w.data(), ref.data(),
+                    static_cast<size_t>(K) * N * sizeof(float16_t)));
+    EXPECT_TRUE(ck::weight_packed_in_place(w.data()));
+    ::reset_grp_matmul_caches();
 }
 
 } // namespace

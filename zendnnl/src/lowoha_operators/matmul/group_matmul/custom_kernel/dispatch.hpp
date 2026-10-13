@@ -520,13 +520,11 @@ struct CallContext {
     std::array<const int8_t *, kMaxExperts> owned_packed_ptrs_int8 {};
     /// FP16 sibling of `owned_packed_ptrs` — caller-owned FP16 packed-
     /// weight pointers, used in the `weight_cache_type == 0` (cache-off
-    /// mode) branch ONLY.  Unlike the bf16 array this is NOT reused for
-    /// WC=2: the FP16 pack family has no in-place (WC=2) mode (see
-    /// `get_or_pack_weight_f16` in pack.hpp), so WC=2 falls through to
-    /// the out-of-place LRU and never populates this array.
-    /// Freed via `free_owned_packed_weight_f16()`.  Same lifetime
-    /// contract as the bf16 array; the destructor /
-    /// `release_owned_buffers()` zero it on exit.
+    /// mode) branch only. Under WC=2 an eligible FP16 pack may alias the
+    /// caller's weight through `packed_ptrs_f16`; that caller memory is
+    /// recorded as an in-place cache entry and this owned slot stays null.
+    /// Freed via `free_owned_packed_weight_f16()`. Same lifetime contract as
+    /// the bf16 array; the destructor / `release_owned_buffers()` zero it.
     std::array<const float16_t *, kMaxExperts> owned_packed_ptrs_f16 {};
     /// W4A8 sibling of `owned_packed_ptrs`: cache-off branch only,
     /// freed via `free_owned_packed_weight_s4()`.
@@ -622,8 +620,8 @@ struct CallContext {
 /// DQ-INT8 families, `f16` for the FP16 family (their fused gated
 /// store helpers write bf16 and f16 respectively).
 ///
-/// `bias_dtype` must be one of `{none, bf16, f32, f16}` for ALL three
-/// families.  An f16 bias is loaded directly by the FP16 microkernel
+/// `bias_dtype` must be one of `{none, bf16, f32, f16}` for the BF16,
+/// DQ-INT8, and FP16 families. An f16 bias is loaded by the FP16 microkernel
 /// and widened via `_mm512_cvtph_ps` (AVX-512F, no native AVX-512-FP16
 /// ISA) by the BF16 / DQ-INT8 microkernels.  `none` means
 /// no bias at all (per-expert bias pointers are expected to be null).
@@ -633,12 +631,12 @@ struct CallContext {
 /// per tile (no specialisation explosion).
 ///
 /// Activation contract:
-///   * `none` — plain matmul.  Both BF16 and F32 dst admitted.
+///   * `none` — plain matmul. Family dst (BF16 or FP16) and F32 admitted.
 ///   * `swiglu_oai_mul` — fused in the per-tile epilogue (caller-
 ///     side interleaved [g0,u0,g1,u1,...] layout puts (gate, up)
 ///     pairs on every 32-col tile).  Halved output width.
-///     `dst_dtype = bf16` ONLY (the swiglu store helper writes
-///     BF16; (swiglu, f32-dst) is rejected inside `select_ukernel`).
+///     Family dst ONLY (BF16 or FP16); gated F32 dst is rejected by
+///     the family microkernel selector.
 ///   * `silu_and_mul` / `gelu_and_mul` — ALSO fused in the per-tile
 ///     epilogue (via `silu_and_mul_store_pair` and
 ///     `gelu_and_mul_store_pair` respectively).  Caller passes
@@ -649,8 +647,8 @@ struct CallContext {
 ///     math, not in the pack layout.  Halved output width.
 ///     Refusal conditions, both routed back through the caller's
 ///     fallback path:
-///       * `dst_dtype = f32` (gated-store helpers write BF16
-///         only) → caller takes the two-pass route described in
+///       * `dst_dtype = f32` (gated-store helpers write the family
+///         dtype only) → caller takes the two-pass route described in
 ///         the file header (act = none + `group_matmul_moe_act_
 ///         execute`).
 ///       * `bias_dtype != none` (bias-into-init under the

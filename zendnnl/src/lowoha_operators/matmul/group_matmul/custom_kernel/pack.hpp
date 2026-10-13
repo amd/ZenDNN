@@ -224,15 +224,14 @@ status_t get_or_pack_weight_bf16(const bfloat16_t *weight, int K, int N,
         bool disable_cache = false, bool in_place = false,
         size_t wei_buffer_capacity_bytes = 0);
 
-/// True when `weight` points into a buffer an in-place pack
-/// (`get_or_pack_weight_bf16`'s `in_place`) rewrote into the custom-kernel
-/// image, at its start or inside it.  The buffer then no longer holds the raw
-/// weight, so the custom kernel is its only valid reader.  Recorded on the
-/// rewrite and forgotten by
-/// `clear_custom_kernel_pack_cache()`.  A single atomic load while no buffer
-/// has been rewritten.  Callers check it before they run, so a call that
-/// reads a weight off the custom kernel while another call packs it in
-/// place is not caught.
+/// True when `weight` points into a buffer an in-place BF16 or FP16 pack
+/// rewrote into a custom-kernel image, at its start or inside it.  The buffer
+/// then no longer holds the raw weight, so the custom kernel is its only
+/// valid reader.  Recorded on the rewrite and forgotten by the matching
+/// family cache clear.  A single atomic load while no buffer has been
+/// rewritten.  Callers check it before they run, so a call that reads a
+/// weight off the custom kernel while another call packs it in place is not
+/// caught.
 bool weight_packed_in_place(const void *weight);
 
 /// `weight_packed_in_place` over the experts with `M[i] > 0`, under one lock.
@@ -300,21 +299,15 @@ void free_owned_packed_weight(const bfloat16_t *packed);
 /// from `[N/2, N)` with `I = N/2`, so an odd N has no valid split.
 /// The function refuses (returns failure) on odd N in that mode.
 ///
-/// IN-PLACE (WEIGHT_CACHE=2) IS NOT SUPPORTED for the F16 pack family:
-/// note there is deliberately NO `in_place` parameter here (contrast
-/// the bf16 sibling's trailing `in_place = false`).  Even though the
-/// FP16 pack is the same size as the raw weight (`packed_bytes ==
-/// K*N*sizeof(float16_t)`, no K-interleave/pad — so an in-place
-/// write-back would be layout-feasible), the F16 path conservatively
-/// declines it and always uses the out-of-place LRU (or the
-/// caller-owned buffer under `disable_cache`).  A WC=2 request from
-/// the dispatcher therefore transparently falls through to the
-/// out-of-place cache for f16 — behaviourally correct, just without
-/// the one-buffer saving the bf16 even-K in-place path gets.
+/// `in_place` follows the BF16 contract above.  FP16 has no K padding, so a
+/// contiguous weight has `packed_bytes == K*N*sizeof(float16_t)` for every K
+/// and can use the caller's buffer under WEIGHT_CACHE=2.  Another layout is
+/// packed out of place from raw bytes rebuilt from the recorded FP16 image.
 status_t get_or_pack_weight_f16(const float16_t *weight, int K, int N, int ldb,
         int pack_nr, bool transB, bool interleave_split_halves,
         const float16_t **out_packed, bool *was_hit_out = nullptr,
-        bool disable_cache = false);
+        bool disable_cache = false, bool in_place = false,
+        size_t wei_buffer_capacity_bytes = 0);
 
 /// Free a packed-weight buffer returned by
 /// `get_or_pack_weight_f16(..., disable_cache=true)`.  Safe with
@@ -547,7 +540,8 @@ void clear_custom_kernel_pack_cache_int8();
 /// empty.  Mirror of `clear_custom_kernel_pack_cache()` for the
 /// disjoint FP16 LRU singleton.  See the warning on the bf16
 /// sibling — the same quiescence contract applies (no in-flight
-/// FP16 CK dispatch on any thread).
+/// FP16 CK dispatch on any thread), and an in-place FP16 image must
+/// not be reused after this drops its registry record.
 void clear_custom_kernel_pack_cache_f16();
 
 } // namespace custom_kernel

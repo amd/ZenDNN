@@ -666,7 +666,7 @@ struct GroupNTileContext {
     // True when ALGO 3 W4A8 follows the aocl_dlp_blocked native s4 path.
     bool w4a8_native = false;
 
-    // A custom-kernel BF16 MoE call (`grp_matmul_auto_algo3_call`):
+    // A custom-kernel BF16/FP16 MoE call (`grp_matmul_auto_algo3_call`):
     // DecodeDynamic splits the whole team over fewer active experts than
     // L3 domains.
     bool split_team_over_experts = false;
@@ -2732,7 +2732,7 @@ inline void apply_round_pick(const GroupNTileTopology &topo,
 //      kernel's nr-alignment contract.
 //
 // A call that must stay on the custom kernel
-// (`ck_required_at_plan_time`: a BF16 MoE call, or weights only the
+// (`ck_required_at_plan_time`: a BF16/FP16 MoE call, or weights only the
 // kernel can read) skips the viability and auto-mirror gates, since
 // Sequential runs every expert on AOCL from the caller's weight buffer.
 //
@@ -3581,7 +3581,7 @@ inline void execute_decode_d(
 // the expert via `do_tile(e, lane, my_ccd_size, min_n_tile)`.  Confining
 // an expert to one CCD keeps its whole weight resident in that CCD's L3
 // rather than scattering tiles of one expert across CCDs.  A custom-kernel
-// BF16 MoE call with fewer active experts than L3 domains is the exception:
+// BF16/FP16 MoE call with fewer active experts than L3 domains is the exception:
 // each expert takes a group of domains instead (see the body).  Column
 // arithmetic is the SAME `aligned_n_split` the rounds / DecodeD
 // executors use, so per-tile numerics are identical; only the
@@ -3668,7 +3668,7 @@ inline void execute_decode_dynamic(
         // With fewer active experts than L3 domains, one domain per expert
         // leaves the rest of the team idle on a weight too large for one L3
         // (the trigger for so few experts).  The custom kernel's pack is
-        // full-N, so on a BF16 MoE call its split widens: the team splits
+        // full-N, so on a BF16/FP16 MoE call its split widens: the team splits
         // evenly over the active experts, each taking a contiguous run of
         // lanes that split its N together.  AOCL tiles keep one domain,
         // whose reorder keys follow the team size.
@@ -4076,7 +4076,7 @@ static bool has_ck_only_weight(const std::vector<const void *> &weight,
     return custom_kernel::any_weight_packed_in_place(weight, M);
 }
 
-// A BF16 MoE call, or one whose weights only the custom kernel can read,
+// A BF16/FP16 MoE call, or one whose weights only the custom kernel can read,
 // with more experts than the planner holds runs as consecutive slices of
 // at most `kNTilePlanMaxExperts` experts.  Past that bound the custom
 // kernel declines a call and the planner's R3 guard runs every expert on
@@ -4293,12 +4293,12 @@ void flat_n_tile(const std::vector<char> &layout,
 
     const int num_ops = static_cast<int>(M.size());
     if (num_ops == 0 || num_threads <= 0) return;
-    // Slices keep a BF16 MoE call on the custom kernel past the planner's
+    // Slices keep a BF16/FP16 MoE call on the custom kernel past the planner's
     // capacity, and weights only the kernel can read; any other call takes
     // the planner's capacity guard.
-    const bool bf16_moe = grp_matmul_auto_algo3_call(M, params);
+    const bool auto_algo3_moe = grp_matmul_auto_algo3_call(M, params);
     if (num_ops > kNTilePlanMaxExperts
-            && (bf16_moe || has_ck_only_weight(weight, M, params))) {
+            && (auto_algo3_moe || has_ck_only_weight(weight, M, params))) {
         flat_n_tile_in_slices(layout, transA, transB, M, N, K, alpha, src, lda,
                 weight, ldb, bias, beta, dst, ldc, is_weights_const, params,
                 num_threads, fused_act, act_dtype, gemm_mode_out,
@@ -5331,7 +5331,7 @@ void flat_n_tile(const std::vector<char> &layout,
             use_custom ? &kctx : nullptr, measured_bf16_route, &abort_code,
             any_hoist ? &hoisted : nullptr, w4a8_s8_weights_in,
             w4a8_native_layout};
-    ctx.split_team_over_experts = use_custom && bf16_moe;
+    ctx.split_team_over_experts = use_custom && auto_algo3_moe;
 
     // `is_int8` drives the planner's int8-variant per-thread N floor
     // (`kDecodeNTileInt8` / `kMinNTileInt8` via the `*_for_variant`
@@ -5352,9 +5352,9 @@ void flat_n_tile(const std::vector<char> &layout,
     // The custom path keeps the legacy cost-model picks because its
     // pack cache is shape-keyed, not tile-keyed.
     // A call that must stay on the custom kernel skips the planner's AUTO
-    // demotions: a BF16 MoE call, or weights only the kernel can read.
-    const bool ck_required
-            = use_custom && (bf16_moe || any_ck_prepacked_b || any_in_place_b);
+    // demotions: a BF16/FP16 MoE call, or weights only the kernel can read.
+    const bool ck_required = use_custom
+            && (auto_algo3_moe || any_ck_prepacked_b || any_in_place_b);
     GroupNTilePlan plan = plan_group_n_tile(topo, algo, nr_align,
             fused_epilogue, use_custom, /*ck_int8_at_plan_time=*/is_int8_call,
             ck_required, M, N, K);

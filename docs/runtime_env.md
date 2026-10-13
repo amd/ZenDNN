@@ -21,7 +21,7 @@ This document lists all environment variables available for configuring ZenDNNL 
 | `ZENDNNL_MATMUL_ALGO` | Selects the MatMul algorithm/kernel to use for 2D matrix multiplication | `none` (auto-select) | `-1` (none)<br>`auto` (auto_tuner)<br>`0` (dynamic_dispatch)<br>`1` (aocl_dlp_blocked)<br>`2` (onednn_blocked)<br>`3` (libxsmm_blocked)<br>`4` (aocl_dlp)<br>`5` (onednn)<br>`6` (libxsmm)<br>`8` (auto_tuner)<br>`9` (reference) |
 | `ZENDNNL_BMM_ALGO` | Selects the Batch MatMul algorithm/kernel to use for 3D batch matrix multiplication | `-1` (none); see note below | Integer ID or name. `-1` (none / unset)<br>`0` (dynamic_dispatch)<br>`1` (aocl_dlp_blocked)<br>`2` (onednn_blocked)<br>`4` (aocl_dlp)<br>`5` (onednn)<br>`6` (libxsmm)<br>`7` (batched_sgemm) |
 | `ZENDNNL_CACHE_OFF` | Process-wide cache kill switch for covered cache infrastructure. Equivalent JSON knob: top-level `global_cache_off`. | `0` (disabled) | `1`/`true`/`on`/`yes` (force covered caches off)<br>`0`/`false`/`off`/`no` (leave local cache knobs in control) |
-| `ZENDNNL_MATMUL_WEIGHT_CACHE` | Weight-reorder caching mode for blocked / auto-tuner algorithms and grouped-matmul custom paths. W8A8 grouped-MoE ALGO 4 requires an enabled persistent pack and declines when this is `0`; BF16 and caller-prequantized S8 may then use generic fallback. | `2` (in-place where supported) | `0` (disabled)<br>`1` (out-of-place, enabled)<br>`2` (in-place: reuse the user weight buffer as the reorder destination when the layout is safe, otherwise fall back to out-of-place; auto-downgraded to `1` under auto_tuner / dynamic_dispatch; grouped-matmul AUTO keeps `2` only with prepack, cross-warm, the custom-kernel decode pack and unlimited LRU capacity, and then a BF16 layer of several experts writes its custom-kernel pack in place unless a phase pin sends one phase off ALGO 3, and any other grouped call writes only its AOCL prompt reorder in place). INT8 in-place needs `matmul_params::wei_buffer_capacity_bytes` when the blocked size exceeds `k*n` (`0` means exactly `k*n`). A partitioned BMM that shares one weight and has a source zero-point stays out-of-place even when that image already equals `k*n`. |
+| `ZENDNNL_MATMUL_WEIGHT_CACHE` | Weight-reorder caching mode for blocked / auto-tuner algorithms and grouped-matmul custom paths. W8A8 grouped-MoE ALGO 4 requires an enabled persistent pack and declines when this is `0`; BF16 and caller-prequantized S8 may then use generic fallback. | `2` (in-place where supported) | `0` (disabled)<br>`1` (out-of-place, enabled)<br>`2` (in-place: reuse the user weight buffer as the reorder destination when the layout is safe, otherwise fall back to out-of-place; auto-downgraded to `1` under auto_tuner / dynamic_dispatch; grouped-matmul AUTO keeps `2` only with prepack, cross-warm, the custom-kernel decode pack and unlimited LRU capacity. A BF16 or FP16 layer of several experts then uses one ALGO 3 custom-kernel layout in both phases and keeps AOCL layouts out-of-place; eligible BF16/FP16 packs may use the caller's buffer. Other grouped calls may write only their AOCL prompt reorder in place). INT8 in-place needs `matmul_params::wei_buffer_capacity_bytes` when the blocked size exceeds `k*n` (`0` means exactly `k*n`). A partitioned BMM that shares one weight and has a source zero-point stays out-of-place even when that image already equals `k*n`. |
 | `ZENDNNL_MATMUL_CUSTOM_KERNEL` | Routes eligible wide-N `matmul_direct` calls through one-op grouped AUTO: prompt executes full-weight AOCL while warming the future decode layout, and decode-class (`M <= 32`) executes ALGO 3 CK. Supported scalar families are BF16 and static per-tensor U8×S8 with a positive F32/BF16 source scale, S32 source zero-point, symmetric S8 weights with scalar or per-channel `{N}` / `{1,N}` F32/BF16 scales, and BF16/F32/U8 destination. U8 destination additionally requires a positive F32/BF16 destination multiplier and S32 destination zero-point. Static U8×S8 may use either no post-op, one buffer-free ReLU/sigmoid, or the exact `binary_mul(F32[M,N]) -> binary_add(F32[M,N])` chain. Scalar routing requires the effective backend to resolve to AOCL-DLP blocked; on an AOCL build this includes the unset/default MatMul algorithm as well as explicit `ZENDNNL_MATMUL_ALGO=1`, while explicit non-AOCL backends remain configured. Plain and supported caller-prepacked weights retain their representation through AUTO selection. For scalar prepack compatibility, `mem_format_b='r'` with unset or AOCL-DLP provenance is treated as AOCL-DLP blocked; `lowoha_algo=moe_custom_kernel` explicitly identifies CK-VNNI. Only a validated ALGO-3 custom-kernel path converts supported AOCL-DLP BF16 or pure static U8×S8 bytes: AOCL unreorders into temporary raw storage and CK packs directly into the final bounded-cache arena, so no persistent raw copy or full-size CK memcpy remains. AOCL symmetric-quant S8 packs remain on AOCL because that format has no unreorder API. Prompt/AOCL and every CK fallback retain the original blocked pointer. Also requires constant weights and compatible cache/threading settings. Equivalent JSON knob: `runtime_variables.matmul.custom_kernel`. | `1` (enabled) | `0` (standard path)<br>`1` (eligible prompt/decode routed through grouped AUTO when the effective backend is AOCL-DLP blocked) |
 | `ZENDNNL_DLP_M_HINT` | Expected M dimension for supported AOCL-DLP GEMMs. Equivalent JSON knob: `runtime_variables.matmul.dlp_m_hint`. A valid JSON config replaces environment-variable configuration. | `0` (hints disabled) | Non-negative base-10 integer; `0` disables hints |
 | `ZENDNNL_ENABLE_ROUTED_MOE` | Enable the routed-MoE fast executor for eligible calls. Set to `0` to skip the fast executor and use the internal vector `group_matmul_direct` fallback. The grouped fallback still follows `ZENDNNL_GRP_MATMUL_ALGO`; set that to `4` to request ALGO 4. Unsupported calls use the generic fallback regardless of this setting. | `1` (enabled) | `1` (routed fast-then-fallback policy)<br>`0` (disable routed fast and use generic fallback) |
@@ -53,8 +53,8 @@ User-facing knob for `group_matmul_direct` (the grouped GEMM dispatcher used by 
 | Variable | Description | Default | Valid Values |
 |----------|-------------|---------|--------------|
 | `ZENDNNL_GRP_MATMUL_ALGO` | Selects the grouped-matmul whole-call mode. `0` (AUTO) lets the library pick per call. `{1,2,3,5,6}` pin a generic scheduler globally when the active phase knob is unset. `4` attempts the private symmetric per-channel W8A8 fused-MoE fast path in both phases, in either BF16-dynamic or caller-prequantized S8 mode. ALGO 4's direct-S8 fast path requires positive finite per-token BF16/F32 source scales, caller-owned BF16 `dst_down`, and `row_ptrs` that permute destination rows. `dst_down[i]` must be the tight BF16 view over the exact same BF16-sized backing as `src[i]` (`ldc_down[i] == hidden`), whose leading bytes hold the S8 source prefix; separate, offset, partial, padded, and cross-expert destinations decline ALGO 4. Any eligibility decline writes nothing and falls back to generic AUTO. ALGO 4 allocation/execution errors remain terminal. Read once and cached on first reference. | `0` (AUTO) | `0` (AUTO), `1` (sequential), `2` (flat M-tile), `3` (flat N-tile), `4` (two-mode W8A8 fused-MoE attempt), `5` (per-expert), `6` (multilevel CCD) |
-| `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO` | Selects the decode-phase policy (`max active M <= 32`) and, when explicitly set, outranks `ZENDNNL_GRP_MATMUL_ALGO`. Unset, an N-tile-safe call of a BF16 layer of at least two experts runs ALGO 3. `{1,2,3,5,6}` pin that scheduler; `0` selects the legacy cascade; `4` attempts W8A8, then inherits the decode default (ALGO 3) on decline. Tile-safety failures clamp to ALGO 1. | `3` | `0`, `1`, `2`, `3`, `4`, `5`, `6` |
-| `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO` | Selects the prompt-phase policy (`max active M > 32`) and, when explicitly set, outranks `ZENDNNL_GRP_MATMUL_ALGO`. Unset, an N-tile-safe call of a BF16 layer of at least two experts runs ALGO 3. When unpinned, Rule 0.7 selects ALGO 2 only for safe all-active W4A8; every other prompt selects ALGO 1. `{1,2,3,5,6}` pin that scheduler with tile-safety clamps; `0` selects the legacy cascade; `4` attempts W8A8, then inherits Rule 0.7 on decline. | unset (Rule 0.7) | `0`, `1`, `2`, `3`, `4`, `5`, `6` |
+| `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO` | Selects the decode-phase policy (`max active M <= 32`) and, when explicitly set, outranks `ZENDNNL_GRP_MATMUL_ALGO`. Unset, an N-tile-safe call of a BF16 or FP16 layer of at least two experts runs ALGO 3. `{1,2,3,5,6}` pin that scheduler; `0` selects the legacy cascade; `4` attempts W8A8, then inherits the decode default (ALGO 3) on decline. Tile-safety failures clamp to ALGO 1. | `3` | `0`, `1`, `2`, `3`, `4`, `5`, `6` |
+| `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO` | Selects the prompt-phase policy (`max active M > 32`) and, when explicitly set, outranks `ZENDNNL_GRP_MATMUL_ALGO`. Unset, an N-tile-safe call of a BF16 or FP16 layer of at least two experts runs ALGO 3. When unpinned, Rule 0.7 selects ALGO 2 only for safe all-active W4A8; every other prompt selects ALGO 1. `{1,2,3,5,6}` pin that scheduler with tile-safety clamps; `0` selects the legacy cascade; `4` attempts W8A8, then inherits Rule 0.7 on decline. | unset (Rule 0.7) | `0`, `1`, `2`, `3`, `4`, `5`, `6` |
 
 **Selector precedence (highest first):**
 
@@ -75,6 +75,11 @@ clamps always apply last: ALGO 2 requires `m_tile_safe` and ALGO 3 requires
 still subject to the ALGO 5 occupancy/dtype qualifier. All three variables are
 cached; set them before the first grouped-matmul call.
 
+> With `ZENDNNL_MATMUL_WEIGHT_CACHE=2`, a multi-expert BF16/FP16 layer does
+> not support splitting a non-AUTO global ALGO pin with a phase override. The
+> call fails before prepack or destination writes. Use weight-cache mode `1`,
+> remove the phase override, or use global ALGO `0`.
+>
 > Internal tuning knobs (planner thresholds, custom-kernel sub-knobs,
 > prepack-cache sizing, etc.) live inside the implementation and are
 > not part of the user-facing contract.  Shared ones are documented in
@@ -94,17 +99,17 @@ cached; set them before the first grouped-matmul call.
 > everywhere — the A/B baseline, and the escape hatch if a deployment
 > sees a regression.
 >
-> Similarly, under a resolved ALGO 3, BF16 prompt calls (`max active M >
+> Similarly, under a resolved ALGO 3, BF16 and FP16 prompt calls (`max active M >
 > 32`) on the custom microkernel run through the prompt tile executor,
 > which schedules (expert, M-block, N-slice) tiles across L3-domain thread
 > teams without per-round barriers.  The output is bitwise identical to the
-> round executor.  AUTO runs the prompts of a BF16 layer of at least two
+> round executor.  AUTO runs the prompts of a BF16 or FP16 layer of at least two
 > experts on ALGO 3.  The executor needs at least two active experts (a
 > single expert, such as a routed dense `matmul_direct`, keeps the round
 > executor), an N the custom-kernel pack divides and
 > `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY` at any value but `1`.
 > `ZENDNNL_GRP_MATMUL_PROMPT_TILE` is a family bitmask (1 BF16, 2 DQ-INT8,
-> 4 W4A8; default 1); `0` keeps every prompt on the round executor.
+> 4 W4A8, 8 FP16; default 9); `0` keeps every prompt on the round executor.
 >
 > Two further ALGO 5 knobs are documented here only because a declined pin
 > names them in a default-level warning, so an operator can be pointed at
@@ -275,12 +280,16 @@ For memory-bounded deployments (multi-tenant, container quotas):
   publishing persistent entries, and W8A8 grouped-MoE ALGO 4 declines before
   writes; BF16 and caller-prequantized S8 may continue through generic
   execution.
-  Entries created before a runtime mode change are
-  not implicitly reclaimed: call `clear_custom_kernel_pack_cache()` and
-  `clear_fused_moe_scratch()` from an outside-OMP quiescent window to release
-  them. If weights may change during a `1 → 0 → 1` transition, that
-  clear is REQUIRED before re-enabling; it closes the old raw-address cache
-  generation before storage can be mutated, released, or reused.
+  Entries created before a runtime mode change are not implicitly reclaimed.
+  From an outside-OMP quiescent window,
+  `clear_grp_matmul_weight_caches()` releases the weight caches and
+  `clear_fused_moe_scratch()` independently releases fused-MoE scratch.
+  Under weight-cache mode 2, the weight-cache clear removes the BF16/FP16
+  in-place image records but cannot restore the caller's raw weight bytes.
+  Do not clear and then reuse an already-packed buffer; release/replace it, or
+  reload the original raw weights before the next call. For a `1 → 0 → 1`
+  transition in which weights may change, quiesce, clear, replace or reload
+  the weights, and only then re-enable caching.
   W8A8 weight scales are copied from the current call and may change without
   flushing the packed-weight generation.
 - `ZENDNNL_LRU_CACHE_CAPACITY=<N>` caps the AOCL reorder cache at

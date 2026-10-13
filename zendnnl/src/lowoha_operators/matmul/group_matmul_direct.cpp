@@ -1819,6 +1819,15 @@ status_t group_matmul_direct(const std::vector<char> &layout,
                             "a "
                             "weight is VNNI-packed and has no safe fallback "
                             "path.");
+                } else if (std::strcmp(gemm_mode,
+                                   kGrpMatmulErrWc2PhaseSplitUnsupported)
+                        == 0) {
+                    log_error(
+                            "group_matmul_direct: WEIGHT_CACHE=2 does not "
+                            "support a global ALGO pin split by a phase "
+                            "override for multi-expert BF16/FP16. Use "
+                            "WEIGHT_CACHE=1, remove the phase override, or "
+                            "select global AUTO.");
                 } else {
                     log_error(
                             "group_matmul_direct: the executor could not "

@@ -83,14 +83,10 @@ struct PackProbeStats {
 /// caller, because the active-set dispatcher will independently
 /// re-validate any expert it actually processes.
 ///
-/// Thread-safety: for the F16 and S4 families the per-expert loop is
-/// OpenMP-parallel when there is more than one expert and the caller is not
-/// already inside a parallel region (`omp_in_parallel` is false).  Those
-/// families pack into private buffers outside any lock; the LRU `get_or_add`
-/// serialises insert, and a duplicate-miss loser frees its buffer.  BF16 and
-/// INT8 misses pack under their family mutex (an in-place WC=2 pack may
-/// rewrite the same source buffer), so their loop runs serially.  Safe to
-/// call before an OMP parallel region.  Callers must NOT invoke this
+/// Thread-safety: only S4 uses the OpenMP-parallel expert loop. BF16, FP16,
+/// and INT8 pack under a family mutex because WC=2 may publish an in-place
+/// image, so their warm loops are intentionally serial. Safe to call before
+/// an OMP parallel region. Callers must NOT invoke this
 /// concurrently with any in-flight `dispatch_tile()` (which reads
 /// cached pointers) or `clear_custom_kernel_pack_cache()` (which drops
 /// every cached entry) on other threads.
@@ -170,9 +166,9 @@ enum class WarmDtypeFamily : uint8_t {
 /// `group_size` is consumed ONLY by `kS4` and is part of its pack
 /// cache key, so a wrong value warms a slab the runtime never looks
 /// up — and of the wrong SIZE, since the slab length depends on it.
-/// `in_place` writes a `kBF16` pack into the caller's weight buffer where
-/// `get_or_pack_weight_bf16` can (even K, contiguous rows); the other
-/// families have no in-place pack and ignore it.
+/// `in_place` writes a `kBF16` or `kF16` pack into the caller's weight buffer
+/// where the family pack permits it (contiguous rows; BF16 also needs even K).
+/// The quantized families ignore it.
 status_t warm_pack_all_custom_kernel_experts(
         const std::vector<const void *> &weight, const std::vector<int> &K,
         const std::vector<int> &N, const std::vector<int> &ldb,

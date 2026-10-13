@@ -25,7 +25,8 @@
 /// (`sanitize`).  Env vars and profiles are read once.
 ///
 /// Knobs, as `ZENDNNL_GRP_MATMUL_PROMPT_TILE[_NAME]` (default):
-///   (none)     family bitmask: 1 BF16, 2 INT8, 4 W4A8; 0 = off (1)
+///   (none)     family bitmask: 1 BF16, 2 INT8, 4 W4A8, 8 FP16;
+///              0 = off (9, BF16 + FP16)
 ///   TEAM       0 = teams from sysfs L3 domains, n = contiguous teams of n (0)
 ///   SUBTEAM    max threads per sub-team of an L3 domain, 0 = whole (4)
 ///   MB         forced M-block rows, rounded up to the row alignment (0 = auto)
@@ -51,7 +52,7 @@
 /// Profile: `ZENDNNL_GRP_MATMUL_PROMPT_TILE_PROFILE`, inline or `@/path` (one
 /// entry per line).  `;`-separated `keys:knobs` entries, e.g.
 ///   fam=bf16,K=2880,N=5760,M=8192-:mb=64,ns=320; K=2048:rb=48
-/// Keys: `fam` (bf16, int8, w4a8), `K` and `N` of the first active expert,
+/// Keys: `fam` (bf16, int8, w4a8, f16), `K` and `N` of the first active expert,
 /// `M` (active rows summed), `Mmax` (tallest expert), `T` (threads); each
 /// takes `v`, `lo-hi`, `lo-` or `-hi`, and an omitted key matches anything.
 /// Knobs use the lower-case names above.  The first matching entry wins; at
@@ -76,8 +77,8 @@ namespace lowoha {
 namespace matmul {
 namespace prompt_tile {
 
-enum class Family : int { kBf16, kInt8, kW4a8 };
-inline constexpr int kNumFamilies = 3;
+enum class Family : int { kBf16, kInt8, kW4a8, kF16 };
+inline constexpr int kNumFamilies = 4;
 
 /// What the planner needs to know about a family's CK microkernel.
 struct FamilyFacts {
@@ -97,6 +98,7 @@ inline constexpr FamilyFacts kFamilies[kNumFamilies] = {
         {"bf16", 2, 16, 4, 8, true},
         {"int8", 1, 8, 1, 0, false},
         {"w4a8", 1, 4, 1, 0, false},
+        {"f16", 2, 16, 1, 0, false},
 };
 
 constexpr const FamilyFacts &facts(Family f) {
@@ -138,7 +140,7 @@ struct KnobDef {
 };
 
 inline constexpr KnobDef kKnobs[kNumKnobs] = {
-        {kEnable, "enable", 0, 7, 1, Scope::kGlobal},
+        {kEnable, "enable", 0, 15, 9, Scope::kGlobal},
         {kTeam, "team", 0, 4096, 0, Scope::kGlobal},
         {kSubteam, "subteam", 0, 4096, 4, Scope::kGlobal},
         {kMb, "mb", 0, 1 << 16, 0, Scope::kShape},

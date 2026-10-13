@@ -43,12 +43,19 @@
 #include "lowoha_operators/matmul/group_matmul/prompt_tile/prompt_tile_tunables.hpp"
 #include "moe_test_utils.hpp"
 
-// The executor runs only on the BF16 custom kernel.  GTEST_SKIP returns from
-// the enclosing function, so call this from the TEST body.
+// GTEST_SKIP returns from the enclosing function, so call these from TEST
+// bodies.
 #define SKIP_WITHOUT_BF16_CUSTOM_KERNEL() \
     do { \
         if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) { \
             GTEST_SKIP() << "the BF16 custom kernel needs AVX-512 BF16"; \
+        } \
+    } while (0)
+
+#define SKIP_WITHOUT_F16_CUSTOM_KERNEL() \
+    do { \
+        if (!zendnnl::lowoha::matmul::custom_kernel::avx512f16_available()) { \
+            GTEST_SKIP() << "the FP16 custom kernel needs AVX-512 FP16"; \
         } \
     } while (0)
 
@@ -57,6 +64,7 @@ namespace {
 namespace pt = zendnnl::lowoha::matmul::prompt_tile;
 using moe_test_utils::bfloat16_t;
 using moe_test_utils::data_type_t;
+using moe_test_utils::float16_t;
 using zendnnl::lowoha::matmul::grp_matmul_gated_act_t;
 
 /// Sets one prompt-tile knob for the scope.
@@ -145,14 +153,15 @@ TEST(PromptTilePlanner, CoversEveryOutputCellOnce) {
             {0, 0, 2, 8, 32, true, int64_t(32) << 20, {8, 8, 8, 8}},
             {24, 64, 2, 2, 12, true, int64_t(1) << 20, {6, 6}},
     };
-    // Kernel facts: BF16 at pack NR 32 and 64, INT8, and W4A8 with groups
-    // of 32 and bf16 scales (K = 640).
+    // Kernel facts: BF16 at pack NR 32 and 64, FP16 at pack NR 32, INT8,
+    // and W4A8 with groups of 32 and bf16 scales (K = 640).
     struct Kernel {
         int max_mr, row_align, min_mr, a_bytes, wei_bits;
         int64_t extra;
     };
-    const std::vector<Kernel> kernels = {{8, 8, 4, 2, 16, 0},
-            {6, 8, 4, 2, 16, 0}, {12, 12, 1, 1, 8, 4}, {6, 6, 1, 1, 4, 120}};
+    const std::vector<Kernel> kernels
+            = {{8, 8, 4, 2, 16, 0}, {6, 8, 4, 2, 16, 0}, {8, 8, 1, 2, 16, 0},
+                    {12, 12, 1, 1, 8, 4}, {6, 6, 1, 1, 4, 120}};
     for (const auto &M : dists) {
         const int num_ops = static_cast<int>(M.size());
         const std::vector<int> N(num_ops, 512), K(num_ops, 640);
@@ -583,9 +592,9 @@ TEST(PromptTileTunables, EnvNamesAndValues) {
     EXPECT_EQ(pt::env_name(pt::kSpanPct),
             "ZENDNNL_GRP_MATMUL_PROMPT_TILE_SPAN_PCT");
     int v = -1;
-    EXPECT_TRUE(pt::parse_knob_value(pt::kEnable, "6", v));
-    EXPECT_EQ(v, 6);
-    for (const char *bad : {"8", "-1", "1x", "", " ", "0x2"})
+    EXPECT_TRUE(pt::parse_knob_value(pt::kEnable, "15", v));
+    EXPECT_EQ(v, 15);
+    for (const char *bad : {"16", "-1", "1x", "", " ", "0x2"})
         EXPECT_FALSE(pt::parse_knob_value(pt::kEnable, bad, v)) << bad;
     EXPECT_FALSE(pt::parse_knob_value(pt::kMb, nullptr, v));
     EXPECT_TRUE(pt::parse_knob_value(pt::kNs, "1048576", v));
@@ -604,10 +613,17 @@ TEST(PromptTileTunables, KnobTableIsConsistent) {
     const pt::PlannerConfig cfg;
     const pt::FamilyFacts &bf16 = pt::facts(pt::Family::kBf16);
     EXPECT_EQ(cfg.tun.v, pt::defaults().v);
+    EXPECT_EQ(cfg.tun[pt::kEnable], 9);
     EXPECT_EQ(cfg.a_bytes, bf16.a_bytes);
     EXPECT_EQ(cfg.wei_bits, bf16.wei_bits);
     EXPECT_EQ(cfg.min_mr, bf16.min_mr);
     EXPECT_EQ(cfg.row_align, bf16.row_align);
+    const pt::FamilyFacts &f16 = pt::facts(pt::Family::kF16);
+    EXPECT_EQ(f16.a_bytes, 2);
+    EXPECT_EQ(f16.wei_bits, 16);
+    EXPECT_EQ(f16.min_mr, 1);
+    EXPECT_EQ(f16.row_align, 0);
+    EXPECT_FALSE(f16.kblock);
 }
 
 TEST(PromptTileTunables, ProfileGrammar) {
@@ -628,6 +644,10 @@ TEST(PromptTileTunables, ProfileGrammar) {
     EXPECT_EQ(p[1].hi[0], 2048);
     EXPECT_EQ(p[1].lo[1], 0);
     EXPECT_EQ(p[1].hi[1], pt::ProfileEntry::kAny);
+
+    ASSERT_TRUE(pt::parse_profile("fam=f16:mb=32", p, &err)) << err;
+    ASSERT_EQ(p.size(), 1u);
+    EXPECT_EQ(p[0].fam, static_cast<int>(pt::Family::kF16));
 
     // Spaces, empty entries, `-hi` and `lo-hi` ranges, and no keys at all.
     ASSERT_TRUE(pt::parse_profile(
@@ -740,6 +760,14 @@ TEST(PromptTileTunables, OverridesWinAndKeepTheFloors) {
         EXPECT_FALSE(pt::enabled(pt::Family::kBf16));
         EXPECT_TRUE(pt::enabled(pt::Family::kInt8));
         EXPECT_FALSE(pt::enabled(pt::Family::kW4a8));
+        EXPECT_FALSE(pt::enabled(pt::Family::kF16));
+    }
+    {
+        PtOverride mask(pt::kEnable, 8);
+        EXPECT_FALSE(pt::enabled(pt::Family::kBf16));
+        EXPECT_FALSE(pt::enabled(pt::Family::kInt8));
+        EXPECT_FALSE(pt::enabled(pt::Family::kW4a8));
+        EXPECT_TRUE(pt::enabled(pt::Family::kF16));
     }
     for (int k = 0; k < pt::kNumKnobs; ++k)
         EXPECT_EQ(pt::test_api::s_override[k].load(), 0) << pt::kKnobs[k].name;
@@ -918,6 +946,7 @@ struct Case {
     std::vector<int> M;
     int N = 256;
     int K = 128;
+    data_type_t src_dt = data_type_t::bf16;
     grp_matmul_gated_act_t act = grp_matmul_gated_act_t::none;
     data_type_t bias_dt = data_type_t::none;
     data_type_t dst_dt = data_type_t::bf16;
@@ -944,6 +973,7 @@ const char *act_label(grp_matmul_gated_act_t a) {
 
 std::string describe(const Case &c) {
     std::string s = std::string("act=") + act_label(c.act)
+            + " src=" + std::to_string(static_cast<int>(c.src_dt))
             + " T=" + std::to_string(c.threads) + " N=" + std::to_string(c.N)
             + " K=" + std::to_string(c.K) + " tight=" + (c.tight ? "1" : "0")
             + " bias=" + std::to_string(static_cast<int>(c.bias_dt))
@@ -971,11 +1001,13 @@ float wide_value(uint32_t h) {
 /// Runs the call once through `algo` (ALGO 3 unless a test asks for AUTO)
 /// with the CK on and the strategy pinned to rounds; `prompt_tile` toggles
 /// the tile executor.
-RunOut run_case(const Case &c, int prompt_tile, int algo = 3) {
+template <typename T>
+RunOut run_case_typed(const Case &c, int prompt_tile, int algo) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     NTileStrategyOverride strat(2);
     CustomKernelOverride ck_on(true);
+    CustomKernelF16Override ck_f16_on(true);
     CustomKernelNROverride nr(c.nr > 0 ? c.nr : -1);
     AlgoEnvGuard algo_guard(algo);
     PtOverride enable(pt::kEnable, prompt_tile);
@@ -986,8 +1018,8 @@ RunOut run_case(const Case &c, int prompt_tile, int algo = 3) {
     const int ldc = (gated && c.tight) ? c.N / 2 : c.N;
     const size_t dst_elem = (c.dst_dt == data_type_t::f32) ? 4 : 2;
 
-    std::vector<std::vector<bfloat16_t>> src(num_ops), wei(num_ops),
-            bias_bf(num_ops);
+    std::vector<std::vector<T>> src(num_ops), wei(num_ops),
+            bias_native(num_ops);
     std::vector<std::vector<float>> bias_f(num_ops);
     std::vector<const void *> srcs(num_ops), weis(num_ops),
             biases(num_ops, nullptr);
@@ -1000,27 +1032,27 @@ RunOut run_case(const Case &c, int prompt_tile, int algo = 3) {
         wei[e].resize(static_cast<size_t>(c.K) * c.N);
         for (size_t i = 0; i < src[e].size(); ++i)
             src[e][i] = c.wide
-                    ? bfloat16_t(wide_value(static_cast<uint32_t>(
+                    ? T(wide_value(static_cast<uint32_t>(
                               i * 7 + static_cast<size_t>(e) * 1000003)))
-                    : bfloat16_t(0.03f
+                    : T(0.03f
                               * static_cast<float>(
                                       static_cast<int>((i * 7 + e * 3) % 11)
                                       - 5));
         for (size_t i = 0; i < wei[e].size(); ++i)
             wei[e][i] = c.wide
-                    ? bfloat16_t(wide_value(static_cast<uint32_t>(
+                    ? T(wide_value(static_cast<uint32_t>(
                               i * 5 + static_cast<size_t>(e) * 7919 + 0x9e37)))
-                    : bfloat16_t(0.01f
+                    : T(0.01f
                               * static_cast<float>(
                                       static_cast<int>((i * 5 + e) % 13) - 6));
         srcs[e] = src[e].data();
         weis[e] = wei[e].data();
-        if (c.bias_dt == data_type_t::bf16) {
-            bias_bf[e].resize(c.N);
+        if (c.bias_dt == c.src_dt) {
+            bias_native[e].resize(c.N);
             for (int j = 0; j < c.N; ++j)
-                bias_bf[e][j] = bfloat16_t(
-                        0.1f * static_cast<float>((j + e) % 7 - 3));
-            biases[e] = bias_bf[e].data();
+                bias_native[e][j]
+                        = T(0.1f * static_cast<float>((j + e) % 7 - 3));
+            biases[e] = bias_native[e].data();
         } else if (c.bias_dt == data_type_t::f32) {
             bias_f[e].resize(c.N);
             for (int j = 0; j < c.N; ++j)
@@ -1034,7 +1066,7 @@ RunOut run_case(const Case &c, int prompt_tile, int algo = 3) {
     gv.Ms = c.M;
     gv.ldc.assign(num_ops, ldc);
     auto params = make_mixed_params(
-            num_ops, data_type_t::bf16, data_type_t::bf16, c.dst_dt, c.bias_dt);
+            num_ops, c.src_dt, c.src_dt, c.dst_dt, c.bias_dt);
     for (auto &p : params)
         p.num_threads = c.threads;
 
@@ -1042,18 +1074,23 @@ RunOut run_case(const Case &c, int prompt_tile, int algo = 3) {
     const char *mode = nullptr;
     group_matmul_run_parallel_dispatch(gv.layout, gv.transA, gv.transB, gv.Ms,
             gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb, biases, gv.beta,
-            dsts, gv.ldc, gv.is_wc, params, c.threads, &mode, c.act,
-            data_type_t::bf16);
+            dsts, gv.ldc, gv.is_wc, params, c.threads, &mode, c.act, c.src_dt);
     out.mode = mode != nullptr ? mode : "";
     out.served = pt::test_api::s_calls_served.load() - served0;
     return out;
+}
+
+RunOut run_case(const Case &c, int prompt_tile, int algo = 3) {
+    if (c.src_dt == data_type_t::f16)
+        return run_case_typed<float16_t>(c, prompt_tile, algo);
+    return run_case_typed<bfloat16_t>(c, prompt_tile, algo);
 }
 
 /// Tile executor output must be bitwise equal to the round executor's.
 void expect_bitwise_equal(const Case &c) {
     SCOPED_TRACE(describe(c));
     const RunOut rounds = run_case(c, 0);
-    const RunOut tiles = run_case(c, 1);
+    const RunOut tiles = run_case(c, c.src_dt == data_type_t::f16 ? 8 : 1);
     ASSERT_EQ(rounds.mode.find("ptile"), std::string::npos) << rounds.mode;
     ASSERT_EQ(rounds.mode.find("sequential"), std::string::npos)
             << "reference did not run the round executor: " << rounds.mode;
@@ -1068,6 +1105,17 @@ void expect_bitwise_equal(const Case &c) {
                 return b != 0x5A;
             })) << "reference left expert "
                 << e << " unwritten";
+        } else {
+            EXPECT_TRUE(std::all_of(rounds.dst[e].begin(), rounds.dst[e].end(),
+                    [](uint8_t b) {
+                return b == 0x5A;
+            })) << "rounds wrote inactive expert "
+                << e;
+            EXPECT_TRUE(std::all_of(tiles.dst[e].begin(), tiles.dst[e].end(),
+                    [](uint8_t b) {
+                return b == 0x5A;
+            })) << "prompt tiles wrote inactive expert "
+                << e;
         }
         EXPECT_EQ(std::memcmp(rounds.dst[e].data(), tiles.dst[e].data(),
                           rounds.dst[e].size()),
@@ -1202,6 +1250,89 @@ TEST(PromptTileExecutor, BitwiseMatchesRoundsAtPackNr64) {
             expect_bitwise_equal(c);
         }
     }
+}
+
+TEST(PromptTileExecutor, F16BitwiseMatchesRounds) {
+    SKIP_WITHOUT_F16_CUSTOM_KERNEL();
+    for (const auto act :
+            {grp_matmul_gated_act_t::none, grp_matmul_gated_act_t::silu_and_mul,
+                    grp_matmul_gated_act_t::gelu_and_mul,
+                    grp_matmul_gated_act_t::swiglu_oai_mul}) {
+        Case c;
+        c.M = ab_dists()[0];
+        c.src_dt = data_type_t::f16;
+        c.dst_dt = data_type_t::f16;
+        c.act = act;
+        expect_bitwise_equal(c);
+    }
+
+    for (const auto bias : {data_type_t::f16, data_type_t::f32}) {
+        Case c;
+        c.M = {23, 39, 15, 7, 71, 0, 100};
+        c.src_dt = data_type_t::f16;
+        c.dst_dt = data_type_t::f32;
+        c.bias_dt = bias;
+        c.nr = 64;
+        expect_bitwise_equal(c);
+    }
+
+    // NR64 caps max MR at 6. Forced 8-row blocks leave short tails while the
+    // gated epilogue writes the tight half-width FP16 destination.
+    PtOverride mb(pt::kMb, 8);
+    for (const auto act : {grp_matmul_gated_act_t::silu_and_mul,
+                 grp_matmul_gated_act_t::gelu_and_mul}) {
+        Case c;
+        c.M = {23, 39, 15, 7, 71, 0, 100, 135, 47};
+        c.src_dt = data_type_t::f16;
+        c.dst_dt = data_type_t::f16;
+        c.act = act;
+        c.nr = 64;
+        expect_bitwise_equal(c);
+    }
+}
+
+TEST(PromptTileExecutor, F16FamilyGate) {
+    namespace ck = zendnnl::lowoha::matmul::custom_kernel;
+    ck::CallContext kctx;
+    kctx.enabled = true;
+    kctx.variant = ck::KernelVariant::kF16_F16_F16;
+    kctx.pack_nr = 32;
+    const std::vector<int> M = {64, 96};
+    const std::vector<int> N = {128, 128};
+
+    {
+        PtOverride f16_on(pt::kEnable, 8);
+        EXPECT_TRUE(pt::should_run(kctx, /*use_custom=*/true,
+                /*rounds_strategy=*/true, /*prompt_phase=*/true, M, N));
+    }
+    {
+        PtOverride bf16_only(pt::kEnable, 1);
+        EXPECT_FALSE(pt::should_run(kctx, /*use_custom=*/true,
+                /*rounds_strategy=*/true, /*prompt_phase=*/true, M, N));
+    }
+}
+
+TEST(PromptTileExecutor, F16EngagementGates) {
+    SKIP_WITHOUT_F16_CUSTOM_KERNEL();
+    Case c;
+    c.M = ab_dists()[0];
+    c.src_dt = data_type_t::f16;
+    c.dst_dt = data_type_t::f16;
+
+    const RunOut wrong_family = run_case(c, /*BF16 only=*/1);
+    EXPECT_EQ(wrong_family.mode.find("ptile"), std::string::npos)
+            << wrong_family.mode;
+    EXPECT_EQ(wrong_family.served, 0);
+
+    c.M = {0, 300, 0};
+    const RunOut single = run_case(c, /*FP16=*/8);
+    EXPECT_EQ(single.mode.find("ptile"), std::string::npos) << single.mode;
+    EXPECT_EQ(single.served, 0);
+
+    c.M = {4, 8, 16, 32};
+    const RunOut decode = run_case(c, /*FP16=*/8);
+    EXPECT_EQ(decode.mode.find("ptile"), std::string::npos) << decode.mode;
+    EXPECT_EQ(decode.served, 0);
 }
 
 // ── Engagement gates ────────────────────────────────────────────────
@@ -1355,6 +1486,56 @@ TEST(PromptTileAuto, AutoSendsBf16PromptsToAlgo3) {
     EXPECT_EQ(auto_pick(auto_probe(16, 1024, 2048, 128)), kAlgo3);
 }
 
+TEST(PromptTileAuto, AutoSendsF16PromptsToAlgo3) {
+    namespace mm = zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    AlgoEnvGuard algo0(0);
+    CustomKernelOverride ck_on(true);
+    CustomKernelF16Override ck_f16_on(true);
+    reset_grp_matmul_caches();
+
+    EXPECT_EQ(auto_pick(auto_probe(
+                      300, 1024, 2048, 64, data_type_t::f16, data_type_t::f16)),
+            kAlgo3);
+    EXPECT_EQ(auto_pick(auto_probe(
+                      16, 1024, 2048, 128, data_type_t::f16, data_type_t::f32)),
+            kAlgo3);
+    EXPECT_EQ(auto_pick(auto_probe(
+                      16, 1024, 2048, 300, data_type_t::f16, data_type_t::f16)),
+            kAlgo3);
+    EXPECT_EQ(auto_pick(auto_probe(
+                      300, 1024, 2048, 1, data_type_t::f16, data_type_t::f16)),
+            kShapeRulePrompt);
+
+    {
+        Probe mixed = auto_probe(
+                300, 1024, 2048, 8, data_type_t::f16, data_type_t::f16);
+        mixed.params[1].dtypes.src = data_type_t::bf16;
+        mixed.params[1].dtypes.wei = data_type_t::bf16;
+        EXPECT_FALSE(mm::grp_matmul_auto_algo3_call(mixed.M, mixed.params));
+        EXPECT_EQ(auto_pick(mixed), kShapeRulePrompt);
+    }
+    {
+        Probe mismatch = auto_probe(
+                300, 1024, 2048, 8, data_type_t::f16, data_type_t::f16);
+        for (auto &p : mismatch.params)
+            p.dtypes.wei = data_type_t::bf16;
+        EXPECT_FALSE(
+                mm::grp_matmul_auto_algo3_call(mismatch.M, mismatch.params));
+        EXPECT_EQ(auto_pick(mismatch), kShapeRulePrompt);
+    }
+    {
+        Probe packed = auto_probe(
+                300, 1024, 2048, 8, data_type_t::f16, data_type_t::f16);
+        for (auto &p : packed.params) {
+            p.mem_format_b = 'r';
+            p.lowoha_algo = zendnnl::common::matmul_algo_t::aocl_dlp_blocked;
+        }
+        EXPECT_FALSE(mm::grp_matmul_auto_algo3_call(packed.M, packed.params));
+        EXPECT_EQ(auto_pick(packed), kShapeRulePrompt);
+    }
+}
+
 // AUTO does not ask whether the tile executor will run: every case here is
 // one it would refuse, and each still runs ALGO 3 without it.  A call ALGO 3
 // cannot serve keeps the shape rules.  Holds on any host.
@@ -1437,6 +1618,27 @@ TEST(PromptTileAuto, AutoPromptRunsTheTileExecutor) {
     EXPECT_NE(off.mode.find("flat_n_tile"), std::string::npos) << off.mode;
     EXPECT_EQ(off.mode.find("ptile"), std::string::npos) << off.mode;
     EXPECT_EQ(off.served, 0);
+}
+
+TEST(PromptTileAuto, AutoF16PromptRunsTheTileExecutor) {
+    SKIP_WITHOUT_F16_CUSTOM_KERNEL();
+    Case c;
+    c.M = ab_dists()[0];
+    c.src_dt = data_type_t::f16;
+    c.dst_dt = data_type_t::f16;
+    c.act = grp_matmul_gated_act_t::silu_and_mul;
+
+    const RunOut pinned = run_case(c, /*FP16=*/8);
+    const RunOut autod = run_case(c, /*FP16=*/8, /*algo=*/0);
+    ASSERT_NE(autod.mode.find("flat_n_tile_ptile_"), std::string::npos)
+            << autod.mode;
+    ASSERT_EQ(autod.served, 1);
+    for (size_t e = 0; e < pinned.dst.size(); ++e) {
+        EXPECT_EQ(std::memcmp(pinned.dst[e].data(), autod.dst[e].data(),
+                          pinned.dst[e].size()),
+                0)
+                << "expert " << e << " differs";
+    }
 }
 
 struct DirectOut {

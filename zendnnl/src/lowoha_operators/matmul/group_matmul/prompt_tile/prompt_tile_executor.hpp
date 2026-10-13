@@ -18,11 +18,11 @@
 /// @brief ALGO 3 prompt tile executor (custom kernel, fat-M calls).
 ///
 /// Replaces the round executor for prompt calls that the custom kernel
-/// (CK) serves, for each dtype family whose `enable` bit is set (BF16 by
-/// default; INT8 and W4A8 opt in).  The call is cut into (expert, M-block,
-/// N-slice) tiles (`prompt_tile_planner.hpp`); each L3 team walks its own
-/// contiguous, equal-cost range through a shared atomic cursor, then
-/// drains other teams' ranges.  One OMP region, no per-round barriers.
+/// (CK) serves, for each dtype family whose `enable` bit is set (BF16 and
+/// FP16 by default; INT8 and W4A8 opt in).  The call is cut into (expert,
+/// M-block, N-slice) tiles (`prompt_tile_planner.hpp`); each L3 team walks
+/// its own contiguous, equal-cost range through a shared atomic cursor,
+/// then drains other teams' ranges.  One OMP region, no per-round barriers.
 ///
 /// Output is bitwise equal to the round executor: every tile runs the
 /// same `custom_kernel::dispatch_tile` on a row / column sub-range (INT8

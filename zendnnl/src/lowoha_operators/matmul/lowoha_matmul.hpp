@@ -263,10 +263,11 @@ ZENDNNL_API void clear_matmul_native_weight_caches();
  * (S4). Also drops the N-tile f32 weight-scale memo that the INT8
  * custom-kernel path keys by scale-buffer pointer.
  *
- * Under @c ZENDNNL_MATMUL_WEIGHT_CACHE=2, eligible BF16 and INT8
- * calls store an in-place sentinel so a later call reuses the caller's buffer
- * as the packed weight. Clearing removes that sentinel, so the next call
- * repacks from the bytes currently in the buffer. Call this after
+ * Under @c ZENDNNL_MATMUL_WEIGHT_CACHE=2, eligible BF16, FP16, and
+ * capacity-qualified INT8 calls store an in-place sentinel so a later call
+ * reuses the caller's buffer as the packed weight. Clearing removes that
+ * sentinel, so the next call repacks from the bytes currently in the buffer.
+ * Call this after
  * replacing or freeing those weights, in the same quiescent window as
  * the other clears — not between inferences that still rely on an
  * in-place pack already written into the buffer.

@@ -54,14 +54,17 @@ inline bool ck_eligible_f16(const PrepackParams &p);
 
 /// The runtime's `grp_matmul_auto_algo3_call` for a prepack of
 /// `scheduling_algo`: the prelude skips caller-prepacked weights, so this is a
-/// raw bf16 layer of several experts.  With both phases unpinned, only a call
-/// ALGO 3 cannot serve runs another ALGO, and it follows the rules of every
-/// other call.
+/// raw BF16 or FP16 layer of several experts.  With both phases unpinned,
+/// only a call ALGO 3 cannot serve runs another ALGO, and it follows the
+/// rules of every other call.
 inline bool auto_algo3_layer(const PrepackParams &p, int scheduling_algo) {
-    const bool layer
-            = grp_matmul_auto_algo3_layer(p.src_dtype == data_type_t::bf16
-                            && p.wei_dtype == data_type_t::bf16,
-                    p.num_ops_total);
+    const bool supported_float_family
+            = (p.src_dtype == data_type_t::bf16
+                      && p.wei_dtype == data_type_t::bf16)
+            || (p.src_dtype == data_type_t::f16
+                    && p.wei_dtype == data_type_t::f16);
+    const bool layer = grp_matmul_auto_algo3_layer(
+            supported_float_family, p.num_ops_total);
     return layer
             && (scheduling_algo == 3 || !grp_matmul_auto_algo3_only(layer));
 }
@@ -93,11 +96,11 @@ inline bool auto_algo3_layer(const PrepackParams &p, int scheduling_algo) {
 /// allocation for its lifetime, so neither can flip mid-run the way a per-call
 /// configuration could.
 ///
-/// The ALGO 3 prepack of a BF16 layer of several experts that AUTO keeps on
-/// ALGO 3 (`grp_matmul_auto_algo3_only`) answers false: the layer's one
-/// in-place layout is the custom-kernel pack, written under the pack mutex,
-/// and every AOCL DLP layout of it stays out-of-place.  Its dtypes and expert
-/// pool are as fixed as the buffer.
+/// The ALGO 3 prepack of a BF16/FP16 layer of several experts that AUTO keeps
+/// on ALGO 3 (`grp_matmul_auto_algo3_only`) answers false: its custom-kernel
+/// pack is shared by both phases and every AOCL DLP layout stays
+/// out-of-place.  BF16 and FP16 may store that pack in place.  The dtypes and
+/// expert pool are as fixed as the buffer.
 ///
 /// Scope is GROUPED MATMUL ONLY, and deliberately kept local to this file:
 /// `is_grp_auto_mixed_inplace_active()` already requires the
@@ -1781,9 +1784,9 @@ inline bool ck_eligible(const PrepackParams &p) {
 // a deployment that fires only the prompt phase during warmup
 // reaches the first decode call with only the ALGO 1 regime warm —
 // the decode's regime 2 (per-tile AOCL) or regime 3 (custom-kernel
-// pack) pays a mid-inference prepack spike.  A BF16 layer of several
-// experts runs both unset phases on ALGO 3, so it has another regime to
-// warm only under a phase pin (`grp_matmul_cross_warm_target_reachable`).
+// pack) pays a mid-inference prepack spike.  A BF16/FP16 layer of several
+// experts runs both unset phases on ALGO 3, so it has another regime to warm
+// only under a phase pin (`grp_matmul_cross_warm_target_reachable`).
 //
 // `cross_warm` opportunistically populates the OTHER regime so the
 // transition is seamless.  Decision is CUSTOM_KERNEL-aware:

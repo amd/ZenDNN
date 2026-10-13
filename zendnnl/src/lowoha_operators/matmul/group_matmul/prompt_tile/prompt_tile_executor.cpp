@@ -75,6 +75,8 @@ bool family_of(KernelVariant v, Family &fam) {
         fam = Family::kInt8;
     else if (custom_kernel::is_s4_variant(v))
         fam = Family::kW4a8;
+    else if (custom_kernel::is_f16_variant(v))
+        fam = Family::kF16;
     else
         return false;
     return true;
