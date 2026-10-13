@@ -3780,6 +3780,14 @@ static float matmul_comparison_abs_bound(uint64_t k, float epsilon, float alpha,
     const float k_f = static_cast<float>(k);
 
     float gemm_accum = 0.0f;
+    // Blocked quantized GEMM dequantizes each K panel and accumulates those
+    // f32 partials. The reference reduces all of K in integer first, then
+    // scales once. Cancellation across panels leaves an absolute residual
+    // per panel that a (k * eps) ULP model of the final value does not cover.
+    constexpr float kSymQuantPanelK = 2048.f;
+    constexpr float kSymQuantPanelAbs = 1.5e-3f;
+    const float n_sym_quant_panels
+            = is_quant ? std::ceil(std::max(k_f, 1.f) / kSymQuantPanelK) : 0.f;
     if (is_quant) {
         gemm_accum = k_f + static_cast<float>(P);
     } else if (is_low_precision) {
@@ -3799,7 +3807,8 @@ static float matmul_comparison_abs_bound(uint64_t k, float epsilon, float alpha,
     const float beta_scale
             = (is_low_precision || is_quant) ? 1.0f : static_cast<float>(P);
     const float beta_term = abs_beta * beta_scale;
-    return (gemm_term + beta_term) * epsilon;
+    return (gemm_term + beta_term) * epsilon
+            + n_sym_quant_panels * kSymQuantPanelAbs;
 }
 
 void compare_tensor_2D_matrix(tensor_t &output_tensor,
