@@ -58,6 +58,9 @@ TEST(CkFeatures, ResolvedActKindMatches) {
     CK_SKIP_IF_NO_BF16_ISA();
     for (auto act : {grp_matmul_gated_act_t::none,
                  grp_matmul_gated_act_t::swiglu_oai_mul}) {
+        // Each iteration frees its weight, and the next allocation can
+        // land inside an in-place image the registry still lists.
+        ::reset_grp_matmul_caches();
         ck_test::PrepCallCase c {};
         c.act = act;
         c.label = "act_resolved";
@@ -82,6 +85,9 @@ TEST(CkFeatures, ResolvedBiasKindMatches) {
                  Row {data_type_t::bf16, ck::BiasKind::bf16},
                  Row {data_type_t::f32, ck::BiasKind::fp32},
                  Row {data_type_t::f16, ck::BiasKind::f16}}) {
+        // Each iteration frees its weight, and the next allocation can
+        // land inside an in-place image the registry still lists.
+        ::reset_grp_matmul_caches();
         ck_test::PrepCallCase c {};
         c.bias_dt = r.dt;
         c.label = "bias_resolved";
@@ -139,6 +145,10 @@ TEST(CkFeatures, RepresentativeSubtileIsValid) {
 // for each expert.
 TEST(CkFeatures, SubtilePerExpertOverride_OffLeavesActiveSlotsZero) {
     CK_SKIP_IF_NO_BF16_ISA();
+    // Earlier cases free their weights without dropping the in-place
+    // registry. A fresh vector can be allocated inside one of those
+    // images, and pack then refuses the pointer.
+    ::reset_grp_matmul_caches();
     moe_test_utils::CustomKernelSubtilePerExpertOverride subtile_guard(
             /*value=*/0);
 
@@ -177,6 +187,10 @@ TEST(CkFeatures, SubtilePerExpertOverride_OffLeavesActiveSlotsZero) {
 // from that expert's M; inactive tail stays zero.
 TEST(CkFeatures, SubtilePerExpertOverride_OnPopulatesActiveSlots) {
     CK_SKIP_IF_NO_BF16_ISA();
+    // Earlier cases free their weights without dropping the in-place
+    // registry. A fresh vector can be allocated inside one of those
+    // images, and pack then refuses the pointer.
+    ::reset_grp_matmul_caches();
     moe_test_utils::CustomKernelSubtilePerExpertOverride subtile_guard(
             /*value=*/1);
 
@@ -227,6 +241,10 @@ TEST(CkFeatures, SubtilePerExpertOverride_OnPopulatesActiveSlots) {
 // ──────────────────────────────────────────────────────────────────
 TEST(CkFeatures, MultiExpertPreparePopulatesActiveOnly) {
     CK_SKIP_IF_NO_BF16_ISA();
+    // Earlier cases free their weights without dropping the in-place
+    // registry. A fresh vector can be allocated inside one of those
+    // images, and pack then refuses the pointer.
+    ::reset_grp_matmul_caches();
 
     // 3 active experts on a uniform shape.  Build per-expert vectors
     // with the dispatcher's expected sizes.
@@ -271,6 +289,10 @@ TEST(CkFeatures, MultiExpertPreparePopulatesActiveOnly) {
 // ──────────────────────────────────────────────────────────────────
 TEST(CkFeatures, MultiExpertPrepareF16PopulatesActiveOnly) {
     CK_SKIP_IF_NO_F16_ISA();
+    // Earlier cases free their weights without dropping the in-place
+    // registry. A fresh vector can be allocated inside one of those
+    // images, and pack then refuses the pointer.
+    ::reset_grp_matmul_caches();
 
     constexpr int kNumActive = 3;
     constexpr int M = 8, K = 64, N = 256;

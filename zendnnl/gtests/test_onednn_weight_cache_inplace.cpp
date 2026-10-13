@@ -21,6 +21,7 @@
 
 #include <gtest/gtest.h>
 
+#include "common/op_config.hpp"
 #include "gtest_utils.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 
@@ -34,7 +35,20 @@ using zendnnl::lowoha::matmul::matmul_params;
 
 class TestOnednnWeightCacheInplace : public ::testing::Test {
 protected:
-    void TearDown() override { clear_matmul_test_caches(); }
+    // The scalar custom-kernel route caps a BF16 weight at weight-cache mode 1
+    // so a later grouped pack still sees raw bytes. These oneDNN blocked tests
+    // need WC=2 to reorder in place.
+    void SetUp() override {
+        auto &config = zendnnl::common::matmul_config_t::instance();
+        custom_kernel_route_ = config.get_custom_kernel_route();
+        config.set_custom_kernel_route(false);
+    }
+    void TearDown() override {
+        zendnnl::common::matmul_config_t::instance().set_custom_kernel_route(
+                custom_kernel_route_);
+        clear_matmul_test_caches();
+    }
+    bool custom_kernel_route_;
     tensor_factory_t tensor_factory {};
 };
 
