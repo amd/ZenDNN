@@ -137,7 +137,9 @@ void dynamic_per_channel_quant_bf16_s8_native(const uint16_t *src,
 
 // Grouped per-channel-column BF16 -> S8 symmetric dynamic quantization.
 // Sources are independent [M_i, K_i] matrices and each scale buffer contains
-// K_i values. Work is scheduled over column blocks across all matrices.
+// K_i values. Work is scheduled over 64-column blocks across all matrices, or
+// over row chunks (partial absmax, reduce, quantize) when there are too few
+// such blocks to fill the team.
 void dynamic_per_channel_group_quant_bf16_s8_native(
         const std::vector<const void *> &src, const std::vector<int> &M,
         const std::vector<int> &K, const std::vector<int> &lda,

@@ -195,8 +195,194 @@ void quantize_bf16_s8_per_channel_scalar(const uint16_t *src, int64_t src_lda,
     }
 }
 
+// absmax[c] = max(absmax[c], |src[r][c]|) over finite values in `rows`;
+// the caller zero-initialises absmax.
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
+void accumulate_bf16_column_absmax(const uint16_t *src, int64_t src_lda,
+        int64_t rows, int64_t columns, float *absmax) {
+    const __m512i abs_mask = _mm512_set1_epi32(0x7fffffff);
+    const __m512 infinity = _mm512_castsi512_ps(_mm512_set1_epi32(0x7f800000));
+    const int64_t vector_columns = columns / 16 * 16;
+    for (int64_t row = 0; row < rows; ++row) {
+        const uint16_t *row_src = src + row * src_lda;
+        for (int64_t column = 0; column < vector_columns; column += 16) {
+            __mmask16 finite;
+            const __m512 abs_value
+                    = finite_abs(load_bf16x16_as_f32(row_src + column),
+                            abs_mask, infinity, finite);
+            const __m512 current = _mm512_loadu_ps(absmax + column);
+            _mm512_storeu_ps(absmax + column,
+                    _mm512_mask_max_ps(current, finite, current, abs_value));
+        }
+        for (int64_t column = vector_columns; column < columns; ++column) {
+            const float value = common::bfloat16_t::bf16_to_f32_val(
+                    static_cast<int16_t>(row_src[column]));
+            if (std::isfinite(value)) {
+                absmax[column] = std::max(absmax[column], std::fabs(value));
+            }
+        }
+    }
+}
+
+// Reduces `parts` absmax arrays of `columns` floats, laid out back to back,
+// into per-channel scales.
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
+void absmax_parts_to_scales(const float *absmax_parts, int64_t parts,
+        int64_t columns, float *scales) {
+    const __m512 quant_max = _mm512_set1_ps(127.0f);
+    const __m512 minimum_scale = _mm512_set1_ps(1.0e-10f);
+    const int64_t vector_columns = columns / 16 * 16;
+    for (int64_t column = 0; column < vector_columns; column += 16) {
+        __m512 absmax = _mm512_loadu_ps(absmax_parts + column);
+        for (int64_t part = 1; part < parts; ++part) {
+            absmax = _mm512_max_ps(absmax,
+                    _mm512_loadu_ps(absmax_parts + part * columns + column));
+        }
+        _mm512_storeu_ps(scales + column,
+                _mm512_max_ps(_mm512_div_ps(absmax, quant_max), minimum_scale));
+    }
+    for (int64_t column = vector_columns; column < columns; ++column) {
+        float absmax = absmax_parts[column];
+        for (int64_t part = 1; part < parts; ++part) {
+            absmax = std::max(absmax, absmax_parts[part * columns + column]);
+        }
+        scales[column] = std::max(absmax / 127.0f, 1.0e-10f);
+    }
+}
+
+// Quantizes `rows` whole rows with precomputed per-channel scales.
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
+void quantize_bf16_s8_rows_with_scales(const uint16_t *src, int64_t src_lda,
+        int8_t *dst, int64_t dst_lda, const float *scales, int64_t rows,
+        int64_t columns) {
+    const __m512i abs_mask = _mm512_set1_epi32(0x7fffffff);
+    const __m512 infinity = _mm512_castsi512_ps(_mm512_set1_epi32(0x7f800000));
+    const __m512i lower_bound = _mm512_set1_epi32(-128);
+    const __m512i upper_bound = _mm512_set1_epi32(127);
+    const int64_t vector_columns = columns / 16 * 16;
+    for (int64_t row = 0; row < rows; ++row) {
+        const uint16_t *row_src = src + row * src_lda;
+        int8_t *row_dst = dst + row * dst_lda;
+        for (int64_t column = 0; column < vector_columns; column += 16) {
+            _mm_storeu_si128(reinterpret_cast<__m128i *>(row_dst + column),
+                    quantize_bf16x16(load_bf16x16_as_f32(row_src + column),
+                            _mm512_loadu_ps(scales + column), lower_bound,
+                            upper_bound, abs_mask, infinity));
+        }
+        for (int64_t column = vector_columns; column < columns; ++column) {
+            const float value = common::bfloat16_t::bf16_to_f32_val(
+                    static_cast<int16_t>(row_src[column]));
+            int32_t quantized = 0;
+            if (std::isfinite(value)) {
+                quantized = static_cast<int32_t>(
+                        std::nearbyint(value / scales[column]));
+                quantized = std::max(-128, std::min(127, quantized));
+            }
+            row_dst[column] = static_cast<int8_t>(quantized);
+        }
+    }
+}
+
 int requested_team_size(int num_threads) {
     return std::max(1, num_threads > 0 ? num_threads : omp_get_max_threads());
+}
+
+// Used when any active matrix has K not a multiple of 64, or when there are
+// fewer 64-column blocks than threads (few, narrow matrices such as a single
+// SDPA V head).  Each matrix's rows are cut into
+// chunks: every chunk accumulates a partial column absmax, the partials of a
+// matrix are reduced into its scales, then every chunk quantizes its rows.
+// Chunks write whole output rows, so threads never share an output cache line
+// the way 16-column blocks do.
+void dynamic_per_channel_group_quant_rows(const std::vector<const void *> &src,
+        const std::vector<int> &M, const std::vector<int> &K,
+        const std::vector<int> &lda, const std::vector<void *> &dst,
+        const std::vector<int> &dst_lda, const std::vector<float *> &scales,
+        int thread_count) {
+    const size_t num_ops = M.size();
+    int64_t active_ops = 0;
+    for (size_t op = 0; op < num_ops; ++op) {
+        if (M[op] > 0) ++active_ops;
+    }
+    if (active_ops == 0) return;
+
+    // At least one chunk per thread, and small enough that a chunk is still
+    // cached when it is re-read for quantization.
+    constexpr int64_t chunk_bytes = 256 * 1024;
+    const int64_t min_chunks = (thread_count + active_ops - 1) / active_ops;
+    std::vector<int64_t> chunk_prefix(num_ops), chunk_rows(num_ops),
+            absmax_offset(num_ops);
+    int64_t total_chunks = 0;
+    int64_t total_absmax = 0;
+    for (size_t op = 0; op < num_ops; ++op) {
+        int64_t chunks = 0;
+        if (M[op] > 0) {
+            const int64_t max_rows = std::max<int64_t>(1,
+                    chunk_bytes / (int64_t(K[op]) * int64_t(sizeof(uint16_t))));
+            chunks = std::min<int64_t>(M[op],
+                    std::max(min_chunks, (M[op] + max_rows - 1) / max_rows));
+            chunk_rows[op] = (M[op] + chunks - 1) / chunks;
+        }
+        absmax_offset[op] = total_absmax;
+        total_absmax += chunks * K[op];
+        total_chunks += chunks;
+        chunk_prefix[op] = total_chunks;
+    }
+    std::vector<float> absmax(static_cast<size_t>(total_absmax), 0.0f);
+
+    struct chunk_t {
+        size_t op;
+        int64_t index, row_begin, rows;
+    };
+    // chunk_prefix holds running chunk counts, so the first entry above
+    // task identifies the matrix that owns this chunk.
+    auto chunk_at = [&](int64_t task) {
+        chunk_t c;
+        c.op = static_cast<size_t>(
+                std::upper_bound(chunk_prefix.begin(), chunk_prefix.end(), task)
+                - chunk_prefix.begin());
+        c.index = task - (c.op == 0 ? 0 : chunk_prefix[c.op - 1]);
+        c.row_begin = std::min<int64_t>(M[c.op], c.index * chunk_rows[c.op]);
+        c.rows = std::min<int64_t>(M[c.op], c.row_begin + chunk_rows[c.op])
+                - c.row_begin;
+        return c;
+    };
+
+    const int team_size
+            = static_cast<int>(std::min<int64_t>(thread_count, total_chunks));
+#pragma omp parallel num_threads(team_size)
+    {
+#pragma omp for schedule(static)
+        for (int64_t task = 0; task < total_chunks; ++task) {
+            const chunk_t c = chunk_at(task);
+            accumulate_bf16_column_absmax(
+                    static_cast<const uint16_t *>(src[c.op])
+                            + c.row_begin * lda[c.op],
+                    lda[c.op], c.rows, K[c.op],
+                    absmax.data() + absmax_offset[c.op] + c.index * K[c.op]);
+        }
+
+#pragma omp for schedule(static)
+        for (int64_t op = 0; op < static_cast<int64_t>(num_ops); ++op) {
+            if (M[op] <= 0) continue;
+            const int64_t parts
+                    = chunk_prefix[op] - (op == 0 ? 0 : chunk_prefix[op - 1]);
+            absmax_parts_to_scales(absmax.data() + absmax_offset[op], parts,
+                    K[op], scales[op]);
+        }
+
+#pragma omp for schedule(static)
+        for (int64_t task = 0; task < total_chunks; ++task) {
+            const chunk_t c = chunk_at(task);
+            quantize_bf16_s8_rows_with_scales(
+                    static_cast<const uint16_t *>(src[c.op])
+                            + c.row_begin * lda[c.op],
+                    lda[c.op],
+                    static_cast<int8_t *>(dst[c.op])
+                            + c.row_begin * dst_lda[c.op],
+                    dst_lda[c.op], scales[c.op], c.rows, K[c.op]);
+        }
+    }
 }
 
 } // namespace
@@ -221,9 +407,9 @@ void dynamic_per_channel_quant_bf16_s8_native(const uint16_t *src,
 
 // Column blocks from every active matrix are flattened into one task list, so a
 // single OpenMP team balances columns across all matrices instead of running one
-// team per matrix.  Blocks are 64 wide only when every active K is a multiple of
-// 64 and there are enough of them to fill the team; otherwise 16, which splits
-// the work more finely at the cost of shorter vector runs.
+// team per matrix.  Blocks are 64 wide, used when every active K is a multiple
+// of 64 and there are enough of them to fill the team; otherwise the rows are
+// split instead (dynamic_per_channel_group_quant_rows).
 void dynamic_per_channel_group_quant_bf16_s8_native(
         const std::vector<const void *> &src, const std::vector<int> &M,
         const std::vector<int> &K, const std::vector<int> &lda,
@@ -240,10 +426,12 @@ void dynamic_per_channel_group_quant_bf16_s8_native(
                 = all_active_ops_divisible_by_64 && (K[op] % 64 == 0);
         blocks_of_64 += K[op] / 64;
     }
-    const int64_t column_block
-            = all_active_ops_divisible_by_64 && blocks_of_64 >= thread_count
-            ? 64
-            : 16;
+    if (!all_active_ops_divisible_by_64 || blocks_of_64 < thread_count) {
+        dynamic_per_channel_group_quant_rows(
+                src, M, K, lda, dst, dst_lda, scales, thread_count);
+        return;
+    }
+    constexpr int64_t column_block = 64;
 
     std::vector<int64_t> block_prefix(num_ops);
     int64_t total_blocks = 0;
