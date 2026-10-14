@@ -597,12 +597,9 @@ static bool check_n_tile_extra(const std::vector<int> &M,
 //     serves prompt and decode from one pack.  Every other call, including a
 //     single expert of any dtype such as a routed `matmul_direct`, takes the
 //     rules below.
-//   * Prompt — Rule 0.7 selects ALGO 2 (flat M-tile) for structurally-safe
-//     W4A8 and ALGO 1 (sequential full-team) for every other dtype unless
-//     AUTO_PROMPT_ALGO is explicitly set.  The W4A8 exception is measured:
-//     large-M per-group S4 is substantially faster with row-disjoint M tiles
-//     than serial full-team expert dispatch.  Setting AUTO_PROMPT_ALGO=0
-//     falls back to the legacy 3-rule cascade.
+//   * Prompt — Rule 0.7 selects ALGO 1 (sequential full-team) unless
+//     AUTO_PROMPT_ALGO is explicitly set. Setting AUTO_PROMPT_ALGO=0 falls
+//     back to the legacy 3-rule cascade.
 //   * Decode — Rule 0.5 / 0.45 / 0.6 apply shape and phase heuristics,
 //     defaulting to ALGO 3 (N-tile + CK).  Setting AUTO_DECODE_ALGO=0
 //     restores the legacy 3-rule cascade.
@@ -663,15 +660,11 @@ static bool check_n_tile_extra(const std::vector<int> &M,
 //      planner picks the strategy.  Yields to an explicit
 //      `AUTO_DECODE_ALGO` pin; prompt is never routed by this rule.
 //
-//   0.7. PROMPT, AUTO_PROMPT_ALGO not explicitly set →
-//          structurally-safe W4A8 → ALGO 2; otherwise ALGO 1.
-//      When the caller sets ZENDNNL_GRP_MATMUL_ALGO=0 and has NOT
-//      explicitly set ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO, Rule 0.7
-//      routes W4A8 (`bf16/s8 × s4 → bf16`, per-token source scale and
-//      per-group weight scale) to ALGO 2 when `check_m_tile_safe` passes.
-//      An unsafe W4A8 shape is clamped to ALGO 1.  Every non-W4A8 prompt
-//      retains the sequential full-team ALGO 1 default.
-//      (labels: auto_rule07_prompt_w4a8_mtile, auto_rule07_prompt_seq)
+//   0.7. PROMPT, AUTO_PROMPT_ALGO not explicitly set → ALGO 1.
+//      All dtype families, including W4A8, use the sequential full-team
+//      default. ALGO 2 is reachable only through an explicit global or
+//      prompt-phase pin.
+//      (label: auto_rule07_prompt_seq)
 //
 //   1. PHASE ENV — `max_M ≤ kDecodeMaxM` (decode) →
 //                  `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO` (default 3)
@@ -683,9 +676,8 @@ static bool check_n_tile_extra(const std::vector<int> &M,
 //      `select_grp_matmul_algo`. Value 4 has already requested W8A8 and, on
 //      decline, behaves as an unset setting here so the inherited default
 //      refinements still run. When the prompt setting does not pin a generic
-//      policy (unset or a declined `4`), Rule 0.7 fires first: safe W4A8 uses
-//      ALGO 2 and every other prompt uses ALGO 1. This block handles explicit
-//      generic/legacy prompt settings.
+//      policy (unset or a declined `4`), Rule 0.7 sends the prompt to ALGO 1.
+//      This block handles explicit generic/legacy prompt settings.
 //      For decode, the default is ALGO 3 (N-tile rounds + CK).  Set
 //      `AUTO_PROMPT_ALGO=0` for the legacy 3-rule cascade.
 //
@@ -795,12 +787,10 @@ static int auto_select_algo(const std::vector<int> &M,
         return pick(1, "auto_single_thread", 1);
     }
 
-    // INVARIANT — AUTO never returns ALGO 5 or 6 of its own accord, and
-    // returns ALGO 2 only for Rule 0.7's measured W4A8 prompt exception.
+    // INVARIANT — AUTO never returns ALGO 2, 5 or 6 of its own accord.
     //
-    //   * constrained-auto-2: Rule 0.7 may answer 2 only when every active
-    //     expert is W4A8 and `m_tile_safe` is true.  All other dtype families
-    //     still require an explicit `ZENDNNL_GRP_MATMUL_ALGO=2` global pin or
+    //   * no-auto-2: ALGO 2 requires an explicit
+    //     `ZENDNNL_GRP_MATMUL_ALGO=2` global pin or
     //     `AUTO_{DECODE,PROMPT}_ALGO=2` phase pin.
     //   * no-5-no-6: every rule that once answered 5 answers
     //     `n_tile_safe ? 3 : 1`.
@@ -809,7 +799,7 @@ static int auto_select_algo(const std::vector<int> &M,
     // QUALIFIES an operator's
     // explicit decode `AUTO_DECODE_ALGO=5` pin (honour for INT8 saturated-team
     // decode, decline → decode default otherwise). Keep new rules inside the
-    // constrained-2 / no-5-no-6 set. The invariant constrains the HEURISTICS, not the operator:
+    // no-auto-2 / no-5-no-6 set. The invariant constrains the HEURISTICS, not the operator:
     // an explicit phase pin or global force of 5/6 is honoured.
     //
     // Rule 0 — STRUCTURAL capacity carve-out, placed before the phase env so
@@ -956,27 +946,10 @@ static int auto_select_algo(const std::vector<int> &M,
         }
     }
 
-    // Rule 0.7 — PROMPT.  The input suite that motivated this exception
-    // (Qwen-class fused W4A8, 150-254 firing experts, max_M≈800) is
-    // compute-heavy along M: ALGO 2's row-disjoint outer OMP schedule avoids
-    // ALGO 1's serial expert orchestration and measured substantially faster
-    // than both ALGO 1 and ALGO 3.  Keep the gate contract-based rather than
-    // shape-specific: every active expert must satisfy the normal W4A8
-    // contract and the existing M-tile safety predicate must admit the call.
-    // This preserves arbitrary supported dimensions and clamps non-row-local
-    // layouts/post-ops to the established ALGO 1 fallback.
+    // Rule 0.7 — PROMPT. Unpinned prompt calls use the same sequential
+    // full-team default for every dtype. ALGO 2 remains explicitly selectable
+    // through the global or prompt-phase knobs.
     if (!is_decode && !grp_matmul_auto_prompt_algo_is_set()) {
-        bool any_active_w4a8 = false;
-        bool all_active_w4a8 = params.size() >= M.size();
-        for (size_t i = 0; i < M.size() && all_active_w4a8; ++i) {
-            if (M[i] <= 0) continue;
-            any_active_w4a8 = true;
-            all_active_w4a8 = is_w4a8_config(params[i]);
-        }
-        if (any_active_w4a8 && all_active_w4a8) {
-            return pick(
-                    m_tile_safe ? 2 : 1, "auto_rule07_prompt_w4a8_mtile", 2);
-        }
         return pick(1, "auto_rule07_prompt_seq", 1);
     }
 

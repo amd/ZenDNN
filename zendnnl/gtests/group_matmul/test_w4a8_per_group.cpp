@@ -120,7 +120,7 @@ void run_w4a8_per_group_scenario(const std::string &label,
 
 void run_w4a8_cross_algo_scenario(const std::string &label,
         const std::vector<int> &rows, uint64_t K, uint64_t N,
-        uint64_t group_size, bool expect_auto_mtile = false) {
+        uint64_t group_size) {
     ASSERT_EQ(K % group_size, 0u)
             << label << ": K must be a multiple of group_size";
     const uint64_t G = K / group_size;
@@ -169,24 +169,13 @@ void run_w4a8_cross_algo_scenario(const std::string &label,
     }
     ASSERT_EQ(st, status_t::success) << label << ": ALGO 1 failed";
 
-    const char *auto_mode = nullptr;
     {
         moe_test_utils::AlgoEnvGuard g(0);
-        moe_test_utils::GemmModeCaptureGuard capture;
         reset_grp_matmul_caches();
         st = group_matmul_kernel_test(inp, wt, bias, out_a0, algo, 1.0f, 0.0f,
                 nullptr, nullptr, {}, active);
-        auto_mode = zendnnl::lowoha::matmul::test_api ::
-                            s_last_group_matmul_direct_gemm_mode.load(
-                                    std::memory_order_relaxed);
     }
     ASSERT_EQ(st, status_t::success) << label << ": ALGO 0 failed";
-    if (expect_auto_mtile) {
-        ASSERT_NE(auto_mode, nullptr);
-        EXPECT_NE(std::strstr(auto_mode, "flat_m_tile"), nullptr)
-                << label << ": AUTO must execute the W4A8 M-tile path; mode="
-                << auto_mode;
-    }
 
     {
         moe_test_utils::AlgoEnvGuard g(2);
@@ -368,8 +357,7 @@ TEST(GroupMatmulW4A8PerGroup, CrossAlgoSmallDecodeBF16) {
 }
 
 TEST(GroupMatmulW4A8PerGroup, CrossAlgoMidRangeBF16) {
-    run_w4a8_cross_algo_scenario("mid", std::vector<int>(10, 128), 128, 64, 32,
-            /*expect_auto_mtile=*/true);
+    run_w4a8_cross_algo_scenario("mid", std::vector<int>(10, 128), 128, 64, 32);
 }
 
 TEST(GroupMatmulW4A8PerGroup, CrossAlgoSingleTokenBF16) {
@@ -625,8 +613,8 @@ TEST(GroupMatmulW4A8PerGroup, PrepackWarmsAllExpertsBF16) {
     }
 }
 
-// The mirror: the prompt runs ALGO 2, so its prepack warms the ALGO 3
-// layout the decode will read.
+// The AUTO prompt runs ALGO 1, and its prepack also warms the ALGO 3 layout
+// the decode will read.
 TEST(GroupMatmulW4A8PerGroup, AutoPromptPrepackWarmsDecodeLayout) {
     namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
     moe_test_utils::LastInvocationCaptureGuard prepack_capture;
@@ -640,7 +628,7 @@ TEST(GroupMatmulW4A8PerGroup, AutoPromptPrepackWarmsDecodeLayout) {
 
     const auto stats = prepack::test_api::get_last_invocation_stats();
     ASSERT_TRUE(stats.valid) << "prepack must fire for the W4A8 prompt";
-    EXPECT_EQ(stats.scheduling_algo, 2);
+    EXPECT_EQ(stats.scheduling_algo, 1);
     if (moe_test_utils::k_grp_matmul_aocl_dlp_compiled) {
         EXPECT_NE(static_cast<int>(stats.cross_warm_regime),
                 static_cast<int>(prepack::CrossWarmRegime::none))

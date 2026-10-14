@@ -486,8 +486,8 @@ inline bool get_grp_matmul_ntile_flat_parallel() {
 // AUTO classifies each call with `classify_grp_matmul_phase()` and reads one
 // cached setting for the matching phase:
 //
-//   AUTO_PROMPT_ALGO inherited value = 2; Rule 0.7 narrows the unpinned
-//   prompt outcome to safe W4A8, with every other prompt using ALGO 1.
+//   AUTO_PROMPT_ALGO inherited value = 2 for compatibility; Rule 0.7 sends
+//   every unpinned prompt to ALGO 1. ALGO 2 therefore remains explicit-only.
 //   AUTO_DECODE_ALGO default = 3 (flat_n_tile and its default refinements).
 //
 // A BF16 or FP16 layer of at least two experts

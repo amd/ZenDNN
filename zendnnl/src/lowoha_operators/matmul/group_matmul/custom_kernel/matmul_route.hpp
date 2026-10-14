@@ -175,11 +175,11 @@ inline bool custom_kernel_routable(char layout, int M, int N, int K,
 
     // Prompt calls intentionally enter one-op grouped AUTO.  BF16 executes
     // full-weight AOCL, or the CK prompt tile executor under Rule 0.46; INT8
-    // executes full-weight AOCL (ALGO 1) so mixed-WC2 preparation can warm a
-    // future decode CK layout; W4A8 executes its supported ALGO 2 prompt
-    // path.  Decode still has to resolve to ALGO 3 below.  The N-tile count
-    // is decode's parallelism requirement; a Rule 0.46 layer is checked after
-    // the variant is known.
+    // and unpinned W4A8 execute full-weight AOCL (ALGO 1) so mixed-WC2
+    // preparation can warm a future decode CK layout. An explicit ALGO 2
+    // W4A8 prompt pin remains supported. Decode still has to resolve to
+    // ALGO 3 below. The N-tile count is decode's parallelism requirement; a
+    // Rule 0.46 layer is checked after the variant is known.
     const bool enough_ntiles
             = has_enough_single_expert_tiles(N, K, num_threads);
     if (M <= 0 || batch_count != 1 || transA || !is_weights_const) return false;

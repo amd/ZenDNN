@@ -690,8 +690,8 @@ void check_scalar_w4_route_matches_fallback(const ScalarW4RouteShape &s) {
         EXPECT_NE(std::strstr(mode, "custom"), nullptr)
                 << "dense W4 decode did not execute CK; mode=" << mode;
     } else {
-        EXPECT_NE(std::strstr(mode, "flat_m_tile"), nullptr)
-                << "dense W4 prompt did not execute ALGO 2; mode=" << mode;
+        EXPECT_NE(std::strstr(mode, "sequential"), nullptr)
+                << "dense W4 prompt did not execute ALGO 1; mode=" << mode;
     }
 
     ::reset_grp_matmul_caches();

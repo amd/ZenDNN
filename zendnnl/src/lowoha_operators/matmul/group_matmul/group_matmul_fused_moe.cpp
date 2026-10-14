@@ -1764,9 +1764,9 @@ status_t group_matmul_fused_moe_execute(
     // ALGO — it slots into the M-tile branch.  Only engage it when the
     // RESOLVED algo for this call is ALGO 2: under a pinned env algo
     // ({1,2,3,5,6}) that is exactly the pinned value; under AUTO (env 0)
-    // the resolved prompt algo is 2 for structurally-safe W4A8 and 1 for
-    // other dtypes (Rule 0.7), while decode defaults to 3; a BF16/FP16 layer
-    // of several experts runs ALGO 3 when ALGO 3 can serve it.
+    // the resolved prompt algo is 1 for every unpinned shape-rule dtype
+    // (Rule 0.7), while decode defaults to 3; a BF16/FP16 layer of several
+    // experts runs ALGO 3 when ALGO 3 can serve it.
     // Vertical fusion therefore remains an M-tile-path only.  This keeps
     // vertical fusion inside the ALGO-2 decision
     // tree and stops it from overriding a pinned ALGO 1/3/5/6 (e.g. an

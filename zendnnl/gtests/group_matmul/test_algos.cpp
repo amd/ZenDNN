@@ -4598,7 +4598,7 @@ struct MinRunResultT {
 //
 // `M_dim` selects the phase.  M <= kDecodeMaxM (32) is decode and, for a
 // few experts, Rule 0.5 may select ALGO 3.  M > 32 is prompt and Rule 0.7
-// selects ALGO 1 for other dtypes; a BF16/FP16 layer of several experts runs
+// selects ALGO 1 for shape-rule dtypes; a BF16/FP16 layer of several experts runs
 // ALGO 3 there too unless its prompt is pinned away.  `num_threads` and
 // `num_ops` are likewise overridable so a decode call can be forced onto
 // ALGO 3's narrow-N full-weight arm.
@@ -6238,7 +6238,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, UnpinnedPromptRoutesToAlgo3AtEveryShape) {
 }
 
 // A BF16 layer of few experts decodes on ALGO 3 too, at any occupancy and
-// any M, and AUTO selects ALGO 2 only for W4A8 prompts — the
+// any M. AUTO never selects ALGO 2 without an explicit pin — the
 // `ExplicitPromptAlgo2PinBeatsRegimeRouting` and
 // `SingleDenseExpertDecodeHonoursExplicitPin` tests cover the pinned side.
 TEST(TestGroupMatmulAutoPhaseEnv, FewExpertsDecodeRoutesToAlgo3) {
@@ -6330,9 +6330,9 @@ TEST(TestGroupMatmulAutoPhaseEnv, GlobalStillAppliesToTheUnsetPhase) {
     }
 }
 
-// Non-W4A8 invariant guard: sweep the BF16 shape space AUTO can see and
-// assert ALGO 2 never comes back without an explicit env pin.  W4A8 prompt
-// routing is covered separately below.
+// Sweep the BF16 shape space AUTO can see and assert ALGO 2 never comes back
+// without an explicit env pin. W4A8's same ALGO 1 prompt default is covered
+// separately below.
 TEST(TestGroupMatmulAutoPhaseEnv,
         NonW4A8AutoNeverSelectsAlgo2AcrossShapeSweep) {
     using namespace zendnnl::lowoha::matmul;
@@ -6441,28 +6441,9 @@ TEST(TestGroupMatmulExpertKernel, AppliesPolicyOnlyToW4A8Experts) {
             << "non-W4A8 experts must preserve the selected inner kernel";
 }
 
-// An unpinned W4A8 prompt runs ALGO 2's row-disjoint M tiles; a prompt pin
-// still outranks it, and a declined `=5` pin falls back to it.
-TEST(TestGroupMatmulAutoPhaseEnv, W4A8PromptRoutesToAlgo2) {
-    using namespace zendnnl::lowoha::matmul;
-    using namespace moe_test_utils;
-    reset_grp_matmul_caches();
-    AlgoEnvGuard reset_algo(0);
-
-    // Rule 0.7's measured W4A8 exception selects row-disjoint M-tiling.
-    auto s = build_auto_probe(/*M=*/512, /*K=*/4096, /*N=*/14336,
-            /*num_ops=*/8, /*num_threads=*/32);
-    apply_w4a8_auto_probe(s);
-    auto_algo_trace trace;
-    EXPECT_EQ(select_grp_matmul_algo(
-                      s.layout, s.M, s.N, s.K, s.params, s.num_threads, &trace),
-            2)
-            << "structurally-safe W4A8 prompt must take the measured ALGO 2 "
-               "route";
-    EXPECT_STREQ(trace.reason, "auto_rule07_prompt_w4a8_mtile");
-}
-
-TEST(TestGroupMatmulAutoPhaseEnv, W4A8PromptUnsafeMTileClampsToAlgo1) {
+// W4A8 follows the same unpinned ALGO 1 prompt default as other shape-rule
+// dtypes. An explicit prompt pin may still select ALGO 2.
+TEST(TestGroupMatmulAutoPhaseEnv, W4A8PromptDefaultsToAlgo1) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     reset_grp_matmul_caches();
@@ -6471,15 +6452,12 @@ TEST(TestGroupMatmulAutoPhaseEnv, W4A8PromptUnsafeMTileClampsToAlgo1) {
     auto s = build_auto_probe(/*M=*/512, /*K=*/4096, /*N=*/14336,
             /*num_ops=*/8, /*num_threads=*/32);
     apply_w4a8_auto_probe(s);
-    for (auto &c : s.layout)
-        c = 'c';
     auto_algo_trace trace;
     EXPECT_EQ(select_grp_matmul_algo(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads, &trace),
             1)
-            << "W4A8 prompt with an M-tile-unsafe layout must retain the "
-               "sequential fallback";
-    EXPECT_STREQ(trace.reason, "auto_rule07_prompt_w4a8_mtile");
+            << "an unpinned W4A8 prompt must use the common ALGO 1 default";
+    EXPECT_STREQ(trace.reason, "auto_rule07_prompt_seq");
 }
 
 // A BF16/FP16 layer of several experts runs both unset phases on ALGO 3, so its
@@ -9395,8 +9373,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, Algo3PhaseEnvClampedOnNonNTileSafe) {
 // ALGO 2 is now PURE M-tile: a FORCED `ZENDNNL_GRP_MATMUL_ALGO=2` on a
 // wide-N shape (`total_need*2 ≤ num_threads && max_M > 1`) no longer falls
 // back to the sequential-full-team loop — it runs the single-tier M-tile
-// plan (kPhase2Single).  (AUTO selects ALGO 2 only for W4A8 prompts; see
-// TestGroupMatmulAutoPhaseEnv.NonW4A8AutoNeverSelectsAlgo2AcrossShapeSweep.)
+// plan (kPhase2Single). AUTO never selects ALGO 2 without an explicit pin.
 TEST(TestGroupMatmulMTileBranches, ForcedAlgo2OnWideNRunsSingleTier) {
     using namespace moe_test_utils;
     using zendnnl::lowoha::matmul::group_matmul_direct;

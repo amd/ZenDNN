@@ -477,9 +477,9 @@ inline void dqint8_compact_and_requant_slice(
 //                        (ALGO 1 equivalent) + a one-time WARN.
 //
 // ALGO 2 is a pure M-tile executor, with no per-expert or sequential
-// full-team fallback.  AUTO selects it only for a structurally-safe W4A8
-// prompt; other dtype families require an explicit
-// `ZENDNNL_GRP_MATMUL_ALGO=2` or `AUTO_{DECODE,PROMPT}_ALGO=2`.
+// full-team fallback.  AUTO never selects ALGO 2; calls reaching this
+// executor come from an explicit global or phase pin
+// (`ZENDNNL_GRP_MATMUL_ALGO=2` or `AUTO_{DECODE,PROMPT}_ALGO=2`).
 //
 // ═══════════════════════════════════════════════════════════════════════
 //
@@ -1313,8 +1313,8 @@ void flat_m_tile(const std::vector<char> &layout,
     //
     // The wide-N memory-bound regime — few actives × shallow M × large N,
     // i.e. `max_M > 1 && total_need*2 ≤ num_threads` — runs the M-tile plan
-    // like any other shape.  AUTO selects ALGO 2 only for a safe W4A8
-    // prompt; every other call here comes from an explicit pin.
+    // like any other shape.  AUTO never selects ALGO 2; calls reaching this
+    // executor come from an explicit global or phase pin.
     //
     // A FORCED `ZENDNNL_GRP_MATMUL_ALGO=2` on a wide-N shape therefore runs
     // the single-tier M-tile plan below: this is CORRECT (the regime is
