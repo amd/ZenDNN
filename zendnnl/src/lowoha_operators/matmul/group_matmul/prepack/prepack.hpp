@@ -201,6 +201,10 @@ struct PrepackParams {
     // than rereading the process-global value.
     int32_t weight_cache_type = 2;
 
+    // The highest effective cache mode among the experts.  Below 2, no weight
+    // of this call is written in place, by prepack or at run time.
+    int32_t max_weight_cache_type = 2;
+
     // At least one caller-supplied weight is already in a backend-specific
     // packed representation (`mem_format_b == 'r'`). Generic eager/cross
     // warmers must not reinterpret those bytes as raw weights.
@@ -440,12 +444,17 @@ inline PrepackParams build_prepack_params(
         }
         p.wei_buffer_capacity_bytes = cap;
 
-        p.weight_cache_type = zendnnl::common::matmul_config_t::instance()
-                                      .get_weight_cache();
+        const int32_t process_mode
+                = zendnnl::common::matmul_config_t::instance()
+                          .get_weight_cache();
+        p.weight_cache_type = process_mode;
+        int32_t highest = 0;
         for (const auto &param : params) {
             p.weight_cache_type
                     = std::min(p.weight_cache_type, param.weight_cache_type);
+            highest = std::max(highest, param.weight_cache_type);
         }
+        p.max_weight_cache_type = std::min(process_mode, highest);
     }
 
     // Mirror the dispatcher's active/total contract

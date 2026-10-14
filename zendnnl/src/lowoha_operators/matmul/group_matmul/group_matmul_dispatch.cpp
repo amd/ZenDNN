@@ -1181,6 +1181,18 @@ bool prepare_grouped_auto_weight_cache(std::vector<matmul_params> &params,
         return false;
     }
 
+    // A call whose matmul_params cap every weight below 2 never writes one in
+    // place, so the AUTO policy below has nothing to protect for it: leave
+    // the process mode and the mixed flag as the other callers set them.
+    const auto at_wc2 = [](const std::vector<matmul_params> *pool) {
+        return pool != nullptr
+                && std::any_of(
+                        pool->begin(), pool->end(), [](const matmul_params &p) {
+            return p.weight_cache_type >= 2;
+        });
+    };
+    if (!at_wc2(&params) && !at_wc2(secondary_params)) { return false; }
+
     bool has_caller_packed_weight = false;
     bool has_raw_weight = false;
     auto scan_formats = [&](const std::vector<matmul_params> &pool) {
@@ -1245,13 +1257,6 @@ bool prepare_grouped_auto_weight_cache(std::vector<matmul_params> &params,
         // out-of-place.  BF16 (even K) and FP16 may write their pack into the
         // caller's buffer.  A later non-CK reader of an in-place image fails closed
         // (`kGrpMatmulErrPackedInPlaceNoCk`).
-        const auto at_wc2 = [](const std::vector<matmul_params> *pool) {
-            return pool != nullptr
-                    && std::any_of(pool->begin(), pool->end(),
-                            [](const matmul_params &p) {
-                return p.weight_cache_type >= 2;
-            });
-        };
         if (ck_inplace_licence != nullptr
                 && grp_matmul_auto_algo3_only(auto_algo3_layer)
                 && (at_wc2(&params) || at_wc2(secondary_params))) {

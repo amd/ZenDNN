@@ -35,8 +35,9 @@
 //
 // DeclaredCapacity* / MatmulDirect*: WC=2 rewrites a padded INT8 buffer
 // when the blocked image exceeds k*n, and leaves an undeclared buffer raw.
-// BmmSharedWeight*: shared tiles force WC=1 so a source zero-point sum
-// still sees raw columns, including when the blocked size equals k*n.
+// BmmSharedWeight*: shared tiles cap the weight cache at 1 so a source
+// zero-point sum still sees raw columns, including when the blocked size
+// equals k*n; a caller's 0 stays 0.
 //
 // The two related vulnerable paths (asymmetric wei_zp != 0, and ZP-comp caching
 // disabled) are documented as a TODO next to the compensation code in
@@ -773,4 +774,181 @@ TEST_F(TestWeightCacheInplace, BmmSharedWeightKeepsAsymmetricU8OutOfPlace) {
                            "iteration "
                         << iter;
     }
+}
+
+// Shared tiles lower the weight cache to 1, never above the caller's own
+// value: with weight_cache_type 0, a weight rewritten at the same address is
+// reordered again on the next call.  With ZP-compensation caching off the
+// weight cache is the only place the old weight could come from; with it on
+// (the default) the compensation must be recomputed from the new weight too.
+TEST_F(TestWeightCacheInplace, BmmSharedWeightHonoursPerCallCacheOff) {
+    constexpr int kBatch = 4;
+    constexpr int kThreads = 4;
+    const uint64_t m = 32, k = 128, n = 128;
+    const int mi = static_cast<int>(m);
+    const int ki = static_cast<int>(k);
+    const int ni = static_cast<int>(n);
+
+    auto wei_ref = tensor_factory.uniform_dist_tensor(
+            {k, n}, data_type_t::bf16, 25.0, /*transB=*/false);
+    tensor_t weight_tensor, wei_scale, wei_zp;
+    ASSERT_EQ(quant_params_compute(tensor_factory, wei_ref, data_type_t::bf16,
+                      data_type_t::s8, {1, 1}, data_type_t::f32, wei_scale,
+                      wei_zp, &weight_tensor),
+            status_t::success)
+            << "weight quantization failed";
+
+    auto src_ref = tensor_factory.uniform_dist_tensor(
+            {static_cast<uint64_t>(kBatch) * m, k}, data_type_t::bf16, 25.0,
+            /*transA=*/false);
+    tensor_t input_tensor, src_scale, src_zp_tensor;
+    ASSERT_EQ(quant_params_compute(tensor_factory, src_ref, data_type_t::bf16,
+                      data_type_t::s8, {1, 1}, data_type_t::f32, src_scale,
+                      src_zp_tensor, &input_tensor),
+            status_t::success)
+            << "source quantization failed";
+
+    auto output_tensor = tensor_factory.uniform_dist_tensor(
+            {static_cast<uint64_t>(kBatch) * m, n}, data_type_t::bf16, 2.0);
+    auto output_tensor_ref = tensor_factory.uniform_dist_tensor(
+            {static_cast<uint64_t>(kBatch) * m, n}, data_type_t::bf16, 2.0);
+
+    const size_t plain = static_cast<size_t>(ki) * static_cast<size_t>(ni);
+    std::vector<int8_t> wei(plain);
+    std::memcpy(wei.data(), weight_tensor.get_raw_handle_unsafe(), plain);
+
+    auto fill_scale = [](matmul_quantization_params_t::matmul_quant_t &q,
+                              const tensor_t &t) {
+        if (!t.is_quantized()) return;
+        q.buff = t.get_quant_scale_raw_handle_const();
+        q.dt = t.get_quant_scale_data_type();
+        auto dims = t.get_quant_scale_size();
+        q.dims.assign(dims.begin(), dims.end());
+    };
+
+    const int32_t src_zp_value = 13;
+
+    matmul_params params;
+    params.lowoha_algo = matmul_algo_t::aocl_dlp_blocked;
+    params.dtypes.src = data_type_t::s8;
+    params.dtypes.wei = data_type_t::s8;
+    params.dtypes.dst = data_type_t::bf16;
+    params.weight_cache_type = 0;
+    params.num_threads = kThreads;
+    fill_scale(params.quant_params.src_scale, input_tensor);
+    fill_scale(params.quant_params.wei_scale, weight_tensor);
+    params.quant_params.src_zp.buff = &src_zp_value;
+    params.quant_params.src_zp.dt = data_type_t::s32;
+    params.quant_params.src_zp.dims = {1};
+
+    matmul_batch_params_t batch;
+    batch.Batch_A = kBatch;
+    batch.Batch_B = 1;
+    batch.batch_stride_src = static_cast<size_t>(-1);
+    batch.batch_stride_wei = static_cast<size_t>(-1);
+    batch.batch_stride_dst = static_cast<size_t>(-1);
+
+    matmul_params ref_params = params;
+    ref_params.lowoha_algo = matmul_algo_t::reference;
+    ref_params.num_threads = 1;
+
+    WeightCacheGuard wc_guard(2);
+    const std::vector<int8_t> original = wei;
+
+    for (const bool zp_comp_cache : {false, true}) {
+        SCOPED_TRACE(zp_comp_cache ? "ZP-compensation cache on"
+                                   : "ZP-compensation cache off");
+        ZpCompCacheGuard zp_guard(zp_comp_cache);
+        clear_matmul_test_caches();
+        wei = original;
+        for (int pass = 0; pass < 2; ++pass) {
+            if (pass == 1) {
+                for (size_t i = 0; i < plain; ++i) {
+                    wei[i] = static_cast<int8_t>(3 - wei[i] / 2);
+                }
+            }
+            ASSERT_EQ(
+                    matmul_direct('r', /*transA=*/false, /*transB=*/false, mi,
+                            ni, ki, 1.0f, input_tensor.get_raw_handle_unsafe(),
+                            ki, wei.data(), ni, /*bias=*/nullptr, 0.0f,
+                            output_tensor_ref.get_raw_handle_unsafe(), ni,
+                            /*is_weights_const=*/true, batch, ref_params),
+                    status_t::success)
+                    << "reference kernel failed on pass " << pass;
+            status_t status = matmul_direct('r', /*transA=*/false,
+                    /*transB=*/false, mi, ni, ki, 1.0f,
+                    input_tensor.get_raw_handle_unsafe(), ki, wei.data(), ni,
+                    /*bias=*/nullptr, 0.0f,
+                    output_tensor.get_raw_handle_unsafe(), ni,
+                    /*is_weights_const=*/true, batch, params);
+            if (status == status_t::isa_unsupported) {
+                GTEST_SKIP()
+                        << "AOCL-DLP blocked INT8 not supported on this ISA";
+            }
+            ASSERT_EQ(status, status_t::success)
+                    << "BMM failed on pass " << pass;
+
+            bool ok = true;
+            compare_tensor_2D_matrix(output_tensor, output_tensor_ref,
+                    static_cast<uint64_t>(kBatch) * m, n, k, rtol_bf16,
+                    epsilon_bf16, ok, false, 1.0f, /*is_quant=*/true);
+            EXPECT_TRUE(ok)
+                    << "BMM output diverged from the reference on pass " << pass
+                    << (pass == 1 ? " (a cached reorder or compensation "
+                                    "served the weight from before the "
+                                    "rewrite)"
+                                  : "");
+        }
+    }
+}
+
+// The simulated W4A8 path (aocl_dlp) caches the blocked reorder of an s4
+// weight while caching is on.  After the caller rewrites the weight at the
+// same address, a call whose effective cache mode is 0 must not reuse it: it
+// matches a run with every cache dropped.
+TEST_F(TestWeightCacheInplace, W4A8CacheOffRereadsRewrittenWeight) {
+    const uint64_t m = 32, k = 128, n = 64, group_size = 32;
+    auto wei_scale = tensor_factory.uniform_dist_tensor(
+            {k / group_size, n}, data_type_t::bf16, 2.0);
+    auto weight = tensor_factory.uniform_dist_tensor(
+            {k, n}, data_type_t::s4, 7.0, false, wei_scale);
+    auto src_scale = tensor_factory.zero_tensor({m, 1u}, data_type_t::bf16);
+    auto input = tensor_factory.uniform_dist_tensor(
+            {m, k}, data_type_t::bf16, 2.0, false, src_scale, tensor_t());
+    auto bias = tensor_factory.zero_tensor({1u, n}, data_type_t::bf16);
+    auto first = tensor_factory.zero_tensor({m, n}, data_type_t::bf16);
+    auto second = tensor_factory.zero_tensor({m, n}, data_type_t::bf16);
+    auto ref = tensor_factory.zero_tensor({m, n}, data_type_t::bf16);
+
+    CustomKernelRouteGuard route_off(false);
+    const std::vector<post_op_type_t> po_types;
+    const std::vector<tensor_t> binary_tensors;
+    const auto run = [&](tensor_t &out, int32_t mode) {
+        WeightCacheGuard wc_guard(mode);
+        ASSERT_EQ(matmul_kernel_test(input, weight, bias, out, po_types,
+                          binary_tensors, /*use_LOWOHA=*/true,
+                          matmul_algo_t::aocl_dlp, 1.0f, 0.0f),
+                status_t::success);
+    };
+
+    clear_matmul_test_caches();
+    ASSERT_NO_FATAL_FAILURE(run(first, 1));
+    // Flip the low bit of every s4 value: still in range, other weights.
+    auto *w = static_cast<uint8_t *>(weight.get_raw_handle_unsafe());
+    for (size_t i = 0; i < weight.get_buffer_sz_bytes(); ++i) {
+        w[i] ^= 0x11;
+    }
+    ASSERT_NO_FATAL_FAILURE(run(second, 0));
+    clear_matmul_test_caches();
+    ASSERT_NO_FATAL_FAILURE(run(ref, 0));
+
+    const size_t bytes = m * n * sizeof(bfloat16_t);
+    EXPECT_NE(std::memcmp(first.get_raw_handle_unsafe(),
+                      ref.get_raw_handle_unsafe(), bytes),
+            0)
+            << "the rewrite must change the output";
+    EXPECT_EQ(std::memcmp(second.get_raw_handle_unsafe(),
+                      ref.get_raw_handle_unsafe(), bytes),
+            0)
+            << "a W4A8 reorder cached before the rewrite was reused";
 }

@@ -38,10 +38,11 @@ void bmm_tile_execute(int batch_idx, int m_start, int m_len,
     matmul_params tile_params = params;
     // Shared tiles sum raw columns before the weight-cache lock. Force
     // out-of-place: clearing the capacity still allows WC=2 when the
-    // blocked image equals k*n.
+    // blocked image equals k*n.  A caller that disabled caching keeps 0.
     if (ctx.force_shared_wei_out_of_place) {
         tile_params.wei_buffer_capacity_bytes = 0;
-        tile_params.weight_cache_type = 1;
+        tile_params.weight_cache_type
+                = std::min<int32_t>(tile_params.weight_cache_type, 1);
     }
     apply_bmm_postop_offsets(tile_params, batch_idx, m_start, ctx.N);
 

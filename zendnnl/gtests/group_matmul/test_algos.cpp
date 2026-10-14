@@ -6046,6 +6046,169 @@ TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkInPlaceHonoursPerCallCap) {
     }
 }
 
+// A call that disables caching keeps no weight-derived tile on ALGO 3's AOCL
+// per-tile path: once the caller rewrites its weights at the same address,
+// the next call reads the new bytes.  A mixed flag left by an earlier AUTO
+// test would send the call to Sequential instead, so the flag is cleared and
+// every call must report a tiled N-tile mode.
+TEST(TestGroupMatmulWeightCacheDowngrade, PerTileHonoursPerCallCacheOff) {
+    SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    AlgoEnvGuard algo3(3);
+    CustomKernelOverride ck_off(false);
+    auto &cfg = zendnnl::common::matmul_config_t::instance();
+    struct MixedRestore {
+        zendnnl::common::matmul_config_t &cfg;
+        bool value;
+        ~MixedRestore() { cfg.set_grp_auto_mixed_inplace(value); }
+    } restore {cfg, cfg.get_grp_auto_mixed_inplace()};
+    cfg.set_grp_auto_mixed_inplace(false);
+    reset_grp_matmul_caches();
+    WeightCacheGuard wc(2);
+    constexpr int E = 8;
+    const std::vector<int> M(E, 1);
+    Bf16Layer layer(E, 512, 1024), rewritten(E, 512, 1024);
+    std::vector<std::vector<bfloat16_t>> first, second, ref;
+    const auto run_tiled
+            = [&](Bf16Layer &l, std::vector<std::vector<bfloat16_t>> &dst) {
+        GemmModeCaptureGuard capture;
+        ASSERT_EQ(l.run(M, dst, 1.0f, 8, /*weight_cache_type=*/0),
+                status_t::success);
+        const char *mode = test_api::s_last_group_matmul_direct_gemm_mode.load(
+                std::memory_order_relaxed);
+        ASSERT_NE(mode, nullptr);
+        EXPECT_EQ(std::string(mode).rfind("flat_n_tile", 0), 0u) << mode;
+        EXPECT_EQ(std::strstr(mode, "sequential"), nullptr)
+                << "the call never reached the per-tile path; mode=" << mode;
+    };
+    ASSERT_NO_FATAL_FAILURE(run_tiled(layer, first));
+    for (int e = 0; e < E; ++e) {
+        for (size_t i = 0; i < layer.wei[e].size(); ++i) {
+            const bfloat16_t v(0.01f * (float)((int)((i * 3 + e) % 11) - 5));
+            layer.wei[e][i] = v;
+            rewritten.wei[e][i] = v;
+        }
+    }
+    ASSERT_NO_FATAL_FAILURE(run_tiled(layer, second));
+    ASSERT_NO_FATAL_FAILURE(run_tiled(rewritten, ref));
+    EXPECT_GT(max_abs_diff(first, ref), 0.0)
+            << "the rewrite must change the result";
+    EXPECT_EQ(max_abs_diff(second, ref), 0.0)
+            << "a cached tile served the weights from before the rewrite";
+}
+
+// A call whose cap keeps every weight below 2 never writes one in place, so
+// AUTO under WC=2 neither downgrades the process mode (as it does for a
+// WC=2 call it cannot make safe) nor sets the mixed flag, and the result
+// matches an out-of-place run.
+TEST(TestGroupMatmulWeightCacheDowngrade, CappedCallKeepsProcessPolicy) {
+    SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    AlgoEnvGuard reset_algo(0);
+    CustomKernelOverride ck_on(true);
+    auto &cfg = zendnnl::common::matmul_config_t::instance();
+    struct MixedRestore {
+        zendnnl::common::matmul_config_t &cfg;
+        bool value;
+        ~MixedRestore() { cfg.set_grp_auto_mixed_inplace(value); }
+    } restore {cfg, cfg.get_grp_auto_mixed_inplace()};
+    const std::vector<int> prompt {64, 64, 64, 64}, decode {8, 8, 8, 8};
+    std::vector<std::vector<bfloat16_t>> ref_p, ref_d;
+    {
+        reset_grp_matmul_caches();
+        WeightCacheGuard wc(1);
+        Bf16Layer layer(4, 256, 256);
+        ASSERT_EQ(layer.run(prompt, ref_p), status_t::success);
+        ASSERT_EQ(layer.run(decode, ref_d), status_t::success);
+    }
+    for (int32_t cap : {0, 1}) {
+        std::vector<std::vector<bfloat16_t>> dst;
+        {
+            // A finite LRU makes the pool mixed-ineligible: a WC=2 call
+            // would downgrade the process to 1 here.
+            reset_grp_matmul_caches();
+            WeightCacheGuard wc(2);
+            LruCapacityGuard finite(4096);
+            cfg.set_grp_auto_mixed_inplace(false);
+            Bf16Layer layer(4, 256, 256);
+            ASSERT_EQ(layer.run(prompt, dst, 1.0f, 8, cap), status_t::success);
+            EXPECT_EQ(cfg.get_weight_cache(), 2) << "cap " << cap;
+            EXPECT_EQ(max_abs_diff(ref_p, dst), 0.0) << "cap " << cap;
+            for (int e = 0; e < 4; ++e) {
+                EXPECT_FALSE(layer.mutated(e)) << "cap " << cap << " e " << e;
+            }
+        }
+        {
+            // An eligible pool: a WC=2 call would set the mixed flag here.
+            reset_grp_matmul_caches();
+            WeightCacheGuard wc(2);
+            LruCapacityGuard unlimited(std::numeric_limits<uint32_t>::max());
+            cfg.set_grp_auto_mixed_inplace(false);
+            Bf16Layer layer(4, 256, 256);
+            ASSERT_EQ(layer.run(prompt, dst, 1.0f, 8, cap), status_t::success);
+            EXPECT_EQ(max_abs_diff(ref_p, dst), 0.0) << "cap " << cap;
+            ASSERT_EQ(layer.run(decode, dst, 1.0f, 8, cap), status_t::success);
+            EXPECT_EQ(max_abs_diff(ref_d, dst), 0.0) << "cap " << cap;
+            EXPECT_EQ(cfg.get_weight_cache(), 2) << "cap " << cap;
+            EXPECT_FALSE(cfg.get_grp_auto_mixed_inplace()) << "cap " << cap;
+            for (int e = 0; e < 4; ++e) {
+                EXPECT_FALSE(layer.mutated(e)) << "cap " << cap << " e " << e;
+            }
+        }
+    }
+}
+
+// The same once an uncapped WC=2 call has turned mixed in-place mode on: a
+// capped single-expert prompt (ALGO 1) and decode find the mixed flag set but
+// have no weight of their own to write in place, so their prepack keeps the
+// process mode at 2 and the flag set.
+TEST(TestGroupMatmulWeightCacheDowngrade, CappedCallKeepsMixedModePolicy) {
+    SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    AlgoEnvGuard reset_algo(0);
+    CustomKernelOverride ck_on(true);
+    auto &cfg = zendnnl::common::matmul_config_t::instance();
+    struct MixedRestore {
+        zendnnl::common::matmul_config_t &cfg;
+        bool value;
+        ~MixedRestore() { cfg.set_grp_auto_mixed_inplace(value); }
+    } restore {cfg, cfg.get_grp_auto_mixed_inplace()};
+    const std::vector<int> prompt {64}, decode {32};
+    std::vector<std::vector<bfloat16_t>> ref_p, ref_d;
+    {
+        reset_grp_matmul_caches();
+        WeightCacheGuard wc(1);
+        Bf16Layer single(1, 256, 256);
+        ASSERT_EQ(single.run(prompt, ref_p), status_t::success);
+        ASSERT_EQ(single.run(decode, ref_d), status_t::success);
+    }
+    for (int32_t cap : {0, 1}) {
+        reset_grp_matmul_caches();
+        WeightCacheGuard wc(2);
+        LruCapacityGuard unlimited(std::numeric_limits<uint32_t>::max());
+        cfg.set_grp_auto_mixed_inplace(false);
+        std::vector<std::vector<bfloat16_t>> dst;
+        Bf16Layer layer(4, 256, 256);
+        ASSERT_EQ(layer.run({64, 64, 64, 64}, dst), status_t::success);
+        ASSERT_EQ(cfg.get_weight_cache(), 2);
+        ASSERT_TRUE(cfg.get_grp_auto_mixed_inplace());
+
+        Bf16Layer single(1, 256, 256);
+        ASSERT_EQ(single.run(prompt, dst, 1.0f, 8, cap), status_t::success);
+        EXPECT_EQ(cfg.get_weight_cache(), 2) << "prompt, cap " << cap;
+        EXPECT_TRUE(cfg.get_grp_auto_mixed_inplace()) << "prompt, cap " << cap;
+        EXPECT_LT(max_abs_diff(ref_p, dst), 0.01) << "prompt, cap " << cap;
+        ASSERT_EQ(single.run(decode, dst, 1.0f, 8, cap), status_t::success);
+        EXPECT_EQ(cfg.get_weight_cache(), 2) << "decode, cap " << cap;
+        EXPECT_TRUE(cfg.get_grp_auto_mixed_inplace()) << "decode, cap " << cap;
+        EXPECT_LT(max_abs_diff(ref_d, dst), 0.01) << "decode, cap " << cap;
+        EXPECT_FALSE(single.mutated(0)) << "cap " << cap;
+    }
+}
+
 // A sequential chain runs every op on AOCL, so it fails on a weight the
 // custom kernel packed in place; on any other weight it runs as before.
 TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkInPlaceSequentialChain) {

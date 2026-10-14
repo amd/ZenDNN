@@ -127,7 +127,7 @@ struct matmul_params {
   int32_t num_threads;                       // Number of threads (0 = auto)
   std::string plugin_op;                     // Plugin op name
   bool dynamic_quant;                        // Enable dynamic quantization of source (default: false)
-  int32_t weight_cache_type;                 // Per-call weight cache mode (0=disabled, 1=out-of-place, 2=allow in-place; capped by ZENDNNL_WEIGHT_CACHE env var)
+  int32_t weight_cache_type;                 // Per-call weight cache mode (0=disabled, 1=out-of-place, 2=allow in-place, needs a writable weight buffer; capped by ZENDNNL_MATMUL_WEIGHT_CACHE env var)
   size_t wei_buffer_capacity_bytes;          // Writable bytes at the weight pointer (0 = exactly k*n). INT8 in-place needs this when the blocked size exceeds k*n.
 };
 ```

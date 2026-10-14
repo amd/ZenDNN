@@ -122,6 +122,8 @@ void PrintTo(const GroupQuantMatmulType &value, ::std::ostream *os);
  *                    experts (default s8 = symmetric).  `u8` selects the
  *                    asymmetric path and declares a per-token s32 `src_zp`
  *                    for the source quantization to fill.
+ *  @param weight_cache_type Per-call `matmul_params::weight_cache_type` set on
+ *                    every expert (default 2 = the `matmul_params` default).
  *  @return group_matmul_direct status
  */
 status_t group_matmul_kernel_test(std::vector<tensor_t> &inputs,
@@ -132,7 +134,8 @@ status_t group_matmul_kernel_test(std::vector<tensor_t> &inputs,
         const grp_matmul_gated_act_params *gated_act = nullptr,
         const std::vector<int> &pack_format_b = {},
         const std::vector<int> &active_rows = {},
-        data_type_t dq_compute = data_type_t::s8);
+        data_type_t dq_compute = data_type_t::s8,
+        int32_t weight_cache_type = 2);
 
 /** @fn expect_prompt_tile_matches_rounds
  *  @brief Runs one `group_matmul_kernel_test` call on ALGO 3's custom kernel

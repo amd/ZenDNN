@@ -60,6 +60,8 @@ inline void clear_zp_compensation_cache() {
  * @param ldb Leading dimension of weights
  * @param src_dtype Source data type (u8 or s8)
  * @param is_weights_const Whether weights are constant across inferences
+ * @param weight_cache_type Weight cache mode of the call; 0 keeps the
+ *        compensation out of the cache
  * @param zp_comp_ndim [out] Dimensionality of compensation (0=none, 1=1D, 2=2D)
  * @param reorder_colsum Optional precomputed per-column weight sums. Required
  *        when the weights use AOCL's blocked layout and both zero-points are
@@ -69,8 +71,8 @@ inline void clear_zp_compensation_cache() {
 inline int32_t *cache_or_compute_zp_compensation(const Key_matmul &key_obj,
         int M, int N, int K, const void *src, const void *wei, int32_t src_zp,
         int32_t wei_zp, bool transA, bool transB, int lda, int ldb,
-        data_type_t src_dtype, bool is_weights_const, int &zp_comp_ndim,
-        const int32_t *reorder_colsum = nullptr) {
+        data_type_t src_dtype, bool is_weights_const, int32_t weight_cache_type,
+        int &zp_comp_ndim, const int32_t *reorder_colsum = nullptr) {
 
     // No compensation needed if both zero-points are zero
     if (src_zp == 0 && wei_zp == 0) {
@@ -80,8 +82,11 @@ inline int32_t *cache_or_compute_zp_compensation(const Key_matmul &key_obj,
 
     // Only cache 1D compensation (src_zp only case) since it depends only on weights
     // 2D compensation depends on source data which changes per inference
-    // Caching is enabled by default and requires weights to be constant
+    // Caching is enabled by default and requires weights to be constant.
+    // The cache is keyed on the weight pointer, so a call that disabled
+    // weight caching (0) computes it from the current weights.
     const bool can_cache = (wei_zp == 0 && src_zp != 0) && is_weights_const
+            && weight_cache_type != 0
             && common::matmul_config_t::instance().get_zp_comp_cache();
 
     lru_cache_t<Key_matmul, int32_t *> &zp_comp_cache = get_zp_comp_lru_cache();

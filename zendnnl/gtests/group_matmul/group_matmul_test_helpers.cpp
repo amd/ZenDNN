@@ -110,7 +110,8 @@ status_t group_matmul_kernel_test(std::vector<tensor_t> &inputs,
         float beta, const group_matmul_moe_postop_params *moe_postop,
         const grp_matmul_gated_act_params *gated_act,
         const std::vector<int> &pack_format_b,
-        const std::vector<int> &active_rows, data_type_t dq_compute) {
+        const std::vector<int> &active_rows, data_type_t dq_compute,
+        int32_t weight_cache_type) {
     using namespace zendnnl::lowoha::matmul;
     try {
         const size_t num_ops = inputs.size();
@@ -181,6 +182,7 @@ status_t group_matmul_kernel_test(std::vector<tensor_t> &inputs,
             // cases. Mirrors how matmul_kernel_test in gtest_utils.cpp
             // populates params.lowoha_algo before invoking matmul_direct.
             params_v[i].lowoha_algo = algo;
+            params_v[i].weight_cache_type = weight_cache_type;
             if (!pack_format_b.empty()) {
                 params_v[i].packing.pack_format_b = pack_format_b[i];
             }

@@ -2225,6 +2225,10 @@ static void prepack_aocl_only_algo(
                 && cross_warm_regime_licenses_mutation(cwr)
                 && cross_warm_attempted && st_ck.skipped_invalid == 0
                 && st_aocl.skipped_invalid == 0;
+        // A call whose experts are all capped below 2 writes no weight in
+        // place, so an incomplete warm leaves it nothing to protect: the
+        // process mode stays as the callers that can write in place set it.
+        const bool call_writes_in_place = p.max_weight_cache_type >= 2;
         if (cross_warm_complete) {
             // ... then the in-place full-weight prompt mutation last.
             warm_primary_full_weight(/*allow_inplace=*/true);
@@ -2240,7 +2244,7 @@ static void prepack_aocl_only_algo(
             const bool primary_warm_complete = st_aocl.total_attempted > 0
                     && st_aocl.skipped_invalid == 0
                     && st_aocl.packed_ok == st_aocl.total_attempted;
-            if (!primary_warm_complete) {
+            if (!primary_warm_complete && call_writes_in_place) {
                 zendnnl::common::matmul_config_t::instance()
                         .downgrade_weight_cache(1);
                 static std::atomic<bool> s_wc2_primary_downgrade_warned {false};
@@ -2257,7 +2261,7 @@ static void prepack_aocl_only_algo(
                             "(weight_cache_type=1) before compute.");
                 }
             }
-        } else {
+        } else if (call_writes_in_place) {
             // Publish the monotonic WC=1 downgrade and leave W raw. Keep the
             // mixed flag sticky so a concurrent call holding an earlier WC=2
             // snapshot remains barred from CK in-place mutation.

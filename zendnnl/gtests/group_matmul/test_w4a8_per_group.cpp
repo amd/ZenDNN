@@ -244,6 +244,75 @@ void run_w4a8_cross_algo_scenario(const std::string &label,
     }
 }
 
+/// Run ALGO 3's s4 custom kernel three times with `weight_cache_type` 0 on
+/// every expert: once, again after doubling every BF16 {G, N} weight scale in
+/// place, and once more after dropping every cache.  The second run must
+/// already see the doubled scale.
+void expect_algo3_cache_off_rereads_rewritten_scale(data_type_t src_scale_dt) {
+    const int E = 2;
+    const uint64_t M = 4, K = 128, N = 64, group_size = 32;
+    const uint64_t G = K / group_size;
+
+    tensor_factory_t tf;
+    std::vector<tensor_t> inp(E), wt(E), bias(E), first(E), second(E), ref(E);
+    std::vector<int> active(E, static_cast<int>(M));
+    for (int e = 0; e < E; ++e) {
+        auto ws = tf.uniform_dist_tensor({G, N}, data_type_t::bf16, 2.0);
+        wt[e] = tf.uniform_dist_tensor({K, N}, data_type_t::s4, 7.0, false, ws);
+        auto ss = tf.zero_tensor({M, 1u}, src_scale_dt);
+        inp[e] = tf.uniform_dist_tensor(
+                {M, K}, data_type_t::bf16, 2.0, false, ss, tensor_t());
+        bias[e] = tf.zero_tensor({1u, N}, data_type_t::bf16);
+        first[e] = tf.zero_tensor({M, N}, data_type_t::bf16);
+        second[e] = tf.zero_tensor({M, N}, data_type_t::bf16);
+        ref[e] = tf.zero_tensor({M, N}, data_type_t::bf16);
+    }
+
+    const matmul_algo_t inner = matmul_algo_t::aocl_dlp_blocked;
+    moe_test_utils::AlgoEnvGuard algo3(3);
+    moe_test_utils::CustomKernelOverride ck_on(true);
+    WeightCacheGuard wc(2);
+    reset_grp_matmul_caches();
+    const auto run = [&](std::vector<tensor_t> &out) {
+        moe_test_utils::GemmModeCaptureGuard capture;
+        ASSERT_EQ(group_matmul_kernel_test(inp, wt, bias, out, inner, 1.0f,
+                          0.0f, nullptr, nullptr, {}, active, data_type_t::s8,
+                          /*weight_cache_type=*/0),
+                status_t::success);
+        const char *mode = zendnnl::lowoha::matmul::test_api::
+                                   s_last_group_matmul_direct_gemm_mode.load(
+                                           std::memory_order_relaxed);
+        ASSERT_NE(mode, nullptr);
+        EXPECT_NE(std::strstr(mode, "custom"), nullptr)
+                << "the call must run the s4 custom kernel; mode=" << mode;
+    };
+
+    ASSERT_NO_FATAL_FAILURE(run(first));
+    for (int e = 0; e < E; ++e) {
+        auto *scale = const_cast<bfloat16_t *>(static_cast<const bfloat16_t *>(
+                wt[e].get_quant_scale_raw_handle_const()));
+        for (uint64_t i = 0; i < G * N; ++i) {
+            scale[i] = bfloat16_t(2.0f * static_cast<float>(scale[i]));
+        }
+    }
+    ASSERT_NO_FATAL_FAILURE(run(second));
+    reset_grp_matmul_caches();
+    ASSERT_NO_FATAL_FAILURE(run(ref));
+
+    const size_t bytes = M * N * sizeof(bfloat16_t);
+    for (int e = 0; e < E; ++e) {
+        EXPECT_NE(std::memcmp(first[e].get_raw_handle_unsafe(),
+                          ref[e].get_raw_handle_unsafe(), bytes),
+                0)
+                << "the rewrite must change expert " << e;
+        EXPECT_EQ(std::memcmp(second[e].get_raw_handle_unsafe(),
+                          ref[e].get_raw_handle_unsafe(), bytes),
+                0)
+                << "expert " << e
+                << " used a weight scale cached before the rewrite";
+    }
+}
+
 } // namespace
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -543,6 +612,22 @@ TEST(GroupMatmulW4A8PerGroup, Algo3PerGroupSourceScaleFallsBackToDlp) {
         compare_tensor_2D_matrix(out_a3[e], out_a1[e], M, N, K, rtol_bf16,
                 abs_tol, ok, false, 1.0f, true);
         EXPECT_TRUE(ok) << "ALGO 3 AOCL fallback mismatch on expert " << e;
+    }
+}
+
+// The s4 custom kernel widens a BF16 {G, N} weight scale to FP32 through a
+// memo keyed on the weight and scale pointers.  A call that disables caching
+// must not use it: after the caller rewrites the scale at the same address,
+// the next call matches a run with every cache dropped.  With a BF16 source
+// scale such a call passes both scales through raw; an FP32 source scale
+// always widens the weight scale, so that run reaches the memo itself.
+TEST(GroupMatmulW4A8PerGroup, Algo3PerCallCacheOffRereadsRewrittenScale) {
+    for (const data_type_t src_scale_dt :
+            {data_type_t::bf16, data_type_t::f32}) {
+        SCOPED_TRACE(src_scale_dt == data_type_t::bf16 ? "bf16 source scale"
+                                                       : "f32 source scale");
+        ASSERT_NO_FATAL_FAILURE(
+                expect_algo3_cache_off_rereads_rewritten_scale(src_scale_dt));
     }
 }
 

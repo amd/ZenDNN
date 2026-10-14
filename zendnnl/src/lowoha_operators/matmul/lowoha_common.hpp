@@ -301,6 +301,8 @@ struct matmul_params {
 
     // Per-call cap on weight-cache mode: 0 = disabled, 1 = out-of-place,
     // 2 = allow in-place when the process-wide setting also permits it.
+    // In-place overwrites the weight buffer, so weights in read-only
+    // memory (for example a read-only mmap) must pass 1.
     int32_t weight_cache_type;
 
     /**

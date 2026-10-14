@@ -768,6 +768,9 @@ void clear_fused_moe_scratch();
  * @brief Apply the grouped-AUTO WC=2 safety policy before any prepack/compute.
  *
  * `secondary_params` lets fused-MoE treat Op1 and Op2 as one weight pool.
+ * Under AUTO, a pool whose every `matmul_params::weight_cache_type` is below 2
+ * cannot be written in place, so it returns false without touching the
+ * process-wide weight-cache mode or the mixed flag.
  * Returns true only when this call is authorised to register the single
  * in-place AOCL mutation used by mixed prompt/decode caching.
  * `auto_algo3_layer` (`grp_matmul_auto_algo3_call`) marks a BF16/FP16 MoE call;

@@ -491,18 +491,18 @@ std::mutex g_wei_scale_f32_cache_mutex;
 
 static const float *materialise_f32_wei_scale_cached(const void *wei,
         const void *buff, data_type_t dt, int N, bool interleave,
-        bool weights_const, std::vector<float> &owned, int n_groups = 1) {
-    // `ZENDNNL_MATMUL_WEIGHT_CACHE=0` is the process-wide contract for "do
-    // NOT cache weight-derived buffers keyed on a raw pointer", which
+        bool weights_const, int32_t weight_cache_mode,
+        std::vector<float> &owned, int n_groups = 1) {
+    // Weight-cache mode 0 (`ZENDNNL_MATMUL_WEIGHT_CACHE=0` process-wide, or
+    // the expert's own `matmul_params::weight_cache_type=0`) is the contract
+    // for "do NOT cache weight-derived buffers keyed on a raw pointer", which
     // exists because frameworks like the PyTorch CPU allocator recycle
     // weight addresses between calls.  This scale view is weight-derived
-    // and pointer-keyed, so it must honour the knob exactly as the CK pack
+    // and pointer-keyed, so it must honour the mode exactly as the CK pack
     // arena does (custom_kernel/dispatch.cpp).  `weights_const` covers the
     // bytes behind a LIVE weight and its metadata; it does not promise that
     // their addresses will never be recycled after the model is released.
-    const bool cache_off
-            = (zendnnl::common::matmul_config_t::instance().get_weight_cache()
-                    == 0);
+    const bool cache_off = (weight_cache_mode == 0);
     if (cache_off || !weights_const || buff == nullptr || N <= 0
             || n_groups <= 0) {
         return materialise_f32_wei_scale(
@@ -1034,8 +1034,10 @@ inline void GroupNTileContext::do_tile(const GroupNTilePlan &plan, int e,
     // this depends on `mixed_eligible`, which requires the custom-kernel pack,
     // and on the `mixed_inplace_ck_refused` routing in `flat_n_tile`, which
     // sends a per-call CK refusal to Sequential rather than tiling it.  The
-    // guard does not depend on either.
-    tile_params.weight_cache_type = 1;
+    // guard does not depend on either.  It only lowers the caller's cap: a
+    // call that disabled caching (0) must not get a cached tile.
+    tile_params.weight_cache_type
+            = std::min<int32_t>(tile_params.weight_cache_type, 1);
 
     // This slice is reordered and multiplied by this thread alone, so the
     // call's `num_threads` does not describe the team its blocked image will
@@ -4707,7 +4709,8 @@ void flat_n_tile(const std::vector<char> &layout,
         // the cache; source scales are per-call/per-row and are materialised
         // into the hoist slot's small owned vector when this forces kF32.
         // The cache only holds const weights, so a non-const active expert
-        // would pay the conversion on every call; keep raw BF16 then.
+        // would pay the conversion on every call; keep raw BF16 then.  The
+        // same holds when this call's cache mode is 0.
         bool active_weights_const = true;
         for (int e = 0; e < num_ops && active_weights_const; ++e) {
             if (M[e] > 0 && static_cast<size_t>(e) < is_weights_const.size()
@@ -4716,19 +4719,14 @@ void flat_n_tile(const std::vector<char> &layout,
         }
         const bool force_bf16_wei_scale_f32 = ck_int8_variant
                 && wdt == data_type_t::bf16 && active_weights_const
-                && zendnnl::common::matmul_config_t::instance()
-                                .get_weight_cache()
-                        != 0;
+                && ck_weight_cache_mode != 0;
         // W4A8 dense shapes benefit from widening the constant {G,N} BF16
         // weight scale once instead of widening the same lanes inside every
         // S4 microkernel call.  Set ZENDNNL_GRP_MATMUL_S4_BF16_SCALE_F32=0
         // to opt out for debugging.
         const bool force_s4_bf16_wei_scale_f32 = ck_s4_scale_variant
                 && wdt == data_type_t::bf16 && active_weights_const
-                && s4_bf16_scale_f32_enabled()
-                && zendnnl::common::matmul_config_t::instance()
-                                .get_weight_cache()
-                        != 0;
+                && s4_bf16_scale_f32_enabled() && ck_weight_cache_mode != 0;
         const bool force_scale_f32
                 = force_bf16_wei_scale_f32 || force_s4_bf16_wei_scale_f32;
         ck_scales_raw = !force_scale_f32 && !ck_scales_interleave
@@ -5100,6 +5098,8 @@ void flat_n_tile(const std::vector<char> &layout,
                                     params[e].quant_params.wei_scale.buff,
                                     params[e].quant_params.wei_scale.dt, N[e],
                                     ck_scales_interleave, is_weights_const[e],
+                                    effective_weight_cache_type(
+                                            params[e].weight_cache_type),
                                     hoisted[e].wei_scale_f32_owned,
                                     ck_wei_scale_groups(e));
                 }
@@ -5185,6 +5185,8 @@ void flat_n_tile(const std::vector<char> &layout,
                                     params[e].quant_params.wei_scale.buff,
                                     params[e].quant_params.wei_scale.dt, N[e],
                                     ck_scales_interleave, is_weights_const[e],
+                                    effective_weight_cache_type(
+                                            params[e].weight_cache_type),
                                     hoisted[e].wei_scale_f32_owned,
                                     ck_wei_scale_groups(e));
                 }

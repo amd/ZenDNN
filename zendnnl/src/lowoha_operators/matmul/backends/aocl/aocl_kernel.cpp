@@ -1131,10 +1131,14 @@ void w4a8ReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
         return;
     }
 
+    // A call that disabled caching (0) reads neither cache below: a weight
+    // rewritten at the same address is converted and reordered again.
+    const bool read_cache = weight_cache_type != 0;
+
     // Check plain-s8 cache before blocked lock.
     int8_t *cvt_weights = nullptr;
     bool own_cvt_buf = false;
-    {
+    if (read_cache) {
         auto &plain_cache = get_w4a8_plain_cache();
         auto &plain_mtx = get_w4a8_plain_cache_mutex();
         std::lock_guard<std::mutex> plain_lock(plain_mtx);
@@ -1150,7 +1154,7 @@ void w4a8ReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
 
     std::lock_guard<std::mutex> lock(w4a8_cache_mutex);
     void *cached_w4a8 = nullptr;
-    bool found_obj = is_weights_const
+    bool found_obj = is_weights_const && read_cache
             && matmul_weight_cache_w4a8.try_get(key, cached_w4a8);
 
     if (!found_obj) {
@@ -1476,11 +1480,12 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
             } else {
                 zp_comp_acc = cache_or_compute_zp_compensation(cache_key, M, N,
                         K, A, B, src_zp, wei_zp, transA == 't', transB == 't',
-                        lda, ldb, dtypes.src, is_weights_const, zp_comp_ndim,
-                        prepacked_colsum);
+                        lda, ldb, dtypes.src, is_weights_const,
+                        weight_cache_type, zp_comp_ndim, prepacked_colsum);
 
                 if (zp_comp_acc) {
                     bool is_cacheable = (wei_zp == 0 && is_weights_const
+                            && weight_cache_type != 0
                             && matmul_config.get_zp_comp_cache());
                     apilog_info("INT8 ZP compensation: src_zp=", src_zp,
                             ", wei_zp=", wei_zp, ", ndim=", zp_comp_ndim,
@@ -1993,13 +1998,13 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
         reordered_mem = nullptr;
     }
     // Free zero-point compensation buffer (only if not cached)
-    // 1D compensation (wei_zp == 0) is cached, 2D compensation is always freed.
+    // 1D compensation (wei_zp == 0) of constant weights is cached unless the
+    // call disabled weight caching, 2D compensation is always freed.
     // The buffer comes from zendnnl_aligned_alloc, so it must be released with
     // zendnnl_aligned_free (_aligned_free on Windows), never std::free.
-    bool zp_cache_enabled = matmul_config.get_zp_comp_cache();
-    if (zp_comp_acc && (!zp_cache_enabled || wei_zp != 0)) {
-        zendnnl_aligned_free(zp_comp_acc);
-    }
+    const bool zp_comp_cached = wei_zp == 0 && is_weights_const
+            && weight_cache_type != 0 && matmul_config.get_zp_comp_cache();
+    if (zp_comp_acc && !zp_comp_cached) { zendnnl_aligned_free(zp_comp_acc); }
     // Per-call teardown for the metadata returned by create_dlp_post_op().
     // No-op for cached holders (the common case); frees the per-call
     // holder + its heap-owned inv_scales[] for the BF16/INT8 per-token-sym
