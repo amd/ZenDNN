@@ -131,7 +131,7 @@ inline const char *act_name(grp_matmul_gated_act_t a) {
 // Tile-size + weight-class constants shared by ALGO 0 auto-select and
 // the tile kernels.  Cutoffs separate per-CCD-L3-resident shapes
 // (small) from L3-tight shapes (medium) from DRAM-streaming (large).
-inline constexpr int kDecodeMaxM = 32; // per-expert M ≤ this → "decode"
+inline constexpr int kDecodeMaxM = 64; // per-expert M ≤ this → "decode"
 inline constexpr int kMinNTile = 512; // prompt-path per-thread N
 
 /// Runtime phase used by AUTO group-matmul policy and W8A8 interception.
