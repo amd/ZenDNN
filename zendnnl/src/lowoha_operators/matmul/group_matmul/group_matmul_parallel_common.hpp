@@ -702,10 +702,14 @@ inline bool grp_matmul_wc2_global_phase_split_unsupported() {
     return prompt == 0 || decode == 0 || prompt != decode;
 }
 
+inline bool grp_matmul_single_dense_call(
+        const std::vector<int> &M, const std::vector<matmul_params> &params);
+
 /// Call-level form of the policy above. Each weight pool is considered
 /// independently so fused MoE covers both W13 and W2: a pool is hazardous only
-/// when it is an eligible BF16/FP16 ALGO-3 layer and at least one active weight
-/// can actually use WC=2.
+/// when it is an eligible BF16/FP16 ALGO-3 layer (or a single dense BF16 layer
+/// under `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE`) and at least one
+/// active weight can actually use WC=2.
 inline bool grp_matmul_wc2_global_phase_split_unsupported_for_call(
         const std::vector<int> &M, const std::vector<matmul_params> &params,
         const std::vector<matmul_params> *secondary_params = nullptr) {
@@ -714,7 +718,9 @@ inline bool grp_matmul_wc2_global_phase_split_unsupported_for_call(
         return false;
     }
     const auto pool_is_hazardous = [&](const std::vector<matmul_params> &pool) {
-        if (!grp_matmul_auto_algo3_call(M, pool)) return false;
+        if (!grp_matmul_auto_algo3_call(M, pool)
+                && !grp_matmul_single_dense_call(M, pool))
+            return false;
         for (size_t i = 0; i < M.size() && i < pool.size(); ++i) {
             if (M[i] > 0 && pool[i].weight_cache_type >= 2) return true;
         }
@@ -903,6 +909,58 @@ inline bool get_grp_matmul_dense_decode_ntile() {
     return v;
 }
 
+// ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE = { 0, 1 } — cached, default 0.
+//   `=1` runs every BF16 prompt group-matmul call of exactly one expert on
+//   the CK prompt tile executor: Rule 0.46 selects ALGO 3 and the executor
+//   admits the one expert.  That covers both passes of a fused dense FFN and,
+//   through the `matmul_direct` route, BF16 prompt linears below the decode
+//   N-tile count.  Meant to be set per model; measured on the BF16 RAG
+//   embedding models (embeddinggemma-300m, functiongemma-270m,
+//   harrier-oss-v1-0.6b) on 32-core Turin pods.  `=0` keeps AOCL (ALGO 1)
+//   and main's routing.  INT8, W4A8, FP16, decode and MoE (including one
+//   active expert among idle slots) are unaffected either way.
+//   Non-numeric input → default 0.
+inline std::atomic<int> &test_api_single_expert_prompt_tile_override();
+inline bool get_grp_matmul_single_expert_prompt_tile() {
+    const int ovr = test_api_single_expert_prompt_tile_override().load(
+            std::memory_order_relaxed);
+    if (ovr >= 0) return ovr != 0;
+    static const bool v = []() {
+        const char *e
+                = std::getenv("ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE");
+        int parsed = 0;
+        if (!parse_env_int_strict(e, parsed)) return false;
+        return parsed != 0;
+    }();
+    return v;
+}
+
+/// Can a one-expert BF16 layer run on the CK prompt tile under
+/// `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE`?  Knob on, custom kernel
+/// on and supported, BF16 x BF16 -> BF16/F32 without dynamic quant, the BF16
+/// prompt tile bit set, no deep-K blocking, and an N-tile strategy other than
+/// `decode_d` (=1), which never reaches the prompt tile executor.  `K`/`N`
+/// > 0 also require a custom-kernel pack width that divides N.  Such a layer
+/// runs ALGO 3 in both phases (Rule 0.46), so its prompt and decode share one
+/// custom-kernel pack, in place at WEIGHT_CACHE=2.  Defined in
+/// group_matmul_dispatch.cpp.
+bool grp_matmul_single_dense_tile_layer(data_type_t src, data_type_t wei,
+        data_type_t dst, bool dynamic_quant, int K = 0, int N = 0);
+
+/// `grp_matmul_single_dense_tile_layer` for one call: exactly one expert in
+/// the pool (not one active expert of an MoE pool) on a raw weight.  A
+/// caller-prepacked AOCL weight keeps AOCL decode, so only its prompt runs
+/// the prompt tile.
+inline bool grp_matmul_single_dense_call(
+        const std::vector<int> &M, const std::vector<matmul_params> &params) {
+    if (M.size() != 1 || M[0] <= 0 || params.empty()) return false;
+    const auto &p = params[0];
+    if (p.active_matmul > 0 && p.total_matmul > 1) return false;
+    if (is_aocl_prepacked_weight(p)) return false;
+    return grp_matmul_single_dense_tile_layer(
+            p.dtypes.src, p.dtypes.wei, p.dtypes.dst, p.dynamic_quant);
+}
+
 // NOTE: `get_grp_matmul_{decode,prompt}_algo5_gate()` moved to
 // `expert_parallel/group_matmul_expert_parallel_policy.hpp` together with the
 // ALGO 5 pin qualifier they gate.  Include that header to call them.
@@ -1048,6 +1106,10 @@ inline std::atomic<int> s_grp_matmul_auto_decode_algo_override {-1};
 // setting the env var after the first call has already latched it.
 inline std::atomic<int> s_grp_matmul_dense_decode_ntile_override {-1};
 
+// `0` / `1` force `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE` off / on for
+// the lifetime of a test; `-1` uses the cached env value.
+inline std::atomic<int> s_grp_matmul_single_expert_prompt_tile_override {-1};
+
 // NOTE: `s_grp_matmul_{decode,prompt}_algo5_gate_override` moved to
 // `expert_parallel/group_matmul_expert_parallel_policy.hpp` (same `test_api`
 // namespace).  Include that header to access them.
@@ -1164,6 +1226,9 @@ inline std::atomic<int> &test_api_algo_override() {
 }
 inline std::atomic<int> &test_api_dense_decode_ntile_override() {
     return test_api::s_grp_matmul_dense_decode_ntile_override;
+}
+inline std::atomic<int> &test_api_single_expert_prompt_tile_override() {
+    return test_api::s_grp_matmul_single_expert_prompt_tile_override;
 }
 // NOTE: `test_api_{decode,prompt}_algo5_gate_override()` moved to
 // `expert_parallel/group_matmul_expert_parallel_policy.hpp` together with the
@@ -2402,11 +2467,29 @@ struct auto_algo_trace {
     bool prompt5_pin_declined = false;
 };
 
+/// Epilogue terms of `custom_kernel::prepare_for_call` that the selector
+/// cannot see.  Rule 0.46 needs them, or it could pick ALGO 3 for a call the
+/// CK then refuses, which would run N-tile rounds on AOCL tiles.  `tight` is
+/// whether a gated output is in the halved-width layout the CK writes.
+inline bool ck_serves_single_expert_epilogue(float alpha, float beta,
+        const void *bias, bool tight, grp_matmul_gated_act_t act,
+        data_type_t act_dtype) {
+    if (alpha != 1.0f || beta != 0.0f) return false;
+    if (act == grp_matmul_gated_act_t::none) return true;
+    if (act_dtype != data_type_t::bf16 || !tight) return false;
+    // Split-halves gated activations have no fused bias yet.
+    return bias == nullptr || act == grp_matmul_gated_act_t::swiglu_oai_mul;
+}
+
+/// `single_expert_epilogue_ok` is false when the custom kernel would refuse a
+/// single expert's epilogue (see `ck_serves_single_expert_epilogue`); the
+/// selector sees none of those terms itself.
 int select_grp_matmul_algo(const std::vector<char> &layout,
         const std::vector<int> &M, const std::vector<int> &N,
         const std::vector<int> &K, const std::vector<matmul_params> &params,
         int num_threads, auto_algo_trace *trace = nullptr,
-        grp_matmul_gated_act_t fused_act = grp_matmul_gated_act_t::none);
+        grp_matmul_gated_act_t fused_act = grp_matmul_gated_act_t::none,
+        bool single_expert_epilogue_ok = true);
 
 } // namespace matmul
 } // namespace lowoha

@@ -362,9 +362,8 @@ inline SubtileBytes subtile_bytes_for_variant(KernelVariant v) {
 // Resolve the per-MR microkernel function-pointer table for one
 // (NV, act_kind, dst_dt) tuple.  Called once by `prepare_for_call()`.
 // Per-tile lookup is then a direct `kfn_table[mr_now]` — no switch.
-status_t fill_kfn_table(int NV, ActKind act_kind, DstDt dst_dt,
+status_t fill_kfn_table(int NV, int max_mr, ActKind act_kind, DstDt dst_dt,
         ukernel_fn_t (&kfn_table)[kMaxMR + 1]) {
-    const int max_mr = max_mr_for_nv(NV);
     for (int mr = 1; mr <= max_mr; ++mr) {
         kfn_table[mr] = select_ukernel(mr, NV, act_kind, dst_dt);
         if (kfn_table[mr] == nullptr) return status_t::failure;
@@ -937,6 +936,14 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
     // dispatch_tile still apply, so only eligible W2 decode calls K-block.
     out.kblock_auto = is_dense_ffn_decode(num_ops, m_max);
     out.single_expert = (num_ops == 1);
+    // A dense BF16 prompt at pack NR 32 runs 12-row calls: 24 accumulator
+    // chains instead of 16 keep VDPBF16PS issue full.  Each output element
+    // still sums K in the same order, so the result is unchanged.
+    if (out.single_expert && out.NV == 2 && m_max > kDecodeMaxM
+            && (variant == KernelVariant::kBF16_BF16_BF16
+                    || variant == KernelVariant::kBF16_BF16_F32)
+            && get_grp_matmul_single_expert_prompt_tile())
+        out.max_mr = kMaxMrNv2Prompt;
     // Map framework activation → CK ActKind.  Order matters: refusal
     // gate above guarantees `act` is one of {none, swiglu_oai_mul,
     // silu_and_mul, gelu_and_mul} at this point.
@@ -991,7 +998,8 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
         }
     } else {
         const DstDt dst_dt = dst_dt_for_variant(out.variant);
-        if (fill_kfn_table(out.NV, out.act_kind, dst_dt, out.kfn_table)
+        if (fill_kfn_table(
+                    out.NV, out.max_mr, out.act_kind, dst_dt, out.kfn_table)
                 != status_t::success) {
             return refuse("kfn_table_fill_failed",
                     "no microkernel for this (NV, act_kind, dst_dt) tuple "

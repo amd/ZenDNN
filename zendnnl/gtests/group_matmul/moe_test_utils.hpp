@@ -1003,6 +1003,27 @@ struct DenseDecodeNTileOverride {
     DenseDecodeNTileOverride &operator=(DenseDecodeNTileOverride &&) = delete;
 };
 
+// RAII guard for `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE`.  `1` = on
+// (the production default), `0` = off, `-1` = restore the env path.
+struct SingleExpertPromptTileOverride {
+    int prev;
+    explicit SingleExpertPromptTileOverride(int value) {
+        prev = zendnnl::lowoha::matmul::test_api ::
+                       s_grp_matmul_single_expert_prompt_tile_override.exchange(
+                               value, std::memory_order_relaxed);
+    }
+    ~SingleExpertPromptTileOverride() {
+        zendnnl::lowoha::matmul::test_api ::
+                s_grp_matmul_single_expert_prompt_tile_override.store(
+                        prev, std::memory_order_relaxed);
+    }
+    SingleExpertPromptTileOverride(const SingleExpertPromptTileOverride &)
+            = delete;
+    SingleExpertPromptTileOverride &operator=(
+            const SingleExpertPromptTileOverride &)
+            = delete;
+};
+
 // RAII override for the decode ALGO 5 pin QUALIFIER
 // (`ZENDNNL_GRP_MATMUL_DECODE_ALGO5_GATE`).  `1` = gate ON (the production
 // default: an `AUTO_DECODE_ALGO=5` pin is honoured only for an s8 +

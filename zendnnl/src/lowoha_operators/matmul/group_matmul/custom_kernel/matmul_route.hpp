@@ -173,11 +173,15 @@ inline bool custom_kernel_routable(char layout, int M, int N, int K,
     if (!get_grp_matmul_custom_kernel()) return false;
     if (get_grp_n_tile_strategy() == 0) return false;
 
-    // Prompt calls intentionally enter one-op grouped AUTO: BF16/INT8 execute
-    // full-weight AOCL (ALGO 1) so mixed-WC2 preparation can warm a future
-    // decode CK layout, while W4A8 executes its supported ALGO 2 prompt path.
-    // Decode still has to resolve to ALGO 3 below.
-    if (!has_enough_single_expert_tiles(N, K, num_threads)) return false;
+    // Prompt calls intentionally enter one-op grouped AUTO.  BF16 executes
+    // full-weight AOCL, or the CK prompt tile executor under Rule 0.46; INT8
+    // executes full-weight AOCL (ALGO 1) so mixed-WC2 preparation can warm a
+    // future decode CK layout; W4A8 executes its supported ALGO 2 prompt
+    // path.  Decode still has to resolve to ALGO 3 below.  The N-tile count
+    // is decode's parallelism requirement; a Rule 0.46 layer is checked after
+    // the variant is known.
+    const bool enough_ntiles
+            = has_enough_single_expert_tiles(N, K, num_threads);
     if (M <= 0 || batch_count != 1 || transA || !is_weights_const) return false;
     if (layout != 'r' && layout != 'R') return false;
     if (params.mem_format_a != 'n') return false;
@@ -209,6 +213,18 @@ inline bool custom_kernel_routable(char layout, int M, int N, int K,
     const bool int_variant = custom_kernel::is_int8_variant(variant);
     const bool s4_variant = custom_kernel::is_s4_variant(variant);
     if (!bf16_variant && !int_variant && !s4_variant) return false;
+    // Under `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE` a BF16 layer also
+    // routes below decode's N-tile count: the prompt tile executor splits M.
+    // A raw weight routes in both phases, because the custom-kernel pack its
+    // prompt writes (in place at WEIGHT_CACHE=2) has no scalar reader.  An
+    // AOCL-prepacked weight keeps its blocked buffer for scalar decode, so
+    // only its prompt routes.
+    const bool single_dense_tile = bf16_variant
+            && grp_matmul_single_dense_tile_layer(params.dtypes.src,
+                    params.dtypes.wei, params.dtypes.dst, params.dynamic_quant,
+                    K, N)
+            && (M > kDecodeMaxM || !aocl_prepacked);
+    if (!enough_ntiles && !single_dense_tile) return false;
     if (!params.postop_.empty()
             && !(int_variant && !params.dynamic_quant
                     && params.dtypes.src == data_type_t::u8
@@ -239,6 +255,9 @@ inline bool custom_kernel_routable(char layout, int M, int N, int K,
     const std::vector<matmul_params> grouped_params {params};
     const int selected = select_grp_matmul_algo(grouped_layout, grouped_m,
             grouped_n, grouped_k, grouped_params, num_threads);
+    // Below decode's N-tile count, only Rule 0.46's ALGO 3 routes; anything
+    // else keeps the standard MatMul path it took before.
+    if (!enough_ntiles) return selected == 3;
     return selected == 3 || (s4_variant && selected == 2)
             || (M > kDecodeMaxM && selected == 1);
 }

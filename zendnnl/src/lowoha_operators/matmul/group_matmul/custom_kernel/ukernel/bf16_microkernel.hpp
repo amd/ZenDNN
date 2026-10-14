@@ -186,6 +186,10 @@ inline int max_mr_for_nv(int NV) {
     return NV == 4 ? 6 : 8;
 }
 
+/// MR bound of a single-expert BF16 prompt call at NV=2; `select_ukernel`
+/// instantiates MR 9..12 for NV=2 for it.
+inline constexpr int kMaxMrNv2Prompt = 12;
+
 /// Runtime selector — returns the function pointer for the requested
 /// (MR ∈ 1..max_mr_for_nv(NV), NV ∈ {2, 4}, Act, DstDt) tuple, or
 /// nullptr if the combination is not instantiated.

@@ -16,7 +16,9 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -30,7 +32,10 @@
 #include "lowoha_operators/matmul/aocl_unreorder_cache.hpp"
 #include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/dispatch.hpp"
+#include "lowoha_operators/matmul/group_matmul/custom_kernel/matmul_route.hpp"
+#include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
 #include "lowoha_operators/matmul/group_matmul/group_matmul_parallel_common.hpp"
+#include "lowoha_operators/matmul/group_matmul/prompt_tile/prompt_tile_tunables.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 #include "lowoha_operators/reorder/lowoha_reorder.hpp"
 #include "lowoha_operators/reorder/prepack/lowoha_prepack.hpp"
@@ -234,13 +239,20 @@ TEST(TestMatmulUnreorderRoute, PackedWeightUsesCachedDerivedCkPath) {
 
 TEST(TestMatmulUnreorderRoute,
         ExplicitAoclPackedPromptOverridesGlobalOneDnnBackend) {
-    run_route_case(/*packed_input=*/true, /*M=*/64,
-            /*expect_custom=*/false, /*expect_derived_cache_hit=*/false,
-            /*trans_b=*/true, /*ldb_padding=*/0, /*weight_cache_mode=*/1,
-            /*direct_group=*/false, /*alpha_value=*/1.0f,
-            /*probe_derived_cache=*/false, /*relu_postop=*/false,
-            /*per_op_algo=*/matmul_algo_t::aocl_dlp_blocked,
-            /*global_algo=*/matmul_algo_t::onednn_blocked);
+    // The grouped route serves the prompt either way: AOCL with the BF16
+    // single-expert prompt tile off, the CK prompt tile with it on.
+    for (const bool prompt_tile : {false, true}) {
+        SCOPED_TRACE(prompt_tile ? "prompt tile on" : "prompt tile off");
+        mt::SingleExpertPromptTileOverride knob(prompt_tile ? 1 : 0);
+        run_route_case(/*packed_input=*/true, /*M=*/64,
+                /*expect_custom=*/prompt_tile,
+                /*expect_derived_cache_hit=*/false,
+                /*trans_b=*/true, /*ldb_padding=*/0, /*weight_cache_mode=*/1,
+                /*direct_group=*/false, /*alpha_value=*/1.0f,
+                /*probe_derived_cache=*/false, /*relu_postop=*/false,
+                /*per_op_algo=*/matmul_algo_t::aocl_dlp_blocked,
+                /*global_algo=*/matmul_algo_t::onednn_blocked);
+    }
 }
 
 TEST(TestMatmulUnreorderRoute, PackedWeightWc2UsesCachedDerivedCkPath) {
@@ -340,11 +352,127 @@ TEST(TestMatmulUnreorderRoute, RawWc2IneligiblePromptPreservesFutureDecode) {
     ::reset_grp_matmul_caches();
 }
 
+// A BF16 prompt MatMul below decode's N-tile count (an embeddinggemma QKV:
+// K 768, N 1280 on 32 threads is 20 NR64 tiles, not 64) routes to the CK
+// prompt tile executor, raw and AOCL-prepacked, and matches the reference.
+// With the knob off it keeps the standard MatMul path.
+static void run_narrow_prompt_case(bool packed_input, bool knob_on) {
+    constexpr int M = 256, K = 768, N = 1280, threads = 32;
+    std::vector<bfloat16_t> src(static_cast<size_t>(M) * K);
+    std::vector<bfloat16_t> weight(static_cast<size_t>(N) * K);
+    for (int m = 0; m < M; ++m)
+        for (int k = 0; k < K; ++k)
+            src[static_cast<size_t>(m) * K + k] = bfloat16_t(
+                    0.01f * static_cast<float>((m * 11 + k * 3) % 13 - 6));
+    for (int n = 0; n < N; ++n)
+        for (int k = 0; k < K; ++k)
+            weight[static_cast<size_t>(n) * K + k]
+                    = bfloat16_t(logical_weight(k, n));
+
+    aligned_ptr_t packed;
+    const void *route_weight = weight.data();
+    if (packed_input) {
+        reorder::reorder_params_t prepack;
+        prepack.is_prepack = true;
+        prepack.num_threads = threads;
+        prepack.prepack.algo = matmul_algo_t::aocl_dlp_blocked;
+        prepack.prepack.wei_dtype = data_type_t::bf16;
+        prepack.prepack.src_dtype = data_type_t::bf16;
+        prepack.prepack.K = K;
+        prepack.prepack.N = N;
+        prepack.prepack.ldb = K;
+        prepack.prepack.transposed = true;
+        const size_t bytes = reorder::weight_prepack_size(prepack);
+        ASSERT_GT(bytes, 0u);
+        packed.reset(zendnnl_aligned_alloc(64, bytes));
+        ASSERT_NE(packed, nullptr);
+        ASSERT_EQ(reorder::reorder_direct(weight.data(), packed.get(), prepack),
+                status_t::success);
+        route_weight = packed.get();
+    }
+
+    RouteConfigGuard route_config;
+    WeightCacheGuard cache_mode(1);
+    mt::AlgoEnvGuard auto_algo(0);
+    mt::CustomKernelOverride custom_on(true);
+    mt::NTileStrategyOverride rounds(2);
+    mt::SingleExpertPromptTileOverride knob(knob_on ? 1 : 0);
+    matmul::clear_aocl_ck_weight_cache();
+    ::reset_grp_matmul_caches();
+
+    matmul::matmul_params params;
+    params.dtypes.src = data_type_t::bf16;
+    params.dtypes.wei = data_type_t::bf16;
+    params.dtypes.dst = data_type_t::bf16;
+    params.mem_format_b = packed_input ? 'r' : 'n';
+    params.num_threads = threads;
+    matmul::matmul_batch_params_t batch;
+    std::vector<bfloat16_t> dst(static_cast<size_t>(M) * N);
+
+    namespace pt = zendnnl::lowoha::matmul::prompt_tile;
+    const long served0 = pt::test_api::s_calls_served.load();
+    mt::GemmModeCaptureGuard mode_capture;
+    ASSERT_EQ(matmul::matmul_direct('r', false, /*transB=*/true, M, N, K, 1.0f,
+                      src.data(), K, route_weight, K, /*bias=*/nullptr, 0.0f,
+                      dst.data(), N, true, batch, params),
+            status_t::success);
+    const long served = pt::test_api::s_calls_served.load() - served0;
+    const char *mode
+            = matmul::test_api::s_last_group_matmul_direct_gemm_mode.load(
+                    std::memory_order_relaxed);
+    if (knob_on) {
+        EXPECT_EQ(served, 1);
+        ASSERT_NE(mode, nullptr);
+        EXPECT_NE(std::string(mode).find("ptile"), std::string::npos) << mode;
+    } else {
+        EXPECT_EQ(served, 0);
+        EXPECT_EQ(mode, nullptr) << "standard MatMul path expected: " << mode;
+    }
+
+    for (int m = 0; m < M; ++m) {
+        for (int n = 0; n < N; ++n) {
+            float reference = 0.0f;
+            for (int k = 0; k < K; ++k)
+                reference += static_cast<float>(
+                                     src[static_cast<size_t>(m) * K + k])
+                        * static_cast<float>(
+                                weight[static_cast<size_t>(n) * K + k]);
+            const float expected = static_cast<float>(bfloat16_t(reference));
+            const float actual
+                    = static_cast<float>(dst[static_cast<size_t>(m) * N + n]);
+            ASSERT_NEAR(actual, expected, std::abs(expected) * 0.02f + 1.0e-3f)
+                    << "m=" << m << " n=" << n;
+        }
+    }
+    ::reset_grp_matmul_caches();
+}
+
+TEST(TestMatmulUnreorderRoute, NarrowBf16PromptRoutesToPromptTile) {
+    if (!ck::dispatch_supported()) {
+        GTEST_SKIP() << "AVX-512 BF16 custom kernel is unavailable";
+    }
+    for (const bool packed : {false, true}) {
+        SCOPED_TRACE(packed ? "aocl-prepacked" : "raw");
+        run_narrow_prompt_case(packed, /*knob_on=*/true);
+        run_narrow_prompt_case(packed, /*knob_on=*/false);
+    }
+}
+
 TEST(TestMatmulUnreorderRoute, PackedPromptStaysBlockedAndSkipsUnreorder) {
-    // Prompt AUTO selects AOCL. The packed bytes must flow directly to AOCL;
-    // the AOCL-derived final CK cache remains cold.
+    // With the BF16 single-expert prompt tile off, prompt AUTO selects AOCL.
+    // The packed bytes must flow directly to AOCL; the AOCL-derived final CK
+    // cache remains cold.
+    mt::SingleExpertPromptTileOverride prompt_tile_off(0);
     run_route_case(true, /*M=*/64, /*expect_custom=*/false,
             /*expect_derived_cache_hit=*/false);
+}
+
+TEST(TestMatmulUnreorderRoute, PackedPromptUsesPromptTileCk) {
+    // By default a BF16 prompt runs the CK prompt tile executor: the packed
+    // bytes are unreordered once into the derived CK cache.
+    mt::SingleExpertPromptTileOverride prompt_tile_on(1);
+    run_route_case(true, /*M=*/64, /*expect_custom=*/true,
+            /*expect_derived_cache_hit=*/true);
 }
 
 TEST(TestMatmulUnreorderRoute, PackedTransposedPaddedLdbUsesOriginalStride) {
@@ -792,5 +920,172 @@ TEST(TestMatmulUnreorderRoute, RejectsAoclBlockedFallbackWithoutAocl) {
                "than pass them to the raw reference kernel";
 }
 #endif
+
+// One raw narrow-N weight (below decode's N-tile count) goes prompt -> decode
+// -> prompt through `matmul_direct`.  With the single-expert prompt tile knob
+// on, both phases route to the custom kernel, so a WEIGHT_CACHE=2 in-place
+// pack is the custom-kernel layout and every later call reads it; the buffer
+// never holds an AOCL layout.  With the knob off, the weight stays raw.
+void run_narrow_phase_switch(int weight_cache_mode, bool with_bias, int knob,
+        int algo_pin = 0, uint32_t lru_capacity = 0) {
+    constexpr int N = 1280, K = 768, threads = 32;
+    std::vector<bfloat16_t> weight(static_cast<size_t>(N) * K);
+    for (int n = 0; n < N; ++n)
+        for (int k = 0; k < K; ++k)
+            weight[static_cast<size_t>(n) * K + k]
+                    = bfloat16_t(logical_weight(k, n));
+    const std::vector<bfloat16_t> weight_copy = weight;
+    std::vector<float> bias(N);
+    for (int n = 0; n < N; ++n)
+        bias[n] = 0.01f * static_cast<float>(n % 7 - 3);
+
+    RouteConfigGuard route_config;
+    if (lru_capacity != 0)
+        matmul_config_t::instance().set_lru_cache_capacity(lru_capacity);
+    WeightCacheGuard cache_mode(weight_cache_mode);
+    mt::AlgoEnvGuard algo(algo_pin);
+    mt::CustomKernelOverride custom_on(true);
+    mt::SingleExpertPromptTileOverride knob_guard(knob);
+    matmul::clear_aocl_ck_weight_cache();
+    ::reset_grp_matmul_caches();
+    namespace pt = zendnnl::lowoha::matmul::prompt_tile;
+    const long served0 = pt::test_api::s_calls_served.load();
+
+    for (const int M : {256, 4, 32, 33, 100, 1, 512}) {
+        SCOPED_TRACE("M=" + std::to_string(M));
+        std::vector<bfloat16_t> src(static_cast<size_t>(M) * K);
+        for (int m = 0; m < M; ++m)
+            for (int k = 0; k < K; ++k)
+                src[static_cast<size_t>(m) * K + k] = bfloat16_t(
+                        0.01f * static_cast<float>((m * 11 + k * 3) % 13 - 6));
+        matmul::matmul_params params;
+        params.dtypes.src = data_type_t::bf16;
+        params.dtypes.wei = data_type_t::bf16;
+        params.dtypes.dst = data_type_t::bf16;
+        params.dtypes.bias = with_bias ? data_type_t::f32 : data_type_t::none;
+        params.num_threads = threads;
+        matmul::matmul_batch_params_t batch;
+        std::vector<bfloat16_t> dst(static_cast<size_t>(M) * N);
+        ASSERT_EQ(matmul::matmul_direct('r', false, /*transB=*/true, M, N, K,
+                          1.0f, src.data(), K, weight.data(), K,
+                          with_bias ? bias.data() : nullptr, 0.0f, dst.data(),
+                          N, true, batch, params),
+                status_t::success);
+        double max_err = 0;
+        for (int m = 0; m < M; ++m)
+            for (int n = 0; n < N; ++n) {
+                float ref = with_bias ? bias[n] : 0.0f;
+                for (int k = 0; k < K; ++k)
+                    ref += static_cast<float>(
+                                   src[static_cast<size_t>(m) * K + k])
+                            * static_cast<float>(
+                                    weight_copy[static_cast<size_t>(n) * K
+                                            + k]);
+                const float got = static_cast<float>(
+                        dst[static_cast<size_t>(m) * N + n]);
+                max_err = std::max(max_err,
+                        static_cast<double>(std::abs(got - ref)
+                                / (std::abs(ref) * 0.02f + 1.0e-3f)));
+            }
+        EXPECT_LE(max_err, 1.0) << "normalised error";
+    }
+    const bool mutated = std::memcmp(weight.data(), weight_copy.data(),
+                                 weight.size() * sizeof(bfloat16_t))
+            != 0;
+    if (knob != 0) {
+        EXPECT_GT(pt::test_api::s_calls_served.load() - served0, 0)
+                << "prompts must run the prompt tile";
+        EXPECT_TRUE(!mutated || ck::weight_packed_in_place(weight.data()))
+                << "an in-place image must be the custom-kernel pack";
+    } else {
+        EXPECT_FALSE(mutated) << "knob off keeps the raw weight";
+    }
+    ::reset_grp_matmul_caches();
+    matmul::clear_aocl_ck_weight_cache();
+}
+
+TEST(TestMatmulUnreorderRoute, NarrowWeightPromptDecodeShareCkPack) {
+    if (!ck::dispatch_supported()) {
+        GTEST_SKIP() << "AVX-512 BF16 custom kernel is unavailable";
+    }
+    for (const int knob : {1, 0})
+        for (const int wc : {1, 2})
+            for (const bool bias : {false, true}) {
+                SCOPED_TRACE("knob=" + std::to_string(knob) + " wc="
+                        + std::to_string(wc) + " bias=" + std::to_string(bias));
+                run_narrow_phase_switch(wc, bias, knob);
+            }
+}
+
+// The WEIGHT_CACHE=2 settings that turn AUTO mixed in-place mode off (an
+// ALGO 3 pin, a finite LRU capacity) let the prompt's pack go in place; the
+// decode must then read it through the custom kernel.
+TEST(TestMatmulUnreorderRoute, NarrowWeightInPlaceCkPackWithoutMixedMode) {
+    if (!ck::dispatch_supported()) {
+        GTEST_SKIP() << "AVX-512 BF16 custom kernel is unavailable";
+    }
+    for (const bool bias : {false, true}) {
+        SCOPED_TRACE("algo3 pin, bias=" + std::to_string(bias));
+        run_narrow_phase_switch(2, bias, 1, /*algo_pin=*/3);
+    }
+    for (const bool bias : {false, true}) {
+        SCOPED_TRACE("LRU capacity 64, bias=" + std::to_string(bias));
+        run_narrow_phase_switch(2, bias, 1, 0, /*lru_capacity=*/64);
+    }
+}
+
+// CROSS_WARM and PREPACK are read once per process, so each runs in a child.
+void expect_narrow_phase_switch_in_child(const char *env, const char *value) {
+    testing::FLAGS_gtest_death_test_style = "threadsafe";
+    setenv(env, value, /*overwrite=*/1);
+    EXPECT_EXIT(
+            {
+                run_narrow_phase_switch(2, /*with_bias=*/false, 1);
+                run_narrow_phase_switch(2, /*with_bias=*/true, 1);
+                std::exit(::testing::Test::HasFailure() ? 1 : 0);
+            },
+            ::testing::ExitedWithCode(0), "");
+    unsetenv(env);
+}
+
+TEST(TestMatmulUnreorderRoute, NarrowWeightInPlaceCkPackCrossWarmOff) {
+    if (!ck::dispatch_supported()) {
+        GTEST_SKIP() << "AVX-512 BF16 custom kernel is unavailable";
+    }
+    expect_narrow_phase_switch_in_child("ZENDNNL_GRP_MATMUL_CROSS_WARM", "0");
+}
+
+TEST(TestMatmulUnreorderRoute, NarrowWeightInPlaceCkPackPrepackOff) {
+    if (!ck::dispatch_supported()) {
+        GTEST_SKIP() << "AVX-512 BF16 custom kernel is unavailable";
+    }
+    expect_narrow_phase_switch_in_child("ZENDNNL_GRP_MATMUL_PREPACK", "0");
+}
+
+// `decode_d` (N_TILE_STRATEGY=1) never reaches the prompt tile executor, so a
+// narrow BF16 prompt keeps the standard MatMul path instead of DecodeD.
+TEST(TestMatmulUnreorderRoute, NarrowBf16PromptDecodeDKeepsStandardPath) {
+    if (!ck::dispatch_supported()) {
+        GTEST_SKIP() << "AVX-512 BF16 custom kernel is unavailable";
+    }
+    RouteConfigGuard route_config;
+    WeightCacheGuard cache_mode(1);
+    mt::AlgoEnvGuard algo(0);
+    mt::CustomKernelOverride custom_on(true);
+    mt::SingleExpertPromptTileOverride knob(1);
+    matmul::matmul_params params;
+    params.dtypes.src = data_type_t::bf16;
+    params.dtypes.wei = data_type_t::bf16;
+    params.dtypes.dst = data_type_t::bf16;
+    const auto routable = [&](int M) {
+        return matmul::custom_kernel_routable('r', M, 1280, 768, 32, 1, false,
+                true, 1.0f, 0.0f, nullptr, 768, true, params);
+    };
+    EXPECT_TRUE(routable(2048));
+    EXPECT_TRUE(routable(4)) << "a raw weight's decode follows its prompt";
+    mt::NTileStrategyOverride decode_d(1);
+    EXPECT_FALSE(routable(2048));
+    EXPECT_FALSE(routable(4));
+}
 
 } // namespace

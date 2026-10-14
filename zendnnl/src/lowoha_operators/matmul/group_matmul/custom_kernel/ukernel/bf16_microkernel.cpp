@@ -366,7 +366,7 @@ static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
                 bias_vec[v] = _mm512_loadu_ps(bias_fp32 + v * 16);
             }
         }
-#pragma GCC unroll 8
+#pragma GCC unroll 16
         for (int m = 0; m < MR; ++m) {
 #pragma GCC unroll 4
             for (int v = 0; v < NV; ++v) {
@@ -374,7 +374,7 @@ static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
             }
         }
         if constexpr (kBuffers > 1) {
-#pragma GCC unroll 8
+#pragma GCC unroll 16
             for (int m = 0; m < MR; ++m) {
 #pragma GCC unroll 4
                 for (int v = 0; v < NV; ++v) {
@@ -383,8 +383,11 @@ static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
             }
         }
     } else {
+#pragma GCC unroll 2
         for (int b = 0; b < kBuffers; ++b)
+#pragma GCC unroll 16
             for (int m = 0; m < MR; ++m)
+#pragma GCC unroll 4
                 for (int v = 0; v < NV; ++v)
                     acc[b][m][v] = _mm512_setzero_ps();
     }
@@ -428,7 +431,31 @@ static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
     // on the compilers we tested, so the `memcpy` idiom is preferred.
 
     int kp = 0;
-    if (kp + 1 < K_pair) {
+    if constexpr (MR > 8) {
+        // One live B set: a staged second set would spill the 24
+        // accumulators of MR 12.
+        for (; kp < K_pair; ++kp) {
+            const bfloat16_t *bp
+                    = Bpacked + static_cast<size_t>(kp) * kp_stride_bf16;
+            __m512bh bv[NV];
+#pragma GCC unroll 4
+            for (int v = 0; v < NV; ++v)
+                bv[v] = (__m512bh)_mm512_loadu_si512(
+                        reinterpret_cast<const __m512i *>(
+                                bp + v * v_stride_bf16));
+#pragma GCC unroll 12
+            for (int m = 0; m < MR; ++m) {
+                uint32_t a_pair;
+                std::memcpy(&a_pair, A + static_cast<size_t>(m) * lda + kp * 2,
+                        sizeof(a_pair));
+                __m512bh av
+                        = (__m512bh)_mm512_set1_epi32(static_cast<int>(a_pair));
+#pragma GCC unroll 4
+                for (int v = 0; v < NV; ++v)
+                    acc[0][m][v] = _mm512_dpbf16_ps(acc[0][m][v], av, bv[v]);
+            }
+        }
+    } else if (kp + 1 < K_pair) {
         __m512bh bv_cur[NV];
         // Prolog: load B for kp=0 so the first outer iteration starts
         // with bv_cur already in flight.  The B-stream loads here and
@@ -480,7 +507,7 @@ static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
                 }
             }
 // ── Stage 2: issue FMAs for kp using bv_cur ───────────────
-#pragma GCC unroll 8
+#pragma GCC unroll 16
             for (int m = 0; m < MR; ++m) {
                 uint32_t a_pair;
                 std::memcpy(&a_pair, A + static_cast<size_t>(m) * lda + kp * 2,
@@ -505,7 +532,7 @@ static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
                 }
             }
 // ── Stage 4: issue FMAs for kp+1 using bv_next ────────────
-#pragma GCC unroll 8
+#pragma GCC unroll 16
             for (int m = 0; m < MR; ++m) {
                 uint32_t a_pair;
                 std::memcpy(&a_pair,
@@ -531,7 +558,7 @@ static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
             bv[v] = (__m512bh)_mm512_loadu_si512(
                     reinterpret_cast<const __m512i *>(bp + v * v_stride_bf16));
         }
-#pragma GCC unroll 8
+#pragma GCC unroll 16
         for (int m = 0; m < MR; ++m) {
             uint32_t a_pair;
             std::memcpy(&a_pair, A + static_cast<size_t>(m) * lda + kp * 2,
@@ -567,7 +594,7 @@ static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
             bv[v] = (__m512bh)_mm512_loadu_si512(
                     reinterpret_cast<const __m512i *>(bp + v * v_stride_bf16));
         }
-#pragma GCC unroll 8
+#pragma GCC unroll 16
         for (int m = 0; m < MR; ++m) {
             uint16_t lo;
             std::memcpy(
@@ -585,7 +612,7 @@ static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
     // here sums the GEMM contributions from the two K-pair interleaves
     // so the bias stays applied exactly once.
     if constexpr (kBuffers > 1) {
-#pragma GCC unroll 8
+#pragma GCC unroll 16
         for (int m = 0; m < MR; ++m) {
 #pragma GCC unroll 4
             for (int v = 0; v < NV; ++v)
@@ -602,7 +629,7 @@ static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
     if constexpr (Act == ActKind::swiglu_oai_mul || Act == ActKind::silu_and_mul
             || Act == ActKind::gelu_and_mul) {
         constexpr int n_pairs = NV / 2; // 1 for NV=2, 2 for NV=4
-#pragma GCC unroll 8
+#pragma GCC unroll 16
         for (int m = 0; m < MR; ++m) {
 #pragma GCC unroll 2
             for (int p = 0; p < n_pairs; ++p) {
@@ -624,7 +651,7 @@ static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
 // Act = none, BF16 dst — manual RNE FP32→BF16 and a 256-bit
 // store per (m, v) tile.  Bit-identical to the standard
 // reference path's `f32_to_bf16x16` (see policy block above).
-#pragma GCC unroll 8
+#pragma GCC unroll 16
         for (int m = 0; m < MR; ++m) {
 #pragma GCC unroll 4
             for (int v = 0; v < NV; ++v) {
@@ -642,7 +669,7 @@ static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
         // Op2 of a fused MoE chain that wants FP32 reduce-input).
         static_assert(std::is_same<DstT, float>::value,
                 "Act=none non-bf16 dst path requires DstT == float");
-#pragma GCC unroll 8
+#pragma GCC unroll 16
         for (int m = 0; m < MR; ++m) {
 #pragma GCC unroll 4
             for (int v = 0; v < NV; ++v) {
@@ -658,17 +685,37 @@ static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
 // ── Function-pointer table dispatch (mirrors select_bf16_brgemm_kernel) ─
 //
 // One entry per supported (MR, NV, Act, DstDt) tuple.  Instantiation set:
-//   NV=2 (NR=32): MR ∈ {1..8} × {(none, BF16), (none, F32), (swiglu, BF16),
-//                                  (silu, BF16), (gelu, BF16)}
+//   NV=2 (NR=32): MR ∈ {1..12} × {(none, BF16), (none, F32), (swiglu, BF16),
+//                                   (silu, BF16), (gelu, BF16)}; MR 9..12
+//                 serve single-expert BF16 prompts (`kMaxMrNv2Prompt`)
 //   NV=4 (NR=64): MR ∈ {1..6} × {(none, BF16), (none, F32), (swiglu, BF16),
 //                                  (silu, BF16), (gelu, BF16)}
-// Total: 8×5 + 6×5 = 70 specializations, all `noinline`.
+// Total: 12×5 + 6×5 = 90 specializations, all `noinline`.
 //
 // Any (gated_act, FP32) tuple is intentionally NOT instantiated — the
 // in-register pair-pack store helpers write BF16 only, and downstream
 // Op2 in fused MoE reads BF16.  The dispatcher refuses those tuples at
 // `prepare_for_call` time (see the `select_ukernel` early-out below
 // returning nullptr for that case).
+namespace {
+template <int MR>
+ukernel_fn_t select_wide_nv2(ActKind act, DstDt dst_dt) {
+    switch (act) {
+        case ActKind::swiglu_oai_mul:
+            return ukernel_impl<MR, 2, ActKind::swiglu_oai_mul, bfloat16_t>;
+        case ActKind::silu_and_mul:
+            return ukernel_impl<MR, 2, ActKind::silu_and_mul, bfloat16_t>;
+        case ActKind::gelu_and_mul:
+            return ukernel_impl<MR, 2, ActKind::gelu_and_mul, bfloat16_t>;
+        case ActKind::none:
+            return dst_dt == DstDt::kF32
+                    ? ukernel_impl<MR, 2, ActKind::none, float>
+                    : ukernel_impl<MR, 2, ActKind::none, bfloat16_t>;
+        default: return nullptr;
+    }
+}
+} // namespace
+
 ukernel_fn_t select_ukernel(int MR, int NV, ActKind act, DstDt dst_dt) {
     if (dst_dt != DstDt::kBf16 && dst_dt != DstDt::kF32) return nullptr;
     // Refuse the structurally-impossible (gated_act, FP32) combinations
@@ -676,6 +723,15 @@ ukernel_fn_t select_ukernel(int MR, int NV, ActKind act, DstDt dst_dt) {
     const bool is_gated_act = (act == ActKind::swiglu_oai_mul
             || act == ActKind::silu_and_mul || act == ActKind::gelu_and_mul);
     if (is_gated_act && dst_dt != DstDt::kBf16) { return nullptr; }
+    if (NV == 2 && MR > 8) {
+        switch (MR) {
+            case 9: return select_wide_nv2<9>(act, dst_dt);
+            case 10: return select_wide_nv2<10>(act, dst_dt);
+            case 11: return select_wide_nv2<11>(act, dst_dt);
+            case 12: return select_wide_nv2<12>(act, dst_dt);
+            default: return nullptr;
+        }
+    }
     if (NV == 2) {
         if (act == ActKind::swiglu_oai_mul) {
             switch (MR) {

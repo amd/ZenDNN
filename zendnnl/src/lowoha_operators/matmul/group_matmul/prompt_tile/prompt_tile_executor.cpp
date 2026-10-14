@@ -146,6 +146,7 @@ ZENDNNL_FLATTEN Planned plan_call(const custom_kernel::CallContext &kctx,
     cfg.min_mr = ff.min_mr;
     cfg.row_align = row_align;
     cfg.num_threads = T;
+    cfg.single_dense = call.M.size() == 1 && p.fam == Family::kBf16;
 
     plan_tiles(call.M.data(), call.N.data(), call.K.data(),
             static_cast<int>(call.M.size()), cfg, p.tm->team_size.data(),
@@ -191,6 +192,12 @@ bool should_run(const custom_kernel::CallContext &kctx, bool use_custom,
         if (N[e] <= 0 || N[e] % kctx.pack_nr != 0) return false;
         ++active;
     }
+    // A single-expert BF16 call (a dense layer) splits its M across teams the
+    // same way a heavy shared expert does.  One active expert among idle MoE
+    // slots and the other families keep the multi-expert scope.
+    if (active == 1)
+        return M.size() == 1 && fam == Family::kBf16
+                && get_grp_matmul_single_expert_prompt_tile();
     return active > 1;
 }
 

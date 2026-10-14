@@ -3886,6 +3886,154 @@ TEST(TestGroupMatmulAutoPhaseEnv,
                "an unsafe shape to ALGO 3";
 }
 
+// ── Rule 0.46 — single dense expert BF16 prompt → ALGO 3 (opt-in) ─────
+// With `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE=1` a one-expert BF16
+// prompt (a dense FFN pass or a routed linear) goes to the CK prompt tile
+// executor rather than Rule 0.7's ALGO 1.  The knob defaults to 0.
+static int select_one(const AutoProbeShape &s,
+        zendnnl::lowoha::matmul::grp_matmul_gated_act_t act
+        = zendnnl::lowoha::matmul::grp_matmul_gated_act_t::none,
+        bool epilogue_ok = true) {
+    return zendnnl::lowoha::matmul::select_grp_matmul_algo(s.layout, s.M, s.N,
+            s.K, s.params, s.num_threads, nullptr, act, epilogue_ok);
+}
+
+TEST(TestGroupMatmulAutoPhaseEnv, SingleDenseExpertBf16PromptRoutesToAlgo3) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    if (!custom_kernel::dispatch_supported()) {
+        GTEST_SKIP() << "needs the BF16 custom kernel (AVX512-BF16)";
+    }
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+    CustomKernelOverride ck_on(true);
+
+    auto s = build_auto_probe(/*M=*/2048, /*K=*/768, /*N=*/2304,
+            /*num_ops=*/1, /*num_threads=*/32);
+    {
+        SingleExpertPromptTileOverride env_default(-1);
+        if (std::getenv("ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE")
+                == nullptr) {
+            EXPECT_EQ(select_one(s), 1) << "the knob defaults to off";
+        }
+    }
+    SingleExpertPromptTileOverride on(1);
+    EXPECT_EQ(select_one(s), 3) << "plain GEMM (a routed linear)";
+    EXPECT_EQ(select_one(s, grp_matmul_gated_act_t::gelu_and_mul), 3)
+            << "gated FFN W13 pass";
+    {
+        SingleExpertPromptTileOverride off(0);
+        EXPECT_EQ(select_one(s, grp_matmul_gated_act_t::gelu_and_mul), 1)
+                << "knob off keeps Rule 0.7's ALGO 1";
+    }
+    {
+        AutoPromptAlgoOverride pin(2);
+        EXPECT_EQ(select_one(s), 2)
+                << "an explicit AUTO_PROMPT_ALGO pin must outrank Rule 0.46";
+    }
+    {
+        CustomKernelOverride ck_off(false);
+        EXPECT_EQ(select_one(s), 1)
+                << "without the custom kernel there is no prompt tile path";
+    }
+}
+
+// Rule 0.46 has no size gate: any shape the prompt tile executor serves
+// qualifies.  It still needs one BF16 expert, an epilogue the CK takes, an N
+// the CK pack divides, a row-major layout and a prompt-phase M.
+TEST(TestGroupMatmulAutoPhaseEnv, SingleDenseExpertPromptScope) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    if (!custom_kernel::dispatch_supported()) {
+        GTEST_SKIP() << "needs the BF16 custom kernel (AVX512-BF16)";
+    }
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+    CustomKernelOverride ck_on(true);
+    SingleExpertPromptTileOverride on(1);
+    const auto probe = [](int K, int N, int num_ops = 1) {
+        return build_auto_probe(
+                /*M=*/2048, K, N, num_ops, /*num_threads=*/32);
+    };
+
+    EXPECT_EQ(select_one(probe(768, 1280)), 3) << "embeddinggemma QKV";
+    EXPECT_EQ(select_one(probe(1152, 768)), 3) << "embeddinggemma W2";
+    EXPECT_EQ(select_one(
+                      probe(4096, 28672), grp_matmul_gated_act_t::silu_and_mul),
+            3)
+            << "a Llama-8B W13 has no size gate";
+    EXPECT_EQ(select_one(probe(768, 2304), grp_matmul_gated_act_t::gelu_and_mul,
+                      /*epilogue_ok=*/false),
+            1)
+            << "an epilogue the CK refuses keeps AOCL";
+    EXPECT_EQ(select_one(probe(768, 2304 + 16)), 1)
+            << "N not divisible by the CK pack";
+
+    auto int8 = probe(768, 2304);
+    int8.params[0].dtypes.wei = data_type_t::s8;
+    int8.params[0].dynamic_quant = true;
+    EXPECT_EQ(select_one(int8), 1) << "DQ-INT8 single expert keeps ALGO 1";
+
+    auto unsafe = probe(768, 2304);
+    unsafe.layout[0] = 'c';
+    EXPECT_EQ(select_one(unsafe), 1) << "n_tile_safe clamp";
+
+    auto two = probe(768, 2304, /*num_ops=*/2);
+    int two_off = 0;
+    {
+        SingleExpertPromptTileOverride off(0);
+        two_off = select_one(two);
+    }
+    EXPECT_EQ(select_one(two), two_off) << "two experts are outside Rule 0.46";
+}
+
+// A Rule 0.46 layer keeps ALGO 3 in decode too, so its prompt and decode
+// share one custom-kernel pack: even with Rule 0.45 off, and at one thread.
+// A caller-prepacked AOCL weight keeps its decode rules.  `decode_d` and one
+// active expert of a larger pool are outside Rule 0.46.
+TEST(TestGroupMatmulAutoPhaseEnv, SingleDenseExpertLayerStaysOnAlgo3) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    if (!custom_kernel::dispatch_supported()) {
+        GTEST_SKIP() << "needs the BF16 custom kernel (AVX512-BF16)";
+    }
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+    CustomKernelOverride ck_on(true);
+    SingleExpertPromptTileOverride on(1);
+    DenseDecodeNTileOverride rule045_off(0);
+
+    auto decode = build_auto_probe(/*M=*/4, /*K=*/768, /*N=*/1280,
+            /*num_ops=*/1, /*num_threads=*/32);
+    EXPECT_EQ(select_one(decode), 3) << "decode follows the layer";
+    auto one_thread = build_auto_probe(/*M=*/4, /*K=*/768, /*N=*/1280,
+            /*num_ops=*/1, /*num_threads=*/1);
+    EXPECT_EQ(select_one(one_thread), 3) << "at any team size";
+    auto prepacked = decode;
+    prepacked.params[0].mem_format_b = 'r';
+    EXPECT_EQ(select_one(prepacked), 1) << "AOCL-prepacked decode keeps AOCL";
+    {
+        SingleExpertPromptTileOverride off(0);
+        EXPECT_EQ(select_one(decode), 1) << "knob off: Rule 0.45 off -> 1";
+    }
+
+    auto prompt = build_auto_probe(/*M=*/2048, /*K=*/768, /*N=*/1280,
+            /*num_ops=*/1, /*num_threads=*/32);
+    {
+        NTileStrategyOverride decode_d(1);
+        EXPECT_EQ(select_one(prompt), 1) << "decode_d never serves the tile";
+    }
+    auto pooled = prompt;
+    pooled.params[0].active_matmul = 1;
+    pooled.params[0].total_matmul = 8;
+    auto_algo_trace trace;
+    select_grp_matmul_algo(pooled.layout, pooled.M, pooled.N, pooled.K,
+            pooled.params, pooled.num_threads, &trace);
+    ASSERT_NE(trace.reason, nullptr);
+    EXPECT_STREQ(trace.reason, "auto_algo3")
+            << "one active expert of an MoE pool follows its MoE layer";
+}
+
 // AUTO_PROMPT_ALGO=3 forces ALGO 3 on a shape Rule 2 would have
 // sent to ALGO 1 (Mixtral-class prompt) — the override is honoured.
 TEST(TestGroupMatmulAutoPhaseEnv, PromptEnvForcesAlgo3OnMixtralPrompt) {

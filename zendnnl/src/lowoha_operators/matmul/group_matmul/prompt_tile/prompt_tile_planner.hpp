@@ -91,6 +91,9 @@ struct PlannerConfig {
     /// Bytes the CK reads per weight column beyond its K weights.
     int64_t wei_col_extra_bytes = 0;
     int num_threads = 1;
+    /// The call is one dense layer (one BF16 expert): auto sizes give
+    /// every team equal M-blocks and every thread equal N-slices.
+    bool single_dense = false;
 };
 
 /// Planner temporaries, kept with the plan so a reused `Plan` plans
@@ -230,6 +233,39 @@ inline void split_cols(int N, int ns, int pack_nr, std::vector<int> &starts) {
     starts.push_back(N);
 }
 
+/// Whether `dense_sizes` suits a single dense layer: every team gets at
+/// least `mb_min` rows, and the weights fit the L3 share a team walks M-block
+/// major (`bm_l3_pct`).  A wide-N head (e.g. a 262144-column LM head) or a
+/// short M keeps the shrink loop's many small tiles.
+inline bool dense_fits(
+        int M, int N, int K, const PlannerConfig &cfg, int n_teams) {
+    const int64_t b_bytes = static_cast<int64_t>(N) * wei_col_bytes(K, cfg);
+    return M >= static_cast<int64_t>(n_teams) * cfg.tun[kMbMin]
+            && b_bytes <= cfg.l3_bytes_per_team * cfg.tun[kBmL3Pct] / 100;
+}
+
+/// Auto sizes of a single dense layer.  A dense layer's tiles all cost the
+/// same, so instead of many small tiles drained dynamically, M splits into
+/// one run of equal blocks per team (each block's A within the L2 share
+/// `auto_mb` allows) and N into one equal slice per team thread: every
+/// thread then gets the same work and no team waits on a last tile.
+inline void dense_sizes(int M, int N, int K, const PlannerConfig &cfg,
+        const int *team_size, int n_teams, int &mb, int &ns) {
+    const int align = std::max(cfg.row_align, 1);
+    const int per_team = (M + n_teams - 1) / n_teams;
+    const int cap = std::max(auto_mb(K, cfg), align);
+    const int runs = (per_team + cap - 1) / cap;
+    mb = (per_team + runs - 1) / runs;
+    mb = std::max(((mb + align - 1) / align) * align, align);
+    int team_max = 1;
+    for (int t = 0; t < n_teams; ++t)
+        team_max = std::max(team_max, team_size[t]);
+    const int nblk = std::max(1, N / cfg.pack_nr);
+    const int slices = std::min(nblk, team_max);
+    // `split_cols` cuts ceil(N / ns) balanced slices.
+    ns = (N + slices - 1) / slices;
+}
+
 /// Count of tiles a given (mb, ns) choice produces for the active experts.
 inline int64_t count_tiles(
         const int *M, const int *N, int num_ops, int mb, int ns, int pack_nr) {
@@ -335,9 +371,14 @@ inline void plan_tiles(const int *M, const int *N, const int *K, int num_ops,
     const int align = std::max(cfg.row_align, 1);
     int mb = mb_knob > 0 ? mb_knob : auto_mb(K[lead], cfg);
     int ns = ns_knob > 0 ? ns_knob : auto_ns(K[lead], N[lead], cfg);
+    const bool dense = cfg.single_dense && order.size() == 1 && mb_knob <= 0
+            && ns_knob <= 0
+            && dense_fits(M[lead], N[lead], K[lead], cfg, n_teams);
+    if (dense)
+        dense_sizes(M[lead], N[lead], K[lead], cfg, team_size, n_teams, mb, ns);
     const int64_t want = static_cast<int64_t>(cfg.tun[kMinTiles])
             * std::max(cfg.num_threads, 1);
-    while (count_tiles(M, N, num_ops, mb, ns, cfg.pack_nr) < want) {
+    while (!dense && count_tiles(M, N, num_ops, mb, ns, cfg.pack_nr) < want) {
         if (mb_knob <= 0 && mb > mb_min) {
             mb = std::max(mb_min, ((mb / 2) / align) * align);
         } else if (ns_knob <= 0 && ns > cfg.pack_nr) {

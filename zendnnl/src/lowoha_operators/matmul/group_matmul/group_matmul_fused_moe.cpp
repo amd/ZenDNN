@@ -1621,8 +1621,13 @@ status_t group_matmul_fused_moe_execute(
     // `*_pin_honoured` flags are dropped exactly when a pin IS honoured — the
     // case an operator sets the pin to observe.
     auto_algo_trace algo_trace;
-    const int resolved_algo = select_grp_matmul_algo(
-            layout, M, N, K, params, num_threads, &algo_trace, act);
+    // The Op1 arena is picked below from the resolved ALGO and is tight
+    // whenever the CK runs, so only the CK's other epilogue terms apply.
+    const bool single_expert_epilogue_ok = M.size() != 1
+            || ck_serves_single_expert_epilogue(alpha[0], beta[0], bias[0],
+                    /*tight=*/true, act, act_dtype);
+    const int resolved_algo = select_grp_matmul_algo(layout, M, N, K, params,
+            num_threads, &algo_trace, act, single_expert_epilogue_ok);
     const bool want_tight = pick_fused_moe_want_tight(
             op1_internal, act, custom_kernel_en, env_algo_fused, resolved_algo);
 

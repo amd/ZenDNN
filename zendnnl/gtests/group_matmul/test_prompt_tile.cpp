@@ -33,6 +33,7 @@
 #include <numeric>
 #include <random>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -284,6 +285,71 @@ TEST(PromptTilePlanner, ShrinksTilesForSmallCalls) {
     pt::plan_tiles(M.data(), N.data(), K.data(), 2, cfg, teams.data(), 4, plan);
     EXPECT_EQ(plan.mb, 64);
     EXPECT_EQ(plan.ns, 128);
+}
+
+// A single dense layer gets one run of equal M-blocks per team and one
+// equal N-slice per thread, so every thread runs the same work; a forced
+// size, or a call that is not one dense layer, keeps the shrink loop.
+TEST(PromptTilePlanner, SingleDenseLayerSplitsEvenlyPerThread) {
+    struct Case {
+        int M, N, K, mb, blocks;
+        bool even;
+    };
+    const std::vector<Case> cases = {
+            {2048, 768, 768, 256, 8, true}, // embeddinggemma o_proj
+            {2048, 2304, 768, 256, 8, true}, // embeddinggemma W13
+            {1024, 1280, 768, 128, 8, true}, // embeddinggemma QKV
+            {4096, 768, 768, 256, 16, true}, // two runs per team past L2
+            {2048, 1024, 3072, 64, 32, true}, // harrier W2: A capped by L2
+            {1500, 640, 2048, 96, 16, false}, // short last block
+    };
+    const std::vector<int> teams(8, 4);
+    for (const auto &c : cases) {
+        SCOPED_TRACE("M=" + std::to_string(c.M) + " N=" + std::to_string(c.N)
+                + " K=" + std::to_string(c.K));
+        pt::PlannerConfig cfg;
+        cfg.num_threads = 32;
+        cfg.single_dense = true;
+        pt::Plan plan;
+        pt::plan_tiles(&c.M, &c.N, &c.K, 1, cfg, teams.data(), 8, plan);
+        check_plan({c.M}, {c.N}, {c.K}, cfg, teams, plan);
+        EXPECT_EQ(plan.mb, c.mb);
+        ASSERT_EQ(plan.tiles.size(), static_cast<size_t>(c.blocks) * 4);
+        for (int t = 0; t < 8 && c.even; ++t)
+            EXPECT_EQ(
+                    plan.team_begin[t + 1] - plan.team_begin[t], c.blocks / 2);
+        const int nblk = c.N / cfg.pack_nr;
+        for (const auto &tile : plan.tiles)
+            EXPECT_LE(std::abs(tile.ncols / cfg.pack_nr - nblk / 4), 1);
+    }
+
+    // A 262144-column LM head and a 100-row call keep the shrink loop.
+    for (const auto &[m, n, k] :
+            {std::tuple {256, 262144, 640}, std::tuple {100, 768, 768}}) {
+        pt::PlannerConfig cfg;
+        cfg.num_threads = 32;
+        cfg.single_dense = true;
+        pt::Plan dense, plain;
+        pt::plan_tiles(&m, &n, &k, 1, cfg, teams.data(), 8, dense);
+        cfg.single_dense = false;
+        pt::plan_tiles(&m, &n, &k, 1, cfg, teams.data(), 8, plain);
+        EXPECT_EQ(dense.tiles.size(), plain.tiles.size()) << "M=" << m;
+        EXPECT_EQ(dense.mb, plain.mb) << "M=" << m;
+        EXPECT_EQ(dense.ns, plain.ns) << "M=" << m;
+    }
+
+    const int M = 2048, N = 768, K = 768;
+    pt::PlannerConfig cfg;
+    cfg.num_threads = 32;
+    pt::Plan plain;
+    pt::plan_tiles(&M, &N, &K, 1, cfg, teams.data(), 8, plain);
+    cfg.single_dense = true;
+    cfg.tun[pt::kMb] = 64;
+    pt::Plan forced;
+    pt::plan_tiles(&M, &N, &K, 1, cfg, teams.data(), 8, forced);
+    EXPECT_EQ(forced.mb, 64);
+    EXPECT_GE(forced.tiles.size(), plain.tiles.size());
+    EXPECT_GT(plain.tiles.size(), 32u);
 }
 
 TEST(PromptTilePlanner, HeaviestExpertFirstAndBalancedTeams) {
@@ -1349,20 +1415,230 @@ TEST(PromptTileExecutor, DecodeCallsNeverEngage) {
     }
 }
 
-// A dense layer (one expert, or one active among idle ones) keeps the round
-// executor.
-TEST(PromptTileExecutor, SingleActiveExpertNeverEngages) {
+// A single-expert BF16 call (a dense layer) runs the tile executor, which
+// splits its M across teams, bitwise equal to rounds.
+TEST(PromptTileExecutor, SingleBf16ExpertMatchesRoundsBitwise) {
     SKIP_WITHOUT_BF16_CUSTOM_KERNEL();
-    for (const auto &M :
-            {std::vector<int> {300}, std::vector<int> {0, 300, 0}}) {
+    using namespace moe_test_utils;
+    SingleExpertPromptTileOverride on(1);
+    for (const auto &M : {std::vector<int> {300}, std::vector<int> {2048}}) {
+        for (const auto act : {grp_matmul_gated_act_t::none,
+                     grp_matmul_gated_act_t::gelu_and_mul,
+                     grp_matmul_gated_act_t::silu_and_mul}) {
+            for (const auto dst : {data_type_t::bf16, data_type_t::f32}) {
+                if (act != grp_matmul_gated_act_t::none
+                        && dst == data_type_t::f32)
+                    continue;
+                Case c;
+                c.M = M;
+                c.act = act;
+                c.dst_dt = dst;
+                expect_bitwise_equal(c);
+            }
+        }
+    }
+    // embeddinggemma FFN-like widths: K 768, N 2304 (gated) and 768.
+    for (const auto &[N, K, act] :
+            {std::tuple {2304, 768, grp_matmul_gated_act_t::gelu_and_mul},
+                    std::tuple {768, 1152, grp_matmul_gated_act_t::none}}) {
+        Case c;
+        c.M = {1024};
+        c.N = N;
+        c.K = K;
+        c.act = act;
+        c.wide = true;
+        expect_bitwise_equal(c);
+    }
+}
+
+// With the knob on a single-expert BF16 prompt runs 12-row CK calls; its
+// output must match the 8-row calls the round executor makes with the knob
+// off bit for bit.
+TEST(PromptTileExecutor, SingleBf16ExpertWideMrMatchesNarrowRounds) {
+    SKIP_WITHOUT_BF16_CUSTOM_KERNEL();
+    using namespace moe_test_utils;
+    for (const auto &[M, N, K, act] :
+            {std::tuple {300, 256, 128, grp_matmul_gated_act_t::none},
+                    std::tuple {1024, 2304, 768,
+                            grp_matmul_gated_act_t::gelu_and_mul},
+                    std::tuple {2048, 768, 1152, grp_matmul_gated_act_t::none},
+                    std::tuple {517, 512, 640,
+                            grp_matmul_gated_act_t::silu_and_mul}}) {
+        Case c;
+        c.M = {M};
+        c.N = N;
+        c.K = K;
+        c.act = act;
+        c.wide = true;
+        SCOPED_TRACE(describe(c));
+        RunOut narrow, wide;
+        {
+            SingleExpertPromptTileOverride off(0);
+            narrow = run_case(c, 0);
+        }
+        {
+            SingleExpertPromptTileOverride on(1);
+            wide = run_case(c, 1);
+        }
+        ASSERT_EQ(narrow.mode.find("ptile"), std::string::npos) << narrow.mode;
+        ASSERT_NE(wide.mode.find("flat_n_tile_ptile_"), std::string::npos)
+                << wide.mode;
+        ASSERT_EQ(narrow.dst[0].size(), wide.dst[0].size());
+        EXPECT_EQ(std::memcmp(narrow.dst[0].data(), wide.dst[0].data(),
+                          narrow.dst[0].size()),
+                0);
+    }
+}
+
+// Under AUTO with the knob on, a single BF16 expert reaches the prompt tile
+// whenever the CK takes its epilogue, a plain GEMM included.  A split-halves
+// gated activation with bias, which the CK refuses, stays on ALGO 1 rather
+// than N-tile rounds without the CK.
+TEST(PromptTileExecutor, AutoSingleExpertFollowsCkEpilogue) {
+    SKIP_WITHOUT_BF16_CUSTOM_KERNEL();
+    using namespace moe_test_utils;
+    SingleExpertPromptTileOverride on(1);
+    {
+        Case plain;
+        plain.M = {300};
+        SCOPED_TRACE(describe(plain));
+        const RunOut r = run_case(plain, 1, /*algo=*/0);
+        EXPECT_NE(r.mode.find("ptile"), std::string::npos) << r.mode;
+        EXPECT_EQ(r.served, 1);
+    }
+    for (const auto act : {grp_matmul_gated_act_t::gelu_and_mul,
+                 grp_matmul_gated_act_t::silu_and_mul}) {
+        Case c;
+        c.M = {300};
+        c.act = act;
+        SCOPED_TRACE(describe(c));
+        const RunOut served = run_case(c, 1, /*algo=*/0);
+        EXPECT_NE(served.mode.find("ptile"), std::string::npos) << served.mode;
+        EXPECT_EQ(served.served, 1);
+
+        c.bias_dt = data_type_t::bf16;
+        SCOPED_TRACE(describe(c));
+        const RunOut refused = run_case(c, 1, /*algo=*/0);
+        EXPECT_EQ(refused.mode.find("flat_n_tile"), std::string::npos)
+                << refused.mode;
+        EXPECT_EQ(refused.served, 0);
+    }
+}
+
+// A fused BF16 dense FFN (W13, gelu_and_mul, W2: what ZenTorch's fused FFN
+// sends) runs both passes on the prompt tile under AUTO with the knob on, at
+// any size, and matches the AOCL two-pass (knob off) to BF16 tolerance.
+TEST(PromptTileExecutor, AutoSingleExpertFusedFfnBothPasses) {
+    SKIP_WITHOUT_BF16_CUSTOM_KERNEL();
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    struct Ffn {
+        int H, I;
+        bool tiles;
+    };
+    constexpr int M = 512;
+    for (const Ffn f : {Ffn {256, 384, true}, Ffn {1536, 256, true}}) {
+        SCOPED_TRACE("H=" + std::to_string(f.H) + " I=" + std::to_string(f.I));
+        const int N13 = 2 * f.I;
+        std::vector<bfloat16_t> src(static_cast<size_t>(M) * f.H),
+                w13(static_cast<size_t>(f.H) * N13),
+                w2(static_cast<size_t>(f.I) * f.H);
+        for (size_t i = 0; i < src.size(); ++i)
+            src[i] = bfloat16_t(0.03f
+                    * static_cast<float>(static_cast<int>(i * 7 % 11) - 5));
+        for (size_t i = 0; i < w13.size(); ++i)
+            w13[i] = bfloat16_t(0.01f
+                    * static_cast<float>(static_cast<int>(i * 5 % 13) - 6));
+        for (size_t i = 0; i < w2.size(); ++i)
+            w2[i] = bfloat16_t(0.01f
+                    * static_cast<float>(static_cast<int>(i * 3 % 7) - 3));
+        const std::vector<bfloat16_t> w13_plain = w13, w2_plain = w2;
+
+        // The in-place weight cache may pack a weight in place, so each leg
+        // starts from the plain bytes.
+        const auto run = [&](int knob, TypedBuffers &out, std::string &mode) {
+            std::memcpy(w13.data(), w13_plain.data(),
+                    w13.size() * sizeof(bfloat16_t));
+            std::memcpy(
+                    w2.data(), w2_plain.data(), w2.size() * sizeof(bfloat16_t));
+            reset_grp_matmul_caches();
+            AlgoEnvGuard algo(0);
+            CustomKernelOverride ck_on(true);
+            SingleExpertPromptTileOverride ovr(knob);
+            const std::vector<const void *> srcs {src.data()},
+                    wei1 {w13.data()}, wei2 {w2.data()}, no_bias {nullptr};
+            auto gv = GemmVecs::uniform(1, M, N13, f.H);
+            auto p = make_uniform_params(1, data_type_t::bf16);
+            p[0].num_threads = 8;
+            grp_matmul_gated_act_params act {};
+            act.act = grp_matmul_gated_act_t::gelu_and_mul;
+            auto fused = make_fused_moe_op2(1, f.H, wei2, no_bias);
+            out.alloc(1, static_cast<size_t>(M) * f.H, /*is_bf16=*/true);
+            fused.dst_down = out.ptrs(true);
+            fused.ldc_down = {f.H};
+            const std::vector<void *> dst_null {nullptr};
+            const std::vector<int> ldc_null {0};
+            GemmModeCaptureGuard cap;
+            ASSERT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB,
+                              gv.Ms, gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, wei1,
+                              gv.ldb, no_bias, gv.beta, dst_null, ldc_null,
+                              gv.is_wc, p, nullptr, &act, &fused),
+                    status_t::success);
+            const char *m = test_api::s_last_group_matmul_direct_gemm_mode.load(
+                    std::memory_order_relaxed);
+            mode = m != nullptr ? m : "";
+        };
+        const auto pass = [](const std::string &mode, const char *tag) {
+            const size_t b = mode.find(tag);
+            if (b == std::string::npos) return std::string();
+            return mode.substr(b, mode.find_first_of(",)", b) - b);
+        };
+
+        TypedBuffers aocl, tiles;
+        std::string mode_aocl, mode_tiles;
+        run(0, aocl, mode_aocl);
+        run(1, tiles, mode_tiles);
+        EXPECT_EQ(mode_aocl.find("ptile"), std::string::npos) << mode_aocl;
+        for (const char *tag : {"op1=", "op2="}) {
+            const std::string p = pass(mode_tiles, tag);
+            ASSERT_FALSE(p.empty()) << mode_tiles;
+            EXPECT_EQ(p.find("ptile") != std::string::npos, f.tiles)
+                    << mode_tiles;
+        }
+        verify_per_expert_2d(tiles, f.H, aocl, f.H, std::vector<int> {M}, f.H,
+                data_type_t::bf16, tol_fused(data_type_t::bf16),
+                "single_expert_fused_ffn");
+    }
+}
+
+// The single-expert scope is a call of one expert: one active expert among
+// idle MoE slots keeps the round executor with the knob on, as does a single
+// expert with the knob off.  FP16 keeps the multi-expert scope.
+TEST(PromptTileExecutor, SingleActiveExpertOutsideScopeNeverEngages) {
+    SKIP_WITHOUT_BF16_CUSTOM_KERNEL();
+    using namespace moe_test_utils;
+    for (const auto &[knob, M] : {std::pair {1, std::vector<int> {0, 300, 0}},
+                 std::pair {0, std::vector<int> {300}},
+                 std::pair {0, std::vector<int> {0, 300, 0}}}) {
+        SingleExpertPromptTileOverride ovr(knob);
         Case c;
         c.M = M;
-        SCOPED_TRACE(describe(c));
+        SCOPED_TRACE(describe(c) + " knob=" + std::to_string(knob));
         const RunOut r = run_case(c, 1);
         EXPECT_NE(r.mode.find("flat_n_tile"), std::string::npos) << r.mode;
         EXPECT_EQ(r.mode.find("ptile"), std::string::npos) << r.mode;
         EXPECT_EQ(r.served, 0);
     }
+    if (!zendnnl::lowoha::matmul::custom_kernel::avx512f16_available()) return;
+    SingleExpertPromptTileOverride on(1);
+    Case c;
+    c.M = {300};
+    c.src_dt = data_type_t::f16;
+    c.dst_dt = data_type_t::f16;
+    SCOPED_TRACE(describe(c));
+    const RunOut r = run_case(c, 8);
+    EXPECT_EQ(r.mode.find("ptile"), std::string::npos) << r.mode;
+    EXPECT_EQ(r.served, 0);
 }
 
 TEST(PromptTileExecutor, KnobOffOrNonCustomNeverEngage) {
