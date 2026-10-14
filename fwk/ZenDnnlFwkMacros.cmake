@@ -71,7 +71,7 @@ macro(zendnnl_add_dependency )
 endmacro()
 
 macro(zendnnl_add_option )
-  set(options EXECLUDE_FROM_COMMAND_LIST FORCE)
+  set(options EXCLUDE_FROM_COMMAND_LIST FORCE)
   set(oneValueArgs NAME VALUE TYPE CACHE_STRING COMMAND_LIST)
   set(multiValueArgs "")
   cmake_parse_arguments(_zao "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
@@ -82,7 +82,7 @@ macro(zendnnl_add_option )
     set(${_zao_NAME} ${_zao_VALUE} CACHE ${_zao_TYPE} ${_zao_CACHE_STRING})
   endif()
 
-  if (NOT ${_zao_EXECLUDE_FROM_COMMAND_LIST})
+  if (NOT ${_zao_EXCLUDE_FROM_COMMAND_LIST})
     # Child ExternalProject must receive the cache entry (integrators may set
     # variables CACHE FORCE before include), not only the macro default VALUE.
     set(_znl_ep_cmake_arg "$CACHE{${_zao_NAME}}")

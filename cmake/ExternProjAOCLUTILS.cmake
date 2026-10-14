@@ -29,6 +29,15 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
   list(APPEND AU_CMAKE_ARGS "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}")
   list(APPEND AU_CMAKE_ARGS "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>")
 
+  # Strip -Werror from flags before passing to third-party AOCL-UTILS to prevent
+  # parent build's zero-warning policy from breaking dependency code we don't control.
+  set(AU_C_FLAGS "${CMAKE_C_FLAGS}")
+  set(AU_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+  string(REGEX REPLACE "(^| )-Werror(=[^ ]*)?( |$)" "\\1\\3" AU_C_FLAGS "${AU_C_FLAGS}")
+  string(REGEX REPLACE "(^| )-Werror(=[^ ]*)?( |$)" "\\1\\3" AU_CXX_FLAGS "${AU_CXX_FLAGS}")
+  string(REGEX REPLACE "(^| )/WX( |$)" "\\1\\2" AU_C_FLAGS "${AU_C_FLAGS}")
+  string(REGEX REPLACE "(^| )/WX( |$)" "\\1\\2" AU_CXX_FLAGS "${AU_CXX_FLAGS}")
+
   if(WIN32)
     # Windows/MSVC: no -lpthread (a Linux-ism cl rejects); disable examples;
     # silence CRT deprecation warnings; forward the build type so the sub-build
@@ -52,8 +61,8 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
     # from it). ZenDNNL only whole-archives the static aocl-utils anyway.
     list(APPEND AU_CMAKE_ARGS "-DBUILD_SHARED_LIBS=OFF")
 
-    list(APPEND AU_CMAKE_ARGS "-DCMAKE_CXX_FLAGS=/D_CRT_SECURE_NO_WARNINGS")
-    list(APPEND AU_CMAKE_ARGS "-DCMAKE_C_FLAGS=/D_CRT_SECURE_NO_WARNINGS")
+    list(APPEND AU_CMAKE_ARGS "-DCMAKE_CXX_FLAGS=${AU_CXX_FLAGS} /D_CRT_SECURE_NO_WARNINGS")
+    list(APPEND AU_CMAKE_ARGS "-DCMAKE_C_FLAGS=${AU_C_FLAGS} /D_CRT_SECURE_NO_WARNINGS")
     list(APPEND AU_CMAKE_ARGS "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}")
     # Force aocl-utils' STATIC libraries onto the dynamic CRT (/MD) so they
     # match ZenDNNL's Windows build (which links /MD). Without this the static
@@ -65,12 +74,12 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
   else()
     # adding pthread to cxx flags is a manylinux docker requirement.
     list(APPEND AU_CMAKE_ARGS "-DAU_BUILD_EXAMPLES=ON")
-    list(APPEND AU_CMAKE_ARGS "-DCMAKE_CXX_FLAGS=-lpthread")
+    list(APPEND AU_CMAKE_ARGS "-DCMAKE_CXX_FLAGS=${AU_CXX_FLAGS} -lpthread")
     # The C examples need it too: aocl-utils does not link Threads on those
     # targets, and thread_pinning_example_linux.c calls pthread_join as of
     # 5.3.2, so without this the C example fails to link (DSO missing from
     # command line) even though the CXX example above builds.
-    list(APPEND AU_CMAKE_ARGS "-DCMAKE_C_FLAGS=-lpthread")
+    list(APPEND AU_CMAKE_ARGS "-DCMAKE_C_FLAGS=${AU_C_FLAGS} -lpthread")
   endif()
 
   # Windows produces .lib (with build-configuration-dependent names/paths), so

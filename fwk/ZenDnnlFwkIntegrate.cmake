@@ -53,6 +53,27 @@ zendnnl_add_option(NAME ZENDNNL_BUILD_TYPE
   CACHE_STRING "zendnnl build type"
   COMMAND_LIST ZNL_CMAKE_ARGS)
 
+# Compiler flags propagation from parent build
+zendnnl_add_option(NAME ZENDNNL_C_FLAGS
+  VALUE ""
+  TYPE STRING
+  CACHE_STRING "C compiler flags from parent"
+  EXCLUDE_FROM_COMMAND_LIST)
+
+zendnnl_add_option(NAME ZENDNNL_CXX_FLAGS
+  VALUE ""
+  TYPE STRING
+  CACHE_STRING "C++ compiler flags from parent"
+  EXCLUDE_FROM_COMMAND_LIST)
+
+# Propagate compiler flags through nested ExternalProject builds
+if(ZENDNNL_C_FLAGS)
+  list(APPEND ZNL_CMAKE_ARGS "-DCMAKE_C_FLAGS:STRING=${ZENDNNL_C_FLAGS}")
+endif()
+if(ZENDNNL_CXX_FLAGS)
+  list(APPEND ZNL_CMAKE_ARGS "-DCMAKE_CXX_FLAGS:STRING=${ZENDNNL_CXX_FLAGS}")
+endif()
+
 zendnnl_add_option(NAME ZENDNNL_MESSAGE_LOG_LEVEL
   VALUE "DEBUG"
   TYPE STRING
@@ -245,14 +266,14 @@ else()
 
   zendnnl_add_dependency(NAME json
     PATH "${ZENDNNL_INSTALL_PREFIX}/deps/json"
-    ALIAS "nlohmann_json::nlohmann_json"
+    ALIAS "zendnnl::json"
     INCLUDE_ONLY)
 
   if(ZENDNNL_LIB_BUILD_ARCHIVE)
-    target_link_libraries(zendnnl_library INTERFACE nlohmann_json::nlohmann_json)
+    target_link_libraries(zendnnl_library INTERFACE zendnnl::json)
   endif()
   if(ZENDNNL_LIB_BUILD_SHARED)
-    target_link_libraries(zendnnl_shared_library INTERFACE nlohmann_json::nlohmann_json)
+    target_link_libraries(zendnnl_shared_library INTERFACE zendnnl::json)
   endif()
 
   if(DEFINED ENV{ZENDNNL_MANYLINUX_BUILD})
@@ -296,17 +317,19 @@ else()
       endif()
     endif()
 
-    zendnnl_add_dependency(NAME onednn
-      PATH "${ZENDNNL_INSTALL_PREFIX}/deps/onednn"
-      LIB_SUFFIX lib64
-      ARCHIVE_FILE "libdnnl.a"
-      ALIAS "DNNL::dnnl")
+    if(ZENDNNL_DEPENDS_ONEDNN)
+      zendnnl_add_dependency(NAME onednn
+        PATH "${ZENDNNL_INSTALL_PREFIX}/deps/onednn"
+        LIB_SUFFIX lib64
+        ARCHIVE_FILE "libdnnl.a"
+        ALIAS "DNNL::dnnl")
 
-    if(ZENDNNL_LIB_BUILD_ARCHIVE)
-      target_link_libraries(zendnnl_library INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,DNNL::dnnl>")
-    endif()
-    if(ZENDNNL_LIB_BUILD_SHARED)
-      target_link_libraries(zendnnl_shared_library INTERFACE DNNL::dnnl)
+      if(ZENDNNL_LIB_BUILD_ARCHIVE)
+        target_link_libraries(zendnnl_library INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,DNNL::dnnl>")
+      endif()
+      if(ZENDNNL_LIB_BUILD_SHARED)
+        target_link_libraries(zendnnl_shared_library INTERFACE DNNL::dnnl)
+      endif()
     endif()
 
   else()
@@ -348,16 +371,18 @@ else()
       endif()
     endif()
 
-    zendnnl_add_dependency(NAME onednn
-      PATH "${ZENDNNL_INSTALL_PREFIX}/deps/onednn"
-      ARCHIVE_FILE "libdnnl.a"
-      ALIAS "DNNL::dnnl")
+    if(ZENDNNL_DEPENDS_ONEDNN)
+      zendnnl_add_dependency(NAME onednn
+        PATH "${ZENDNNL_INSTALL_PREFIX}/deps/onednn"
+        ARCHIVE_FILE "libdnnl.a"
+        ALIAS "DNNL::dnnl")
 
-    if(ZENDNNL_LIB_BUILD_ARCHIVE)
-      target_link_libraries(zendnnl_library INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,DNNL::dnnl>")
-    endif()
-    if(ZENDNNL_LIB_BUILD_SHARED)
-      target_link_libraries(zendnnl_shared_library INTERFACE DNNL::dnnl)
+      if(ZENDNNL_LIB_BUILD_ARCHIVE)
+        target_link_libraries(zendnnl_library INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,DNNL::dnnl>")
+      endif()
+      if(ZENDNNL_LIB_BUILD_SHARED)
+        target_link_libraries(zendnnl_shared_library INTERFACE DNNL::dnnl)
+      endif()
     endif()
   endif()
 

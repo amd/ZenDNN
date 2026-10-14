@@ -38,7 +38,8 @@ if (ZENDNNL_DEPENDS_LIBXSMM)
       # toolchain has no system BLAS to satisfy those symbols, so build BLAS-free
       # to mirror the Linux BLAS=0 build and avoid unresolved externals when
       # linking zendnnl.
-      list(APPEND LIBXSMM_CMAKE_ARGS "-DCMAKE_C_FLAGS=-D__BLAS=0")
+      list(APPEND LIBXSMM_CMAKE_ARGS "-DCMAKE_C_FLAGS=${CMAKE_C_FLAGS} -D__BLAS=0")
+      list(APPEND LIBXSMM_CMAKE_ARGS "-DCMAKE_CXX_FLAGS=${CMAKE_CXX_FLAGS}")
       # LIBXSMM's CMake build globs every src/*.c into xsmm.lib, including the
       # standalone generator tools that each define their own main(). Upstream
       # drops libxsmm_generator_gemm_driver.c but not
@@ -64,6 +65,15 @@ if (ZENDNNL_DEPENDS_LIBXSMM)
     else()
       list(APPEND LIBXSMM_MAKE_ARGS "NOFORTRAN=1")
       list(APPEND LIBXSMM_MAKE_ARGS "BLAS=0")
+      # LIBXSMM's Makefile compiles with $(DFLAGS) $(IFLAGS) $(CTARGET) $(CFLAGS),
+      # so overriding CFLAGS/CXXFLAGS keeps its own ISA and include flags. Pass them
+      # only when non-empty so RPM_OPT_FLAGS defaults are not wiped.
+      if(CMAKE_C_FLAGS)
+        list(APPEND LIBXSMM_MAKE_ARGS "CFLAGS=${CMAKE_C_FLAGS}")
+      endif()
+      if(CMAKE_CXX_FLAGS)
+        list(APPEND LIBXSMM_MAKE_ARGS "CXXFLAGS=${CMAKE_CXX_FLAGS}")
+      endif()
     endif()
 
     message(DEBUG "${ZENDNNL_MSG_PREFIX}LIBXSMM_MAKE_ARGS=${LIBXSMM_MAKE_ARGS}")

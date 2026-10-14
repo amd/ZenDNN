@@ -46,7 +46,16 @@ if(ZENDNNL_DEPENDS_AOCLDLP)
     # The -DXbyak=XbyakAOCL flag renames the namespace at the preprocessor level
     # so both libraries compile to uniquely-named symbols with zero overhead.
     # -------------------------------------------------------------------------
-    list(APPEND AD_CMAKE_ARGS "-DCMAKE_CXX_FLAGS=-DXbyak=XbyakAOCL")
+    # Strip -Werror from flags before passing to third-party AOCL-DLP to prevent
+    # parent build's zero-warning policy from breaking dependency code we don't control.
+    set(AD_C_FLAGS "${CMAKE_C_FLAGS}")
+    set(AD_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+    string(REGEX REPLACE "(^| )-Werror(=[^ ]*)?( |$)" "\\1\\3" AD_C_FLAGS "${AD_C_FLAGS}")
+    string(REGEX REPLACE "(^| )-Werror(=[^ ]*)?( |$)" "\\1\\3" AD_CXX_FLAGS "${AD_CXX_FLAGS}")
+    string(REGEX REPLACE "(^| )/WX( |$)" "\\1\\2" AD_C_FLAGS "${AD_C_FLAGS}")
+    string(REGEX REPLACE "(^| )/WX( |$)" "\\1\\2" AD_CXX_FLAGS "${AD_CXX_FLAGS}")
+    list(APPEND AD_CMAKE_ARGS "-DCMAKE_C_FLAGS=${AD_C_FLAGS}")
+    list(APPEND AD_CMAKE_ARGS "-DCMAKE_CXX_FLAGS=${AD_CXX_FLAGS} -DXbyak=XbyakAOCL")
 
     message(DEBUG "${ZENDNNL_MSG_PREFIX}AOCLDLP_CMAKE_ARGS=${AD_CMAKE_ARGS}")
 
