@@ -241,10 +241,12 @@ TEST(TestMatmulUnreorderRoute,
         ExplicitAoclPackedPromptOverridesGlobalOneDnnBackend) {
     // The grouped route serves the prompt either way: AOCL with the BF16
     // single-expert prompt tile off, the CK prompt tile with it on.
+    // M == kDecodeMaxM is decode (Rule 0.45, custom-kernel N-tile) and does
+    // not consult this knob.
     for (const bool prompt_tile : {false, true}) {
         SCOPED_TRACE(prompt_tile ? "prompt tile on" : "prompt tile off");
         mt::SingleExpertPromptTileOverride knob(prompt_tile ? 1 : 0);
-        run_route_case(/*packed_input=*/true, /*M=*/64,
+        run_route_case(/*packed_input=*/true, /*M=*/matmul::kDecodeMaxM + 1,
                 /*expect_custom=*/prompt_tile,
                 /*expect_derived_cache_hit=*/false,
                 /*trans_b=*/true, /*ldb_padding=*/0, /*weight_cache_mode=*/1,
@@ -463,7 +465,7 @@ TEST(TestMatmulUnreorderRoute, PackedPromptStaysBlockedAndSkipsUnreorder) {
     // The packed bytes must flow directly to AOCL; the AOCL-derived final CK
     // cache remains cold.
     mt::SingleExpertPromptTileOverride prompt_tile_off(0);
-    run_route_case(true, /*M=*/64, /*expect_custom=*/false,
+    run_route_case(true, /*M=*/matmul::kDecodeMaxM + 1, /*expect_custom=*/false,
             /*expect_derived_cache_hit=*/false);
 }
 
@@ -471,7 +473,7 @@ TEST(TestMatmulUnreorderRoute, PackedPromptUsesPromptTileCk) {
     // By default a BF16 prompt runs the CK prompt tile executor: the packed
     // bytes are unreordered once into the derived CK cache.
     mt::SingleExpertPromptTileOverride prompt_tile_on(1);
-    run_route_case(true, /*M=*/64, /*expect_custom=*/true,
+    run_route_case(true, /*M=*/matmul::kDecodeMaxM + 1, /*expect_custom=*/true,
             /*expect_derived_cache_hit=*/true);
 }
 

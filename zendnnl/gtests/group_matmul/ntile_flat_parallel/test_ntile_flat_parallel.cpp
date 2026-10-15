@@ -1128,8 +1128,9 @@ TEST(W8A8MoEDispatch, AutoPromptPhase4ExecutesEligibleCall) {
     clear_fused_moe_scratch();
     ASSERT_EQ(w8a8::packed_weight_cache_size(), 0u);
 
-    // One expert with M=40 is prompt-class (strictly above 32).
-    const auto p = make_problem(/*E=*/1, /*H=*/64, /*I=*/32, /*T=*/40,
+    // One expert with M just above kDecodeMaxM is prompt-class.
+    const int64_t prompt_m = static_cast<int64_t>(kDecodeMaxM) + 1;
+    const auto p = make_problem(/*E=*/1, /*H=*/64, /*I=*/32, /*T=*/prompt_m,
             /*topk=*/1, /*seed=*/79);
     auto call = build_call(p, /*num_threads=*/2);
     moe_test_utils::AutoPromptAlgoOverride prompt_w8a8(4);
@@ -1682,9 +1683,11 @@ TEST(W8A8MoEFallback, PromptGeometryMissInheritsAlgo1Policy) {
     using namespace zendnnl::lowoha::matmul;
     clear_fused_moe_scratch();
 
-    // M=64 is prompt-class. H=48 deliberately misses ALGO4 alignment, while
-    // latest main's unpinned prompt policy routes the declined call to ALGO1.
-    const auto p = make_problem(/*E=*/1, /*H=*/48, /*I=*/32, /*T=*/64,
+    // M just above kDecodeMaxM is prompt-class. H=48 deliberately misses
+    // ALGO4 alignment, while latest main's unpinned prompt policy routes
+    // the declined call to ALGO1.
+    const int64_t prompt_m = static_cast<int64_t>(kDecodeMaxM) + 1;
+    const auto p = make_problem(/*E=*/1, /*H=*/48, /*I=*/32, /*T=*/prompt_m,
             /*topk=*/1, /*seed=*/139);
     auto generic_baseline = build_call(p, /*num_threads=*/2);
     ASSERT_EQ(generic_baseline->run(/*algo=*/1), status_t::success);

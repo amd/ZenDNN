@@ -6677,10 +6677,13 @@ TEST(TestGroupMatmulAutoPhaseEnv, PerGroupInt8KeepsShapeRules) {
         int groups, num_ops, m, algo;
         const char *reason;
     };
-    for (const auto &c : {layer_case {90, 4, 64, 1, "auto_rule07_prompt_seq"},
-                 layer_case {90, 4, 2, 1, "auto_rule05_few_active"},
-                 layer_case {90, 16, 2, 3, "auto_phase_env"},
-                 layer_case {1, 4, 64, 1, "auto_rule07_prompt_seq"}}) {
+    // M == kDecodeMaxM is decode. Prompt cases sit one row above it.
+    const int prompt_m = kDecodeMaxM + 1;
+    for (const auto &c :
+            {layer_case {90, 4, prompt_m, 1, "auto_rule07_prompt_seq"},
+                    layer_case {90, 4, 2, 1, "auto_rule05_few_active"},
+                    layer_case {90, 16, 2, 3, "auto_phase_env"},
+                    layer_case {1, 4, prompt_m, 1, "auto_rule07_prompt_seq"}}) {
         auto s = build_auto_probe(c.m, /*K=*/2880, /*N=*/5760, c.num_ops,
                 /*num_threads=*/32);
         for (size_t i = 0; i < s.params.size(); ++i) {
@@ -6941,7 +6944,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, PromptManyExpertsDeepRoutesToAlgo1) {
     AlgoEnvGuard reset_algo(0);
     // No phase-env override — exercises the default prompt policy.
 
-    // Prompt-class: max_M=768 > kDecodeMaxM(32); 88 active experts on 64
+    // Prompt-class: max_M=768 > kDecodeMaxM; 88 active experts on 64
     // threads (active_ops > num_threads).  Deep side of the retired gate:
     // 768/88 = 8.7 rows per expert cleared 0.9*sqrt(64) = 7.2.
     auto s = build_auto_probe(/*M=*/768, /*K=*/2048, /*N=*/1536,
@@ -6960,9 +6963,10 @@ TEST(TestGroupMatmulAutoPhaseEnv, PromptManyExpertsThinRoutesToAlgo1) {
     reset_grp_matmul_caches();
     AlgoEnvGuard reset_algo(0);
 
-    // Same 88-expert / 64-thread frame, but max_M=64 → 0.7 rows per expert,
-    // far under the 7.2 the retired gate demanded of a 64-thread team.
-    auto s = build_auto_probe(/*M=*/64, /*K=*/2048, /*N=*/1536,
+    // Same 88-expert / 64-thread frame, but the shallowest prompt
+    // (M = kDecodeMaxM + 1). 65/88 ≈ 0.7 rows per expert, still far under
+    // the 7.2 the retired gate demanded. M == kDecodeMaxM is decode.
+    auto s = build_auto_probe(/*M=*/kDecodeMaxM + 1, /*K=*/2048, /*N=*/1536,
             /*num_ops=*/88, /*num_threads=*/64);
     apply_shape_rules_probe(s);
     EXPECT_EQ(select_grp_matmul_algo(
@@ -6998,19 +7002,16 @@ TEST(TestGroupMatmulAutoPhaseEnv, PromptWideNRoutesToAlgo1) {
     reset_grp_matmul_caches();
     AlgoEnvGuard reset_algo(0);
 
-    // 8 actives × M=8 on 64 threads: total_need = 8*ceil(8/16) = 8, 2*8=16
-    // <= 64; max_M=8 > 1 → wide-N regime.  Prompt-class because... max_M=8
-    // <= kDecodeMaxM(32) would be DECODE.  Use M=40 (>32 prompt) but keep
-    // total_need*2 <= num_threads: 8*ceil(40/16)=8*3=24, 2*24=48 <= 64. ✓
-    auto s = build_auto_probe(/*M=*/40, /*K=*/2048, /*N=*/1536,
+    // Few actives and a shallow prompt. M must exceed kDecodeMaxM; M==64
+    // is decode and would take Rule 0.5 instead of Rule 0.7.
+    auto s = build_auto_probe(/*M=*/kDecodeMaxM + 1, /*K=*/2048, /*N=*/1536,
             /*num_ops=*/8, /*num_threads=*/64);
     apply_shape_rules_probe(s);
     EXPECT_EQ(select_grp_matmul_algo(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             1)
-            << "prompt-class wide-N (8 actives × M=40 / 64t: total_need*2=48 "
-               "<= 64, "
-               "max_M=40 > 1) must route to ALGO 1 (sequential full-team)";
+            << "prompt-class wide-N (8 actives, M just above kDecodeMaxM) "
+               "must route to ALGO 1 (sequential full-team)";
 }
 
 TEST(TestGroupMatmulAutoPhaseEnv, S8FewExpertsDecodeStillTakesRule05) {
@@ -7276,13 +7277,13 @@ TEST(TestGroupMatmulAutoPhaseEnv, DecodeEnvDoesNotLeakIntoPrompt) {
 TEST(TestGroupMatmulAutoPhaseEnv, SharedClassifierUsesBoundaryAndActivePrefix) {
     using namespace zendnnl::lowoha::matmul;
 
-    EXPECT_EQ(classify_grp_matmul_phase(std::vector<int> {0, 32}),
+    EXPECT_EQ(classify_grp_matmul_phase(std::vector<int> {0, kDecodeMaxM}),
             grp_matmul_phase::decode);
-    EXPECT_EQ(classify_grp_matmul_phase(std::vector<int> {0, 33}),
+    EXPECT_EQ(classify_grp_matmul_phase(std::vector<int> {0, kDecodeMaxM + 1}),
             grp_matmul_phase::prompt);
-    EXPECT_EQ(classify_grp_matmul_phase(/*max_active_m=*/32),
+    EXPECT_EQ(classify_grp_matmul_phase(/*max_active_m=*/kDecodeMaxM),
             grp_matmul_phase::decode);
-    EXPECT_EQ(classify_grp_matmul_phase(/*max_active_m=*/33),
+    EXPECT_EQ(classify_grp_matmul_phase(/*max_active_m=*/kDecodeMaxM + 1),
             grp_matmul_phase::prompt);
 
     // The trailing 4096-row expert is prepack-only. Classification of the
@@ -7455,8 +7456,8 @@ TEST(TestGroupMatmulAutoPhaseEnv,
 
     // Default-policy refinements must not be suppressed by treating phase 4
     // as a literal pin.
-    auto wide_prompt = build_auto_probe(/*M=*/40, /*K=*/2048, /*N=*/8192,
-            /*num_ops=*/8, /*num_threads=*/64);
+    auto wide_prompt = build_auto_probe(/*M=*/kDecodeMaxM + 1, /*K=*/2048,
+            /*N=*/8192, /*num_ops=*/8, /*num_threads=*/64);
     apply_shape_rules_probe(wide_prompt);
     auto_algo_trace prompt_trace;
     EXPECT_EQ(select_grp_matmul_algo(wide_prompt.layout, wide_prompt.M,
@@ -7496,8 +7497,8 @@ TEST(TestGroupMatmulAutoPhaseEnv, ExplicitPromptAlgo2PinBeatsRegimeRouting) {
     reset_grp_matmul_caches();
     AlgoEnvGuard reset_algo(0);
 
-    // Wide-N prompt frame: few experts, modest M, large thread count.
-    auto s = build_auto_probe(/*M=*/40, /*K=*/2048, /*N=*/8192,
+    // Prompt frame: few experts, M just above the decode cutoff.
+    auto s = build_auto_probe(/*M=*/kDecodeMaxM + 1, /*K=*/2048, /*N=*/8192,
             /*num_ops=*/8, /*num_threads=*/64);
     EXPECT_EQ(select_grp_matmul_algo(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
@@ -7563,14 +7564,14 @@ TEST(TestGroupMatmulAutoPhaseEnv, TraceNamesTheMatchedRule) {
             "auto_rule0_capacity");
     EXPECT_EQ(algo, 1);
 
-    // Rule 0.7 — inherited prompt default on a wide-N frame.
-    EXPECT_EQ(reason_for(/*M=*/40, /*K=*/2048, /*N=*/8192, /*num_ops=*/8,
-                      /*num_threads=*/64, &algo),
+    // Rule 0.7 — inherited prompt default. M == kDecodeMaxM is decode.
+    EXPECT_EQ(reason_for(/*M=*/kDecodeMaxM + 1, /*K=*/2048, /*N=*/8192,
+                      /*num_ops=*/8, /*num_threads=*/64, &algo),
             "auto_rule07_prompt_seq");
     EXPECT_EQ(algo, 1);
 
     // A BF16/FP16 layer of several experts, in either phase.
-    for (const int M : {8, 40}) {
+    for (const int M : {8, kDecodeMaxM + 1}) {
         EXPECT_EQ(reason_for(M, /*K=*/2048, /*N=*/8192, /*num_ops=*/4,
                           /*num_threads=*/64, &algo, /*shape_rules=*/false),
                 "auto_algo3")
@@ -7581,8 +7582,8 @@ TEST(TestGroupMatmulAutoPhaseEnv, TraceNamesTheMatchedRule) {
     // An explicit pin reports itself, not the rule it pre-empted.
     {
         AutoPromptAlgoOverride pin_prompt(6);
-        EXPECT_EQ(reason_for(/*M=*/40, /*K=*/2048, /*N=*/8192, /*num_ops=*/8,
-                          /*num_threads=*/64, &algo),
+        EXPECT_EQ(reason_for(/*M=*/kDecodeMaxM + 1, /*K=*/2048, /*N=*/8192,
+                          /*num_ops=*/8, /*num_threads=*/64, &algo),
                 "auto_phase_env");
         EXPECT_EQ(algo, 6);
     }
@@ -7597,7 +7598,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, InvalidPromptValueFallsBackToDefault) {
     reset_grp_matmul_caches();
     AlgoEnvGuard reset_algo(0);
 
-    auto s = build_auto_probe(/*M=*/40, /*K=*/2048, /*N=*/8192,
+    auto s = build_auto_probe(/*M=*/kDecodeMaxM + 1, /*K=*/2048, /*N=*/8192,
             /*num_ops=*/8, /*num_threads=*/64);
 
     for (const int bogus : {7, 99, 1000}) {
@@ -11979,9 +11980,11 @@ TEST(TestGroupMatmulInt8Kblock, AutomaticGateScope) {
     }
     {
         SCOPED_TRACE("prompt stays straight in automatic mode");
-        expect_int8_kblock_gate(/*M=*/64, deep_K, /*with_bias=*/false,
+        // M == kDecodeMaxM is decode. Prompt starts one row above it.
+        const int prompt_m = zendnnl::lowoha::matmul::kDecodeMaxM + 1;
+        expect_int8_kblock_gate(prompt_m, deep_K, /*with_bias=*/false,
                 /*expected=*/false);
-        expect_int8_kblock_gate(/*M=*/64, deep_K, /*with_bias=*/false,
+        expect_int8_kblock_gate(prompt_m, deep_K, /*with_bias=*/false,
                 /*expected=*/true, /*num_ops=*/1, /*kblock_mode=*/1);
     }
 }
@@ -12284,14 +12287,16 @@ TEST(TestGroupMatmulKblock, AutoEnablesOnSingleExpertDecode) {
             /*ldc_pad=*/0, /*expect_kblock=*/true, "kblock_auto_decode");
 }
 
-// Same shape past the decode M ceiling: automatic enablement must stay off,
-// which is what keeps prompt-class calls on the straight-line path.
+// One row past the decode ceiling: M == kDecodeMaxM is still decode, so
+// automatic enablement must stay off only above it. That is what keeps
+// prompt-class calls on the straight-line path.
 TEST(TestGroupMatmulKblock, AutoStaysOffAboveDecodeM) {
+    using zendnnl::lowoha::matmul::kDecodeMaxM;
     KblockThreadGuard tg(8);
     if (!require_min_threads(8)) {
         GTEST_SKIP() << "Requires >= 8 OMP threads.";
     }
-    run_kblock_case(/*num_threads=*/8, /*M=*/64, /*N=*/64 * 8,
+    run_kblock_case(/*num_threads=*/8, /*M=*/kDecodeMaxM + 1, /*N=*/64 * 8,
             /*K=*/kblock_min_K(64), /*nr=*/64, /*kblock_mode=*/2,
             /*with_bias=*/false, /*f32_dst=*/false, /*lda_pad=*/0,
             /*ldc_pad=*/0, /*expect_kblock=*/false, "kblock_auto_prompt");
