@@ -234,13 +234,15 @@ inline void split_cols(int N, int ns, int pack_nr, std::vector<int> &starts) {
 }
 
 /// Whether `dense_sizes` suits a single dense layer: every team gets at
-/// least `mb_min` rows, and the weights fit the L3 share a team walks M-block
-/// major (`bm_l3_pct`).  A wide-N head (e.g. a 262144-column LM head) or a
-/// short M keeps the shrink loop's many small tiles.
-inline bool dense_fits(
-        int M, int N, int K, const PlannerConfig &cfg, int n_teams) {
+/// least `mb_min` rows, every team thread at least one pack-width column
+/// block, and the weights fit the L3 share a team walks M-block major
+/// (`bm_l3_pct`).  A wide-N head (e.g. a 262144-column LM head), a narrow N
+/// or a short M keeps the shrink loop's many small tiles.
+inline bool dense_fits(int M, int N, int K, const PlannerConfig &cfg,
+        int n_teams, int team_max) {
     const int64_t b_bytes = static_cast<int64_t>(N) * wei_col_bytes(K, cfg);
     return M >= static_cast<int64_t>(n_teams) * cfg.tun[kMbMin]
+            && N / std::max(cfg.pack_nr, 1) >= team_max
             && b_bytes <= cfg.l3_bytes_per_team * cfg.tun[kBmL3Pct] / 100;
 }
 
@@ -371,9 +373,12 @@ inline void plan_tiles(const int *M, const int *N, const int *K, int num_ops,
     const int align = std::max(cfg.row_align, 1);
     int mb = mb_knob > 0 ? mb_knob : auto_mb(K[lead], cfg);
     int ns = ns_knob > 0 ? ns_knob : auto_ns(K[lead], N[lead], cfg);
+    int team_max = 1;
+    for (int t = 0; t < n_teams; ++t)
+        team_max = std::max(team_max, team_size[t]);
     const bool dense = cfg.single_dense && order.size() == 1 && mb_knob <= 0
             && ns_knob <= 0
-            && dense_fits(M[lead], N[lead], K[lead], cfg, n_teams);
+            && dense_fits(M[lead], N[lead], K[lead], cfg, n_teams, team_max);
     if (dense)
         dense_sizes(M[lead], N[lead], K[lead], cfg, team_size, n_teams, mb, ns);
     const int64_t want = static_cast<int64_t>(cfg.tun[kMinTiles])

@@ -323,9 +323,11 @@ TEST(PromptTilePlanner, SingleDenseLayerSplitsEvenlyPerThread) {
             EXPECT_LE(std::abs(tile.ncols / cfg.pack_nr - nblk / 4), 1);
     }
 
-    // A 262144-column LM head and a 100-row call keep the shrink loop.
-    for (const auto &[m, n, k] :
-            {std::tuple {256, 262144, 640}, std::tuple {100, 768, 768}}) {
+    // A 262144-column LM head, a 100-row call, and an N with fewer pack-width
+    // blocks than a team has threads keep the shrink loop.
+    for (const auto &[m, n, k] : {std::tuple {256, 262144, 640},
+                 std::tuple {100, 768, 768}, std::tuple {512, 32, 1024},
+                 std::tuple {512, 64, 1024}, std::tuple {512, 96, 1024}}) {
         pt::PlannerConfig cfg;
         cfg.num_threads = 32;
         cfg.single_dense = true;
@@ -336,6 +338,7 @@ TEST(PromptTilePlanner, SingleDenseLayerSplitsEvenlyPerThread) {
         EXPECT_EQ(dense.tiles.size(), plain.tiles.size()) << "M=" << m;
         EXPECT_EQ(dense.mb, plain.mb) << "M=" << m;
         EXPECT_EQ(dense.ns, plain.ns) << "M=" << m;
+        EXPECT_GE(dense.tiles.size(), 32u) << "every thread gets a tile";
     }
 
     const int M = 2048, N = 768, K = 768;
@@ -1369,12 +1372,14 @@ TEST(PromptTileExecutor, F16FamilyGate) {
     {
         PtOverride f16_on(pt::kEnable, 8);
         EXPECT_TRUE(pt::should_run(kctx, /*use_custom=*/true,
-                /*rounds_strategy=*/true, /*prompt_phase=*/true, M, N));
+                /*rounds_strategy=*/true, /*prompt_phase=*/true, M, N,
+                /*single_expert_prompt=*/false));
     }
     {
         PtOverride bf16_only(pt::kEnable, 1);
         EXPECT_FALSE(pt::should_run(kctx, /*use_custom=*/true,
-                /*rounds_strategy=*/true, /*prompt_phase=*/true, M, N));
+                /*rounds_strategy=*/true, /*prompt_phase=*/true, M, N,
+                /*single_expert_prompt=*/false));
     }
 }
 
@@ -1416,11 +1421,12 @@ TEST(PromptTileExecutor, DecodeCallsNeverEngage) {
 }
 
 // A single-expert BF16 call (a dense layer) runs the tile executor, which
-// splits its M across teams, bitwise equal to rounds.
+// splits its M across teams, bitwise equal to rounds.  These layers are
+// narrower than decode's N-tile count, so only `..._FORCE_CK` covers them.
 TEST(PromptTileExecutor, SingleBf16ExpertMatchesRoundsBitwise) {
     SKIP_WITHOUT_BF16_CUSTOM_KERNEL();
     using namespace moe_test_utils;
-    SingleExpertPromptTileOverride on(1);
+    SingleExpertCkPolicy on(1, 1, 1);
     for (const auto &M : {std::vector<int> {300}, std::vector<int> {2048}}) {
         for (const auto act : {grp_matmul_gated_act_t::none,
                      grp_matmul_gated_act_t::gelu_and_mul,
@@ -1473,11 +1479,11 @@ TEST(PromptTileExecutor, SingleBf16ExpertWideMrMatchesNarrowRounds) {
         SCOPED_TRACE(describe(c));
         RunOut narrow, wide;
         {
-            SingleExpertPromptTileOverride off(0);
+            SingleExpertCkPolicy off(0, 0, 0);
             narrow = run_case(c, 0);
         }
         {
-            SingleExpertPromptTileOverride on(1);
+            SingleExpertCkPolicy on(1, 1, 1);
             wide = run_case(c, 1);
         }
         ASSERT_EQ(narrow.mode.find("ptile"), std::string::npos) << narrow.mode;
@@ -1497,7 +1503,7 @@ TEST(PromptTileExecutor, SingleBf16ExpertWideMrMatchesNarrowRounds) {
 TEST(PromptTileExecutor, AutoSingleExpertFollowsCkEpilogue) {
     SKIP_WITHOUT_BF16_CUSTOM_KERNEL();
     using namespace moe_test_utils;
-    SingleExpertPromptTileOverride on(1);
+    SingleExpertCkPolicy on(1, 1, 1);
     {
         Case plain;
         plain.M = {300};
@@ -1564,7 +1570,7 @@ TEST(PromptTileExecutor, AutoSingleExpertFusedFfnBothPasses) {
             reset_grp_matmul_caches();
             AlgoEnvGuard algo(0);
             CustomKernelOverride ck_on(true);
-            SingleExpertPromptTileOverride ovr(knob);
+            SingleExpertCkPolicy ovr(knob, knob, knob);
             const std::vector<const void *> srcs {src.data()},
                     wei1 {w13.data()}, wei2 {w2.data()}, no_bias {nullptr};
             auto gv = GemmVecs::uniform(1, M, N13, f.H);
@@ -1613,14 +1619,14 @@ TEST(PromptTileExecutor, AutoSingleExpertFusedFfnBothPasses) {
 
 // The single-expert scope is a call of one expert: one active expert among
 // idle MoE slots keeps the round executor with the knob on, as does a single
-// expert with the knob off.  FP16 keeps the multi-expert scope.
+// expert with the knob off.  An FP16 single expert follows the same knobs.
 TEST(PromptTileExecutor, SingleActiveExpertOutsideScopeNeverEngages) {
     SKIP_WITHOUT_BF16_CUSTOM_KERNEL();
     using namespace moe_test_utils;
     for (const auto &[knob, M] : {std::pair {1, std::vector<int> {0, 300, 0}},
                  std::pair {0, std::vector<int> {300}},
                  std::pair {0, std::vector<int> {0, 300, 0}}}) {
-        SingleExpertPromptTileOverride ovr(knob);
+        SingleExpertCkPolicy ovr(knob, knob, 0);
         Case c;
         c.M = M;
         SCOPED_TRACE(describe(c) + " knob=" + std::to_string(knob));
@@ -1630,15 +1636,18 @@ TEST(PromptTileExecutor, SingleActiveExpertOutsideScopeNeverEngages) {
         EXPECT_EQ(r.served, 0);
     }
     if (!zendnnl::lowoha::matmul::custom_kernel::avx512f16_available()) return;
-    SingleExpertPromptTileOverride on(1);
     Case c;
     c.M = {300};
     c.src_dt = data_type_t::f16;
     c.dst_dt = data_type_t::f16;
     SCOPED_TRACE(describe(c));
-    const RunOut r = run_case(c, 8);
-    EXPECT_EQ(r.mode.find("ptile"), std::string::npos) << r.mode;
-    EXPECT_EQ(r.served, 0);
+    for (const int knob : {0, 1}) {
+        SingleExpertCkPolicy ovr(knob, knob, knob);
+        const RunOut r = run_case(c, 8);
+        EXPECT_EQ(r.mode.find("ptile") != std::string::npos, knob == 1)
+                << r.mode;
+        EXPECT_EQ(r.served, knob);
+    }
 }
 
 TEST(PromptTileExecutor, KnobOffOrNonCustomNeverEngage) {
@@ -1748,6 +1757,7 @@ TEST(PromptTileAuto, AutoSendsBf16PromptsToAlgo3) {
     AlgoEnvGuard algo0(0);
     CustomKernelOverride ck_on(true);
     PtOverride enable(pt::kEnable, 1);
+    SingleExpertCkPolicy single_expert_off(0, 0, 0);
     reset_grp_matmul_caches();
 
     // Routed gate-up and down projections; the lone shared expert keeps the
@@ -1768,6 +1778,7 @@ TEST(PromptTileAuto, AutoSendsF16PromptsToAlgo3) {
     AlgoEnvGuard algo0(0);
     CustomKernelOverride ck_on(true);
     CustomKernelF16Override ck_f16_on(true);
+    SingleExpertCkPolicy single_expert_off(0, 0, 0);
     reset_grp_matmul_caches();
 
     EXPECT_EQ(auto_pick(auto_probe(

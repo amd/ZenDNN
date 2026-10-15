@@ -5532,12 +5532,19 @@ void flat_n_tile(const std::vector<char> &layout,
     // Takes over the calls the planner sent to the round executor; the
     // decode strategies, Sequential and every non-custom path keep their
     // executors.  See `prompt_tile/prompt_tile_executor.hpp`.
+    const bool rounds_strategy = plan.strategy == GroupNTileStrategy::FewExperts
+            || plan.strategy == GroupNTileStrategy::ManyExperts;
+    const bool prompt_phase
+            = classify_grp_matmul_phase(M, static_cast<size_t>(num_ops))
+            != grp_matmul_phase::decode;
+    // Only a prompt the round executor would run can take the tile.
+    const bool single_expert_prompt = rounds_strategy && prompt_phase
+            && num_ops == 1 && !params.empty()
+            && !(params[0].active_matmul > 0 && params[0].total_matmul > 1)
+            && grp_matmul_single_expert_ck(params[0], K[0], N[0], num_threads)
+                       .prompt;
     bool run_prompt_tile = prompt_tile::should_run(kctx, use_custom,
-            plan.strategy == GroupNTileStrategy::FewExperts
-                    || plan.strategy == GroupNTileStrategy::ManyExperts,
-            classify_grp_matmul_phase(M, static_cast<size_t>(num_ops))
-                    != grp_matmul_phase::decode,
-            M, N);
+            rounds_strategy, prompt_phase, M, N, single_expert_prompt);
     // INT8 and W4A8 tiles read the hoisted A and its CK scale views; an
     // expert that `do_tile` would send to AOCL, or a static U8xS8 one (its
     // per-tensor epilogue is not tiled), keeps the call on rounds.

@@ -44,6 +44,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -1003,6 +1004,15 @@ struct DenseDecodeNTileOverride {
     DenseDecodeNTileOverride &operator=(DenseDecodeNTileOverride &&) = delete;
 };
 
+// Single-expert knob value for a test override: `1` = every dtype, `0` = none,
+// `-1` = the env path.  `SingleExpertCkMasks` takes dtype masks instead (where
+// `1` is BF16 only).
+inline int single_expert_knob(int value) {
+    return value == 1
+            ? static_cast<int>(zendnnl::lowoha::matmul::kSingleExpertAll)
+            : value;
+}
+
 // RAII guard for `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE`.  `1` = on
 // (the production default), `0` = off, `-1` = restore the env path.
 struct SingleExpertPromptTileOverride {
@@ -1010,7 +1020,8 @@ struct SingleExpertPromptTileOverride {
     explicit SingleExpertPromptTileOverride(int value) {
         prev = zendnnl::lowoha::matmul::test_api ::
                        s_grp_matmul_single_expert_prompt_tile_override.exchange(
-                               value, std::memory_order_relaxed);
+                               single_expert_knob(value),
+                               std::memory_order_relaxed);
     }
     ~SingleExpertPromptTileOverride() {
         zendnnl::lowoha::matmul::test_api ::
@@ -1022,6 +1033,75 @@ struct SingleExpertPromptTileOverride {
     SingleExpertPromptTileOverride &operator=(
             const SingleExpertPromptTileOverride &)
             = delete;
+};
+
+// RAII guard for `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_DECODE_TILE`.  `1` = on
+// (the production default), `0` = off, `-1` = restore the env path.
+struct SingleExpertDecodeTileOverride {
+    int prev;
+    explicit SingleExpertDecodeTileOverride(int value) {
+        prev = zendnnl::lowoha::matmul::test_api ::
+                       s_grp_matmul_single_expert_decode_tile_override.exchange(
+                               single_expert_knob(value),
+                               std::memory_order_relaxed);
+    }
+    ~SingleExpertDecodeTileOverride() {
+        zendnnl::lowoha::matmul::test_api ::
+                s_grp_matmul_single_expert_decode_tile_override.store(
+                        prev, std::memory_order_relaxed);
+    }
+    SingleExpertDecodeTileOverride(const SingleExpertDecodeTileOverride &)
+            = delete;
+    SingleExpertDecodeTileOverride &operator=(
+            const SingleExpertDecodeTileOverride &)
+            = delete;
+};
+
+// Sets all three single-expert CK knobs for a scope (`-1` = env path).
+struct SingleExpertCkPolicy {
+    SingleExpertPromptTileOverride prompt;
+    SingleExpertDecodeTileOverride decode;
+    struct Force {
+        int prev;
+        explicit Force(int value) {
+            prev = zendnnl::lowoha::matmul::test_api ::
+                           s_grp_matmul_single_expert_force_ck_override
+                                   .exchange(single_expert_knob(value),
+                                           std::memory_order_relaxed);
+        }
+        ~Force() {
+            zendnnl::lowoha::matmul::test_api ::
+                    s_grp_matmul_single_expert_force_ck_override.store(
+                            prev, std::memory_order_relaxed);
+        }
+    } force;
+    SingleExpertCkPolicy(int prompt_tile, int decode_tile, int force_ck)
+        : prompt(prompt_tile), decode(decode_tile), force(force_ck) {}
+    SingleExpertCkPolicy(const SingleExpertCkPolicy &) = delete;
+    SingleExpertCkPolicy &operator=(const SingleExpertCkPolicy &) = delete;
+};
+
+// Sets the three single-expert knobs to dtype masks (`single_expert_dtype`).
+struct SingleExpertCkMasks {
+    std::array<int, 3> prev;
+    SingleExpertCkMasks(
+            unsigned prompt_tile, unsigned decode_tile, unsigned force_ck) {
+        namespace ta = zendnnl::lowoha::matmul::test_api;
+        prev = {ta::s_grp_matmul_single_expert_prompt_tile_override.exchange(
+                        static_cast<int>(prompt_tile)),
+                ta::s_grp_matmul_single_expert_decode_tile_override.exchange(
+                        static_cast<int>(decode_tile)),
+                ta::s_grp_matmul_single_expert_force_ck_override.exchange(
+                        static_cast<int>(force_ck))};
+    }
+    ~SingleExpertCkMasks() {
+        namespace ta = zendnnl::lowoha::matmul::test_api;
+        ta::s_grp_matmul_single_expert_prompt_tile_override.store(prev[0]);
+        ta::s_grp_matmul_single_expert_decode_tile_override.store(prev[1]);
+        ta::s_grp_matmul_single_expert_force_ck_override.store(prev[2]);
+    }
+    SingleExpertCkMasks(const SingleExpertCkMasks &) = delete;
+    SingleExpertCkMasks &operator=(const SingleExpertCkMasks &) = delete;
 };
 
 // RAII override for the decode ALGO 5 pin QUALIFIER

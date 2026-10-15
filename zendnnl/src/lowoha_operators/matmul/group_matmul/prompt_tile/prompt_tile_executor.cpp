@@ -178,11 +178,11 @@ std::string join_knobs(const Tunables &k) {
 
 bool should_run(const custom_kernel::CallContext &kctx, bool use_custom,
         bool rounds_strategy, bool prompt_phase, const std::vector<int> &M,
-        const std::vector<int> &N) {
+        const std::vector<int> &N, bool single_expert_prompt) {
     if (!use_custom || !kctx.enabled || !rounds_strategy || !prompt_phase)
         return false;
     Family fam = Family::kBf16;
-    if (!family_of(kctx.variant, fam) || !enabled(fam)) return false;
+    if (!family_of(kctx.variant, fam)) return false;
     if (facts(fam).kblock && grp_matmul_kblock_enabled(kctx.kblock_auto))
         return false;
     if (kctx.pack_nr <= 0) return false;
@@ -192,13 +192,13 @@ bool should_run(const custom_kernel::CallContext &kctx, bool use_custom,
         if (N[e] <= 0 || N[e] % kctx.pack_nr != 0) return false;
         ++active;
     }
-    // A single-expert BF16 call (a dense layer) splits its M across teams the
-    // same way a heavy shared expert does.  One active expert among idle MoE
-    // slots and the other families keep the multi-expert scope.
-    if (active == 1)
-        return M.size() == 1 && fam == Family::kBf16
-                && get_grp_matmul_single_expert_prompt_tile();
-    return active > 1;
+    // A single-expert call (a dense layer) splits its M across teams the same
+    // way a heavy shared expert does, under the single-expert CK policy
+    // rather than the multi-expert family mask; `enable=0` still keeps every
+    // prompt on rounds.  One active expert among idle MoE slots keeps
+    // the multi-expert scope.
+    if (active == 1) return single_expert_prompt && global_value(kEnable) != 0;
+    return active > 1 && enabled(fam);
 }
 
 void execute(const custom_kernel::CallContext &kctx, const CallView &call,

@@ -554,6 +554,35 @@ TEST(GroupMatmulW4A8PerGroup, Algo3PromptTileMatchesRoundsBF16) {
     }
 }
 
+// A single W4A8 expert (a dense layer) runs the prompt tile under
+// FORCE_CK (the layer is narrower than decode's N-tile count), whatever the
+// family mask, and writes exactly what the round executor writes.
+TEST(GroupMatmulW4A8PerGroup, Algo3SingleExpertPromptTileMatchesRounds) {
+    if (!zendnnl::lowoha::matmul::custom_kernel::avx512vnni_available()) {
+        GTEST_SKIP() << "AVX-512 VNNI not available on this host";
+    }
+    using namespace moe_test_utils;
+    const uint64_t K = 512, N = 512, group_size = 64, G = K / group_size;
+    const data_type_t scale_dt = data_type_t::bf16;
+    SingleExpertCkPolicy force(1, 1, 1);
+    for (const int rows : {300, 2048}) {
+        SCOPED_TRACE(::testing::Message() << "M=" << rows);
+        tensor_factory_t tf;
+        const uint64_t M = static_cast<uint64_t>(rows);
+        auto ws = tf.uniform_dist_tensor({G, N}, scale_dt, 2.0);
+        std::vector<tensor_t> wt {tf.uniform_dist_tensor(
+                {K, N}, data_type_t::s4, 7.0, false, ws)};
+        auto ss = tf.zero_tensor({M, 1u}, scale_dt);
+        std::vector<tensor_t> inp {tf.uniform_dist_tensor(
+                {M, K}, data_type_t::bf16, 2.0, false, ss, tensor_t())};
+        std::vector<tensor_t> bias {
+                tf.uniform_dist_tensor({1u, N}, data_type_t::bf16, 2.0)};
+        std::vector<tensor_t> out {tf.zero_tensor({M, N}, data_type_t::bf16)};
+        expect_prompt_tile_matches_rounds(/*mask=*/9, /*mb=*/0, /*ns=*/0, inp,
+                wt, bias, out, /*gated_act=*/nullptr, {rows});
+    }
+}
+
 // The s4 microkernel applies one source scale per row.  A caller that supplies
 // per-group source scales `{M, G}` must therefore stay on ALGO 3's AOCL path;
 // only the production `{M, 1}` source + `{G, N}` weight combination may use CK.

@@ -39,6 +39,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -192,8 +193,8 @@ inline constexpr const char *grp_matmul_phase_name(grp_matmul_phase phase) {
 //       be decode-gated.
 //   `is_dense_ffn_decode` (adds the decode gate) guards Rule 0.45 ALGO-3
 //       routing and the auto deep-K K-blocking in `prepare_for_call`; both
-//       must fire only in decode, since single-expert prompt has its own
-//       path (ALGO 1).
+//       must fire only in decode (a single-expert prompt takes Rule 0.46 or
+//       Rule 0.7).
 inline bool is_single_dense_expert(int num_ops) {
     return num_ops == 1;
 }
@@ -702,33 +703,43 @@ inline bool grp_matmul_wc2_global_phase_split_unsupported() {
     return prompt == 0 || decode == 0 || prompt != decode;
 }
 
-inline bool grp_matmul_single_dense_call(
-        const std::vector<int> &M, const std::vector<matmul_params> &params);
+inline bool grp_matmul_single_dense_call(const std::vector<int> &M,
+        const std::vector<int> &N, const std::vector<int> &K,
+        const std::vector<matmul_params> &params, int num_threads);
 
 /// Call-level form of the policy above. Each weight pool is considered
 /// independently so fused MoE covers both W13 and W2: a pool is hazardous only
-/// when it is an eligible BF16/FP16 ALGO-3 layer (or a single dense BF16 layer
-/// under `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE`) and at least one
-/// active weight can actually use WC=2.
+/// when it is an eligible BF16/FP16 ALGO-3 layer (or a single dense layer
+/// under a single-expert CK policy) and at least one active weight can
+/// actually use WC=2.
 inline bool grp_matmul_wc2_global_phase_split_unsupported_for_call(
-        const std::vector<int> &M, const std::vector<matmul_params> &params,
-        const std::vector<matmul_params> *secondary_params = nullptr) {
+        const std::vector<int> &M, const std::vector<int> &N,
+        const std::vector<int> &K, const std::vector<matmul_params> &params,
+        int num_threads,
+        const std::vector<matmul_params> *secondary_params = nullptr,
+        const std::vector<int> *secondary_N = nullptr,
+        const std::vector<int> *secondary_K = nullptr) {
     if (matmul_config_t::instance().get_weight_cache() != 2
             || !grp_matmul_wc2_global_phase_split_unsupported()) {
         return false;
     }
-    const auto pool_is_hazardous = [&](const std::vector<matmul_params> &pool) {
+    const auto pool_is_hazardous = [&](const std::vector<matmul_params> &pool,
+                                           const std::vector<int> &pool_N,
+                                           const std::vector<int> &pool_K) {
         if (!grp_matmul_auto_algo3_call(M, pool)
-                && !grp_matmul_single_dense_call(M, pool))
+                && !grp_matmul_single_dense_call(
+                        M, pool_N, pool_K, pool, num_threads))
             return false;
         for (size_t i = 0; i < M.size() && i < pool.size(); ++i) {
             if (M[i] > 0 && pool[i].weight_cache_type >= 2) return true;
         }
         return false;
     };
-    return pool_is_hazardous(params)
-            || (secondary_params != nullptr
-                    && pool_is_hazardous(*secondary_params));
+    return pool_is_hazardous(params, N, K)
+            || (secondary_params != nullptr && secondary_N != nullptr
+                    && secondary_K != nullptr
+                    && pool_is_hazardous(
+                            *secondary_params, *secondary_N, *secondary_K));
 }
 
 /// Can this phase be ruled OUT of ALGO 3 for the whole process?
@@ -909,56 +920,196 @@ inline bool get_grp_matmul_dense_decode_ntile() {
     return v;
 }
 
-// ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE = { 0, 1 } — cached, default 0.
-//   `=1` runs every BF16 prompt group-matmul call of exactly one expert on
-//   the CK prompt tile executor: Rule 0.46 selects ALGO 3 and the executor
-//   admits the one expert.  That covers both passes of a fused dense FFN and,
-//   through the `matmul_direct` route, BF16 prompt linears below the decode
-//   N-tile count.  Meant to be set per model; measured on the BF16 RAG
-//   embedding models (embeddinggemma-300m, functiongemma-270m,
-//   harrier-oss-v1-0.6b) on 32-core Turin pods.  `=0` keeps AOCL (ALGO 1)
-//   and main's routing.  INT8, W4A8, FP16, decode and MoE (including one
-//   active expert among idle slots) are unaffected either way.
-//   Non-numeric input → default 0.
+// Single-expert custom-kernel policy — three cached dtype-set knobs for
+// group-matmul calls of exactly one expert (one expert in the pool, not one
+// active expert of an MoE pool) at an N the custom-kernel pack divides.  A
+// covered phase runs ALGO 3 on the custom kernel (Rule 0.46), and
+// `matmul_direct` routes the layer.
+//   * ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE (default `none`) — prompt,
+//     on the CK prompt tile executor; not static U8xS8, which the executor
+//     does not tile; not under `ZENDNNL_GRP_MATMUL_PROMPT_TILE=0`,
+//     K-blocking or `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=1`.
+//   * ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_DECODE_TILE (default `all`) — decode,
+//     on the CK N-tile path.
+//   * ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_FORCE_CK (default `all`) — the phase
+//     knobs cover a dtype it lists at any N; any other dtype only at decode's
+//     N-tile count (`has_enough_single_expert_tiles`).  It never adds a phase.
+// Each value is a list of tokens joined by `,`, `+` or whitespace
+// (case-insensitive): `bf16`, `f16`, `int8` (DQ-INT8), `u8s8` (static
+// U8xS8), `w4a8`, `all` / `1` / `on` / `true` / `yes` (every dtype) and
+// `none` / `0` / `off` / `false` / `no` (nothing).  Unknown tokens are
+// ignored; a value with no known token keeps the default.  Both are warned
+// once.  Read once per process.  No knob applies under
+// `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=0`.  With both phases covered the layer
+// has one custom-kernel pack, which WEIGHT_CACHE=2 may store in place.  An
+// explicit `ZENDNNL_GRP_MATMUL_AUTO_{PROMPT,DECODE}_ALGO` pin and the CK
+// sub-knobs still apply.
+enum single_expert_dtype : unsigned {
+    kSingleExpertBf16 = 1u << 0,
+    kSingleExpertF16 = 1u << 1,
+    kSingleExpertInt8 = 1u << 2,
+    kSingleExpertU8s8 = 1u << 3,
+    kSingleExpertW4a8 = 1u << 4,
+    kSingleExpertAll = (1u << 5) - 1,
+};
+
+/// Parse a single-expert dtype-set value.  Unset → `fallback`; a value with
+/// no known token → `fallback`, with `*unknown` set.  Unknown tokens are
+/// appended to `*unknown` (space-separated) when it is non-null.
+inline unsigned parse_grp_matmul_single_expert_dtypes(
+        const char *value, unsigned fallback, std::string *unknown = nullptr) {
+    if (value == nullptr) return fallback;
+    static constexpr std::pair<const char *, unsigned> kTokens[]
+            = {{"0", 0u}, {"none", 0u}, {"off", 0u}, {"false", 0u}, {"no", 0u},
+                    {"1", kSingleExpertAll}, {"all", kSingleExpertAll},
+                    {"on", kSingleExpertAll}, {"true", kSingleExpertAll},
+                    {"yes", kSingleExpertAll}, {"bf16", kSingleExpertBf16},
+                    {"f16", kSingleExpertF16}, {"int8", kSingleExpertInt8},
+                    {"u8s8", kSingleExpertU8s8}, {"w4a8", kSingleExpertW4a8}};
+    const auto is_sep = [](char c) {
+        return c == ',' || c == '+' || c == ' ' || c == '\t' || c == '\n'
+                || c == '\r';
+    };
+    unsigned mask = 0;
+    bool known = false;
+    bool any_token = false;
+    for (const char *p = value; *p != '\0';) {
+        while (*p != '\0' && is_sep(*p))
+            ++p;
+        const char *start = p;
+        while (*p != '\0' && !is_sep(*p))
+            ++p;
+        const size_t len = static_cast<size_t>(p - start);
+        if (len == 0) continue;
+        any_token = true;
+        bool matched = false;
+        for (const auto &[name, bits] : kTokens) {
+            if (std::strlen(name) != len) continue;
+            matched = true;
+            for (size_t i = 0; i < len && matched; ++i) {
+                const char c = start[i];
+                matched = (c >= 'A' && c <= 'Z'
+                                          ? static_cast<char>(c - 'A' + 'a')
+                                          : c)
+                        == name[i];
+            }
+            if (matched) {
+                mask |= bits;
+                break;
+            }
+        }
+        known |= matched;
+        if (!matched && unknown != nullptr) {
+            if (!unknown->empty()) unknown->push_back(' ');
+            unknown->append(start, len);
+        }
+    }
+    if (!known && !any_token && unknown != nullptr) *unknown = "<empty>";
+    return known ? mask : fallback;
+}
+
 inline std::atomic<int> &test_api_single_expert_prompt_tile_override();
-inline bool get_grp_matmul_single_expert_prompt_tile() {
+inline std::atomic<int> &test_api_single_expert_decode_tile_override();
+inline std::atomic<int> &test_api_single_expert_force_ck_override();
+/// Logs the unknown tokens of a knob value once, when its getter first reads
+/// it.  Defined in group_matmul_dispatch.cpp.
+void warn_single_expert_knob_value(
+        const char *name, const std::string &unknown);
+/// The cached dtype set of one knob.
+inline unsigned read_grp_matmul_single_expert_knob(
+        const char *name, unsigned fallback) {
+    std::string unknown;
+    const unsigned v = parse_grp_matmul_single_expert_dtypes(
+            std::getenv(name), fallback, &unknown);
+    if (!unknown.empty()) warn_single_expert_knob_value(name, unknown);
+    return v;
+}
+/// Dtype sets of the three knobs; a test override `>= 0` is the mask itself.
+inline unsigned get_grp_matmul_single_expert_prompt_tile_dtypes() {
     const int ovr = test_api_single_expert_prompt_tile_override().load(
             std::memory_order_relaxed);
-    if (ovr >= 0) return ovr != 0;
-    static const bool v = []() {
-        const char *e
-                = std::getenv("ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE");
-        int parsed = 0;
-        if (!parse_env_int_strict(e, parsed)) return false;
-        return parsed != 0;
-    }();
+    if (ovr >= 0) return static_cast<unsigned>(ovr) & kSingleExpertAll;
+    static const unsigned v = read_grp_matmul_single_expert_knob(
+            "ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE", 0u);
+    return v;
+}
+inline unsigned get_grp_matmul_single_expert_decode_tile_dtypes() {
+    const int ovr = test_api_single_expert_decode_tile_override().load(
+            std::memory_order_relaxed);
+    if (ovr >= 0) return static_cast<unsigned>(ovr) & kSingleExpertAll;
+    static const unsigned v = read_grp_matmul_single_expert_knob(
+            "ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_DECODE_TILE", kSingleExpertAll);
+    return v;
+}
+inline unsigned get_grp_matmul_single_expert_force_ck_dtypes() {
+    const int ovr = test_api_single_expert_force_ck_override().load(
+            std::memory_order_relaxed);
+    if (ovr >= 0) return static_cast<unsigned>(ovr) & kSingleExpertAll;
+    static const unsigned v = read_grp_matmul_single_expert_knob(
+            "ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_FORCE_CK", kSingleExpertAll);
     return v;
 }
 
-/// Can a one-expert BF16 layer run on the CK prompt tile under
-/// `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE`?  Knob on, custom kernel
-/// on and supported, BF16 x BF16 -> BF16/F32 without dynamic quant, the BF16
-/// prompt tile bit set, no deep-K blocking, and an N-tile strategy other than
-/// `decode_d` (=1), which never reaches the prompt tile executor.  `K`/`N`
-/// > 0 also require a custom-kernel pack width that divides N.  Such a layer
-/// runs ALGO 3 in both phases (Rule 0.46), so its prompt and decode share one
-/// custom-kernel pack, in place at WEIGHT_CACHE=2.  Defined in
-/// group_matmul_dispatch.cpp.
-bool grp_matmul_single_dense_tile_layer(data_type_t src, data_type_t wei,
-        data_type_t dst, bool dynamic_quant, int K = 0, int N = 0);
+inline constexpr int kSingleExpertTilesPerThread = 2;
 
-/// `grp_matmul_single_dense_tile_layer` for one call: exactly one expert in
-/// the pool (not one active expert of an MoE pool) on a raw weight.  A
-/// caller-prepacked AOCL weight keeps AOCL decode, so only its prompt runs
-/// the prompt tile.
-inline bool grp_matmul_single_dense_call(
-        const std::vector<int> &M, const std::vector<matmul_params> &params) {
-    if (M.size() != 1 || M[0] <= 0 || params.empty()) return false;
+/// Decode's N-tile count for a single expert: at least
+/// `kSingleExpertTilesPerThread` custom-kernel column blocks per thread.
+inline bool has_enough_single_expert_tiles(
+        int N, int K, int num_threads) noexcept {
+    const int pack_nr = custom_kernel::plan_pack_nr(K, N);
+    if (pack_nr != custom_kernel::kNRMin && pack_nr != custom_kernel::kNRMax)
+        return false;
+    const int usable_n_tiles = N / pack_nr;
+    const int requested_threads = std::max(1, num_threads);
+    return usable_n_tiles >= requested_threads * kSingleExpertTilesPerThread;
+}
+
+/// The phases a one-expert layer runs on the custom kernel under the
+/// single-expert policy; `forced` marks coverage below decode's N-tile count,
+/// which only `..._FORCE_CK` grants.
+struct single_expert_ck_t {
+    bool prompt = false;
+    bool decode = false;
+    bool forced = false;
+    bool any() const { return prompt || decode; }
+    bool both() const { return prompt && decode; }
+    bool covers(bool is_decode) const { return is_decode ? decode : prompt; }
+};
+
+/// The policy for one weight's dtype tuple.  `K`/`N` > 0 also require a
+/// custom-kernel pack width that divides N.  When `num_threads` > 0, a dtype
+/// `..._FORCE_CK` does not list also needs
+/// `has_enough_single_expert_tiles(N, K, num_threads)`.  `static_u8s8` marks the static
+/// U8xS8 form; `aocl_prepacked` an AOCL-DLP blocked weight, which the custom
+/// kernel converts only for BF16 and static U8xS8.  Defined in
+/// group_matmul_dispatch.cpp.
+single_expert_ck_t grp_matmul_single_expert_ck(data_type_t src, data_type_t wei,
+        data_type_t dst, bool dynamic_quant, data_type_t compute,
+        bool static_u8s8, bool aocl_prepacked, int K = 0, int N = 0,
+        int num_threads = 0);
+
+/// `grp_matmul_single_expert_ck` for one call's representative params.
+single_expert_ck_t grp_matmul_single_expert_ck(
+        const matmul_params &p, int K = 0, int N = 0, int num_threads = 0);
+
+/// A call of exactly one expert in the pool (not one active expert of an
+/// MoE pool) on a raw BF16/FP16 weight whose both phases the single-expert
+/// CK policy covers: the layers whose custom-kernel pack may own the weight
+/// buffer at WEIGHT_CACHE=2.
+inline bool grp_matmul_single_dense_call(const std::vector<int> &M,
+        const std::vector<int> &N, const std::vector<int> &K,
+        const std::vector<matmul_params> &params, int num_threads) {
+    if (M.size() != 1 || M[0] <= 0 || params.empty() || N.empty() || K.empty())
+        return false;
     const auto &p = params[0];
     if (p.active_matmul > 0 && p.total_matmul > 1) return false;
     if (is_aocl_prepacked_weight(p)) return false;
-    return grp_matmul_single_dense_tile_layer(
-            p.dtypes.src, p.dtypes.wei, p.dtypes.dst, p.dynamic_quant);
+    const bool float_family = (p.dtypes.src == data_type_t::bf16
+                                      && p.dtypes.wei == data_type_t::bf16)
+            || (p.dtypes.src == data_type_t::f16
+                    && p.dtypes.wei == data_type_t::f16);
+    return float_family
+            && grp_matmul_single_expert_ck(p, K[0], N[0], num_threads).both();
 }
 
 // NOTE: `get_grp_matmul_{decode,prompt}_algo5_gate()` moved to
@@ -1106,9 +1257,19 @@ inline std::atomic<int> s_grp_matmul_auto_decode_algo_override {-1};
 // setting the env var after the first call has already latched it.
 inline std::atomic<int> s_grp_matmul_dense_decode_ntile_override {-1};
 
-// `0` / `1` force `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE` off / on for
-// the lifetime of a test; `-1` uses the cached env value.
+// A `single_expert_dtype` mask for
+// `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE` for the lifetime of a test;
+// `-1` uses the cached env value.
 inline std::atomic<int> s_grp_matmul_single_expert_prompt_tile_override {-1};
+
+// A `single_expert_dtype` mask for
+// `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_DECODE_TILE` for the lifetime of a test;
+// `-1` uses the cached env value.
+inline std::atomic<int> s_grp_matmul_single_expert_decode_tile_override {-1};
+
+// A `single_expert_dtype` mask for `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_FORCE_CK`
+// for the lifetime of a test; `-1` uses the cached env value.
+inline std::atomic<int> s_grp_matmul_single_expert_force_ck_override {-1};
 
 // NOTE: `s_grp_matmul_{decode,prompt}_algo5_gate_override` moved to
 // `expert_parallel/group_matmul_expert_parallel_policy.hpp` (same `test_api`
@@ -1229,6 +1390,12 @@ inline std::atomic<int> &test_api_dense_decode_ntile_override() {
 }
 inline std::atomic<int> &test_api_single_expert_prompt_tile_override() {
     return test_api::s_grp_matmul_single_expert_prompt_tile_override;
+}
+inline std::atomic<int> &test_api_single_expert_decode_tile_override() {
+    return test_api::s_grp_matmul_single_expert_decode_tile_override;
+}
+inline std::atomic<int> &test_api_single_expert_force_ck_override() {
+    return test_api::s_grp_matmul_single_expert_force_ck_override;
 }
 // NOTE: `test_api_{decode,prompt}_algo5_gate_override()` moved to
 // `expert_parallel/group_matmul_expert_parallel_policy.hpp` together with the
@@ -2476,20 +2643,25 @@ inline bool ck_serves_single_expert_epilogue(float alpha, float beta,
         data_type_t act_dtype) {
     if (alpha != 1.0f || beta != 0.0f) return false;
     if (act == grp_matmul_gated_act_t::none) return true;
-    if (act_dtype != data_type_t::bf16 || !tight) return false;
+    if ((act_dtype != data_type_t::bf16 && act_dtype != data_type_t::f16)
+            || !tight)
+        return false;
     // Split-halves gated activations have no fused bias yet.
     return bias == nullptr || act == grp_matmul_gated_act_t::swiglu_oai_mul;
 }
 
 /// `single_expert_epilogue_ok` is false when the custom kernel would refuse a
 /// single expert's epilogue (see `ck_serves_single_expert_epilogue`); the
-/// selector sees none of those terms itself.
+/// selector sees none of those terms itself.  `single_ck`, when given, is the
+/// call's single-expert policy already resolved for those inputs (so the
+/// dispatcher classifies the call once).
 int select_grp_matmul_algo(const std::vector<char> &layout,
         const std::vector<int> &M, const std::vector<int> &N,
         const std::vector<int> &K, const std::vector<matmul_params> &params,
         int num_threads, auto_algo_trace *trace = nullptr,
         grp_matmul_gated_act_t fused_act = grp_matmul_gated_act_t::none,
-        bool single_expert_epilogue_ok = true);
+        bool single_expert_epilogue_ok = true,
+        const single_expert_ck_t *single_ck = nullptr);
 
 } // namespace matmul
 } // namespace lowoha

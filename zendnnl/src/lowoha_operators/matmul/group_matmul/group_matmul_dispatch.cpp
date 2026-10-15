@@ -594,9 +594,10 @@ static bool check_n_tile_extra(const std::vector<int> &M,
 //   * BF16 or FP16 layer of at least two experts
 //     (`grp_matmul_auto_algo3_layer`) that ALGO 3 can serve (`n_tile_safe`) —
 //     ALGO 3 in both phases while the phase is not pinned: the custom kernel
-//     serves prompt and decode from one pack.  Every other call, including a
-//     single expert of any dtype such as a routed `matmul_direct`, takes the
-//     rules below.
+//     serves prompt and decode from one pack.
+//   * Single expert (Rule 0.46) — ALGO 3 for each phase whose
+//     `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_*` knob lists its dtype.  Every other
+//     call takes the rules below.
 //   * Prompt — Rule 0.7 selects ALGO 1 (sequential full-team) unless
 //     AUTO_PROMPT_ALGO is explicitly set. Setting AUTO_PROMPT_ALGO=0 falls
 //     back to the legacy 3-rule cascade.
@@ -716,53 +717,132 @@ static bool check_n_tile_extra(const std::vector<int> &M,
 // keeping the global env unset / 0).
 } // namespace
 
-bool grp_matmul_single_dense_tile_layer(data_type_t src, data_type_t wei,
-        data_type_t dst, bool dynamic_quant, int K, int N) {
-    if (!get_grp_matmul_single_expert_prompt_tile()) return false;
-    if (!get_grp_matmul_custom_kernel() || !custom_kernel::dispatch_supported())
-        return false;
-    if (dynamic_quant || src != data_type_t::bf16 || wei != data_type_t::bf16
-            || (dst != data_type_t::bf16 && dst != data_type_t::f32))
-        return false;
-    if (!prompt_tile::enabled(prompt_tile::Family::kBf16)) return false;
-    if (prompt_tile::facts(prompt_tile::Family::kBf16).kblock
-            && grp_matmul_kblock_enabled(/*kblock_auto=*/false))
-        return false;
-    // `decode_d` never plans the rounds strategies the executor takes over.
-    if (get_grp_n_tile_strategy() == 1) return false;
-    return K <= 0 || N <= 0 || custom_kernel::plan_pack_nr(K, N) > 0;
+void warn_single_expert_knob_value(
+        const char *name, const std::string &unknown) {
+    apilog_warning(name, ": ignoring unknown value(s) '", unknown,
+            "'; expected bf16, f16, int8, u8s8, w4a8, all or none");
+}
+
+single_expert_ck_t grp_matmul_single_expert_ck(data_type_t src, data_type_t wei,
+        data_type_t dst, bool dynamic_quant, data_type_t compute,
+        bool static_u8s8, bool aocl_prepacked, int K, int N, int num_threads) {
+    const unsigned force_dt = get_grp_matmul_single_expert_force_ck_dtypes();
+    const unsigned prompt_dt
+            = get_grp_matmul_single_expert_prompt_tile_dtypes();
+    const unsigned decode_dt
+            = get_grp_matmul_single_expert_decode_tile_dtypes();
+    if ((prompt_dt | decode_dt) == 0) return {};
+    if (!get_grp_matmul_custom_kernel()) return {};
+    // Strategy 0 plans a lone expert as Sequential AOCL.
+    if (get_grp_n_tile_strategy() == 0) return {};
+    using custom_kernel::KernelVariant;
+    const KernelVariant v = custom_kernel::resolve_variant(
+            src, wei, dst, dynamic_quant, compute);
+    prompt_tile::Family fam;
+    unsigned dt = 0;
+    if (v == KernelVariant::kBF16_BF16_BF16
+            || v == KernelVariant::kBF16_BF16_F32) {
+        if (!custom_kernel::dispatch_supported()) return {};
+        fam = prompt_tile::Family::kBf16;
+        dt = kSingleExpertBf16;
+    } else if (custom_kernel::is_int8_variant(v)) {
+        if (!get_grp_matmul_custom_kernel_int8()
+                || !custom_kernel::avx512vnni_available())
+            return {};
+        fam = prompt_tile::Family::kInt8;
+        dt = static_u8s8 ? kSingleExpertU8s8 : kSingleExpertInt8;
+    } else if (custom_kernel::is_s4_variant(v)) {
+        if (!custom_kernel::avx512vnni_available()) return {};
+        fam = prompt_tile::Family::kW4a8;
+        dt = kSingleExpertW4a8;
+    } else if (custom_kernel::is_f16_variant(v)) {
+        if (!get_grp_matmul_custom_kernel_f16()
+                || !custom_kernel::avx512f16_available())
+            return {};
+        fam = prompt_tile::Family::kF16;
+        dt = kSingleExpertF16;
+    } else {
+        return {};
+    }
+    if (((prompt_dt | decode_dt) & dt) == 0) return {};
+    if (K > 0 && N > 0 && custom_kernel::plan_pack_nr(K, N) <= 0) return {};
+    // Shapes `prepare_for_call` always refuses.
+    if (K > 0 && fam == prompt_tile::Family::kInt8
+            && (K % custom_kernel::kVNNIInt8Quad != 0
+                    || K > custom_kernel::kMaxSafeInt8AccumK))
+        return {};
+    if (K > 0 && fam == prompt_tile::Family::kW4a8
+            && K % custom_kernel::kS4Octet != 0)
+        return {};
+    // The custom kernel converts only BF16 and static U8xS8 AOCL-DLP packs.
+    if (aocl_prepacked && fam != prompt_tile::Family::kBf16 && !static_u8s8)
+        return {};
+
+    // The phase knobs choose the phases; `..._FORCE_CK` lifts decode's
+    // N-tile count for the dtypes it lists.
+    const bool wide_n = num_threads <= 0 || K <= 0 || N <= 0
+            || has_enough_single_expert_tiles(N, K, num_threads);
+    const bool n_ok = wide_n || (force_dt & dt) != 0;
+    if (!n_ok) return {};
+    single_expert_ck_t r;
+    r.decode = (decode_dt & dt) != 0;
+    // The executor does not tile static U8xS8 (per-tensor source scale), and
+    // `decode_d` never plans the rounds strategies it takes over.
+    r.prompt = (prompt_dt & dt & ~kSingleExpertU8s8) != 0
+            && prompt_tile::global_value(prompt_tile::kEnable) != 0
+            && !(prompt_tile::facts(fam).kblock
+                    && grp_matmul_kblock_enabled(/*kblock_auto=*/false))
+            && get_grp_n_tile_strategy() != 1;
+    r.forced = !wide_n && r.any();
+    return r;
+}
+
+single_expert_ck_t grp_matmul_single_expert_ck(
+        const matmul_params &p, int K, int N, int num_threads) {
+    if (K > 0 && p.dtypes.wei == data_type_t::s4) {
+        const auto &ws = p.quant_params.wei_scale.dims;
+        if (ws.size() == 2 && ws[0] > 0
+                && (K % ws[0] != 0
+                        || (K / ws[0]) % custom_kernel::kS4Octet != 0))
+            return {};
+    }
+    return grp_matmul_single_expert_ck(p.dtypes.src, p.dtypes.wei, p.dtypes.dst,
+            p.dynamic_quant, p.dtypes.compute, is_static_u8s8_quant_config(p),
+            is_aocl_prepacked_weight(p), K, N, num_threads);
 }
 
 namespace {
 
-// Rule 0.46 scope for one call: one BF16 expert in the pool whose prompt the
-// CK prompt tile executor will serve.  Mirrors `prompt_tile::should_run` so a
-// selected call never lands on N-tile rounds.
-static bool single_expert_bf16_tile_ok(const std::vector<int> &M,
+// Rule 0.46 scope for one call: one expert in the pool under the
+// single-expert CK policy, on a call the custom kernel will engage for.
+static single_expert_ck_t single_expert_ck(const std::vector<int> &M,
         const std::vector<int> &N, const std::vector<int> &K,
-        const std::vector<matmul_params> &params) {
-    if (M.size() != 1 || M[0] <= 0 || params.empty()) return false;
+        const std::vector<matmul_params> &params,
+        grp_matmul_gated_act_t fused_act, int num_threads) {
+    if (M.size() != 1 || M[0] <= 0 || params.empty()) return {};
     const auto &p = params[0];
-    if (p.active_matmul > 0 && p.total_matmul > 1) return false;
-    return grp_matmul_single_dense_tile_layer(p.dtypes.src, p.dtypes.wei,
-            p.dtypes.dst, p.dynamic_quant, K[0], N[0]);
-}
-
-// A single dense layer AUTO keeps on ALGO 3 in both phases: the custom-kernel
-// pack is then its only layout (Rule 0.46, `prepare_grouped_auto_weight_cache`).
-// A caller-prepacked AOCL weight keeps its AOCL decode, so it does not count.
-static bool single_dense_layer(const std::vector<int> &M,
-        const std::vector<int> &N, const std::vector<int> &K,
-        const std::vector<matmul_params> &params, bool epilogue_ok) {
-    return epilogue_ok && single_expert_bf16_tile_ok(M, N, K, params)
-            && !is_aocl_prepacked_weight(params[0]);
+    if (p.active_matmul > 0 && p.total_matmul > 1) return {};
+    // The custom kernel's gated activations store the family's 16-bit type:
+    // FP16 for an FP16 layer, BF16 otherwise.
+    const data_type_t gated_dst = p.dtypes.src == data_type_t::f16
+            ? data_type_t::f16
+            : data_type_t::bf16;
+    if (fused_act != grp_matmul_gated_act_t::none && p.dtypes.dst != gated_dst)
+        return {};
+    const single_expert_ck_t sck
+            = grp_matmul_single_expert_ck(p, K[0], N[0], num_threads);
+    if (!sck.any()
+            || !grp_matmul_custom_kernel_effective(params, M, N, fused_act))
+        return {};
+    return sck;
 }
 
 static int auto_select_algo(const std::vector<int> &M,
         const std::vector<int> &N, const std::vector<int> &K,
         const std::vector<matmul_params> &params, int num_threads,
         bool m_tile_safe, bool n_tile_safe, auto_algo_trace *trace,
-        bool single_expert_epilogue_ok) {
+        grp_matmul_gated_act_t fused_act, bool single_expert_epilogue_ok,
+        const single_expert_ck_t *precomputed_single_ck) {
     // Every return below goes through this, so the reported rule cannot
     // disagree with the rule that ran.  `want` is the rule's own answer;
     // `algo` is that answer after the safety clamps, and the two differing is
@@ -780,8 +860,15 @@ static int auto_select_algo(const std::vector<int> &M,
             = n_tile_safe && grp_matmul_auto_algo3_call(M, params);
     // Rule 0.46's layer keeps ALGO 3 at any team size, like an MoE layer: its
     // custom-kernel pack may already own the weight buffer.
-    const bool dense_algo3_layer = n_tile_safe
-            && single_dense_layer(M, N, K, params, single_expert_epilogue_ok);
+    const single_expert_ck_t single_ck
+            = !(n_tile_safe && single_expert_epilogue_ok)
+            ? single_expert_ck_t {}
+            : precomputed_single_ck != nullptr
+            ? *precomputed_single_ck
+            : single_expert_ck(M, N, K, params, fused_act, num_threads);
+    // A single expert whose decode runs on the custom kernel keeps ALGO 3 at
+    // one thread too.
+    const bool dense_algo3_layer = single_ck.decode;
     if (num_ops == 0
             || (num_threads <= 1 && !algo3_layer && !dense_algo3_layer)) {
         return pick(1, "auto_single_thread", 1);
@@ -856,25 +943,27 @@ static int auto_select_algo(const std::vector<int> &M,
 
     if (algo3_layer && !phase_env_pinned) { return pick(3, "auto_algo3", 3); }
 
-    // Rule 0.46 — SINGLE DENSE EXPERT BF16 LAYER → ALGO 3 in both phases.
-    // Opt-in via `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE=1` (default 0).
-    // A lone BF16 expert in prompt would otherwise take Rule 0.7's ALGO 1
-    // (full-team AOCL).  The CK prompt tile executor splits its M into
+    // Rule 0.46 — SINGLE DENSE EXPERT → ALGO 3 (custom kernel), per phase.
+    // `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_{PROMPT,DECODE}_TILE` cover the
+    // prompt / decode and `..._FORCE_CK` both, each for the dtypes it lists
+    // (`grp_matmul_single_expert_ck`; decode on by default).  A lone expert would otherwise
+    // take Rule 0.7's ALGO 1 (full-team AOCL) in prompt and Rule 0.45 /
+    // 0.5 in decode.  The prompt tile executor splits a prompt's M into
     // L3-team blocks; for a fused FFN each team keeps its rows local from W13
-    // to W2.  Every call the prompt tile executor will serve qualifies (fused
-    // FFN passes and routed `matmul_direct` linears alike).  Decode stays on
-    // ALGO 3 too (even with Rule 0.45 off), so prompt and decode share one
-    // custom-kernel pack, which WEIGHT_CACHE=2 may store in place.  A
-    // caller-prepacked AOCL weight keeps Rule 0.45 / AOCL decode.  Honours
+    // to W2.  With both phases covered, prompt and decode share one
+    // custom-kernel pack, which WEIGHT_CACHE=2 may store in place.  Honours
     // an explicit phase pin and the n_tile_safe clamp.
-    if (!phase_env_pinned && n_tile_safe && single_expert_epilogue_ok
-            && single_expert_bf16_tile_ok(M, N, K, params)) {
-        if (!is_decode) {
-            return pick(3, "auto_rule046_single_dense_prompt", 3);
+    if (!phase_env_pinned && single_ck.covers(is_decode)) {
+        if (single_ck.forced) {
+            return pick(3,
+                    is_decode ? "auto_rule046_single_expert_force_ck_decode"
+                              : "auto_rule046_single_expert_force_ck",
+                    3);
         }
-        if (dense_algo3_layer) {
-            return pick(3, "auto_rule046_single_dense_decode", 3);
-        }
+        return pick(3,
+                is_decode ? "auto_rule046_single_dense_decode"
+                          : "auto_rule046_single_dense_prompt",
+                3);
     }
 
     // Rule 0.45 — SINGLE DENSE EXPERT DECODE → ALGO 3 (N-tile).
@@ -1058,7 +1147,8 @@ int select_grp_matmul_algo(const std::vector<char> &layout,
         const std::vector<int> &M, const std::vector<int> &N,
         const std::vector<int> &K, const std::vector<matmul_params> &params,
         int num_threads, auto_algo_trace *trace,
-        grp_matmul_gated_act_t fused_act, bool single_expert_epilogue_ok) {
+        grp_matmul_gated_act_t fused_act, bool single_expert_epilogue_ok,
+        const single_expert_ck_t *single_ck) {
 
     // `M.size()` is the active matmul count after `group_matmul_direct`
     // sliced the M vector to honour `params[0].active_matmul`.  Pass it
@@ -1161,7 +1251,8 @@ int select_grp_matmul_algo(const std::vector<char> &layout,
     }
 
     return auto_select_algo(M, N, K, params, num_threads, m_tile_safe,
-            n_tile_safe, trace, single_expert_epilogue_ok);
+            n_tile_safe, trace, fused_act, single_expert_epilogue_ok,
+            single_ck);
 }
 
 // ── Grouped-AUTO in-place cache policy ─────────────────────────────────
@@ -1266,7 +1357,8 @@ bool prepare_grouped_auto_weight_cache(std::vector<matmul_params> &params,
                 apilog_info(
                         "[GRP_MATMUL.WEIGHT_CACHE] weight_cache_type=2 AUTO "
                         "custom-kernel layout ownership ENABLED for bf16/f16 "
-                        "layers of several experts (both phases run ALGO 3): "
+                        "MoE layers and single experts whose both phases run "
+                        "ALGO 3: "
                         "AOCL DLP layouts stay out-of-place; supported bf16 "
                         "and f16 packs may use the caller's buffer.");
             }
@@ -1379,8 +1471,12 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
     const bool single_expert_epilogue_ok = M.size() != 1
             || ck_serves_single_expert_epilogue(alpha[0], beta[0], bias[0],
                     /*tight=*/ldc[0] == N[0] / 2, fused_act, act_dtype);
-    const bool auto_algo3_layer = grp_matmul_auto_algo3_call(M, params)
-            || single_dense_layer(M, N, K, params, single_expert_epilogue_ok);
+    // One single-expert classification serves the licence and the selector.
+    const single_expert_ck_t single_ck = single_expert_epilogue_ok
+            ? single_expert_ck(M, N, K, params, fused_act, num_threads)
+            : single_expert_ck_t {};
+    const bool auto_algo3_layer
+            = grp_matmul_auto_algo3_call(M, params) || single_ck.both();
     // Capture the effective per-call cache mode before any ownership policy
     // caps the AOCL side; CK preparation consumes this original value.
     int32_t ck_weight_cache_mode
@@ -1390,7 +1486,8 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
         ck_weight_cache_mode
                 = std::min(ck_weight_cache_mode, params[i].weight_cache_type);
     }
-    if (grp_matmul_wc2_global_phase_split_unsupported_for_call(M, params)) {
+    if (grp_matmul_wc2_global_phase_split_unsupported_for_call(
+                M, N, K, params, num_threads)) {
         log_error(
                 "group_matmul: WEIGHT_CACHE=2 with a non-AUTO global ALGO "
                 "and phase overrides that split BF16/FP16 prompt/decode "
@@ -1405,12 +1502,19 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
     bool ck_inplace_licence = false;
     track_grouped_inplace_mutation = prepare_grouped_auto_weight_cache(params,
             custom_kernel_en, nullptr, auto_algo3_layer, &ck_inplace_licence);
+    // Without the licence, a process downgraded to WEIGHT_CACHE=1 just now
+    // must not see this first call pack in place.
+    if (!ck_inplace_licence) {
+        ck_weight_cache_mode = std::min(ck_weight_cache_mode,
+                matmul_config_t::instance().get_weight_cache());
+    }
 
     mutation_tracking.set(track_grouped_inplace_mutation);
 
     auto_algo_trace algo_trace;
     const int use_algo = select_grp_matmul_algo(layout, M, N, K, params,
-            num_threads, &algo_trace, fused_act, single_expert_epilogue_ok);
+            num_threads, &algo_trace, fused_act, single_expert_epilogue_ok,
+            &single_ck);
 
     // A call ALGO 3 cannot serve follows the mixed policy.  `params` is a
     // per-call copy, so the cap does not reach the caller.

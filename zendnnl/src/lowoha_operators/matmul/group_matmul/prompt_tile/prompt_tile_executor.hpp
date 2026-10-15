@@ -74,12 +74,12 @@ struct CallView {
 /// prompt-phase call that the planner sent to the round executor, deep-K
 /// blocking off for a family the CK K-blocks (its use depends on the
 /// per-call M), and every active expert's N a multiple of pack_nr.  A call
-/// with one active expert stays on the round executor, except a BF16 call of
-/// exactly one expert (a dense layer) while
-/// `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE` is on.
+/// with one active expert stays on the round executor unless
+/// `single_expert_prompt`: a call of exactly one expert (a dense layer) whose
+/// prompt the single-expert CK policy covers (`grp_matmul_single_expert_ck`).
 bool should_run(const custom_kernel::CallContext &kctx, bool use_custom,
         bool rounds_strategy, bool prompt_phase, const std::vector<int> &M,
-        const std::vector<int> &N);
+        const std::vector<int> &N, bool single_expert_prompt);
 
 /// Run every tile of the call on an OMP region of `num_threads`.
 /// `log_plan` emits one `[GRP_MATMUL.PLAN.PTILE]` apilog line.

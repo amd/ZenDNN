@@ -241,11 +241,11 @@ TEST(TestMatmulUnreorderRoute,
         ExplicitAoclPackedPromptOverridesGlobalOneDnnBackend) {
     // The grouped route serves the prompt either way: AOCL with the BF16
     // single-expert prompt tile off, the CK prompt tile with it on.
-    // M == kDecodeMaxM is decode (Rule 0.45, custom-kernel N-tile) and does
-    // not consult this knob.
+    // M == kDecodeMaxM is decode, so the prompt uses kDecodeMaxM + 1.
     for (const bool prompt_tile : {false, true}) {
         SCOPED_TRACE(prompt_tile ? "prompt tile on" : "prompt tile off");
-        mt::SingleExpertPromptTileOverride knob(prompt_tile ? 1 : 0);
+        mt::SingleExpertCkPolicy knob(
+                prompt_tile ? 1 : 0, prompt_tile ? 1 : 0, 0);
         run_route_case(/*packed_input=*/true, /*M=*/matmul::kDecodeMaxM + 1,
                 /*expect_custom=*/prompt_tile,
                 /*expect_derived_cache_hit=*/false,
@@ -355,9 +355,9 @@ TEST(TestMatmulUnreorderRoute, RawWc2IneligiblePromptPreservesFutureDecode) {
 }
 
 // A BF16 prompt MatMul below decode's N-tile count (an embeddinggemma QKV:
-// K 768, N 1280 on 32 threads is 20 NR64 tiles, not 64) routes to the CK
-// prompt tile executor, raw and AOCL-prepacked, and matches the reference.
-// With the knob off it keeps the standard MatMul path.
+// K 768, N 1280 on 32 threads is 40 NR32 tiles, not 64) routes to the CK
+// prompt tile executor under FORCE_CK, raw and AOCL-prepacked, and matches
+// the reference.  With FORCE_CK off it keeps the standard MatMul path.
 static void run_narrow_prompt_case(bool packed_input, bool knob_on) {
     constexpr int M = 256, K = 768, N = 1280, threads = 32;
     std::vector<bfloat16_t> src(static_cast<size_t>(M) * K);
@@ -398,7 +398,8 @@ static void run_narrow_prompt_case(bool packed_input, bool knob_on) {
     mt::AlgoEnvGuard auto_algo(0);
     mt::CustomKernelOverride custom_on(true);
     mt::NTileStrategyOverride rounds(2);
-    mt::SingleExpertPromptTileOverride knob(knob_on ? 1 : 0);
+    mt::SingleExpertCkPolicy knob(
+            knob_on ? 1 : 0, knob_on ? 1 : 0, knob_on ? 1 : 0);
     matmul::clear_aocl_ck_weight_cache();
     ::reset_grp_matmul_caches();
 
@@ -464,7 +465,7 @@ TEST(TestMatmulUnreorderRoute, PackedPromptStaysBlockedAndSkipsUnreorder) {
     // With the BF16 single-expert prompt tile off, prompt AUTO selects AOCL.
     // The packed bytes must flow directly to AOCL; the AOCL-derived final CK
     // cache remains cold.
-    mt::SingleExpertPromptTileOverride prompt_tile_off(0);
+    mt::SingleExpertCkPolicy prompt_tile_off(0, 0, 0);
     run_route_case(true, /*M=*/matmul::kDecodeMaxM + 1, /*expect_custom=*/false,
             /*expect_derived_cache_hit=*/false);
 }
@@ -472,7 +473,7 @@ TEST(TestMatmulUnreorderRoute, PackedPromptStaysBlockedAndSkipsUnreorder) {
 TEST(TestMatmulUnreorderRoute, PackedPromptUsesPromptTileCk) {
     // By default a BF16 prompt runs the CK prompt tile executor: the packed
     // bytes are unreordered once into the derived CK cache.
-    mt::SingleExpertPromptTileOverride prompt_tile_on(1);
+    mt::SingleExpertCkPolicy prompt_tile_on(1, 1, 0);
     run_route_case(true, /*M=*/matmul::kDecodeMaxM + 1, /*expect_custom=*/true,
             /*expect_derived_cache_hit=*/true);
 }
@@ -923,14 +924,18 @@ TEST(TestMatmulUnreorderRoute, RejectsAoclBlockedFallbackWithoutAocl) {
 }
 #endif
 
-// One raw narrow-N weight (below decode's N-tile count) goes prompt -> decode
-// -> prompt through `matmul_direct`.  With the single-expert prompt tile knob
+// One raw narrow-N weight goes prompt -> decode -> prompt through
+// `matmul_direct`.  At 32 threads it is below decode's N-tile count (only
+// FORCE_CK covers it); at 8 threads its 40 NR32 tiles pass the gate, so the
+// phase knobs cover it too.  With the single-expert prompt tile knob
 // on, both phases route to the custom kernel, so a WEIGHT_CACHE=2 in-place
 // pack is the custom-kernel layout and every later call reads it; the buffer
 // never holds an AOCL layout.  With the knob off, the weight stays raw.
 void run_narrow_phase_switch(int weight_cache_mode, bool with_bias, int knob,
-        int algo_pin = 0, uint32_t lru_capacity = 0) {
-    constexpr int N = 1280, K = 768, threads = 32;
+        int algo_pin = 0, uint32_t lru_capacity = 0, int force_ck = 0,
+        int decode_knob = -1, int threads = 32) {
+    if (decode_knob < 0) decode_knob = knob;
+    constexpr int N = 1280, K = 768;
     std::vector<bfloat16_t> weight(static_cast<size_t>(N) * K);
     for (int n = 0; n < N; ++n)
         for (int k = 0; k < K; ++k)
@@ -947,12 +952,18 @@ void run_narrow_phase_switch(int weight_cache_mode, bool with_bias, int knob,
     WeightCacheGuard cache_mode(weight_cache_mode);
     mt::AlgoEnvGuard algo(algo_pin);
     mt::CustomKernelOverride custom_on(true);
-    mt::SingleExpertPromptTileOverride knob_guard(knob);
+    mt::SingleExpertCkPolicy knob_guard(knob, decode_knob, force_ck);
     matmul::clear_aocl_ck_weight_cache();
     ::reset_grp_matmul_caches();
     namespace pt = zendnnl::lowoha::matmul::prompt_tile;
     const long served0 = pt::test_api::s_calls_served.load();
 
+    // A phase knob covers its phase; below decode's N-tile count only under
+    // FORCE_CK.
+    const bool n_ok = force_ck != 0
+            || matmul::has_enough_single_expert_tiles(N, K, threads);
+    const bool prompt_cov = knob != 0 && n_ok;
+    const bool decode_cov = decode_knob != 0 && n_ok;
     for (const int M : {256, 4, 32, 33, 100, 1, 512}) {
         SCOPED_TRACE("M=" + std::to_string(M));
         std::vector<bfloat16_t> src(static_cast<size_t>(M) * K);
@@ -968,11 +979,22 @@ void run_narrow_phase_switch(int weight_cache_mode, bool with_bias, int knob,
         params.num_threads = threads;
         matmul::matmul_batch_params_t batch;
         std::vector<bfloat16_t> dst(static_cast<size_t>(M) * N);
-        ASSERT_EQ(matmul::matmul_direct('r', false, /*transB=*/true, M, N, K,
-                          1.0f, src.data(), K, weight.data(), K,
-                          with_bias ? bias.data() : nullptr, 0.0f, dst.data(),
-                          N, true, batch, params),
-                status_t::success);
+        {
+            mt::GemmModeCaptureGuard mode_capture;
+            ASSERT_EQ(matmul::matmul_direct('r', false, /*transB=*/true, M, N,
+                              K, 1.0f, src.data(), K, weight.data(), K,
+                              with_bias ? bias.data() : nullptr, 0.0f,
+                              dst.data(), N, true, batch, params),
+                    status_t::success);
+            const char *mode
+                    = matmul::test_api::s_last_group_matmul_direct_gemm_mode
+                              .load(std::memory_order_relaxed);
+            if (M <= 4 && decode_cov) {
+                ASSERT_NE(mode, nullptr);
+                EXPECT_NE(std::string(mode).find("custom"), std::string::npos)
+                        << "a covered decode runs the custom kernel: " << mode;
+            }
+        }
         double max_err = 0;
         for (int m = 0; m < M; ++m)
             for (int n = 0; n < N; ++n) {
@@ -994,13 +1016,16 @@ void run_narrow_phase_switch(int weight_cache_mode, bool with_bias, int knob,
     const bool mutated = std::memcmp(weight.data(), weight_copy.data(),
                                  weight.size() * sizeof(bfloat16_t))
             != 0;
-    if (knob != 0) {
+    if (prompt_cov && decode_cov) {
         EXPECT_GT(pt::test_api::s_calls_served.load() - served0, 0)
                 << "prompts must run the prompt tile";
         EXPECT_TRUE(!mutated || ck::weight_packed_in_place(weight.data()))
                 << "an in-place image must be the custom-kernel pack";
-    } else {
-        EXPECT_FALSE(mutated) << "knob off keeps the raw weight";
+    } else if (prompt_cov) {
+        EXPECT_GT(pt::test_api::s_calls_served.load() - served0, 0)
+                << "prompts must run the prompt tile";
+    } else if (!decode_cov && !n_ok) {
+        EXPECT_FALSE(mutated) << "policy off keeps the raw weight";
     }
     ::reset_grp_matmul_caches();
     matmul::clear_aocl_ck_weight_cache();
@@ -1015,7 +1040,24 @@ TEST(TestMatmulUnreorderRoute, NarrowWeightPromptDecodeShareCkPack) {
             for (const bool bias : {false, true}) {
                 SCOPED_TRACE("knob=" + std::to_string(knob) + " wc="
                         + std::to_string(wc) + " bias=" + std::to_string(bias));
-                run_narrow_phase_switch(wc, bias, knob);
+                run_narrow_phase_switch(wc, bias, knob, 0, 0, 0, -1,
+                        /*threads=*/knob != 0 ? 8 : 32);
+            }
+    for (const int wc : {1, 2})
+        for (const bool bias : {false, true}) {
+            SCOPED_TRACE("force_ck wc=" + std::to_string(wc)
+                    + " bias=" + std::to_string(bias));
+            run_narrow_phase_switch(wc, bias, /*knob=*/1, 0, 0, /*force_ck=*/1);
+        }
+    // One phase on the custom kernel, the other on AOCL.
+    for (const auto &[pk, dk] : {std::pair {1, 0}, std::pair {0, 1}})
+        for (const int wc : {1, 2})
+            for (const bool bias : {false, true}) {
+                SCOPED_TRACE("prompt=" + std::to_string(pk) + " decode="
+                        + std::to_string(dk) + " wc=" + std::to_string(wc)
+                        + " bias=" + std::to_string(bias));
+                run_narrow_phase_switch(
+                        wc, bias, pk, 0, 0, 0, dk, /*threads=*/8);
             }
 }
 
@@ -1028,12 +1070,63 @@ TEST(TestMatmulUnreorderRoute, NarrowWeightInPlaceCkPackWithoutMixedMode) {
     }
     for (const bool bias : {false, true}) {
         SCOPED_TRACE("algo3 pin, bias=" + std::to_string(bias));
-        run_narrow_phase_switch(2, bias, 1, /*algo_pin=*/3);
+        run_narrow_phase_switch(2, bias, 1, /*algo_pin=*/3, 0, 0, -1, 8);
     }
     for (const bool bias : {false, true}) {
         SCOPED_TRACE("LRU capacity 64, bias=" + std::to_string(bias));
-        run_narrow_phase_switch(2, bias, 1, 0, /*lru_capacity=*/64);
+        run_narrow_phase_switch(2, bias, 1, 0, /*lru_capacity=*/64, 0, -1, 8);
     }
+}
+
+// With both phases covered (here by FORCE_CK), WEIGHT_CACHE=2 may pack a raw
+// BF16 single-expert weight in place.  A later call on that buffer that the route
+// does not take (here an F32 destination) cannot read the image and must fail
+// closed, not compute on packed bytes.
+TEST(TestMatmulUnreorderRoute,
+        NonRoutedCallOnSingleExpertInPlaceImageFailsClosed) {
+    if (!ck::dispatch_supported()) {
+        GTEST_SKIP() << "AVX-512 BF16 custom kernel is unavailable";
+    }
+    constexpr int N = 1280, K = 768, M = 256, threads = 32;
+    std::vector<bfloat16_t> weight(static_cast<size_t>(N) * K);
+    for (int n = 0; n < N; ++n)
+        for (int k = 0; k < K; ++k)
+            weight[static_cast<size_t>(n) * K + k]
+                    = bfloat16_t(logical_weight(k, n));
+    std::vector<bfloat16_t> src(static_cast<size_t>(M) * K, bfloat16_t(0.25f));
+
+    RouteConfigGuard route_config;
+    WeightCacheGuard cache_mode(2);
+    mt::AlgoEnvGuard algo(3);
+    mt::CustomKernelOverride custom_on(true);
+    mt::SingleExpertCkPolicy force(1, 1, 1);
+    matmul::clear_aocl_ck_weight_cache();
+    ::reset_grp_matmul_caches();
+
+    matmul::matmul_params params;
+    params.dtypes.src = data_type_t::bf16;
+    params.dtypes.wei = data_type_t::bf16;
+    params.dtypes.dst = data_type_t::bf16;
+    params.num_threads = threads;
+    matmul::matmul_batch_params_t batch;
+    std::vector<bfloat16_t> dst(static_cast<size_t>(M) * N);
+    ASSERT_EQ(matmul::matmul_direct('r', false, /*transB=*/true, M, N, K, 1.0f,
+                      src.data(), K, weight.data(), K, nullptr, 0.0f,
+                      dst.data(), N, true, batch, params),
+            status_t::success);
+    if (!ck::weight_packed_in_place(weight.data())) {
+        ::reset_grp_matmul_caches();
+        GTEST_SKIP() << "the pack did not go in place on this configuration";
+    }
+    params.dtypes.dst = data_type_t::f32;
+    const float canary = -7.0f;
+    std::vector<float> dst_f32(static_cast<size_t>(M) * N, canary);
+    EXPECT_NE(matmul::matmul_direct('r', false, /*transB=*/true, M, N, K, 1.0f,
+                      src.data(), K, weight.data(), K, nullptr, 0.0f,
+                      dst_f32.data(), N, true, batch, params),
+            status_t::success);
+    ::reset_grp_matmul_caches();
+    matmul::clear_aocl_ck_weight_cache();
 }
 
 // CROSS_WARM and PREPACK are read once per process, so each runs in a child.
@@ -1042,12 +1135,48 @@ void expect_narrow_phase_switch_in_child(const char *env, const char *value) {
     setenv(env, value, /*overwrite=*/1);
     EXPECT_EXIT(
             {
-                run_narrow_phase_switch(2, /*with_bias=*/false, 1);
-                run_narrow_phase_switch(2, /*with_bias=*/true, 1);
+                run_narrow_phase_switch(
+                        2, /*with_bias=*/false, 1, 0, 0, 0, -1, 8);
+                run_narrow_phase_switch(
+                        2, /*with_bias=*/true, 1, 0, 0, 0, -1, 8);
+                run_narrow_phase_switch(2, /*with_bias=*/false, 1, 0, 0, 1);
+                run_narrow_phase_switch(
+                        2, /*with_bias=*/false, 1, 0, 0, 0, 0, 8);
+                run_narrow_phase_switch(
+                        2, /*with_bias=*/false, 0, 0, 0, 0, 1, 8);
                 std::exit(::testing::Test::HasFailure() ? 1 : 0);
             },
             ::testing::ExitedWithCode(0), "");
     unsetenv(env);
+}
+
+// With PREPACK off, AUTO mixed in-place mode cannot start and the first call
+// downgrades the process to WEIGHT_CACHE=1.  A prompt-only layer whose decode
+// leaves ALGO 3 (a decode pin, or Rule 0.45 off) must then find its weight
+// unpacked: the first prompt may not pack it in place.
+TEST(TestMatmulUnreorderRoute,
+        NarrowPromptOnlyLayerWithPrepackOffKeepsRawWeight) {
+    if (!ck::dispatch_supported()) {
+        GTEST_SKIP() << "AVX-512 BF16 custom kernel is unavailable";
+    }
+    testing::FLAGS_gtest_death_test_style = "threadsafe";
+    setenv("ZENDNNL_GRP_MATMUL_PREPACK", "0", /*overwrite=*/1);
+    EXPECT_EXIT(
+            {
+                {
+                    mt::AutoDecodeAlgoOverride decode_pin(1);
+                    run_narrow_phase_switch(
+                            2, /*with_bias=*/false, 1, 0, 0, 0, 0, 8);
+                }
+                {
+                    mt::DenseDecodeNTileOverride rule045_off(0);
+                    run_narrow_phase_switch(
+                            2, /*with_bias=*/true, 1, 0, 0, 0, 0, 8);
+                }
+                std::exit(::testing::Test::HasFailure() ? 1 : 0);
+            },
+            ::testing::ExitedWithCode(0), "");
+    unsetenv("ZENDNNL_GRP_MATMUL_PREPACK");
 }
 
 TEST(TestMatmulUnreorderRoute, NarrowWeightInPlaceCkPackCrossWarmOff) {
@@ -1064,8 +1193,10 @@ TEST(TestMatmulUnreorderRoute, NarrowWeightInPlaceCkPackPrepackOff) {
     expect_narrow_phase_switch_in_child("ZENDNNL_GRP_MATMUL_PREPACK", "0");
 }
 
-// `decode_d` (N_TILE_STRATEGY=1) never reaches the prompt tile executor, so a
-// narrow BF16 prompt keeps the standard MatMul path instead of DecodeD.
+// The prompt knob needs decode's N-tile count, and `decode_d`
+// (N_TILE_STRATEGY=1) never reaches the prompt tile executor: a narrow BF16
+// layer under the prompt knob keeps the standard MatMul path either way, and
+// FORCE_CK routes it either way.
 TEST(TestMatmulUnreorderRoute, NarrowBf16PromptDecodeDKeepsStandardPath) {
     if (!ck::dispatch_supported()) {
         GTEST_SKIP() << "AVX-512 BF16 custom kernel is unavailable";
@@ -1074,7 +1205,6 @@ TEST(TestMatmulUnreorderRoute, NarrowBf16PromptDecodeDKeepsStandardPath) {
     WeightCacheGuard cache_mode(1);
     mt::AlgoEnvGuard algo(0);
     mt::CustomKernelOverride custom_on(true);
-    mt::SingleExpertPromptTileOverride knob(1);
     matmul::matmul_params params;
     params.dtypes.src = data_type_t::bf16;
     params.dtypes.wei = data_type_t::bf16;
@@ -1083,11 +1213,22 @@ TEST(TestMatmulUnreorderRoute, NarrowBf16PromptDecodeDKeepsStandardPath) {
         return matmul::custom_kernel_routable('r', M, 1280, 768, 32, 1, false,
                 true, 1.0f, 0.0f, nullptr, 768, true, params);
     };
-    EXPECT_TRUE(routable(2048));
-    EXPECT_TRUE(routable(4)) << "a raw weight's decode follows its prompt";
-    mt::NTileStrategyOverride decode_d(1);
-    EXPECT_FALSE(routable(2048));
-    EXPECT_FALSE(routable(4));
+    for (const int strategy : {2, 1}) {
+        SCOPED_TRACE(strategy);
+        mt::NTileStrategyOverride st(strategy);
+        {
+            mt::SingleExpertCkPolicy prompt_only(1, 0, 0);
+            EXPECT_FALSE(routable(2048));
+            EXPECT_FALSE(routable(4));
+            EXPECT_EQ(matmul::grp_matmul_single_expert_ck(params, 768, 1280, 8)
+                              .prompt,
+                    strategy != 1)
+                    << "with the N-tile count, only decode_d drops the prompt";
+        }
+        mt::SingleExpertCkPolicy force(1, 1, 1);
+        EXPECT_TRUE(routable(2048));
+        EXPECT_TRUE(routable(4));
+    }
 }
 
 } // namespace

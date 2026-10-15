@@ -22,7 +22,7 @@ This document lists all environment variables available for configuring ZenDNNL 
 | `ZENDNNL_BMM_ALGO` | Selects the Batch MatMul algorithm/kernel to use for 3D batch matrix multiplication | `-1` (none); see note below | Integer ID or name. `-1` (none / unset)<br>`0` (dynamic_dispatch)<br>`1` (aocl_dlp_blocked)<br>`2` (onednn_blocked)<br>`4` (aocl_dlp)<br>`5` (onednn)<br>`6` (libxsmm)<br>`7` (batched_sgemm) |
 | `ZENDNNL_CACHE_OFF` | Process-wide cache kill switch for covered cache infrastructure. Equivalent JSON knob: top-level `global_cache_off`. | `0` (disabled) | `1`/`true`/`on`/`yes` (force covered caches off)<br>`0`/`false`/`off`/`no` (leave local cache knobs in control) |
 | `ZENDNNL_MATMUL_WEIGHT_CACHE` | Weight-reorder caching mode for blocked / auto-tuner algorithms and grouped-matmul custom paths. W8A8 grouped-MoE ALGO 4 requires an enabled persistent pack and declines when this is `0`; BF16 and caller-prequantized S8 may then use generic fallback. | `2` (in-place where supported) | `0` (disabled)<br>`1` (out-of-place, enabled)<br>`2` (in-place: reuse the user weight buffer as the reorder destination when the layout is safe, otherwise fall back to out-of-place; the buffer must be writable, so pass a per-call `weight_cache_type` of `1` for read-only weights such as a read-only mmap; auto-downgraded to `1` under auto_tuner / dynamic_dispatch; grouped-matmul AUTO keeps `2` only with prepack, cross-warm, the custom-kernel decode pack and unlimited LRU capacity. A BF16 or FP16 layer of several experts then uses one ALGO 3 custom-kernel layout in both phases and keeps AOCL layouts out-of-place; eligible BF16/FP16 packs may use the caller's buffer. Other grouped calls may write only their AOCL prompt reorder in place). INT8 in-place needs `matmul_params::wei_buffer_capacity_bytes` when the blocked size exceeds `k*n` (`0` means exactly `k*n`). A partitioned BMM that shares one weight and has a source zero-point stays out-of-place even when that image already equals `k*n`. A call's `matmul_params::weight_cache_type` caps that call to the lower of this mode and the per-call value; the GGML Q8_0/Q4_0 unpack cache, the W4A8 plain s8 cache that ALGO 3 reads, and the native BRGEMM/GEMM looper's one-time process-mode snapshot ignore a per-call `0`. |
-| `ZENDNNL_MATMUL_CUSTOM_KERNEL` | Routes eligible wide-N `matmul_direct` calls through one-op grouped AUTO: prompt executes full-weight AOCL while warming the future decode layout, and decode-class (`M <= 32`) executes ALGO 3 CK. With `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE=1`, a BF16 call also routes at any N the custom-kernel pack divides: prompt executes the ALGO 3 CK prompt tile executor and, for a raw weight, decode executes ALGO 3 CK from the same custom-kernel pack (an AOCL-prepacked weight routes only its prompt). Supported scalar families are BF16 and static per-tensor U8×S8 with a positive F32/BF16 source scale, S32 source zero-point, symmetric S8 weights with scalar or per-channel `{N}` / `{1,N}` F32/BF16 scales, and BF16/F32/U8 destination. U8 destination additionally requires a positive F32/BF16 destination multiplier and S32 destination zero-point. Static U8×S8 may use either no post-op, one buffer-free ReLU/sigmoid, or the exact `binary_mul(F32[M,N]) -> binary_add(F32[M,N])` chain. Scalar routing requires the effective backend to resolve to AOCL-DLP blocked; on an AOCL build this includes the unset/default MatMul algorithm as well as explicit `ZENDNNL_MATMUL_ALGO=1`, while explicit non-AOCL backends remain configured. Plain and supported caller-prepacked weights retain their representation through AUTO selection. For scalar prepack compatibility, `mem_format_b='r'` with unset or AOCL-DLP provenance is treated as AOCL-DLP blocked; `lowoha_algo=moe_custom_kernel` explicitly identifies CK-VNNI. Only a validated ALGO-3 custom-kernel path converts supported AOCL-DLP BF16 or pure static U8×S8 bytes: AOCL unreorders into temporary raw storage and CK packs directly into the final bounded-cache arena, so no persistent raw copy or full-size CK memcpy remains. AOCL symmetric-quant S8 packs remain on AOCL because that format has no unreorder API. Prompt/AOCL and every CK fallback retain the original blocked pointer. Also requires constant weights and compatible cache/threading settings. Equivalent JSON knob: `runtime_variables.matmul.custom_kernel`. | `1` (enabled) | `0` (standard path)<br>`1` (eligible prompt/decode routed through grouped AUTO when the effective backend is AOCL-DLP blocked) |
+| `ZENDNNL_MATMUL_CUSTOM_KERNEL` | Routes eligible wide-N `matmul_direct` calls through one-op grouped AUTO: prompt executes full-weight AOCL while warming the future decode layout, and decode-class (`M <= 32`) executes ALGO 3 CK. A single-expert call that `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE` / `..._DECODE_TILE` covers (by default the decode of every dtype) also routes below decode's N-tile count when `..._FORCE_CK` (default `all`) lists its dtype, at any N the custom-kernel pack divides (see the group-matmul notes below): a covered phase executes ALGO 3 CK, and a raw weight routes in both phases so grouped AUTO owns all of its layouts (an AOCL-prepacked weight routes only its covered phases). Supported scalar families are BF16 (BF16 destination), DQ-INT8 (per-token source, per-channel S8 weight scales), W4A8 (per-group S4 weight scales), FP16 (single-expert policy only) and static per-tensor U8×S8 with a positive F32/BF16 source scale, S32 source zero-point, symmetric S8 weights with scalar or per-channel `{N}` / `{1,N}` F32/BF16 scales, and BF16/F32/U8 destination. U8 destination additionally requires a positive F32/BF16 destination multiplier and S32 destination zero-point. Static U8×S8 may use either no post-op, one buffer-free ReLU/sigmoid, or the exact `binary_mul(F32[M,N]) -> binary_add(F32[M,N])` chain. Scalar routing requires the effective backend to resolve to AOCL-DLP blocked; on an AOCL build this includes the unset/default MatMul algorithm as well as explicit `ZENDNNL_MATMUL_ALGO=1`, while explicit non-AOCL backends remain configured. Plain and supported caller-prepacked weights retain their representation through AUTO selection. For scalar prepack compatibility, `mem_format_b='r'` with unset or AOCL-DLP provenance is treated as AOCL-DLP blocked; `lowoha_algo=moe_custom_kernel` explicitly identifies CK-VNNI. Only a validated ALGO-3 custom-kernel path converts supported AOCL-DLP BF16 or pure static U8×S8 bytes: AOCL unreorders into temporary raw storage and CK packs directly into the final bounded-cache arena, so no persistent raw copy or full-size CK memcpy remains. AOCL symmetric-quant S8 packs remain on AOCL because that format has no unreorder API. Prompt/AOCL and every CK fallback retain the original blocked pointer. Also requires constant weights and compatible cache/threading settings. Equivalent JSON knob: `runtime_variables.matmul.custom_kernel`. | `1` (enabled) | `0` (standard path)<br>`1` (eligible prompt/decode routed through grouped AUTO when the effective backend is AOCL-DLP blocked) |
 | `ZENDNNL_DLP_M_HINT` | Expected M dimension for supported AOCL-DLP GEMMs. Equivalent JSON knob: `runtime_variables.matmul.dlp_m_hint`. A valid JSON config replaces environment-variable configuration. | `0` (hints disabled) | Non-negative base-10 integer; `0` disables hints |
 | `ZENDNNL_ENABLE_ROUTED_MOE` | Enable the routed-MoE fast executor for eligible calls. Set to `0` to skip the fast executor and use the internal vector `group_matmul_direct` fallback. The grouped fallback still follows `ZENDNNL_GRP_MATMUL_ALGO`; set that to `4` to request ALGO 4. Unsupported calls use the generic fallback regardless of this setting. | `1` (enabled) | `1` (routed fast-then-fallback policy)<br>`0` (disable routed fast and use generic fallback) |
 | `ZENDNNL_ZP_COMP_CACHE` | Enable/disable zero-point compensation caching for quantized operations. Forced off when `ZENDNNL_CACHE_OFF=1` or JSON `global_cache_off=true`. | `1` (enabled) | `1`/`true`/`on`/`yes` (enabled)<br>`0`/`false`/`off`/`no` (disabled) |
@@ -75,8 +75,10 @@ clamps always apply last: ALGO 2 requires `m_tile_safe` and ALGO 3 requires
 still subject to the ALGO 5 occupancy/dtype qualifier. All three variables are
 cached; set them before the first grouped-matmul call.
 
-> With `ZENDNNL_MATMUL_WEIGHT_CACHE=2`, a multi-expert BF16/FP16 layer does
-> not support splitting a non-AUTO global ALGO pin with a phase override. The
+> With `ZENDNNL_MATMUL_WEIGHT_CACHE=2`, a multi-expert BF16/FP16 layer, and a
+> raw BF16/FP16 single expert whose both phases the single-expert knobs below
+> cover, do not support splitting a non-AUTO global ALGO pin with a phase
+> override. The
 > call fails before prepack or destination writes. Use weight-cache mode `1`,
 > remove the phase override, or use global ALGO `0`.
 >
@@ -106,26 +108,74 @@ cached; set them before the first grouped-matmul call.
 > round executor.  AUTO runs the prompts of a BF16 or FP16 layer of at least two
 > experts on ALGO 3.  The executor needs at least two active experts, an N the
 > custom-kernel pack divides and `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY` at any
-> value but `1`.  `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE=1` (default
-> `0`, opt-in per model) adds every group-matmul call of exactly one BF16
-> expert (one expert in the pool, not one active expert of an MoE pool) that
-> the custom kernel serves: AUTO runs its prompt on ALGO 3 and the executor
-> splits M across the thread teams, one run of equal M-blocks per team (each
-> block's A within half of L2) and one equal N-slice per thread unless
-> `ZENDNNL_GRP_MATMUL_PROMPT_TILE_MB` / `_NS` force a size; at pack NR 32 the
-> CK runs it in 12-row microkernel calls.  That covers both passes of a dense
-> fused FFN (ZenTorch's fused FFN) and, through the `matmul_direct` route,
-> BF16 linears at any N the custom-kernel pack divides.  The layer's decode
-> stays on ALGO 3 as well, so prompt and decode share one custom-kernel pack:
-> out-of-place at `ZENDNNL_WEIGHT_CACHE=1`, in the caller's buffer at
-> `ZENDNNL_WEIGHT_CACHE=2` (no AOCL layout is written there), with or without
-> AUTO mixed in-place mode.  A caller-prepacked AOCL weight keeps its AOCL
-> decode.  The knob does not apply under `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=1`
-> or to calls whose epilogue the custom kernel refuses.  The output matches
-> the AOCL path to BF16 tolerance, not bitwise.  Measured on the BF16 RAG
-> embedding models (embeddinggemma-300m, functiongemma-270m,
-> harrier-oss-v1-0.6b) on 32-core Turin pods; other models keep AOCL unless
-> they set it.
+> value but `1`.
+>
+> Group-matmul calls of exactly one expert (one expert in the pool, not one
+> active expert of an MoE pool) follow a single-expert custom-kernel policy
+> of three dtype-set knobs.  A value is a list of tokens joined by `,`, `+`
+> or whitespace (case-insensitive): `bf16`, `f16`, `int8` (DQ-INT8), `u8s8`
+> (static U8×S8), `w4a8`, `all` / `1` / `on` / `true` / `yes` (every dtype)
+> and `none` / `0` / `off` / `false` / `no` (nothing); tokens are OR-ed.
+> Unknown tokens are ignored, and a value with no known token keeps the
+> knob's default; both log one warning.  The knobs are read once per
+> process.  A phase of a call runs ALGO 3 on the custom kernel when a knob
+> covering that phase lists the call's dtype, the custom kernel serves it
+> (`ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL`, `..._CUSTOM_KERNEL_INT8`, `..._F16`,
+> ISA), the custom-kernel pack divides N and the custom kernel takes the
+> epilogue:
+>
+> * `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE` (default `none`) — the
+>   prompt runs ALGO 3 on the prompt tile executor, which splits M across the
+>   thread teams.  A BF16 prompt uses one run of equal M-blocks per team
+>   (each block's A within half of L2) and one equal N-slice per thread
+>   unless `ZENDNNL_GRP_MATMUL_PROMPT_TILE_MB` / `_NS` force a size, and at
+>   pack NR 32 runs 12-row microkernel calls; the other dtypes use the
+>   multi-expert tile sizing, INT8 / W4A8 on the source quantized once per
+>   call.  Not static U8×S8 (the executor does not tile it), and not under
+>   `ZENDNNL_GRP_MATMUL_PROMPT_TILE=0`, K-blocking or
+>   `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=1`.  Off, the prompt keeps Rule 0.7
+>   (AOCL-DLP, ALGO 1).
+> * `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_DECODE_TILE` (default `all`) — the
+>   decode runs ALGO 3 on the custom-kernel N-tile path, also at one thread.
+>   Off, decode keeps Rule 0.45 (which also picks ALGO 3 unless
+>   `ZENDNNL_GRP_MATMUL_DENSE_DECODE_NTILE=0`) and, through `matmul_direct`,
+>   main's N-gated routing.
+> * `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_FORCE_CK` (default `all`) — the two
+>   phase knobs cover a dtype it lists at any N; any other dtype only at
+>   decode's N-tile count (at least two custom-kernel column blocks per
+>   thread, the gate `matmul_direct` applies).  It never adds a phase: the
+>   phase knobs take precedence.
+>
+> The defaults therefore run a single expert's prompt on AOCL-DLP and its
+> decode on the custom kernel, at any N.  All three at `0` reproduce main.
+> No knob applies under `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=0`.  A one-thread
+> prompt stays on ALGO 3 only when the decode is covered too.  The policy
+> covers both passes of a dense fused FFN (ZenTorch's fused FFN) and, through
+> the `matmul_direct` route, linears at any N for a dtype `FORCE_CK`
+> lists.  A raw weight routes in both phases once
+> either is covered, so grouped AUTO owns all of its layouts (even where it
+> then selects ALGO 1); an AOCL-prepacked weight routes only its covered
+> phases.  With both phases covered the layer has one custom-kernel pack:
+> out of place at `ZENDNNL_MATMUL_WEIGHT_CACHE=1`; at
+> `ZENDNNL_MATMUL_WEIGHT_CACHE=2` a BF16 (even K) or FP16 pack may go in the
+> caller's buffer (no AOCL layout is written there), while INT8 and W4A8
+> packs stay out of place.  A later call on that buffer that does not reach
+> the custom kernel (for example a `matmul_direct` with an F32 destination,
+> `beta != 0` or a post-op the route refuses) fails closed rather than read
+> the packed bytes.  With one phase covered, the other keeps the AUTO rules
+> and grouped AUTO's mixed WEIGHT_CACHE=2 policy.  An AOCL-prepacked weight is
+> covered only for BF16 and static U8×S8, which the custom kernel converts.
+> An explicit `ZENDNNL_GRP_MATMUL_AUTO_{PROMPT,DECODE}_ALGO` pin still wins.
+> Examples: decode on the custom kernel only for layers with decode's N-tile
+> count, `..._FORCE_CK=0`; decode on the custom kernel for W4A8 only,
+> `..._DECODE_TILE=w4a8`; the prompt tile as well, at any N,
+> `..._PROMPT_TILE=all`; the prompt tile for BF16 only at any N and for
+> every other dtype only above the gate, `..._PROMPT_TILE=all
+> ..._FORCE_CK=bf16`.  Set all three to `0` for the AUTO shape rules (prompt
+> on ALGO 1, Rule 0.45 decode) and main's N-gated
+> `matmul_direct` routing.  Output matches the AOCL path to the dtype's
+> tolerance, not bitwise.  A single-expert call ignores the family bits of
+> `ZENDNNL_GRP_MATMUL_PROMPT_TILE` below; only `0` keeps it off the tile.
 > `ZENDNNL_GRP_MATMUL_PROMPT_TILE` is a family bitmask (1 BF16, 2 DQ-INT8,
 > 4 W4A8, 8 FP16; default 9); `0` keeps every prompt on the round executor.
 >

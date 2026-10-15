@@ -1706,8 +1706,9 @@ status_t group_matmul_fused_moe_execute(
     // ALGO 2/5 fused pipelines bypass the ordinary grouped dispatcher, so
     // reject the same unsupported WC=2 phase split here before either W13 or
     // W2 can be prepacked, mutated, or consumed. Inspect both weight pools.
-    if (grp_matmul_wc2_global_phase_split_unsupported_for_call(
-                M, params, &scratch.params_down)) {
+    if (grp_matmul_wc2_global_phase_split_unsupported_for_call(M, N, K, params,
+                num_threads, &scratch.params_down, &fused.N_down,
+                &scratch.K_down)) {
         log_error(
                 "group_matmul_fused_moe: WEIGHT_CACHE=2 with a non-AUTO "
                 "global ALGO and phase overrides that split BF16/FP16 "

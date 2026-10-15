@@ -32,8 +32,6 @@ namespace zendnnl {
 namespace lowoha {
 namespace matmul {
 
-inline constexpr int kSingleExpertTilesPerThread = 2;
-
 inline bool matmul_custom_kernel_bias_supported(
         const void *bias, data_type_t bias_dtype) noexcept {
     const bool has_bias = bias != nullptr;
@@ -104,16 +102,6 @@ inline bool matmul_custom_kernel_quant_supported(int M, int N, int K,
     return true;
 }
 
-inline bool has_enough_single_expert_tiles(
-        int N, int K, int num_threads) noexcept {
-    const int pack_nr = custom_kernel::plan_pack_nr(K, N);
-    if (pack_nr != custom_kernel::kNRMin && pack_nr != custom_kernel::kNRMax)
-        return false;
-    const int usable_n_tiles = N / pack_nr;
-    const int requested_threads = std::max(1, num_threads);
-    return usable_n_tiles >= requested_threads * kSingleExpertTilesPerThread;
-}
-
 /// True when a raw scalar weight can become eligible for CK on another phase
 /// or thread configuration in this process. This deliberately ignores
 /// execution-only fields (M, current thread count, alpha/beta, bias, post-ops):
@@ -144,7 +132,15 @@ inline bool custom_kernel_cross_phase_weight_candidate(
     const bool int8_route = params.dtypes.wei == data_type_t::s8
             && get_grp_matmul_custom_kernel_int8()
             && custom_kernel::avx512vnni_available();
-    return bf16_route || int8_route;
+    // FP16 routes only for a single expert the policy lists `f16` for.
+    const bool f16_route = params.dtypes.wei == data_type_t::f16
+            && ((get_grp_matmul_single_expert_prompt_tile_dtypes()
+                        | get_grp_matmul_single_expert_decode_tile_dtypes())
+                       & kSingleExpertF16)
+                    != 0
+            && get_grp_matmul_custom_kernel_f16()
+            && custom_kernel::avx512f16_available();
+    return bf16_route || int8_route || f16_route;
 }
 
 /// Return true when a single MatMul can be reproduced by one-op grouped AUTO.
@@ -212,19 +208,25 @@ inline bool custom_kernel_routable(char layout, int M, int N, int K,
             = variant == custom_kernel::KernelVariant::kBF16_BF16_BF16;
     const bool int_variant = custom_kernel::is_int8_variant(variant);
     const bool s4_variant = custom_kernel::is_s4_variant(variant);
-    if (!bf16_variant && !int_variant && !s4_variant) return false;
-    // Under `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE` a BF16 layer also
-    // routes below decode's N-tile count: the prompt tile executor splits M.
-    // A raw weight routes in both phases, because the custom-kernel pack its
-    // prompt writes (in place at WEIGHT_CACHE=2) has no scalar reader.  An
-    // AOCL-prepacked weight keeps its blocked buffer for scalar decode, so
-    // only its prompt routes.
-    const bool single_dense_tile = bf16_variant
-            && grp_matmul_single_dense_tile_layer(params.dtypes.src,
-                    params.dtypes.wei, params.dtypes.dst, params.dynamic_quant,
-                    K, N)
-            && (M > kDecodeMaxM || !aocl_prepacked);
-    if (!enough_ntiles && !single_dense_tile) return false;
+    const bool f16_variant = custom_kernel::is_f16_variant(variant);
+    // The single-expert CK policy routes a covered layer (below decode's
+    // N-tile count too for a dtype FORCE_CK lists): Rule 0.46 runs each
+    // covered phase on the custom kernel.  A raw weight routes in both phases once
+    // either is covered, so grouped AUTO owns every layout of the buffer
+    // (WEIGHT_CACHE=2 may pack it in place, which the scalar path cannot
+    // read).  An AOCL-prepacked weight is never written, so only its covered
+    // phases route.
+    const single_expert_ck_t single_ck
+            = (bf16_variant || int_variant || s4_variant || f16_variant)
+            ? grp_matmul_single_expert_ck(params, K, N, num_threads)
+            : single_expert_ck_t {};
+    if (!bf16_variant && !int_variant && !s4_variant
+            && !(f16_variant && single_ck.any()))
+        return false;
+    const bool single_layer = aocl_prepacked
+            ? single_ck.covers(/*is_decode=*/M <= kDecodeMaxM)
+            : single_ck.any();
+    if (!enough_ntiles && !single_layer) return false;
     if (!params.postop_.empty()
             && !(int_variant && !params.dynamic_quant
                     && params.dtypes.src == data_type_t::u8
@@ -244,6 +246,10 @@ inline bool custom_kernel_routable(char layout, int M, int N, int K,
         return false;
     const int min_ldb = transB ? K : N;
     if (ldb < min_ldb) return false;
+
+    // A raw single-expert layer stays on grouped AUTO in both phases whatever
+    // it selects, so grouped AUTO owns every layout of the buffer.
+    if (single_layer && !aocl_prepacked) return true;
 
     // Reuse the grouped selector itself rather than approximating its policy.
     // In particular, one thread, a global ALGO 1 pin, or a decode-phase ALGO 1

@@ -942,7 +942,8 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
     if (out.single_expert && out.NV == 2 && m_max > kDecodeMaxM
             && (variant == KernelVariant::kBF16_BF16_BF16
                     || variant == KernelVariant::kBF16_BF16_F32)
-            && get_grp_matmul_single_expert_prompt_tile())
+            && (get_grp_matmul_single_expert_prompt_tile_dtypes()
+                    & kSingleExpertBf16))
         out.max_mr = kMaxMrNv2Prompt;
     // Map framework activation → CK ActKind.  Order matters: refusal
     // gate above guarantees `act` is one of {none, swiglu_oai_mul,

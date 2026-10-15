@@ -52,6 +52,7 @@ namespace {
 
 inline bool ck_eligible_f16(const PrepackParams &p);
 inline bool ck_eligible_bf16(const PrepackParams &p);
+inline bool ck_eligible(const PrepackParams &p);
 
 /// The runtime's `grp_matmul_auto_algo3_call` for a prepack of
 /// `scheduling_algo`: the prelude skips caller-prepacked weights, so this is a
@@ -64,13 +65,21 @@ inline bool auto_algo3_layer(const PrepackParams &p, int scheduling_algo) {
                       && p.wei_dtype == data_type_t::bf16)
             || (p.src_dtype == data_type_t::f16
                     && p.wei_dtype == data_type_t::f16);
-    // A Rule 0.46 single dense BF16 layer runs ALGO 3 in both phases too.
+    // A Rule 0.46 single dense layer runs ALGO 3 in both phases too.
     const bool single_dense = p.num_ops_total == 1 && !p.caller_prepacked
             && p.K != nullptr && p.N != nullptr && !p.K->empty()
             && !p.N->empty()
-            && grp_matmul_single_dense_tile_layer(p.src_dtype, p.wei_dtype,
-                    p.dst_dtype, p.dynamic_quant, (*p.K)[0], (*p.N)[0])
-            && ck_eligible_bf16(p);
+            && grp_matmul_single_expert_ck(p.src_dtype, p.wei_dtype,
+                    p.dst_dtype, p.dynamic_quant, p.compute_dtype,
+                    /*static_u8s8=*/!p.dynamic_quant
+                            && p.src_dtype == data_type_t::u8
+                            && p.wei_dtype == data_type_t::s8
+                            && (p.compute_dtype == data_type_t::none
+                                    || p.compute_dtype == data_type_t::u8),
+                    /*aocl_prepacked=*/false, (*p.K)[0], (*p.N)[0],
+                    p.num_threads)
+                       .both()
+            && ck_eligible(p);
     const bool layer = single_dense
             || grp_matmul_auto_algo3_layer(
                     supported_float_family, p.num_ops_total);
