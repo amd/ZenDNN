@@ -11371,10 +11371,23 @@ static bool run_and_compare_standalone_f16(StandaloneMTileShapeF16 &s,
     using zendnnl::lowoha::matmul::group_matmul_direct;
     using zendnnl::lowoha::matmul::status_t;
 
+    // WEIGHT_CACHE=2 packs into the caller's weight buffer. Clearing the
+    // pack cache between the two runs does not restore those bytes, so the
+    // second call would multiply already-packed weights. Reload the raw
+    // weights before each run.
+    const auto wei_raw = s.wei;
+    const auto reload_raw_weights = [&]() {
+        s.wei = wei_raw;
+        for (int e = 0; e < s.num_ops; ++e) {
+            s.weis[e] = s.wei[e].data();
+        }
+    };
+
     // Reference run first (ALGO 1, sequential per-expert).  An
     // `isa_unsupported` return here means the host lacks AVX-512-FP16;
     // signal the caller to GTEST_SKIP() instead of failing.
     {
+        reload_raw_weights();
         auto pr = s.params;
         AlgoEnvGuard algo_guard_ref(algo_ref);
         ::reset_grp_matmul_caches();
@@ -11390,6 +11403,7 @@ static bool run_and_compare_standalone_f16(StandaloneMTileShapeF16 &s,
     }
     int tag = 0;
     {
+        reload_raw_weights();
         auto pt = s.params;
         ::reset_grp_matmul_caches();
         AlgoEnvGuard algo_guard_test(algo_test);
@@ -12610,15 +12624,16 @@ TEST(TestGroupMatmulMTileStandalone, GatedActSwigluOaiMulF16) {
     if (!ran) { GTEST_SKIP() << "F16 not supported: requires AVX512-FP16 ISA"; }
 }
 
-// F16 sibling of `RoundBasedGatedActFullMPostPass`.  Same
-// 8 experts × M=8 × N=256 × K=64 shape (drives ALGO 2 to the
-// round-based path with a full-M apply_gated_act_inplace post-pass
-// instead of the per-slice path that the larger configs above
-// exercise).
-TEST(TestGroupMatmulMTileBranches, RoundBasedGatedActFullMPostPassF16) {
+// F16 sibling of `ManyExpertsSeqClampGatedActFullMPostPass`.  Same
+// 8 experts × M=8 × N=256 × K=64 shape.  active_ops > num_threads, so
+// ALGO 2 clamps to sequential full-team (kManyExpertsSeqFallback) and
+// applies the gated activation over each expert's full M.
+TEST(TestGroupMatmulMTileBranches,
+        ManyExpertsSeqClampGatedActFullMPostPassF16) {
     using zendnnl::lowoha::matmul::grp_matmul_gated_act_params;
     using zendnnl::lowoha::matmul::grp_matmul_gated_act_t;
-    using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kRoundBased;
+    using zendnnl::lowoha::matmul::test_api::m_tile_path_tag ::
+            kManyExpertsSeqFallback;
 
     const int saved = omp_get_max_threads();
     struct G {
@@ -12640,9 +12655,9 @@ TEST(TestGroupMatmulMTileBranches, RoundBasedGatedActFullMPostPassF16) {
 
     const bool ran
             = run_and_compare_standalone_f16(s, /*algo_test=*/2, /*algo_ref=*/1,
-                    /*expected_tag=*/kRoundBased,
+                    /*expected_tag=*/kManyExpertsSeqFallback,
                     /*rtol=*/5e-2f, /*atol=*/5e-2f,
-                    "round_based_silu_full_M_post_pass_f16",
+                    "many_experts_seq_clamp_silu_full_M_post_pass_f16",
                     /*gated_act=*/&ga);
     if (!ran) { GTEST_SKIP() << "F16 not supported: requires AVX512-FP16 ISA"; }
 }
