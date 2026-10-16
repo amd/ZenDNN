@@ -33,9 +33,9 @@ QwenBf16DecodeRoute apply_qwen_bf16_decode_policy(CallContext &ctx,
 
     const int n = N[0];
     const int k = K[0];
-    const bool qwen35_gated = M[0] > 8
+    const bool wide_silu_gated = M[0] > 8
             && act == grp_matmul_gated_act_t::silu_and_mul && k == 4096
-            && n == 24576;
+            && n >= 24576 && n <= 28672 && (n % 4096) == 0;
     const bool qwen35_w2 = M[0] > 8 && act == grp_matmul_gated_act_t::none
             && k == 12288 && n == 4096;
     const bool qwen35_plain = M[0] > 8 && act == grp_matmul_gated_act_t::none
@@ -45,7 +45,7 @@ QwenBf16DecodeRoute apply_qwen_bf16_decode_policy(CallContext &ctx,
             && ((k == 2048 && (n == 256 || n == 12288 || n == 248320))
                     || (k == 4096 && n == 2048));
 
-    if (qwen35_gated) {
+    if (wide_silu_gated) {
         bool complete = true;
         for (int mr = 9; mr <= 12; ++mr) {
             ctx.kfn_table[mr] = decode_specialized::select_gated_bf16_one_panel(
@@ -64,14 +64,14 @@ QwenBf16DecodeRoute apply_qwen_bf16_decode_policy(CallContext &ctx,
                 = select_ukernel(mr_small, ctx.NV, ActKind::none, DstDt::kF32);
         const auto initial_big
                 = select_ukernel(mr_big, ctx.NV, ActKind::none, DstDt::kF32);
-        const auto continue_small
-                = decode_specialized::select_plain_bf16_f32_continue(
+        const auto accumulate_small
+                = decode_specialized::select_plain_bf16_f32_accumulate(
                         mr_small, ctx.NV);
-        const auto continue_big
-                = decode_specialized::select_plain_bf16_f32_continue(
+        const auto accumulate_big
+                = decode_specialized::select_plain_bf16_f32_accumulate(
                         mr_big, ctx.NV);
         if (initial_small != nullptr && initial_big != nullptr
-                && continue_small != nullptr && continue_big != nullptr) {
+                && accumulate_small != nullptr && accumulate_big != nullptr) {
             return QwenBf16DecodeRoute::qwen35_w2_resume;
         }
         return QwenBf16DecodeRoute::none;
@@ -125,14 +125,15 @@ bool dispatch_qwen_bf16_decode_tile(QwenBf16DecodeRoute route,
     const ukernel_fn_t initial_big = (n_big > 0)
             ? select_ukernel(mr_big, ctx.NV, ActKind::none, DstDt::kF32)
             : initial_small;
-    const ukernel_fn_t continue_small
-            = decode_specialized::select_plain_bf16_f32_continue(
+    const ukernel_fn_t accumulate_small
+            = decode_specialized::select_plain_bf16_f32_accumulate(
                     mr_small, ctx.NV);
-    const ukernel_fn_t continue_big = (n_big > 0)
-            ? decode_specialized::select_plain_bf16_f32_continue(mr_big, ctx.NV)
-            : continue_small;
+    const ukernel_fn_t accumulate_big = (n_big > 0)
+            ? decode_specialized::select_plain_bf16_f32_accumulate(
+                      mr_big, ctx.NV)
+            : accumulate_small;
     assert(initial_small != nullptr && initial_big != nullptr);
-    assert(continue_small != nullptr && continue_big != nullptr);
+    assert(accumulate_small != nullptr && accumulate_big != nullptr);
 
     const auto *A = static_cast<const bfloat16_t *>(src);
     const auto *Bpacked_full = ctx.packed_ptrs[expert_idx];
@@ -158,7 +159,7 @@ bool dispatch_qwen_bf16_decode_tile(QwenBf16DecodeRoute route,
                 const bool big = call < n_big;
                 const int mr = big ? mr_big : mr_small;
                 const ukernel_fn_t kernel = resume
-                        ? (big ? continue_big : continue_small)
+                        ? (big ? accumulate_big : accumulate_small)
                         : (big ? initial_big : initial_small);
                 const bfloat16_t *A_chunk
                         = A + static_cast<size_t>(m_offset) * lda + sub;

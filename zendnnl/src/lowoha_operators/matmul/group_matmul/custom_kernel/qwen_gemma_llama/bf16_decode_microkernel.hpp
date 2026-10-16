@@ -28,7 +28,7 @@ namespace decode_specialized {
 ukernel_fn_t select_plain_bf16_one_panel(int MR);
 ukernel_fn_t select_plain_bf16_fixed_k(int MR, int K);
 ukernel_fn_t select_gated_bf16_one_panel(int MR, ActKind act);
-ukernel_fn_t select_plain_bf16_f32_continue(int MR, int NV);
+ukernel_fn_t select_plain_bf16_f32_accumulate(int MR, int NV);
 
 } // namespace decode_specialized
 } // namespace custom_kernel

@@ -14,10 +14,12 @@
  * limitations under the License.
  *******************************************************************************/
 
-/// Qwen BF16 decode microkernel specializations.
+/// Qwen, Gemma, and Llama BF16 decode microkernel specializations.
 ///
-/// These kernels are selected only by `qwen/bf16_decode_policy.cpp` after the
-/// common group-matmul dispatcher has prepared the established ALGO 3 context.
+/// These kernels are selected by
+/// `qwen_gemma_llama/bf16_decode_policy.cpp` and the generic dense decode
+/// dispatcher after the common group-matmul dispatcher has prepared the
+/// established ALGO 3 context.
 ///
 /// PER K-PAIR INNER LOOP (VDPBF16PS, AVX512_BF16):
 ///
@@ -261,7 +263,8 @@ static inline void silu_and_mul_store_pair(
 // MR×NV register footprint; `noinline` prevents the compiler from
 // duplicating the body at every dispatch site.
 // ─────────────────────────────────────────────────────────────────────
-template <int MR, int NV, ActKind Act, typename DstT, bool ContinueF32 = false>
+template <int MR, int NV, ActKind Act, typename DstT,
+        bool AccumulateF32 = false>
 ZENDNNL_TARGET_NOINLINE("avx512f,avx512bf16,avx512bw,avx512vl,fma")
 static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
         const bfloat16_t *__restrict Bpacked, const void *__restrict bias,
@@ -286,10 +289,10 @@ static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
     static_assert(Act == ActKind::none || std::is_same<DstT, bfloat16_t>::value,
             "Gated-activation kinds (swiglu_oai_mul, silu_and_mul, "
             "gelu_and_mul) are BF16-dst only");
-    static_assert(!ContinueF32
+    static_assert(!AccumulateF32
                     || (Act == ActKind::none && std::is_same<DstT, float>::value
                             && MR >= 4),
-            "continued partials require Act=none, FP32 dst and one buffer");
+            "FP32 accumulation requires Act=none, FP32 dst and one buffer");
 
     // Reinterpret the dispatcher's `void *` outputs as the templated
     // dst type.  ldc / ldc_tight stay in element units (not bytes) —
@@ -334,7 +337,7 @@ static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
     // branch produces identical accumulator state as the previous code.
     const bool has_bias = (bias != nullptr && bias_kind != BiasKind::none);
     __m512 bias_vec[NV];
-    if constexpr (ContinueF32) {
+    if constexpr (AccumulateF32) {
 #pragma GCC unroll 8
         for (int m = 0; m < MR; ++m) {
 #pragma GCC unroll 4
@@ -1146,7 +1149,7 @@ ukernel_fn_t select_gated_bf16_one_panel(int MR, ActKind act) {
     }
 }
 
-ukernel_fn_t select_plain_bf16_f32_continue(int MR, int NV) {
+ukernel_fn_t select_plain_bf16_f32_accumulate(int MR, int NV) {
     if (NV != 2) return nullptr;
     switch (MR) {
         case 4: return ukernel_impl<4, 2, ActKind::none, float, true>;

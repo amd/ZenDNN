@@ -12,8 +12,8 @@
 
 #include "../../kblock_test_hooks.hpp"
 #include "../ck_test_helpers.hpp"
-#include "lowoha_operators/matmul/group_matmul/custom_kernel/qwen/bf16_decode_microkernel.hpp"
-#include "lowoha_operators/matmul/group_matmul/custom_kernel/qwen/bf16_decode_policy.hpp"
+#include "lowoha_operators/matmul/group_matmul/custom_kernel/qwen_gemma_llama/bf16_decode_microkernel.hpp"
+#include "lowoha_operators/matmul/group_matmul/custom_kernel/qwen_gemma_llama/bf16_decode_policy.hpp"
 
 namespace {
 
@@ -89,6 +89,22 @@ TEST(QwenBf16DecodePolicy, UsesOnePanelGatedKernel) {
     EXPECT_TRUE(kctx.kblock_auto);
 }
 
+TEST(QwenBf16DecodePolicy, UsesOnePanelGatedKernelForWideDenseShape) {
+    CK_SKIP_IF_NO_BF16_ISA();
+    ::reset_grp_matmul_caches();
+    auto c = qwen_case("wide_dense_decode_gated");
+    c.M = 32;
+    c.N = 28672;
+    c.K = 4096;
+    c.act = grp_matmul_gated_act_t::silu_and_mul;
+    ck_test::PrepCallStorage storage;
+    ck::CallContext kctx;
+    ASSERT_EQ(
+            run_prepare_with_qwen_policy(c, storage, kctx), status_t::success);
+    EXPECT_EQ(kctx.max_mr, 12);
+    EXPECT_TRUE(kctx.kblock_auto);
+}
+
 TEST(QwenBf16DecodePolicy, KeepsPromptOnEstablishedKernel) {
     CK_SKIP_IF_NO_BF16_ISA();
     ::reset_grp_matmul_caches();
@@ -150,6 +166,24 @@ TEST(QwenBf16DecodePolicy, KeepsSmallDownProjectionOnEstablishedKernel) {
             status_t::success);
     EXPECT_EQ(route, ck::QwenBf16DecodeRoute::none);
     EXPECT_TRUE(kctx.kblock_auto);
+}
+
+TEST(QwenBf16DecodePolicy, DenseW2KeepsCkContext) {
+    CK_SKIP_IF_NO_BF16_ISA();
+    for (const auto &[K, N] : {std::pair<int, int> {15360, 3840},
+                 std::pair<int, int> {14336, 4096}}) {
+        ::reset_grp_matmul_caches();
+        auto c = qwen_case("dense_decode_w2");
+        c.M = 32;
+        c.N = N;
+        c.K = K;
+        ck_test::PrepCallStorage storage;
+        ck::CallContext kctx;
+        ASSERT_EQ(run_prepare_with_qwen_policy(c, storage, kctx),
+                status_t::success);
+        EXPECT_EQ(kctx.pack_nr, 32);
+        EXPECT_TRUE(kctx.kblock_auto);
+    }
 }
 
 TEST(QwenBf16DecodePolicy, UsesFixedKKernelForQwen36BS8) {
@@ -223,6 +257,21 @@ TEST(QwenBf16DecodeE2E, DownProjectionHandlesEveryMrTail) {
                 M == 31 ? "qwen35_w2_sidecar_tail31"
                         : "qwen35_w2_sidecar_tail9");
     }
+}
+
+TEST(QwenBf16DecodeE2E, DenseW2OptimizedKblockIsCorrect) {
+    QwenThreadGuard threads(32);
+    if (!qwen_has_threads(32)) {
+        GTEST_SKIP() << "Requires >= 32 OMP threads.";
+    }
+    group_matmul_test::run_kblock_case(/*num_threads=*/32, /*M=*/32,
+            /*N=*/3840, /*K=*/15360, /*nr=*/32, /*kblock_mode=*/2,
+            /*with_bias=*/false, /*f32_dst=*/false, /*lda_pad=*/0,
+            /*ldc_pad=*/0, /*expect_kblock=*/true, "gemma4_w2_kc512");
+    group_matmul_test::run_kblock_case(/*num_threads=*/32, /*M=*/32,
+            /*N=*/4096, /*K=*/14336, /*nr=*/32, /*kblock_mode=*/2,
+            /*with_bias=*/false, /*f32_dst=*/false, /*lda_pad=*/0,
+            /*ldc_pad=*/0, /*expect_kblock=*/true, "llama31_w2_kc512");
 }
 
 } // namespace

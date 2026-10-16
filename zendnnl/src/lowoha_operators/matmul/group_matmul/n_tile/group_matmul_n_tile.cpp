@@ -69,7 +69,7 @@
 #include <omp.h>
 
 #include "../custom_kernel/dispatch.hpp"
-#include "../custom_kernel/qwen/bf16_decode_policy.hpp"
+#include "../custom_kernel/qwen_gemma_llama/bf16_decode_policy.hpp"
 #include "../group_matmul_parallel_common.hpp"
 #include "../prepack/prepack.hpp"
 #include "../prompt_tile/prompt_tile_executor.hpp"

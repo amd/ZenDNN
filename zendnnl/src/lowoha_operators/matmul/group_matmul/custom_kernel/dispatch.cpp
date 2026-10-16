@@ -23,12 +23,16 @@
 #include <cstdlib>
 #include <vector>
 
+#include <immintrin.h>
+
 #include "../group_matmul_parallel_common.hpp"
+#include "common/zendnnl_compat.hpp"
 #include "common/zendnnl_global.hpp"
 #include "lowoha_operators/matmul/aocl_unreorder_cache.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 #include "pack.hpp"
+#include "qwen_gemma_llama/bf16_decode_microkernel.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -2012,6 +2016,7 @@ inline void dispatch_tile_f16(const CallContext &ctx, int expert_idx, int M,
 //   * M > max_mr AND the o-block B strip exceeds the L2 budget
 //     (otherwise the plain path is already optimal — no benefit).
 namespace {
+ZENDNNL_TARGET("avx512f,avx512bf16,avx512bw,avx512vl,fma")
 inline void dispatch_tile_bf16_kblocked(const CallContext &ctx, int expert_idx,
         int M, int K, int n_tile, int col_start, const void *src, int lda,
         void *tight_dst, int tight_ldc) {
@@ -2043,6 +2048,14 @@ inline void dispatch_tile_bf16_kblocked(const CallContext &ctx, int expert_idx,
     const ukernel_fn_t fn_big = (n_big > 0)
             ? select_ukernel(mr_base + 1, NV, ActKind::none, DstDt::kF32)
             : fn_small;
+    const ukernel_fn_t accumulate_small
+            = decode_specialized::select_plain_bf16_f32_accumulate(mr_base, NV);
+    const ukernel_fn_t accumulate_big = (n_big > 0)
+            ? decode_specialized::select_plain_bf16_f32_accumulate(
+                      mr_base + 1, NV)
+            : accumulate_small;
+    const bool direct_accumulate
+            = accumulate_small != nullptr && accumulate_big != nullptr;
 
     // Per-thread f32 accumulator [M × n_tile].  thread_local so the
     // allocation amortises across tiles/calls on the same worker.
@@ -2061,6 +2074,15 @@ inline void dispatch_tile_bf16_kblocked(const CallContext &ctx, int expert_idx,
             l2_budget / (static_cast<int64_t>(pack_nr + max_mr) * 2));
     kc &= ~1; // even (K-pair aligned)
     if (kc < 2) kc = 2;
+    const bool dense_decode_w2
+            = pack_nr == 32 && M > 8 && (K == 15360 || K == 14336);
+    if (dense_decode_w2) {
+        // Dense Gemma/Llama decode W2 rotates through cold layer weights.
+        // A 512-element K chunk keeps each NR32 slab resident while all
+        // M-blocks consume it, avoiding the bandwidth cliff of the larger
+        // generic L2-derived chunk.
+        kc = 512;
+    }
 
     // Small on-stack partial for k_chunk > 0 (max_mr × pack_nr f32).
     float ctmp[kMaxMR * 64];
@@ -2087,6 +2109,15 @@ inline void dispatch_tile_bf16_kblocked(const CallContext &ctx, int expert_idx,
                     kfn(A_chunk, lda, Bpk, /*bias=*/nullptr, BiasKind::none,
                             /*Cout=*/Cdst, /*ldc=*/n_tile,
                             /*Cout_tight=*/nullptr, /*ldc_tight=*/0, kc_now);
+                } else if (direct_accumulate) {
+                    float *Cdst = c_accum.data()
+                            + static_cast<size_t>(m_off) * n_tile
+                            + static_cast<size_t>(b) * pack_nr;
+                    const ukernel_fn_t accumulate_kfn
+                            = (c < n_big) ? accumulate_big : accumulate_small;
+                    accumulate_kfn(A_chunk, lda, Bpk, /*bias=*/nullptr,
+                            BiasKind::none, /*Cout=*/Cdst, /*ldc=*/n_tile,
+                            /*Cout_tight=*/nullptr, /*ldc_tight=*/0, kc_now);
                 } else {
                     kfn(A_chunk, lda, Bpk, /*bias=*/nullptr, BiasKind::none,
                             /*Cout=*/ctmp, /*ldc=*/pack_nr,
@@ -2097,8 +2128,12 @@ inline void dispatch_tile_bf16_kblocked(const CallContext &ctx, int expert_idx,
                                 + static_cast<size_t>(b) * pack_nr;
                         const float *src_row
                                 = ctmp + static_cast<size_t>(mm) * pack_nr;
-                        for (int cc = 0; cc < pack_nr; ++cc)
-                            dst_row[cc] += src_row[cc];
+                        for (int cc = 0; cc < pack_nr; cc += 16) {
+                            const __m512 dstv = _mm512_loadu_ps(dst_row + cc);
+                            const __m512 srcv = _mm512_loadu_ps(src_row + cc);
+                            _mm512_storeu_ps(
+                                    dst_row + cc, _mm512_add_ps(dstv, srcv));
+                        }
                     }
                 }
                 m_off += mr_now;
@@ -2107,18 +2142,30 @@ inline void dispatch_tile_bf16_kblocked(const CallContext &ctx, int expert_idx,
     }
 
     // Epilogue: narrow the f32 accumulator to the caller's dst dtype.
-    std::byte *dst_bytes = static_cast<std::byte *>(tight_dst);
-    for (int m = 0; m < M; ++m) {
-        const float *acc_row = c_accum.data() + static_cast<size_t>(m) * n_tile;
-        for (int col = 0; col < n_tile; ++col) {
-            const size_t off
-                    = (static_cast<size_t>(m) * tight_ldc + col_start + col)
-                    * dst_elem_bytes;
-            if (dst_elem_bytes == sizeof(float)) {
-                *reinterpret_cast<float *>(dst_bytes + off) = acc_row[col];
-            } else {
-                *reinterpret_cast<bfloat16_t *>(dst_bytes + off)
-                        = bfloat16_t(acc_row[col]);
+    if (dst_elem_bytes == sizeof(float)) {
+        auto *dst = static_cast<float *>(tight_dst);
+        for (int m = 0; m < M; ++m) {
+            const float *acc_row
+                    = c_accum.data() + static_cast<size_t>(m) * n_tile;
+            float *dst_row
+                    = dst + static_cast<size_t>(m) * tight_ldc + col_start;
+            for (int col = 0; col < n_tile; col += 16) {
+                _mm512_storeu_ps(dst_row + col, _mm512_loadu_ps(acc_row + col));
+            }
+        }
+    } else {
+        auto *dst = static_cast<bfloat16_t *>(tight_dst);
+        for (int m = 0; m < M; ++m) {
+            const float *acc_row
+                    = c_accum.data() + static_cast<size_t>(m) * n_tile;
+            bfloat16_t *dst_row
+                    = dst + static_cast<size_t>(m) * tight_ldc + col_start;
+            for (int col = 0; col < n_tile; col += 32) {
+                const __m512 lo = _mm512_loadu_ps(acc_row + col);
+                const __m512 hi = _mm512_loadu_ps(acc_row + col + 16);
+                const __m512bh out = _mm512_cvtne2ps_pbh(hi, lo);
+                _mm512_storeu_si512(reinterpret_cast<__m512i *>(dst_row + col),
+                        (__m512i)out);
             }
         }
     }
