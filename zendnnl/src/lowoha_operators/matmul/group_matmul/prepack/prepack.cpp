@@ -30,11 +30,12 @@
 #include <unordered_set>
 
 #include "common/zendnnl_global.hpp"
+#include "lowoha_operators/matmul/group_matmul/common/group_matmul_parallel_common.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/dispatch.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
-#include "lowoha_operators/matmul/group_matmul/group_matmul_parallel_common.hpp"
 #include "lowoha_operators/matmul/group_matmul/prepack/prepack_aocl_dlp.hpp"
 #include "lowoha_operators/matmul/group_matmul/prepack/prepack_custom_kernel.hpp"
+#include "lowoha_operators/matmul/group_matmul/single_expert/single_expert_policy.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -69,16 +70,9 @@ inline bool auto_algo3_layer(const PrepackParams &p, int scheduling_algo) {
     const bool single_dense = p.num_ops_total == 1 && !p.caller_prepacked
             && p.K != nullptr && p.N != nullptr && !p.K->empty()
             && !p.N->empty()
-            && grp_matmul_single_expert_ck(p.src_dtype, p.wei_dtype,
-                    p.dst_dtype, p.dynamic_quant, p.compute_dtype,
-                    /*static_u8s8=*/!p.dynamic_quant
-                            && p.src_dtype == data_type_t::u8
-                            && p.wei_dtype == data_type_t::s8
-                            && (p.compute_dtype == data_type_t::none
-                                    || p.compute_dtype == data_type_t::u8),
-                    /*aocl_prepacked=*/false, (*p.K)[0], (*p.N)[0],
-                    p.num_threads)
-                       .both()
+            && grp_matmul_single_expert_prepack_layer(p.src_dtype, p.wei_dtype,
+                    p.dst_dtype, p.dynamic_quant, p.compute_dtype, (*p.K)[0],
+                    (*p.N)[0], p.num_threads)
             && ck_eligible(p);
     const bool layer = single_dense
             || grp_matmul_auto_algo3_layer(

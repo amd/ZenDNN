@@ -56,7 +56,7 @@
 #include <immintrin.h>
 
 #include "common/zendnnl_global.hpp"
-#include "lowoha_operators/matmul/group_matmul/group_matmul_act_avx512.hpp"
+#include "lowoha_operators/matmul/group_matmul/common/group_matmul_act_avx512.hpp"
 
 namespace zendnnl {
 namespace lowoha {

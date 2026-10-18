@@ -61,7 +61,7 @@
 
 #include <immintrin.h>
 
-#include "lowoha_operators/matmul/group_matmul/group_matmul_act_avx512.hpp"
+#include "lowoha_operators/matmul/group_matmul/common/group_matmul_act_avx512.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 

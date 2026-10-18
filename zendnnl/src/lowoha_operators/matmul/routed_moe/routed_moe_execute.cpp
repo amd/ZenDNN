@@ -47,7 +47,7 @@
 #include "common/zendnnl_global.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/ukernel/s4_microkernel.hpp"
-#include "lowoha_operators/matmul/group_matmul/ntile_flat_parallel/ntile_flat_parallel.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/ntile_flat_parallel.hpp"
 #include "lowoha_operators/matmul/routed_moe/routed_moe_kernels.hpp"
 
 #include <algorithm>

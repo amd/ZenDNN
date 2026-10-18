@@ -76,7 +76,7 @@
 // path emits the same `_custom`-suffixed labels as the bf16 path
 // (`flat_n_tile_custom`, `flat_n_tile_fused_silu_and_mul_tight_custom`,
 // ...), so the `_custom` substring check is family-agnostic.
-#include "lowoha_operators/matmul/group_matmul/group_matmul_parallel_common.hpp"
+#include "lowoha_operators/matmul/group_matmul/common/group_matmul_parallel_common.hpp"
 
 namespace {
 

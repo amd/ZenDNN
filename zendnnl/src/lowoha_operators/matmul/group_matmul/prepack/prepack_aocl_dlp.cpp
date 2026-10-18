@@ -22,7 +22,7 @@
 #include "common/hash_utils.hpp"
 #include "common/zendnnl_global.hpp"
 #include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
-#include "lowoha_operators/matmul/group_matmul/group_matmul_parallel_common.hpp"
+#include "lowoha_operators/matmul/group_matmul/common/group_matmul_parallel_common.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 
 namespace zendnnl {

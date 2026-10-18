@@ -21,14 +21,18 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 
 #include <immintrin.h>
 
-#include "../group_matmul_parallel_common.hpp"
+#include "../single_expert/single_expert_hooks.hpp"
+#include "../single_expert/single_expert_policy.hpp"
 #include "common/zendnnl_compat.hpp"
 #include "common/zendnnl_global.hpp"
 #include "lowoha_operators/matmul/aocl_unreorder_cache.hpp"
+#include "lowoha_operators/matmul/group_matmul/common/grp_matmul_constants.hpp"
+#include "lowoha_operators/matmul/group_matmul/common/grp_matmul_env.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 #include "pack.hpp"
@@ -932,23 +936,10 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
         out.group_size = group_size;
         out.wei_scale_grp_stride = wei_scale_grp_stride;
     }
-    // AUTO deep-K K-blocking: engage for the single-expert (dense-FFN)
-    // decode-class call only (see `is_dense_ffn_decode`, the decode-gated
-    // twin of the adaptive N-tile sizer's scope predicate). MoE (num_ops>1)
-    // and prompt (m_max>kDecodeMaxM) leave this false; the BF16/INT8
-    // dtype-specific, act=none, bias-free, deep-K, and M>max_mr guards in
-    // dispatch_tile still apply, so only eligible W2 decode calls K-block.
-    out.kblock_auto = is_dense_ffn_decode(num_ops, m_max);
+    out.kblock_auto = se_kblock_auto(num_ops, m_max);
     out.single_expert = (num_ops == 1);
-    // A dense BF16 prompt at pack NR 32 runs 12-row calls: 24 accumulator
-    // chains instead of 16 keep VDPBF16PS issue full.  Each output element
-    // still sums K in the same order, so the result is unchanged.
-    if (out.single_expert && out.NV == 2 && m_max > kDecodeMaxM
-            && (variant == KernelVariant::kBF16_BF16_BF16
-                    || variant == KernelVariant::kBF16_BF16_F32)
-            && (get_grp_matmul_single_expert_prompt_tile_dtypes()
-                    & kSingleExpertBf16))
-        out.max_mr = kMaxMrNv2Prompt;
+    out.max_mr = se_prompt_max_mr(
+            out.max_mr, out.single_expert, out.NV, m_max, variant);
     // Map framework activation → CK ActKind.  Order matters: refusal
     // gate above guarantees `act` is one of {none, swiglu_oai_mul,
     // silu_and_mul, gelu_and_mul} at this point.
@@ -1337,16 +1328,8 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
 // the public dispatch.hpp surface so the prepack module can compute
 // the same NR the dispatcher will pack under.)
 
-// Minimum MR-call count at which the custom-kernel tile loops
-// (`dispatch_tile` for BF16, `dispatch_tile_int8` for DQ-INT8) switch to
-// o-block-outer nesting.  The swap trades redundant walks of the sub-tile's
-// B strip for re-reading the A panel once per o-block; with two MR calls it
-// saves a single B walk and does not pay, so it starts at three.
-//
-// Paired with `ctx.single_expert`: the reordering only engages for
-// num_ops == 1.  Both orders compute identical results; the MoE exclusion
-// is explained at the BF16 use site in `dispatch_tile`.
-inline constexpr int kOblockOuterMinCalls = 3;
+// The o-block-outer threshold (`kOblockOuterMinCalls`) and its single-expert
+// gate are `se_oblock_outer` in `single_expert/single_expert_hooks.hpp`.
 
 // Visits every (MR call, o-block) pair of one sub-tile, o-block outer when
 // `oblk_outer` is set.  Each pair writes a disjoint output block.
@@ -1465,8 +1448,7 @@ inline void dispatch_tile_int8(const CallContext &ctx, int expert_idx, int M,
             ? sizeof(bfloat16_t)
             : sizeof(float);
 
-    const bool oblk_outer
-            = ctx.single_expert && n_calls >= kOblockOuterMinCalls;
+    const bool oblk_outer = se_oblock_outer(ctx.single_expert, n_calls);
     const auto mr_of = [mr_base, n_big](int c) {
         return (c < n_big) ? mr_base + 1 : mr_base;
     };
@@ -2420,7 +2402,7 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
             // so the o-block count per sub-tile — and with it the whole
             // benefit — can differ.  Both orders compute the same result,
             // so this is a scope guard, not a correctness one.
-            if (ctx.single_expert && n_calls >= kOblockOuterMinCalls) {
+            if (se_oblock_outer(ctx.single_expert, n_calls)) {
                 for (int b = 0; b < n_blocks; ++b) {
                     const bfloat16_t *Bpacked_blk = Bpacked_blk_base
                             + static_cast<size_t>(b) * o_blk_stride;
@@ -2505,7 +2487,7 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
                         + static_cast<size_t>(sub_col_base) * bias_elem_bytes
                 : nullptr;
 
-        if (ctx.single_expert && n_calls >= kOblockOuterMinCalls) {
+        if (se_oblock_outer(ctx.single_expert, n_calls)) {
             for (int b = 0; b < n_blocks; ++b) {
                 const bfloat16_t *Bpacked_blk = Bpacked_blk_base
                         + static_cast<size_t>(b) * o_blk_stride;
@@ -2565,6 +2547,141 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
             }
             m_off += mr_now;
         }
+    }
+}
+
+bool block_api_supported(const CallContext &ctx, const void *bias,
+        const void *src_zp, const Int8EpilogueConfig &int8_epilogue) {
+    if (ctx.act_kind != ActKind::none || bias != nullptr) return false;
+    if (ctx.variant == KernelVariant::kS8_S8_BF16_SYM)
+        return ctx.compute_int == IntCompute::kS8_Sym && ctx.pack_nr == kNRMin
+                && src_zp == nullptr && !int8_epilogue.src_quant_per_tensor
+                && !int8_epilogue.wei_scale_per_tensor
+                && int8_epilogue.binary_mul == nullptr
+                && int8_epilogue.binary_add == nullptr
+                && int8_epilogue.unary_postop == Int8UnaryPostOp::kNone;
+    return (ctx.variant == KernelVariant::kBF16_BF16_BF16
+                   || ctx.variant == KernelVariant::kBF16_BF16_F32)
+            && (ctx.pack_nr == kNRMin || ctx.pack_nr == kNRMax);
+}
+
+int block_k_step(const CallContext &ctx) {
+    return is_int8_variant(ctx.variant) ? kVNNIInt8Quad : kVNNIPair;
+}
+
+size_t block_dst_elem_bytes(const CallContext &ctx) {
+    return ctx.variant == KernelVariant::kBF16_BF16_F32 ? sizeof(float)
+                                                        : sizeof(bfloat16_t);
+}
+
+size_t block_scale_elem_bytes(const CallContext &ctx) {
+    return ctx.scale_kind == ScaleKind::kBf16 ? sizeof(bfloat16_t)
+                                              : sizeof(float);
+}
+
+namespace {
+
+// Packed-block byte strides; must match `bytes_per_oblock` in pack.cpp, as
+// `dispatch_tile_int8_kblocked` and `dispatch_tile_bf16_kblocked` do.
+inline size_t int8_block_weight_bytes(int K) {
+    return static_cast<size_t>(K / kVNNIInt8Quad) * kNRMin * kVNNIInt8Quad;
+}
+inline size_t int8_block_stride_bytes(int K) {
+    return int8_block_weight_bytes(K) + kNRMin * sizeof(int32_t);
+}
+
+} // namespace
+
+void block_accum(const CallContext &ctx, int expert_idx, int M, int K,
+        int block, int k_begin, int k_end, const void *src, int lda, void *acc,
+        bool add, int mr_cap) {
+    assert(k_begin % block_k_step(ctx) == 0 && k_begin < k_end && k_end <= K);
+    const int pack_nr = ctx.pack_nr;
+    const int max_mr = (mr_cap > 0) ? std::min(mr_cap, ctx.max_mr) : ctx.max_mr;
+    const int n_calls = (M + max_mr - 1) / max_mr;
+    const int mr_base = M / n_calls;
+    const int n_big = M - mr_base * n_calls;
+
+    if (is_int8_variant(ctx.variant)) {
+        const int8_t *Bpk = ctx.packed_ptrs_int8[expert_idx]
+                + static_cast<size_t>(block) * int8_block_stride_bytes(K)
+                + static_cast<size_t>(k_begin / kVNNIInt8Quad) * kNRMin
+                        * kVNNIInt8Quad;
+        const auto *A = static_cast<const uint8_t *>(src) + k_begin;
+        auto *C = static_cast<int32_t *>(acc);
+        int m_off = 0;
+        for (int c = 0; c < n_calls; ++c) {
+            const int mr_now = (c < n_big) ? mr_base + 1 : mr_base;
+            const int8_accum_ukernel_fn_t kfn
+                    = select_int8_accum_ukernel(mr_now);
+            assert(kfn != nullptr);
+            kfn(A + static_cast<size_t>(m_off) * lda, lda, Bpk, k_end - k_begin,
+                    C + static_cast<size_t>(m_off) * pack_nr, pack_nr, add);
+            m_off += mr_now;
+        }
+        return;
+    }
+
+    const size_t o_blk_stride
+            = static_cast<size_t>((K + 1) / 2) * pack_nr * kVNNIPair;
+    const bfloat16_t *Bpk = ctx.packed_ptrs[expert_idx]
+            + static_cast<size_t>(block) * o_blk_stride
+            + static_cast<size_t>(k_begin / kVNNIPair) * pack_nr * kVNNIPair;
+    const auto *A = static_cast<const bfloat16_t *>(src) + k_begin;
+    auto *C = static_cast<float *>(acc);
+    // The f32-store kernel overwrites its output, so `add` goes through a
+    // per-call partial.
+    float part[kMaxMR * kNRMax];
+    int m_off = 0;
+    for (int c = 0; c < n_calls; ++c) {
+        const int mr_now = (c < n_big) ? mr_base + 1 : mr_base;
+        const ukernel_fn_t kfn
+                = select_ukernel(mr_now, ctx.NV, ActKind::none, DstDt::kF32);
+        assert(kfn != nullptr);
+        float *Crow = C + static_cast<size_t>(m_off) * pack_nr;
+        kfn(A + static_cast<size_t>(m_off) * lda, lda, Bpk, /*bias=*/nullptr,
+                BiasKind::none, add ? part : Crow, pack_nr,
+                /*Cout_tight=*/nullptr, /*ldc_tight=*/0, k_end - k_begin);
+        if (add) {
+            for (int i = 0; i < mr_now * pack_nr; ++i)
+                Crow[i] += part[i];
+        }
+        m_off += mr_now;
+    }
+}
+
+void block_finish(const CallContext &ctx, int expert_idx, int M, int K,
+        int block, const void *acc, const void *src_scale,
+        const void *wei_scale, void *dst, int ldc) {
+    const int pack_nr = ctx.pack_nr;
+    const size_t col = static_cast<size_t>(block) * pack_nr;
+    if (is_int8_variant(ctx.variant)) {
+        const int8_t *Bblock = ctx.packed_ptrs_int8[expert_idx]
+                + static_cast<size_t>(block) * int8_block_stride_bytes(K);
+        const auto *comp = reinterpret_cast<const int32_t *>(
+                Bblock + int8_block_weight_bytes(K));
+        const void *wei_scale_block = static_cast<const char *>(wei_scale)
+                + col * block_scale_elem_bytes(ctx);
+        finish_int8_accum_nv2_sym_bf16(static_cast<const int32_t *>(acc),
+                pack_nr, M, comp, src_scale, wei_scale_block, ctx.scale_kind,
+                static_cast<bfloat16_t *>(dst) + col, ldc);
+        return;
+    }
+    const auto *a = static_cast<const float *>(acc);
+    if (ctx.variant == KernelVariant::kBF16_BF16_F32) {
+        auto *out = static_cast<float *>(dst);
+        for (int m = 0; m < M; ++m)
+            std::memcpy(out + static_cast<size_t>(m) * ldc + col,
+                    a + static_cast<size_t>(m) * pack_nr,
+                    pack_nr * sizeof(float));
+        return;
+    }
+    auto *out = static_cast<bfloat16_t *>(dst);
+    for (int m = 0; m < M; ++m) {
+        const float *row = a + static_cast<size_t>(m) * pack_nr;
+        bfloat16_t *o = out + static_cast<size_t>(m) * ldc + col;
+        for (int c = 0; c < pack_nr; ++c)
+            o[c] = bfloat16_t(row[c]);
     }
 }
 

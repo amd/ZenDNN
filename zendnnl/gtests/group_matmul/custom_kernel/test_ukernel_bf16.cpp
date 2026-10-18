@@ -73,7 +73,7 @@
 // cache alone is not — `flat_n_tile` warms it via
 // `prepack_for_algo_3` BEFORE the plan is built, so cache hits do
 // not prove the plan engaged the per-tile dispatch).
-#include "lowoha_operators/matmul/group_matmul/group_matmul_parallel_common.hpp"
+#include "lowoha_operators/matmul/group_matmul/common/group_matmul_parallel_common.hpp"
 
 namespace {
 

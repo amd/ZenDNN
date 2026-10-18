@@ -86,9 +86,9 @@ cached; set them before the first grouped-matmul call.
 > prepack-cache sizing, etc.) live inside the implementation and are
 > not part of the user-facing contract.  Shared ones are documented in
 > `zendnnl/src/lowoha_operators/matmul/group_matmul/
-> group_matmul_parallel_common.hpp`; per-ALGO ones live with their ALGO
-> (`m_tile/`, `n_tile/`, `expert_parallel/`).  Production deployments
-> should not need them.  If a workload requires one, file an issue
+> common/group_matmul_parallel_common.hpp`; per-ALGO ones live with their ALGO
+> (`executors/m_tile/`, `executors/n_tile/`, `multi_expert/expert_parallel/`, `single_expert/`).  Production
+> deployments should not need them.  If a workload requires one, file an issue
 > describing the problem and we will assess whether to promote the knob
 > to user-visible status.
 >
@@ -178,6 +178,25 @@ cached; set them before the first grouped-matmul call.
 > `ZENDNNL_GRP_MATMUL_PROMPT_TILE` below; only `0` keeps it off the tile.
 > `ZENDNNL_GRP_MATMUL_PROMPT_TILE` is a family bitmask (1 BF16, 2 DQ-INT8,
 > 4 W4A8, 8 FP16; default 9); `0` keeps every prompt on the round executor.
+>
+> A lone expert's custom-kernel decode (DQ-INT8 symmetric or BF16, no bias,
+> no activation or post-op) can run a blocking plan instead of the N-only
+> split:
+> * `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_BLOCK` (default unset: the N-only
+>   split) — `key=value` pairs: `split=legacy|remainder|grid`;
+>   `mparts=<n>` and `kparts=<n>|auto` (the thread grid is M parts x N parts
+>   x K parts, N parts = threads / (M parts x K parts); `remainder` gives
+>   every thread its even share of whole column blocks and splits only the
+>   remainder blocks along K); `kc=<n>` (K chunk per accumulation);
+>   `mr=<n>` (rows per microkernel call, 1-12); `order=n|k` (loop order inside
+>   a work unit).  A malformed value is warned once and ignored; a plan the
+>   shape cannot take falls back to the N-only split.
+> * `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_KSPLIT` (default `0`) — with no
+>   `..._BLOCK` value, `1` gives the `remainder` plan to every decode whose
+>   column blocks do not divide evenly over the threads (K ranges of at
+>   least 256).
+>
+> Split K ranges are summed exactly for DQ-INT8 and in f32 for BF16.
 >
 > Two further ALGO 5 knobs are documented here only because a declined pin
 > names them in a default-level warning, so an operator can be pointed at
@@ -299,7 +318,7 @@ The diagnostics layer gates expensive input-validation paths (null-pointer check
 
 - The gate covers diagnostic-only checks.  Memory-safety checks that are always required (e.g. empty-vector reject in `group_matmul_direct`, post-op `leading_dim` defaulting in `matmul`) execute unconditionally regardless of this flag.
 - Profiling and logging are separate subsystems (`ZENDNNL_ENABLE_PROFILER`, `ZENDNNL_*_LOG_LEVEL`) and are NOT controlled by this flag.
-- The value is captured once per process via `static const bool`, so in-process `setenv` / `unsetenv` calls after the first validator call have no effect.  Tests that need to deterministically toggle the gate must do so via `fork()` / `execve()` subprocesses (see `[15] TestDispatcherActiveTotalNegative` in `gtests/group_matmul/test_fused_moe.cpp`).
+- The value is captured once per process via `static const bool`, so in-process `setenv` / `unsetenv` calls after the first validator call have no effect.  Tests that need to deterministically toggle the gate must do so via `fork()` / `execve()` subprocesses (see `[15] TestDispatcherActiveTotalNegative` in `gtests/group_matmul/fused_moe/test_fused_moe.cpp`).
 
 ---
 

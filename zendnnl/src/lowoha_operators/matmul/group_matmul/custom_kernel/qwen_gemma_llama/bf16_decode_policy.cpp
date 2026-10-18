@@ -14,7 +14,7 @@
 
 #include "bf16_decode_microkernel.hpp"
 #include "common/zendnnl_compat.hpp"
-#include "lowoha_operators/matmul/group_matmul/group_matmul_parallel_common.hpp"
+#include "lowoha_operators/matmul/group_matmul/common/grp_matmul_constants.hpp"
 
 namespace zendnnl {
 namespace lowoha {

@@ -23,19 +23,19 @@
 target_sources(gtests
   PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/group_matmul_test_helpers.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_basic.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_fused_moe.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/e2e/test_basic.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/fused_moe/test_fused_moe.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_algos.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_quant.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_group_per_group.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_ggml_per_group.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_fused_moe_ggml.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_prepack.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_w4a8_per_group.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_group_reorder_e2e.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_wei_buffer_capacity.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_int8_inplace_warm.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_prompt_tile.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/e2e/test_quant.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/e2e/test_group_per_group.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/e2e/test_ggml_per_group.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/fused_moe/test_fused_moe_ggml.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/prepack/test_prepack.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/e2e/test_w4a8_per_group.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/e2e/test_group_reorder_e2e.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/e2e/test_wei_buffer_capacity.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/prepack/test_int8_inplace_warm.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/executors/n_tile/prompt_tile/test_prompt_tile.cpp
     # Custom-kernel direct-surface tests — see gtests/group_matmul/
     # custom_kernel/ck_test_helpers.hpp for scope (unit-level on
     # `dispatch_supported`, `resolve_variant`, `prepare_for_call`,
@@ -65,7 +65,13 @@ target_sources(gtests
     ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_features.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_dispatch_routing.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/qwen_gemma_llama/test_bf16_decode.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/ntile_flat_parallel/test_ntile_flat_parallel.cpp
+    # Single-expert policy (selector rules, phase knobs, dtype masks) and its
+    # `matmul_direct` route; executor-level single-expert tests stay beside
+    # their executors.
+    ${CMAKE_CURRENT_SOURCE_DIR}/single_expert/test_single_expert_policy.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/single_expert/test_single_expert_route.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/single_expert/test_single_expert_executor.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/multi_expert/ntile_flat_parallel/test_ntile_flat_parallel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/routed_moe/test_routed_moe.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/routed_moe/test_routed_moe_s4.cpp
 )

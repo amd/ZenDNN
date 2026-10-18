@@ -31,11 +31,12 @@
 #include "gtest_utils.hpp"
 #include "lowoha_operators/matmul/aocl_unreorder_cache.hpp"
 #include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
+#include "lowoha_operators/matmul/group_matmul/common/group_matmul_parallel_common.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/dispatch.hpp"
-#include "lowoha_operators/matmul/group_matmul/custom_kernel/matmul_route.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
-#include "lowoha_operators/matmul/group_matmul/group_matmul_parallel_common.hpp"
-#include "lowoha_operators/matmul/group_matmul/prompt_tile/prompt_tile_tunables.hpp"
+#include "lowoha_operators/matmul/group_matmul/executors/n_tile/prompt_tile/prompt_tile_tunables.hpp"
+#include "lowoha_operators/matmul/group_matmul/single_expert/single_expert_policy.hpp"
+#include "lowoha_operators/matmul/group_matmul/single_expert/single_expert_route.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 #include "lowoha_operators/reorder/lowoha_reorder.hpp"
 #include "lowoha_operators/reorder/prepack/lowoha_prepack.hpp"
@@ -923,6 +924,8 @@ TEST(TestMatmulUnreorderRoute, RejectsAoclBlockedFallbackWithoutAocl) {
                "than pass them to the raw reference kernel";
 }
 #endif
+
+// ── Single-expert policy (see single_expert/ for the policy tests) ──
 
 // One raw narrow-N weight goes prompt -> decode -> prompt through
 // `matmul_direct`.  At 32 threads it is below decode's N-tile count (only

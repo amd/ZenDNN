@@ -80,7 +80,7 @@ struct GroupQuantMatmulType {
 };
 
 /// Global vector populated once by `gtest_main.cpp::main()`; consumed by
-/// `TestGroupMatmulQuant` (`group_matmul/test_quant.cpp`) via `ValuesIn`.
+/// `TestGroupMatmulQuant` (`group_matmul/e2e/test_quant.cpp`) via `ValuesIn`.
 extern std::vector<GroupQuantMatmulType> quant_matmul_test;
 
 /** @brief Print GroupQuantMatmulType for GTest parameterized test failure messages. */

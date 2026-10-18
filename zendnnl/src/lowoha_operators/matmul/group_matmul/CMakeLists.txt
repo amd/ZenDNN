@@ -18,18 +18,26 @@
 # Paths are relative to lowoha_operators/matmul/ (parent listfile).
 
 set(lowoha_group_matmul_sources
-  group_matmul/group_matmul_dispatch.cpp
-  group_matmul/m_tile/group_matmul_m_tile.cpp
-  group_matmul/n_tile/group_matmul_n_tile.cpp
-  group_matmul/expert_parallel/group_matmul_expert_parallel.cpp
-  group_matmul/group_matmul_moe_postop.cpp
-  group_matmul/group_matmul_moe_act.cpp
-  group_matmul/group_matmul_fused_moe.cpp
+  group_matmul/selection/group_matmul_dispatch.cpp
+  group_matmul/selection/algo_select.cpp
+  group_matmul/executors/sequential/sequential_experts.cpp
+  group_matmul/executors/m_tile/group_matmul_m_tile.cpp
+  group_matmul/executors/n_tile/group_matmul_n_tile.cpp
+  group_matmul/executors/n_tile/n_tile_admission.cpp
+  group_matmul/multi_expert/expert_parallel/group_matmul_expert_parallel.cpp
+  group_matmul/multi_expert/multilevel/parallel_multilevel.cpp
+  group_matmul/single_expert/single_expert_policy.cpp
+  group_matmul/single_expert/single_expert_plan.cpp
+  group_matmul/single_expert/single_expert_executor.cpp
+  group_matmul/epilogue/group_matmul_moe_postop.cpp
+  group_matmul/epilogue/group_matmul_moe_act.cpp
+  group_matmul/fused_moe/group_matmul_fused_moe.cpp
+  group_matmul/fused_moe/vertical_fusion_pipeline.cpp
   group_matmul/prepack/prepack.cpp
   group_matmul/prepack/prepack_aocl_dlp.cpp
   group_matmul/prepack/prepack_custom_kernel.cpp
   group_matmul/custom_kernel/pack.cpp
-  group_matmul/custom_kernel/ntile_flat_parallel_pack.cpp
+  group_matmul/custom_kernel/w8a8/ntile_flat_parallel_pack.cpp
   group_matmul/custom_kernel/qwen_gemma_llama/bf16_decode_policy.cpp
   group_matmul/custom_kernel/ukernel/bf16_microkernel.cpp
   group_matmul/custom_kernel/qwen_gemma_llama/bf16_decode_microkernel.cpp
@@ -37,15 +45,15 @@ set(lowoha_group_matmul_sources
   group_matmul/custom_kernel/ukernel/s4_microkernel.cpp
   group_matmul/custom_kernel/ukernel/f16_microkernel.cpp
   group_matmul/custom_kernel/dispatch.cpp
-  group_matmul/ntile_flat_parallel/ntile_flat_parallel.cpp
-  group_matmul/prompt_tile/prompt_tile_topology.cpp
-  group_matmul/prompt_tile/prompt_tile_tunables.cpp
-  group_matmul/prompt_tile/prompt_tile_executor.cpp)
+  group_matmul/multi_expert/ntile_flat_parallel/ntile_flat_parallel.cpp
+  group_matmul/executors/n_tile/prompt_tile/prompt_tile_topology.cpp
+  group_matmul/executors/n_tile/prompt_tile/prompt_tile_tunables.cpp
+  group_matmul/executors/n_tile/prompt_tile/prompt_tile_executor.cpp)
 
 # AOCL-DLP backed MoE gated activations: only built when AOCL-DLP is enabled.
 if(ZENDNNL_DEPENDS_AOCLDLP)
   list(APPEND lowoha_group_matmul_sources
-    group_matmul/group_matmul_moe_act_dlp.cpp)
+    group_matmul/epilogue/group_matmul_moe_act_dlp.cpp)
 endif()
 
 set(lowoha_group_matmul_sources ${lowoha_group_matmul_sources} PARENT_SCOPE)

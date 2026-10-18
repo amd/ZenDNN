@@ -768,6 +768,34 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
         const int32_t *src_zp, const void *wei_scale,
         const Int8EpilogueConfig &int8_epilogue);
 
+/// Block-level pieces for executors that partition a call themselves
+/// (`single_expert/single_expert_executor`).  A block is one `ctx.pack_nr`
+/// wide column block of the expert's packed weight.
+///   * `block_accum` writes the partial sums of K range [`k_begin`, `k_end`)
+///     of `block` for `M` rows (`src` points at the first row) to `acc`
+///     (`M` x `ctx.pack_nr`, row stride `ctx.pack_nr`): s32 for DQ-INT8, f32
+///     for BF16.  `add` accumulates onto `acc`.  `mr_cap` (0: the context's
+///     `max_mr`) bounds the rows per microkernel call.  The range bounds are
+///     multiples of `block_k_step`.
+///   * `block_finish` turns full-K sums into the destination block at column
+///     `block * pack_nr` of `dst` (`dst` and `src_scale` point at the first
+///     row; `wei_scale` at column 0).
+/// Supported: symmetric DQ-INT8 (s8 compute, BF16 dst, per-token src and
+/// per-channel wei scales, no post-ops) and BF16 weights (BF16 or F32 dst),
+/// act=none, bias-free.  DQ-INT8 sums are exact; BF16 sums are f32, so
+/// splitting K can change the last bit of the f32 result.
+bool block_api_supported(const CallContext &ctx, const void *bias,
+        const void *src_zp, const Int8EpilogueConfig &int8_epilogue);
+int block_k_step(const CallContext &ctx);
+size_t block_dst_elem_bytes(const CallContext &ctx);
+size_t block_scale_elem_bytes(const CallContext &ctx);
+void block_accum(const CallContext &ctx, int expert_idx, int M, int K,
+        int block, int k_begin, int k_end, const void *src, int lda, void *acc,
+        bool add, int mr_cap);
+void block_finish(const CallContext &ctx, int expert_idx, int M, int K,
+        int block, const void *acc, const void *src_scale,
+        const void *wei_scale, void *dst, int ldc);
+
 } // namespace custom_kernel
 } // namespace matmul
 } // namespace lowoha

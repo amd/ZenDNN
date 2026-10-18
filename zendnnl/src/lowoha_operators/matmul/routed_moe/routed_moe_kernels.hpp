@@ -54,7 +54,7 @@
 #include <type_traits>
 
 #include "common/zendnnl_compat.hpp"
-#include "lowoha_operators/matmul/group_matmul/group_matmul_act_avx512.hpp"
+#include "lowoha_operators/matmul/group_matmul/common/group_matmul_act_avx512.hpp"
 
 namespace zendnnl {
 namespace lowoha {

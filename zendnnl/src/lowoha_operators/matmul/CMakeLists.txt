@@ -26,7 +26,7 @@ add_subdirectory(lru_cache)
 
 set(lowoha_matmul_sources
   lowoha_matmul.cpp
-  group_matmul_direct.cpp
+  group_matmul/group_matmul_direct.cpp
   aocl_unreorder_cache.cpp
   ${lowoha_group_matmul_sources}
   ${lowoha_routed_moe_sources}

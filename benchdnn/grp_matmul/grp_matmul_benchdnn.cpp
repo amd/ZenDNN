@@ -374,7 +374,7 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
     //     case 4 confirms the gate refuses with a null wei_scale.
     //   * `params[i].quant_params.src_scale.buff = nullptr` — the
     //     library's pre-OMP source-reorder hoist
-    //     (`HoistedSrcQuant` in `n_tile/group_matmul_n_tile.cpp`)
+    //     (`HoistedSrcQuant` in `executors/n_tile/group_matmul_n_tile.cpp`)
     //     allocates and fills the per-token scale at runtime.
     //     Caller leaves the buffer null and only sets the dims +
     //     dtype so the gate sees a properly-shaped descriptor.

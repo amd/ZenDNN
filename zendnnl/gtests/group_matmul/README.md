@@ -39,8 +39,24 @@ zendnnl/gtests/group_matmul/
                                     quant_matmul_test extern, group_matmul_kernel_test
                                     proto, PrintTo(GroupQuantMatmulType, ...)
   group_matmul_test_helpers.cpp     implementations of the above
-  test_basic.cpp                    [2] TestGroupMatmul, [3] TestGatedAct, [4] TestMoEPostop
-  test_fused_moe.cpp                [5]/[5b]/[5c] TestFusedMoE family,
+  auto_probe_test_utils.hpp         AutoProbeShape / build_auto_probe + W4A8 /
+                                    shape-rules probe rewrites, Int8AlgoCustomParam /
+                                    build_int8_dq_inputs (shared by test_algos.cpp
+                                    and single_expert/)
+  test_algos.cpp                    [7] TestFusedMoEAlgos,
+                                    [7b] TestFusedMoEAlgoCustom,
+                                    [8] TestGroupMatmulAlgoCustom,
+                                    [8b] TestGroupMatmulAutoSelectAlgo
+  e2e/                              End-to-end group_matmul_direct tests
+    test_basic.cpp                  [2] TestGroupMatmul, [3] TestGatedAct, [4] TestMoEPostop
+    test_quant.cpp                  [9] TestGroupMatmulQuant
+    test_group_per_group.cpp        grouped per-group / per-channel dynamic quantization
+    test_ggml_per_group.cpp         grouped INT8 per-group matmul with GGML Q8_0 weights
+    test_w4a8_per_group.cpp         grouped W4A8 per-group matmul (sparse expert routing)
+    test_group_reorder_e2e.cpp      group_reorder prepack, then group_matmul on its buffers
+    test_wei_buffer_capacity.cpp    matmul_params::wei_buffer_capacity_bytes in-place gate
+  fused_moe/
+    test_fused_moe.cpp              [5]/[5b]/[5c] TestFusedMoE family,
                                     [6] TestGroupMatmulCombined,
                                     [10] TestFusedMoEDstSplit,
                                     [11] TestFusedMoEActiveMatmul,
@@ -57,24 +73,9 @@ zendnnl/gtests/group_matmul/
                                          each scheme gets its own subclass + grid
                                          + INSTANTIATE_TEST_SUITE_P so no test is
                                          GTEST_SKIP()'d at run time)
-  test_algos.cpp                    [7] TestFusedMoEAlgos,
-                                    [7b] TestFusedMoEAlgoCustom,
-                                    [8] TestGroupMatmulAlgoCustom,
-                                    [8b] TestGroupMatmulAutoSelectAlgo
-  test_quant.cpp                    [9] TestGroupMatmulQuant
-  test_prompt_tile.cpp              ALGO 3 prompt tile executor: PromptTilePlanner
-                                    (coverage, row invariant, balance, order,
-                                    golden plans), PromptTileTunables (env values,
-                                    profile grammar, precedence), PromptTileTopology
-                                    (L3 teams, sub-teams, steal order),
-                                    PromptTileExecutor (bitwise A/B vs the round
-                                    executor, knob A/B, decode no-op),
-                                    PromptTileAuto (AUTO prompt routing, its
-                                    cross-warm skip); the INT8 and W4A8 A/B
-                                    sit beside their fixtures, in
-                                    TestGroupMatmulInt8PromptTile (test_algos.cpp)
-                                    and GroupMatmulW4A8PerGroup.Algo3PromptTile*
-  test_prepack.cpp                  [16] TestFusedMoECacheStress,
+    test_fused_moe_ggml.cpp         fused MoE with GGML Q8_0 weights on both projections
+  prepack/
+    test_prepack.cpp                [16] TestFusedMoECacheStress,
                                     [17] TestFusedMoEPointerChurn,
                                     [18] TestPrepackPerAlgoFunctions,
                                     [19] TestPrepackFusedMoEEndToEnd,
@@ -91,6 +92,22 @@ zendnnl/gtests/group_matmul/
                                     [30] TestPrepackFingerprintInvariance,
                                     [32] TestPrepackCkGateSymmetry,
                                     [F16] TestPrepackF16WarmDtypeFamily (WarmDtypeFamily::kF16)
+    test_int8_inplace_warm.cpp      INT8 in-place weight warmer
+  executors/n_tile/prompt_tile/
+    test_prompt_tile.cpp            ALGO 3 prompt tile executor: PromptTilePlanner
+                                    (coverage, row invariant, balance, order,
+                                    golden plans), PromptTileTunables (env values,
+                                    profile grammar, precedence), PromptTileTopology
+                                    (L3 teams, sub-teams, steal order),
+                                    PromptTileExecutor (bitwise A/B vs the round
+                                    executor, knob A/B, decode no-op),
+                                    PromptTileAuto (AUTO prompt routing, its
+                                    cross-warm skip); the INT8 and W4A8 A/B
+                                    sit beside their fixtures, in
+                                    TestGroupMatmulInt8PromptTile (test_algos.cpp)
+                                    and GroupMatmulW4A8PerGroup.Algo3PromptTile*
+  multi_expert/ntile_flat_parallel/
+    test_ntile_flat_parallel.cpp    ALGO 4, the W8A8 grouped-MoE fast path
   custom_kernel/                    Direct-surface tests for the CK stack (dispatcher,
                                     resolve_variant, prepare_for_call, pack, per-tile
                                     microkernels).  One dtype family per *_bf16 / *_int8 /
@@ -99,6 +116,8 @@ zendnnl/gtests/group_matmul/
                                     CK_SKIP_IF_NO_{BF16,INT8,F16}_ISA, PrepCallCase,
                                     run_prepare).
     ck_test_helpers.hpp             shared CK gtest scaffolding + ISA gates
+    route_test_utils.hpp            ScalarRouteConfigGuard (shared with
+                                    single_expert/test_single_expert_route.cpp)
     test_dispatch_supported.cpp     dispatch_supported() BF16 gate + FP16 ISA-symmetry
     test_resolve_variant.cpp        (src,wei,dst) -> KernelVariant truth table (BF16/INT8/F16)
     test_prepare_for_call.cpp       per-call gating matrix (CkPrepareForCall{,Int8,F16})
@@ -115,6 +134,14 @@ zendnnl/gtests/group_matmul/
     test_ukernel_int8.cpp           DQ-INT8 microkernel direct-surface correctness
     test_ukernel_f16.cpp            FP16 microkernel e2e vs inline scalar FP32 reference
                                     (CkF16UkernelCorrectness matrix + Engages/Fallback gates)
+  single_expert/                    Single-expert policy (`src/.../group_matmul/single_expert/`).
+                                    Executor-level single-expert tests stay beside their
+                                    executors (test_prompt_tile.cpp, test_w4a8_per_group.cpp,
+                                    custom_kernel/test_matmul_unreorder_route.cpp).
+    test_single_expert_policy.cpp   selector: aligned N split, Rule 0.45 / 0.46, phase
+                                    knobs, FORCE_CK, dtype masks, WC=2 phase-split guard
+    test_single_expert_route.cpp    matmul_direct route: FORCE_CK N gate, narrow quantized
+                                    prompt/decode switch, env strings in a child process
   routed_moe/
     test_routed_moe.cpp             routed W8, validation, cache, and generic fallback
     test_routed_moe_s4.cpp          routed W4 scalar-oracle and branch coverage
@@ -127,11 +154,11 @@ LOC summary (current tree, `wc -l`):
 | `moe_test_utils.hpp`            |  ~647 |
 | `group_matmul_test_helpers.hpp` |  ~120 |
 | `group_matmul_test_helpers.cpp` |  ~244 |
-| `test_basic.cpp`                |  ~688 |
-| `test_fused_moe.cpp`            | ~1794 |
+| `e2e/test_basic.cpp`            |  ~688 |
+| `fused_moe/test_fused_moe.cpp`  | ~1794 |
 | `test_algos.cpp`                |  ~935 |
-| `test_quant.cpp`                | ~1081 |
-| `test_prepack.cpp`              | ~2593 |
+| `e2e/test_quant.cpp`            | ~1081 |
+| `prepack/test_prepack.cpp`      | ~2593 |
 | **Total**                       | **~8102 LOC** |
 
 ---
@@ -251,7 +278,7 @@ deterministic fallback policy.
 - 1 `sequential_experts`            — covered by `[7]` and `[8]` in `test_algos.cpp`
 - 2 `flat_m_tile`                   — covered by `[7]` and `[8]`
 - 3 `flat_n_tile`                   — covered by `[7]`, `[8]`, `[18]`-`[28]` (the prepack module's hot path is ALGO 3)
-- 4 W8A8 fused-MoE interceptor      — covered by `ntile_flat_parallel/test_ntile_flat_parallel.cpp` and `TestGroupMatmulAutoPhaseEnv`; includes global/phase precedence, max-M 32/33 classification, BF16-dynamic and caller-prequantized S8 numerics, signed-vs-biased microkernel equivalence, required same-backing S8/BF16 fast-path destinations, separate/padded/unsafe fast-path destination rejection, scale/ownership/row-pointer rejection, and BF16/direct-S8 fallback to main's generic fused-MoE implementation
+- 4 W8A8 fused-MoE interceptor      — covered by `multi_expert/ntile_flat_parallel/test_ntile_flat_parallel.cpp` and `TestGroupMatmulAutoPhaseEnv`; includes global/phase precedence, max-M 32/33 classification, BF16-dynamic and caller-prequantized S8 numerics, signed-vs-biased microkernel equivalence, required same-backing S8/BF16 fast-path destinations, separate/padded/unsafe fast-path destination rejection, scale/ownership/row-pointer rejection, and BF16/direct-S8 fallback to main's generic fused-MoE implementation
 - 5 `parallel_per_expert`           — covered by `[7]` and `[8]`
 - 6 `parallel_multilevel`           — covered by `[7]` and `[8]`
 
@@ -357,7 +384,7 @@ per-element comparison on `0 == 0`.
 ## 5. Env vars consumed
 
 All knobs the prepack / dispatch / kernel layers read are listed below.
-`gtests/group_matmul/test_prepack.cpp` `[26]`-`[28]` exercises the prepack
+`gtests/group_matmul/prepack/test_prepack.cpp` `[26]`-`[28]` exercises the prepack
 knobs in subprocesses; `TestGroupMatmulAutoPhaseEnv` does the same for the
 phase selectors. Subprocesses are required because `static const` IIFEs cache
 the first read for the process lifetime.
@@ -383,7 +410,7 @@ the first read for the process lifetime.
 | `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_SUBTILE_PER_EXPERT` | OFF | yes | Per-expert L2-friendly subtile_cols |
 | `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_N_TILE` | 0 (off) | yes | Override outer N-tile minimum |
 | `ZENDNNL_GRP_MATMUL_PROMPT_TILE` | 9 (BF16 + FP16) | yes (test override `prompt_tile::test_api::ScopedOverride` / `PromptTileOverride`) | Family bitmask (1 BF16, 2 INT8, 4 W4A8, 8 FP16; 0 off): ALGO 3 CK prompt calls of a set family with two or more active experts use the prompt tile executor instead of the round executor (bitwise identical output) |
-| `ZENDNNL_GRP_MATMUL_PROMPT_TILE_<KNOB>`, `ZENDNNL_GRP_MATMUL_PROMPT_TILE_PROFILE` | see `prompt_tile/prompt_tile_tunables.hpp` | yes (`ScopedOverride`) | Prompt tile sizes, cost model, tile order, team layout and stealing; the profile sets knobs per shape |
+| `ZENDNNL_GRP_MATMUL_PROMPT_TILE_<KNOB>`, `ZENDNNL_GRP_MATMUL_PROMPT_TILE_PROFILE` | see `executors/n_tile/prompt_tile/prompt_tile_tunables.hpp` | yes (`ScopedOverride`) | Prompt tile sizes, cost model, tile order, team layout and stealing; the profile sets knobs per shape |
 | `ZENDNNL_MATMUL_WEIGHT_CACHE` | 2 | runtime-mutable via `set_weight_cache(...)` | AOCL DLP/custom pack policy; under grouped AUTO, BF16 and FP16 layers of several experts share one ALGO 3 pack across phases and keep AOCL layouts out-of-place. Eligible BF16/FP16 packs may use the caller's buffer. Other calls may use the AOCL prompt reorder in place. Mode 0 short-circuits prepack warming and makes W8A8 ALGO 4 decline without publishing a private packed entry. Changing modes does not itself flush entries from an earlier W8A8 generation. |
 | `ZENDNNL_LRU_CACHE_CAPACITY` | UINT32_MAX | yes (matmul_config) | Capacity for AOCL DLP reorder and W8A8 ALGO-4 complete-tensor LRUs. Caps their populated entries; no effect on the custom-kernel pack arena (intentionally eviction-immune). |
 | `ZENDNNL_DIAGNOSTICS_ENABLE` | ON (set `=0` to disable) | yes | Wraps `validate_group_matmul_direct_inputs` (Phase B-G + log_error).  Default-enabled so contract violations are surfaced; the `[15]` subprocess test re-asserts the knob explicitly via `setenv(..., "1")` to exercise the diagnostic-mode reject paths for `am > M.size()` / `tm < am`. |
@@ -447,6 +474,10 @@ Is it a direct-surface custom-kernel test (resolve_variant, prepare_for_call,
 pack cache, per-tile microkernel e2e)?
   yes -> custom_kernel/test_*.cpp  (one *_bf16 / *_int8 / *_f16 sibling per family)
 
+Is it about the single-expert policy (selector rules, phase knobs, dtype
+masks) or its matmul_direct route?
+  yes -> single_expert/test_single_expert_{policy,route}.cpp
+
 Is it WOQ / INT8 / dynamic-quant?
   yes -> test_quant.cpp
 
@@ -461,6 +492,9 @@ per-tile vs full-weight, env-knob subprocess matrix, stress)?
   `moe_test_utils.hpp` (header-only, all definitions inline).
 - **Need a quant-fixture-specific helper?** -> add to
   `group_matmul_test_helpers.hpp`/`cpp`.
+- **Need an AUTO-select probe or DQ-INT8 input builder?** -> use
+  `auto_probe_test_utils.hpp`; the scalar `matmul_direct` route config
+  guard is in `custom_kernel/route_test_utils.hpp`.
 - **Single-file helper?** -> file-local anonymous namespace inside the
   owning `.cpp`.
 

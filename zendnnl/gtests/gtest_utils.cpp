@@ -22,7 +22,7 @@
 #include <stdexcept>
 #include "lowoha_operators/matmul/ggml_weight_unpack.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
-#include "lowoha_operators/matmul/group_matmul/n_tile/group_matmul_n_tile.hpp"
+#include "lowoha_operators/matmul/group_matmul/executors/n_tile/group_matmul_n_tile.hpp"
 #include "lowoha_operators/matmul/group_matmul/prepack/prepack.hpp"
 
 namespace {
