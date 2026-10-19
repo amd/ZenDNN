@@ -635,6 +635,58 @@ static std::vector<GatedActTestParam> make_gated_act_params() {
 INSTANTIATE_TEST_SUITE_P(GroupMatmulGatedAct, TestGatedAct,
         ::testing::ValuesIn(make_gated_act_params()), GatedActParamName);
 
+TEST(MatmulDirectGatedAct, ForwardsActivationToSingleExpertGroupPath) {
+    using namespace zendnnl::lowoha::matmul;
+
+    WeightCacheGuard wc_out_of_place(1);
+    constexpr int M = 2;
+    constexpr int K = 3;
+    constexpr int dim = 4;
+    constexpr int N = 2 * dim;
+
+    const std::vector<float> src {0.25f, -0.50f, 0.75f, -0.40f, 0.20f, 0.60f};
+    std::vector<float> weight(static_cast<size_t>(K) * N);
+    for (int k = 0; k < K; ++k) {
+        for (int n = 0; n < N; ++n) {
+            weight[static_cast<size_t>(k) * N + n]
+                    = 0.05f * static_cast<float>((k + 1) * (n + 2) - 7);
+        }
+    }
+    std::vector<float> dst(static_cast<size_t>(M) * N, 0.0f);
+
+    matmul_params params;
+    params.dtypes.src = data_type_t::f32;
+    params.dtypes.wei = data_type_t::f32;
+    params.dtypes.dst = data_type_t::f32;
+    params.num_threads = 1;
+
+    matmul_batch_params_t batch;
+    matmul_gated_act_params gated_act;
+    gated_act.act = matmul_gated_act_t::silu_and_mul;
+
+    ASSERT_EQ(matmul_direct('r', /*transA=*/false, /*transB=*/false, M, N, K,
+                      /*alpha=*/1.0f, src.data(), /*lda=*/K, weight.data(),
+                      /*ldb=*/N, /*bias=*/nullptr, /*beta=*/0.0f, dst.data(),
+                      /*ldc=*/N, /*is_weights_const=*/false, batch, params,
+                      &gated_act),
+            status_t::success);
+
+    for (int m = 0; m < M; ++m) {
+        for (int n = 0; n < dim; ++n) {
+            float gate = 0.0f;
+            float up = 0.0f;
+            for (int k = 0; k < K; ++k) {
+                const float a = src[static_cast<size_t>(m) * K + k];
+                gate += a * weight[static_cast<size_t>(k) * N + n];
+                up += a * weight[static_cast<size_t>(k) * N + dim + n];
+            }
+            const float expected = gate / (1.0f + std::exp(-gate)) * up;
+            EXPECT_NEAR(dst[static_cast<size_t>(m) * N + n], expected, 1.0e-5f)
+                    << "m=" << m << " n=" << n;
+        }
+    }
+}
+
 // ???????????????????????????????????????????????????????????????????????????????
 // [4] TestMoEPostop: weighted-reduce post-op correctness
 // ???????????????????????????????????????????????????????????????????????????????

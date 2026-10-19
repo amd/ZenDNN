@@ -86,6 +86,11 @@ void matmul_execute(const char layout, const bool transA, const bool transB,
  *     builds an internal working copy for reorder dispatch, kernel
  *     selection, and post-op normalization so the caller's struct can be
  *     reused across calls without reset.
+ * @param gated_act     Optional gated activation applied in-place after GEMM:
+ *     dst[:, 0:N/2] = act(gate) * up. Uses the same contract as
+ *     @c group_matmul_direct; nullptr or @c act==none disables it. An active
+ *     gated activation is supported only for a single batch and is dispatched
+ *     through the one-op grouped path. See @c matmul_gated_act_params.
  *
  * @note Thread safety: This entry point does not mutate the @c matmul_params or
  *       @c matmul_batch_params_t objects themselves. Callers may share them
@@ -101,7 +106,8 @@ ZENDNNL_API status_t matmul_direct(const char layout, const bool transA,
         const float alpha, const void *src, const int lda, const void *weight,
         const int ldb, const void *bias, const float beta, void *dst,
         const int ldc, const bool is_weights_const,
-        const matmul_batch_params_t &batch_params, const matmul_params &params);
+        const matmul_batch_params_t &batch_params, const matmul_params &params,
+        const matmul_gated_act_params *gated_act = nullptr);
 
 /**
  * @brief Execute group matmul operations (e.g. MoE experts)

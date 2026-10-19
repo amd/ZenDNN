@@ -184,6 +184,25 @@ struct pack_format {
     pack_format() : pack_format_b(0) {}
 };
 
+/**
+ * @brief Gated activation applied after a direct matrix multiplication.
+ */
+enum class matmul_gated_act_t : int {
+    none = 0, ///< No gated activation.
+    silu_and_mul = 1, ///< SiLU(gate) * up — split-halves [gate | up].
+    gelu_and_mul = 2, ///< GELU(gate) * up — split-halves [gate | up].
+    swiglu_oai_mul = 3 ///< SwigluOAI — interleaved [g0,u0,g1,u1,...].
+};
+
+/**
+ * @brief Optional gated activation parameters for matmul_direct.
+ */
+struct matmul_gated_act_params {
+    matmul_gated_act_t act;
+
+    matmul_gated_act_params() : act(matmul_gated_act_t::none) {}
+};
+
 /// @brief Is a blocked reorder allowed to overwrite the caller's weight
 ///        buffer in place?
 ///

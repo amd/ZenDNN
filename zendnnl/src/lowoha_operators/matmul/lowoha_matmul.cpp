@@ -255,12 +255,31 @@ void matmul_execute(const char layout, const bool transA, const bool transB,
             bias, is_weights_const, num_threads);
 }
 
+static bool to_group_gated_act(
+        matmul_gated_act_t act, grp_matmul_gated_act_t &group_act) noexcept {
+    switch (act) {
+        case matmul_gated_act_t::none:
+            group_act = grp_matmul_gated_act_t::none;
+            return true;
+        case matmul_gated_act_t::silu_and_mul:
+            group_act = grp_matmul_gated_act_t::silu_and_mul;
+            return true;
+        case matmul_gated_act_t::gelu_and_mul:
+            group_act = grp_matmul_gated_act_t::gelu_and_mul;
+            return true;
+        case matmul_gated_act_t::swiglu_oai_mul:
+            group_act = grp_matmul_gated_act_t::swiglu_oai_mul;
+            return true;
+    }
+    return false;
+}
+
 status_t matmul_direct(const char layout, const bool transA, const bool transB,
         const int M, const int N, const int K, const float alpha,
         const void *src, const int lda, const void *weight, const int ldb,
         const void *bias, const float beta, void *dst, const int ldc,
         const bool is_weights_const, const matmul_batch_params_t &batch_params,
-        const matmul_params &params) {
+        const matmul_params &params, const matmul_gated_act_params *gated_act) {
     // Profiler overhead in production (ZENDNNL_ENABLE_PROFILER unset):
     //  - profiler_t constructor: eliminated by dead store elimination at -O3
     //    when profiler is never used.
@@ -342,6 +361,24 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
 
     const int batch_count
             = std::max(exec_batch_params.Batch_A, exec_batch_params.Batch_B);
+    grp_matmul_gated_act_params group_gated_act;
+    const grp_matmul_gated_act_params *group_gated_act_ptr = nullptr;
+    if (gated_act != nullptr) {
+        if (!to_group_gated_act(gated_act->act, group_gated_act.act)) {
+            log_error("matmul_direct: unsupported gated activation value ",
+                    static_cast<int>(gated_act->act));
+            return status_t::failure;
+        }
+        group_gated_act_ptr = &group_gated_act;
+    }
+    const bool run_gated_act = group_gated_act_ptr != nullptr
+            && group_gated_act.act != grp_matmul_gated_act_t::none;
+    if (run_gated_act && batch_count != 1) {
+        log_error(
+                "matmul_direct: gated activation is supported only for a "
+                "single batch");
+        return status_t::failure;
+    }
     const int32_t omp_mt = thread_guard::max_threads();
     const int32_t num_threads
             = resolve_num_threads(exec_params.num_threads, omp_mt);
@@ -358,15 +395,18 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
                 != scalar_mutated_conflicts_before;
     };
 
-    // Wide-N projection: run it as a one-op group so it reaches the
-    // single-expert custom-kernel path.  Safe to sit ahead of the
-    // reorder-quant and GGML-unpack blocks below: routed INT8 and W4A8 calls
-    // are quantized by group_matmul_direct's own pre-pass, while the predicate
-    // still excludes GGML-packed weights.
-    // A declined grouped call falls through to the standard dispatch.
-    if (custom_kernel_routable(layout, M, N, K, num_threads, batch_count,
-                transA, transB, alpha, beta, bias, ldb, is_weights_const,
-                exec_params)) {
+    // Wide-N projections and gated activations run as a one-op group.  Wide-N
+    // calls use this route to reach the single-expert custom kernel.  Gated
+    // activation has no equivalent in the standard scalar fallback, so an
+    // active request always enters the grouped path and propagates its status.
+    // Safe to sit ahead of the reorder-quant and GGML-unpack blocks below:
+    // routed INT8 and W4A8 calls are quantized by group_matmul_direct's own
+    // pre-pass, while the custom-kernel predicate still excludes GGML-packed
+    // weights.
+    if (run_gated_act
+            || custom_kernel_routable(layout, M, N, K, num_threads, batch_count,
+                    transA, transB, alpha, beta, bias, ldb, is_weights_const,
+                    exec_params)) {
         matmul_params grp_param = exec_params;
         grp_param.num_threads = num_threads;
         const bool aocl_prepacked = is_aocl_prepacked_weight(exec_params);
@@ -395,7 +435,7 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
                 grp_trans_b, grp_m, grp_n, grp_k, grp_alpha, grp_src, grp_lda,
                 grp_weight, grp_ldb, grp_bias, grp_beta, grp_dst, grp_ldc,
                 grp_weights_const, grp_params,
-                /*moe_postop=*/nullptr, /*gated_act=*/nullptr,
+                /*moe_postop=*/nullptr, group_gated_act_ptr,
                 /*fused_moe=*/nullptr);
         if (grp_status == status_t::success) {
             if (scalar_mutation_conflict()) {
@@ -408,8 +448,11 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
             if (is_profile) { profiler.tbp_stop(); }
             apilog_info(
                     "LOWOHA matmul_direct: routed to group_matmul_direct "
-                    "(num_ops=1, act=none), M=",
-                    M, ", K=", K, ", N=", N,
+                    "(num_ops=1, act=",
+                    static_cast<int>(run_gated_act
+                                    ? group_gated_act.act
+                                    : grp_matmul_gated_act_t::none),
+                    "), M=", M, ", K=", K, ", N=", N,
                     ", source=", (aocl_prepacked ? "aocl_prepacked" : "raw"));
             return status_t::success;
         }
@@ -419,6 +462,13 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
                     "matmul_direct: grouped scalar route hit a mutated-weight "
                     "cache conflict; refusing standard scalar fallback");
             return status_t::failure;
+        }
+        if (run_gated_act) {
+            if (is_profile) { profiler.tbp_stop(); }
+            log_error(
+                    "matmul_direct: group_matmul_direct could not execute the "
+                    "requested gated activation");
+            return grp_status;
         }
         log_info(
                 "group_matmul_direct route declined; continuing on the "
