@@ -74,6 +74,17 @@ if(ZENDNNL_CXX_FLAGS)
   list(APPEND ZNL_CMAKE_ARGS "-DCMAKE_CXX_FLAGS:STRING=${ZENDNNL_CXX_FLAGS}")
 endif()
 
+# ExternalProject does not inherit the parent cache compilers. The parent
+# already resolved CMAKE_C/CXX_COMPILER from $CC/$CXX and/or
+# -DCMAKE_*_COMPILER; pass that resolved compiler. The child still inherits
+# $CC/$CXX; command-line wins if both are set.
+if(CMAKE_C_COMPILER)
+  list(APPEND ZNL_CMAKE_ARGS "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}")
+endif()
+if(CMAKE_CXX_COMPILER)
+  list(APPEND ZNL_CMAKE_ARGS "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}")
+endif()
+
 zendnnl_add_option(NAME ZENDNNL_MESSAGE_LOG_LEVEL
   VALUE "DEBUG"
   TYPE STRING
@@ -465,7 +476,6 @@ else()
     SOURCE_DIR  "${ZENDNNL_SOURCE_DIR}"
     BINARY_DIR  "${ZENDNNL_BINARY_DIR}"
     CMAKE_ARGS  "${ZNL_CMAKE_ARGS}"
-    BUILD_COMMAND cmake --build . --target all -j
     INSTALL_COMMAND ""
     BUILD_BYPRODUCTS ${ZNL_BYPRODUCTS})
 
