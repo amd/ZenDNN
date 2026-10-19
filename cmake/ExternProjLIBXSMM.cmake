@@ -65,6 +65,8 @@ if (ZENDNNL_DEPENDS_LIBXSMM)
     else()
       list(APPEND LIBXSMM_MAKE_ARGS "NOFORTRAN=1")
       list(APPEND LIBXSMM_MAKE_ARGS "BLAS=0")
+      list(APPEND LIBXSMM_MAKE_ARGS "CC=${CMAKE_C_COMPILER}")
+      list(APPEND LIBXSMM_MAKE_ARGS "CXX=${CMAKE_CXX_COMPILER}")
       # LIBXSMM's Makefile compiles with $(DFLAGS) $(IFLAGS) $(CTARGET) $(CFLAGS),
       # so overriding CFLAGS/CXXFLAGS keeps its own ISA and include flags. Pass them
       # only when non-empty so RPM_OPT_FLAGS defaults are not wiped.

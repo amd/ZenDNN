@@ -27,13 +27,8 @@ if(ZENDNNL_DEPENDS_AOCLDLP)
     list(APPEND AD_CMAKE_ARGS "-DCMAKE_VERBOSE_MAKEFILE=OFF")
     list(APPEND AD_CMAKE_ARGS "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>")
 
-    # On Windows, forward the main build's compiler so the AOCL-DLP sub-build
-    # uses cl rather than auto-detecting a different compiler. Gated to Windows
-    # so the Linux build's existing behavior is unchanged.
-    if(WIN32)
-      list(APPEND AD_CMAKE_ARGS "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}")
-      list(APPEND AD_CMAKE_ARGS "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}")
-    endif()
+    list(APPEND AD_CMAKE_ARGS "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}")
+    list(APPEND AD_CMAKE_ARGS "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}")
 
     # uncoment if openmp root need to be given
     # list(APPEND AD_CMAKE_ARGS "-DDLP_OPENMP_ROOT=/path/to/openmp")
