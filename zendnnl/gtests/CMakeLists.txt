@@ -36,6 +36,8 @@ if(ZENDNNL_BUILD_GTEST)
     test_embedding.cpp
     test_normalization.cpp
     test_sdpa.cpp
+    test_sdpa_ck_gemm.cpp
+    test_sdpa_ck_int8.cpp
     test_omp_api.cpp
     test_softmax.cpp)
 

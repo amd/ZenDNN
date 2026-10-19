@@ -274,6 +274,15 @@ dispatcher.
 
 ---
 
+## SDPA Flash Kernel Configuration
+
+| Variable | Description | Default | Valid Values |
+|----------|-------------|---------|--------------|
+| `ZENDNNL_SDPA_BF16_CK` | Runs the BF16 GEMMs of flash SDPA on the BF16 custom-kernel (CK) microkernel instead of AOCL-DLP, packing B on the fly; the rest of the flash loop is unchanged. Applies to every BF16 flash GEMM with alpha 1, beta 0 or 1 and at least 3 rows: Q*K^T and P*V of the BF16 path, and the BF16 P*V of the INT8 path with INT8 Q*K^T only (its scaled BF16 Q*K^T, and one- or two-row GEMMs such as decode, stay on AOCL-DLP). On by default; needs AVX512-BF16, AVX512-BW and AVX512-VL, otherwise AOCL-DLP runs (with a warning only when the variable is set). Cached on first read. | `1` | `0`/`false`/`off`/`no` (AOCL-DLP), `1`/`true`/`on`/`yes` (custom kernel); other values keep the default |
+| `ZENDNNL_SDPA_INT8_CK` | Runs the INT8 matmuls of dynamic-INT8 flash SDPA (`is_qk_quant` / `is_pv_quant`, or ZenTorch's `ZENTORCH_SDPA_QK_QUANT` / `ZENTORCH_SDPA_PV_QUANT`) on the INT8 custom-kernel (CK) `vpdpbusd` microkernel instead of AOCL-DLP, packing B on the fly: the S8 Q*K^T (any rows) and the U8 x S8 P*V (two rows or more; one-row P*V stays on AOCL-DLP). Quantization and the rest of the flash loop are unchanged. On by default; needs AVX512-VNNI, AVX512-BW and AVX512-VL, otherwise AOCL-DLP runs (with a warning only when the variable is set). Independent of `ZENDNNL_SDPA_BF16_CK`, which covers the BF16 P*V of the QK-only mode; the PV-only mode's BF16 Q*K^T is scaled through alpha and stays on AOCL-DLP. Cached on first read. | `1` | `0`/`false`/`off`/`no` (AOCL-DLP), `1`/`true`/`on`/`yes` (custom kernel); other values keep the default |
+
+---
+
 ## Logging Configuration
 
 Log levels control the verbosity of messages for different modules.

@@ -161,7 +161,7 @@ The flash backend uses per-tensor BHSD strides to support non-contiguous memory 
 | FP16 | FP16 | FP16 | Full FP16 pipeline (requires AVX512-FP16, see below) |
 | FP16 | None | FP16 | No attention mask (requires AVX512-FP16, see below) |
 
-> **Note:** Internal precision is FP32 across all paths. Both the Q×K^T and softmax×V matmuls write FP32 outputs into the per-thread accumulators (`aocl_gemm_bf16bf16f32of32` for BF16 inputs, `aocl_gemm_f16f16f32of32` for FP16 inputs, `aocl_gemm_f32f32f32of32` for FP32 inputs). Online-softmax max/sum reductions and the running output accumulator stay in FP32. `out_dt` must either equal `qkv_dt` or be `data_type_t::none`.
+> **Note:** Internal precision is FP32 across all paths. Both the Q×K^T and softmax×V matmuls write FP32 outputs into the per-thread accumulators (`aocl_gemm_bf16bf16f32of32` for BF16 inputs, or by default the BF16 custom kernel, which `ZENDNNL_SDPA_BF16_CK=0` turns off, see [runtime_env.md](../../runtime_env.md); `aocl_gemm_f16f16f32of32` for FP16 inputs, `aocl_gemm_f32f32f32of32` for FP32 inputs). Online-softmax max/sum reductions and the running output accumulator stay in FP32. `out_dt` must either equal `qkv_dt` or be `data_type_t::none`.
 
 #### Dynamic INT8 compute
 
@@ -185,7 +185,9 @@ The public tensor data types do not change. Internally, with `is_qk_quant`:
 
 - Q and K are quantized once per head to symmetric s8 with one scale per token,
   through a single LOWOHA `group_dynamic_quant` call.
-- Q×K^T uses s8×s8 via `matmul_direct` and writes dequantized FP32 scores.
+- Q×K^T uses s8×s8 on the INT8 custom kernel by default (`matmul_direct` with
+  `ZENDNNL_SDPA_INT8_CK=0`, see [runtime_env.md](../../runtime_env.md)) and
+  writes dequantized FP32 scores.
 - The attention scale is folded into the per-token Q dequantization scales.
 
 With `is_pv_quant`:
@@ -196,7 +198,8 @@ With `is_pv_quant`:
 - The online-softmax exponential loop writes its known `[0, 1]` output directly
   as u8 with scale `1/255`, avoiding a separate probability min/max scan or
   reorder.
-- probability×V uses u8×s8 and accumulates dequantized FP32 output.
+- probability×V uses u8×s8 (the INT8 custom kernel by default, AOCL-DLP with
+  `ZENDNNL_SDPA_INT8_CK=0`) and accumulates dequantized FP32 output.
 
 When `is_pv_quant` is set without `is_qk_quant`, Q×K^T stays on the BF16 GEMM
 with the attention scale folded into its alpha, and only the V and probability
@@ -291,13 +294,13 @@ cpu_flash_attention_sa / INT8 kernel
   │    │    if sliding_window:
   │    │      shrink to live keys [band_lo, band_hi) inside the tile
   │    │      skip the tile when that span is empty
-  │    │    1. GEMM: Q_tile × K[n_gemm:]^T       (via AOCL BLAS)
+  │    │    1. GEMM: Q_tile × K[n_gemm:]^T       (AOCL BLAS, or BF16 / INT8 CK)
   │    │    2. if window: fill keys outside the row band with -inf
   │    │       else if causal on the last KV span: fill future with -inf
   │    │    3. Scale + additive mask fusion at column n_gemm
   │    │    4. Row-wise max + exp + sum           (SIMD fused reductions)
   │    │    5. Rescale the accumulator only after the first live tile
-  │    │    6. GEMM: softmax_tile × V[n_gemm:]
+  │    │    6. GEMM: softmax_tile × V[n_gemm:]   (AOCL BLAS, or BF16 / INT8 CK)
   │    │       beta = 0 on the first live tile, else 1
   │    └─
   │    if no live KV tile: write zeros
@@ -735,7 +738,13 @@ int lowoha_sdpa_cross_attention_example() {
    quantized Q/K/V, scale, FP32 tile, and BF16/u8 probability buffers, avoiding
    repeated allocation and value-initialization for stable or smaller shapes.
    Call `sdpa_flash_cpu_free_scratch()` on the owning thread to release all
-   retained flash scratch storage eagerly.
+   retained flash scratch storage eagerly. With the BF16 custom kernel (on
+   unless `ZENDNNL_SDPA_BF16_CK=0`), each worker thread also keeps one packed
+   32-column B block of the custom-kernel GEMM (`ceil(K/2) * 128` bytes, 32 KB
+   for 512-key tiles) until it exits. With the INT8 custom kernel (on unless
+   `ZENDNNL_SDPA_INT8_CK=0`), each worker thread keeps one packed INT8 B block
+   (`ceil(K/4) * 128` bytes, 16 KB for 512-key tiles) and the U8 copy of its Q
+   tile (rows * head_dim bytes, 128 KB for 512 x 256) until it exits.
 
    | Buffer | Size | Purpose |
    |--------|------|---------|

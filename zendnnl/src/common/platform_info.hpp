@@ -95,6 +95,16 @@ public:
    */
     ZENDNNL_API bool get_avx512_vnni_status() const;
 
+    /** @brief Get AVX512-BF16 status.
+   *
+   *  True when the CPU supports AVX512-BF16 (CPUID leaf 7, subleaf 1,
+   *  EAX bit 5): VDPBF16PS and the VCVTNE2PS2BF16 / VCVTNEPS2BF16
+   *  conversions. Required by the BF16 custom-kernel SDPA paths.
+   *
+   *  @return true if the platform supports AVX-512F and AVX512-BF16.
+   */
+    ZENDNNL_API bool get_avx512_bf16_status() const;
+
     /** @brief Get isa version
    *  @return isa version.
    */
@@ -122,10 +132,11 @@ public:
     /**@}*/
 
 private:
-    /** @brief Detect F16 ISA support via raw CPUID queries.
+    /** @brief Detect F16 and BF16 ISA support via raw CPUID queries.
    *
    *  Populates is_avx512_f16_native by checking AVX512-FP16
-   *  (leaf 7, sub 0, EDX bit 23).
+   *  (leaf 7, sub 0, EDX bit 23) and is_avx512_bf16 by checking
+   *  AVX512-BF16 (leaf 7, sub 1, EAX bit 5).
    */
     void detect_f16_isa();
 
@@ -135,6 +146,7 @@ private:
     bool is_avx512vl;
     bool is_avx512_vnni;
     bool is_avx512_f16_native;
+    bool is_avx512_bf16;
     uint32_t isa_version;
     uint32_t cpu_family;
     uint32_t cpu_model;

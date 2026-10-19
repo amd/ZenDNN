@@ -49,3 +49,4 @@ create_header_file(${zendnnl_inc_file}
 add_subdirectory(bmm_sdpa)
 add_subdirectory(flash_sdpa)
 add_subdirectory(reference)
+add_subdirectory(sdpa_gemm_ck)

@@ -11,6 +11,7 @@
 
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 #include "lowoha_operators/reorder/lowoha_reorder.hpp"
+#include "lowoha_operators/sdpa/sdpa_gemm_ck/lowoha_sdpa_ck.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -80,6 +81,10 @@ status_t sdpa_group_quantize_bf16_s8_per_channel(
 status_t sdpa_qk_int8_matmul(const int8_t *query, const int8_t *key,
         float *scores, int M, int N, int K, const float *query_scales,
         const float *key_scales) {
+    if (ck::int8_mode() != ck::mode_t::off
+            && ck::int8::qk(
+                    query, key, scores, M, N, K, query_scales, key_scales))
+        return status_t::success;
     matmul::matmul_params params = base_int8_matmul_params();
     params.dtypes.src = data_type_t::s8;
     params.dtypes.wei = data_type_t::s8;
@@ -100,6 +105,10 @@ status_t sdpa_qk_int8_matmul(const int8_t *query, const int8_t *key,
 status_t sdpa_pv_int8_matmul(const uint8_t *probability, const int8_t *value,
         float *output, int M, int N, int K, const float *probability_scale,
         const float *value_scales) {
+    if (ck::int8_mode() != ck::mode_t::off
+            && ck::int8::pv(probability, value, output, M, N, K,
+                    *probability_scale, value_scales))
+        return status_t::success;
     static const int32_t probability_zero_point = 0;
 
     matmul::matmul_params params = base_int8_matmul_params();

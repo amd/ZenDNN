@@ -39,7 +39,12 @@ struct sdpa_flash_cpu_mask_view {
 };
 
 /// Eagerly free the thread-local floating-point and INT8 flash scratch buffers.
-/// The buffers are also freed automatically when the thread exits (RAII).
+/// The buffers are also freed automatically when the thread exits (RAII). The
+/// custom-kernel GEMMs keep per-worker buffers until their worker thread exits:
+/// the BF16 packed B block (`ceil(K/2) * 128` bytes, 32 KB for 512-key tiles),
+/// and the INT8 packed B block (`ceil(K/4) * 128` bytes, 16 KB for 512-key
+/// tiles) and U8 copy of the Q tile (rows * head_dim bytes, 128 KB for 512 x
+/// 256).
 void sdpa_flash_cpu_free_scratch();
 
 status_t sdpa_flash_cpu_run_internal(const sdpa_flash_cpu_tensor_view &output,

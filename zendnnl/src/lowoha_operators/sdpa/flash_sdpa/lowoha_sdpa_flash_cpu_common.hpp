@@ -18,6 +18,7 @@
 #include "common/float16.hpp"
 #include "lowoha_operators/common/simd_ops.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
+#include "lowoha_operators/sdpa/sdpa_gemm_ck/lowoha_sdpa_ck.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -95,11 +96,19 @@ inline void sdpa_data_index_init(int64_t linear_idx, int64_t &i, int64_t dim_i,
 
 // All supported Tin variants (f32 / bf16 / f16) write an F32 output through
 // the corresponding AOCL kernel (f32f32f32of32 / bf16bf16f32of32 /
-// f16f16f32of32), so the output buffer is always `float *`.
+// f16f16f32of32), or for bf16 through the custom kernel when
+// `ck::bf16_mode()` is on and covers the call, so the output buffer is always
+// `float *`.
 template <typename Tin>
 inline void zendnn_gemm(int64_t m, int64_t n, int64_t k, float alpha,
         const Tin *a, int64_t lda, const Tin *b, int64_t ldb, float beta,
         float *c, int64_t ldc, bool TransA, bool TransB) {
+    if constexpr (std::is_same_v<Tin, bfloat16_t>) {
+        if (ck::bf16_mode() == ck::mode_t::gemm
+                && ck::bf16::gemm(m, n, k, alpha, a, lda, b, ldb, beta, c, ldc,
+                        TransA, TransB))
+            return;
+    }
     zendnnl::lowoha::matmul::matmul_params params;
     zendnnl::lowoha::matmul::matmul_data_types matmul_dtype;
     matmul_dtype.bias = zendnnl::common::data_type_t::none;

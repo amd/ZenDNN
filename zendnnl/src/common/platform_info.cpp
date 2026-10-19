@@ -33,6 +33,7 @@ platform_info_t::platform_info_t()
     , is_avx512vl {false}
     , is_avx512_vnni {false}
     , is_avx512_f16_native {false}
+    , is_avx512_bf16 {false}
     , isa_version {0}
     , cpu_family {0}
     , cpu_model {0}
@@ -69,6 +70,10 @@ void platform_info_t::detect_f16_isa() {
     // Full FP16 arithmetic (FMA, add, mul, div, etc.)
     zendnnl_cpuid_count(7, 0, eax, ebx, ecx, edx);
     is_avx512_f16_native = (edx >> 23) & 1;
+
+    // AVX512-BF16 (CPUID leaf 7, subleaf 1, EAX bit 5)
+    zendnnl_cpuid_count(7, 1, eax, ebx, ecx, edx);
+    is_avx512_bf16 = is_avx512f && ((eax >> 5) & 1);
 #endif
 }
 
@@ -90,6 +95,10 @@ bool platform_info_t::get_avx512_bw_vl_status() const {
 
 bool platform_info_t::get_avx512_vnni_status() const {
     return is_avx512_vnni;
+}
+
+bool platform_info_t::get_avx512_bf16_status() const {
+    return is_avx512_bf16;
 }
 
 uint32_t platform_info_t::get_isa_version() const {
