@@ -64,7 +64,6 @@ if(ZENDNNL_LIB_BUILD_ARCHIVE)
       PUBLIC "-fopenmp")
   endif()
 
-  target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_JSON=1)
   target_link_libraries(zendnnl_archive
     PUBLIC OpenMP::OpenMP_CXX
     PUBLIC ${CMAKE_DL_LIBS}
@@ -85,14 +84,12 @@ if(ZENDNNL_LIB_BUILD_ARCHIVE)
   #   target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_ONEDNN=0)
   # endif()
 
-  target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_AOCLUTILS=1)
   target_link_libraries(zendnnl_archive
     PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::aoclutils>")
   # target_link_libraries(zendnnl_archive
   #   PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::au_cpuid>")
 
   if(ZENDNNL_DEPENDS_AOCLDLP)
-    target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_AOCLDLP=1)
     if(ZENDNNL_FWK_BUILD AND ZENDNNL_AOCLDLP_INJECTED)
       target_link_libraries(zendnnl_archive
         PUBLIC "$<COMPILE_ONLY:aocldlp::aocl_dlp_static>")
@@ -100,14 +97,11 @@ if(ZENDNNL_LIB_BUILD_ARCHIVE)
       target_link_libraries(zendnnl_archive
         PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,aocldlp::aocl_dlp_static>")
     endif()
-  else()
-    target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_AOCLDLP=0)
   endif()
 
   # NOTE: OneDNN (DNNL) MUST be linked BEFORE aoclutils to ensure OneDNN's
   # CPU detection symbols take priority.
   if(ZENDNNL_DEPENDS_ONEDNN)
-    target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_ONEDNN=1)
     if(ZENDNNL_FWK_BUILD AND ZENDNNL_ONEDNN_INJECTED)
       target_link_libraries(zendnnl_archive
         PUBLIC "$<COMPILE_ONLY:DNNL::dnnl>")
@@ -115,12 +109,9 @@ if(ZENDNNL_LIB_BUILD_ARCHIVE)
       target_link_libraries(zendnnl_archive
         PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,DNNL::dnnl>")
     endif()
-  else()
-    target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_ONEDNN=0)
   endif()
 
   if(ZENDNNL_DEPENDS_LIBXSMM)
-    target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_LIBXSMM=1)
     if(ZENDNNL_FWK_BUILD AND ZENDNNL_LIBXSMM_INJECTED)
       target_link_libraries(zendnnl_archive
         PUBLIC "$<COMPILE_ONLY:libxsmm::libxsmm_archive>")
@@ -128,12 +119,9 @@ if(ZENDNNL_LIB_BUILD_ARCHIVE)
       target_link_libraries(zendnnl_archive
         PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,libxsmm::libxsmm_archive>")
     endif()
-  else()
-    target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_LIBXSMM=0)
   endif()
 
   if(ZENDNNL_DEPENDS_PARLOOPER)
-    target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_PARLOOPER=1)
     if(ZENDNNL_FWK_BUILD AND ZENDNNL_PARLOOPER_INJECTED)
       target_link_libraries(zendnnl_archive
         PUBLIC "$<COMPILE_ONLY:parlooper::parlooper_archive>")
@@ -141,12 +129,9 @@ if(ZENDNNL_LIB_BUILD_ARCHIVE)
       target_link_libraries(zendnnl_archive
         PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,parlooper::parlooper_archive>")
     endif()
-  else()
-    target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_PARLOOPER=0)
   endif()
 
   if(ZENDNNL_DEPENDS_FBGEMM)
-    target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_FBGEMM=1)
     if(ZENDNNL_FWK_BUILD AND ZENDNNL_FBGEMM_INJECTED)
       target_link_libraries(zendnnl_archive
         PUBLIC "$<COMPILE_ONLY:fbgemm::fbgemm_archive>")
@@ -154,8 +139,6 @@ if(ZENDNNL_LIB_BUILD_ARCHIVE)
       target_link_libraries(zendnnl_archive
         PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,fbgemm::fbgemm_archive>")
     endif()
-  else()
-    target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_FBGEMM=0)
   endif()
 
 endif()
@@ -192,7 +175,6 @@ if(ZENDNNL_LIB_BUILD_SHARED)
       PUBLIC "-fopenmp")
   endif()
 
-  target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_JSON=1)
   target_link_libraries(zendnnl
     PUBLIC OpenMP::OpenMP_CXX
     PUBLIC ${CMAKE_DL_LIBS}
@@ -233,14 +215,12 @@ if(ZENDNNL_LIB_BUILD_SHARED)
   #
   # The archive target keeps these PUBLIC because a static library does not
   # absorb its dependencies, so consumers must link them exactly once.
-  target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_AOCLUTILS=1)
   target_link_libraries(zendnnl
     PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::aoclutils>"
     PUBLIC  "$<COMPILE_ONLY:au::aoclutils>")
   #  PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::au_cpuid>"
 
   if(ZENDNNL_DEPENDS_AOCLDLP)
-    target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_AOCLDLP=1)
     if(ZENDNNL_FWK_BUILD AND ZENDNNL_AOCLDLP_INJECTED)
       target_link_libraries(zendnnl
         PRIVATE aocldlp::aocl_dlp_static)
@@ -250,14 +230,11 @@ if(ZENDNNL_LIB_BUILD_SHARED)
     endif()
     target_link_libraries(zendnnl
       PUBLIC "$<COMPILE_ONLY:aocldlp::aocl_dlp_static>")
-  else()
-    target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_AOCLDLP=0)
   endif()
 
   # NOTE: OneDNN (DNNL) MUST be linked BEFORE aoclutils to ensure OneDNN's
   # CPU detection symbols take priority. See archive target comment above.
   if(ZENDNNL_DEPENDS_ONEDNN)
-    target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_ONEDNN=1)
     if(ZENDNNL_FWK_BUILD AND ZENDNNL_ONEDNN_INJECTED)
       target_link_libraries(zendnnl
         PRIVATE DNNL::dnnl)
@@ -267,12 +244,9 @@ if(ZENDNNL_LIB_BUILD_SHARED)
     endif()
     target_link_libraries(zendnnl
       PUBLIC "$<COMPILE_ONLY:DNNL::dnnl>")
-  else()
-    target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_ONEDNN=0)
   endif()
 
   if(ZENDNNL_DEPENDS_LIBXSMM)
-    target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_LIBXSMM=1)
     if(ZENDNNL_FWK_BUILD AND ZENDNNL_LIBXSMM_INJECTED)
       target_link_libraries(zendnnl
         PRIVATE libxsmm::libxsmm_archive)
@@ -282,12 +256,9 @@ if(ZENDNNL_LIB_BUILD_SHARED)
     endif()
     target_link_libraries(zendnnl
       PUBLIC "$<COMPILE_ONLY:libxsmm::libxsmm_archive>")
-  else()
-    target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_LIBXSMM=0)
   endif()
 
   if(ZENDNNL_DEPENDS_PARLOOPER)
-    target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_PARLOOPER=1)
     if(ZENDNNL_FWK_BUILD AND ZENDNNL_PARLOOPER_INJECTED)
       target_link_libraries(zendnnl
         PRIVATE parlooper::parlooper_archive)
@@ -297,12 +268,9 @@ if(ZENDNNL_LIB_BUILD_SHARED)
     endif()
     target_link_libraries(zendnnl
       PUBLIC "$<COMPILE_ONLY:parlooper::parlooper_archive>")
-  else()
-    target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_PARLOOPER=0)
   endif()
 
   if(ZENDNNL_DEPENDS_FBGEMM)
-    target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_FBGEMM=1)
     if(ZENDNNL_FWK_BUILD AND ZENDNNL_FBGEMM_INJECTED)
       target_link_libraries(zendnnl
         PRIVATE fbgemm::fbgemm_archive)
@@ -312,48 +280,18 @@ if(ZENDNNL_LIB_BUILD_SHARED)
     endif()
     target_link_libraries(zendnnl
       PUBLIC "$<COMPILE_ONLY:fbgemm::fbgemm_archive>")
-  else()
-    target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_FBGEMM=0)
   endif()
 
 endif()
 
-# Build-time toggle for F16 native-kernel accumulation precision. The cache
-# variable itself is declared in cmake/ZenDnnlComponentsOptions.cmake (single
-# canonical location, alongside every other ZENDNNL_* component option). Here
-# we only consume the variable to attach the matching C++ preprocessor macro
-# to the library targets when the user passes
-#   -DZENDNNL_NATIVE_F32_ACCUM=ON
-# on the cmake command line. Each operator that has an F16-FMA fast path
-# (embedding-bag, normalization, ...) gates its can_use_f16_fma_kernel()
-# helper on this macro, so a single switch forces every such operator onto
-# its FP32-accumulating AVX-512 path for numerical-reproducibility studies.
-if(ZENDNNL_NATIVE_F32_ACCUM)
-  if(ZENDNNL_LIB_BUILD_ARCHIVE)
-    target_compile_definitions(zendnnl_archive
-      PUBLIC ZENDNNL_NATIVE_F32_ACCUM)
-  endif()
-  if(ZENDNNL_LIB_BUILD_SHARED)
-    target_compile_definitions(zendnnl
-      PUBLIC ZENDNNL_NATIVE_F32_ACCUM)
-  endif()
+zendnnl_public_compile_definitions(ZENDNNL_PUBLIC_COMPILE_DEFINITIONS)
+if(ZENDNNL_LIB_BUILD_ARCHIVE)
+  target_compile_definitions(zendnnl_archive
+    PUBLIC ${ZENDNNL_PUBLIC_COMPILE_DEFINITIONS})
 endif()
-
-# Build-time toggle that re-introduces the native AVX512-FP16 (F16-accumulating)
-# fast path for FusedAddRMSNorm. The kernel and its dispatch branch are kept in
-# the tree but compiled out by default (OFF), because the in-place residual add
-# plus F16 sum-of-squares accumulation was found to lose too much precision. Turn
-# it ON only for A/B precision experiments; the cache variable is declared in
-# cmake/ZenDnnlComponentsOptions.cmake alongside every other ZENDNNL_* option.
-if(ZENDNNL_FUSED_ADD_RMS_F16)
-  if(ZENDNNL_LIB_BUILD_ARCHIVE)
-    target_compile_definitions(zendnnl_archive
-      PUBLIC ZENDNNL_FUSED_ADD_RMS_F16)
-  endif()
-  if(ZENDNNL_LIB_BUILD_SHARED)
-    target_compile_definitions(zendnnl
-      PUBLIC ZENDNNL_FUSED_ADD_RMS_F16)
-  endif()
+if(ZENDNNL_LIB_BUILD_SHARED)
+  target_compile_definitions(zendnnl
+    PUBLIC ${ZENDNNL_PUBLIC_COMPILE_DEFINITIONS})
 endif()
 
 # Shared library "DLL mode": ZENDNNL_DLL selects the export/import decoration

@@ -293,3 +293,28 @@ macro(enable_dependency_injection _dep)
   endif()
 
 endmacro()
+
+# Public compile definitions of the zendnnl targets. Shared with the fwk
+# placeholder target so consumer flags match before and after install.
+function(zendnnl_public_compile_definitions _out_var)
+  set(_defs "")
+  foreach(_dep JSON AOCLUTILS AOCLDLP ONEDNN LIBXSMM PARLOOPER FBGEMM)
+    if(ZENDNNL_DEPENDS_${_dep})
+      list(APPEND _defs ZENDNNL_DEPENDS_${_dep}=1)
+    else()
+      list(APPEND _defs ZENDNNL_DEPENDS_${_dep}=0)
+    endif()
+  endforeach()
+
+  # Force F32 accumulation in all F16 native kernels.
+  if(ZENDNNL_NATIVE_F32_ACCUM)
+    list(APPEND _defs ZENDNNL_NATIVE_F32_ACCUM)
+  endif()
+
+  # F16-accumulating FusedAddRMSNorm path; OFF by default (precision loss).
+  if(ZENDNNL_FUSED_ADD_RMS_F16)
+    list(APPEND _defs ZENDNNL_FUSED_ADD_RMS_F16)
+  endif()
+
+  set(${_out_var} "${_defs}" PARENT_SCOPE)
+endfunction()

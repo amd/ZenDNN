@@ -16,6 +16,7 @@
 include_guard(GLOBAL)
 include(ExternalProject)
 include("${CMAKE_CURRENT_LIST_DIR}/ZenDnnlFwkMacros.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/../cmake/ZenDnnlMacros.cmake")
 
 message(AUTHOR_WARNING "(ZENDNNL) please ensure all zendnnl variables are set properly.")
 
@@ -130,7 +131,28 @@ zendnnl_add_option(NAME ZENDNNL_CODE_COVERAGE
   CACHE_STRING "build zendnnl code coverage"
   COMMAND_LIST ZNL_CMAKE_ARGS)
 
+## precision options (public compile definitions, see zendnnl_public_compile_definitions)
+zendnnl_add_option(NAME ZENDNNL_NATIVE_F32_ACCUM
+  VALUE OFF
+  TYPE BOOL
+  CACHE_STRING "Force F32 accumulation in F16 native kernels (embedding-bag, normalization)"
+  COMMAND_LIST ZNL_CMAKE_ARGS)
+
+zendnnl_add_option(NAME ZENDNNL_FUSED_ADD_RMS_F16
+  VALUE OFF
+  TYPE BOOL
+  CACHE_STRING "Enable the native AVX512-FP16 (F16-accumulating) fast path for FusedAddRMSNorm"
+  COMMAND_LIST ZNL_CMAKE_ARGS)
+
 ## dependencies
+# aocl-utils and nlohmann-json are hard dependencies, always ON in the zendnnl
+# build (cmake/ZenDnnlDependenciesDefaults.cmake) and in its installed
+# zendnnl-config.cmake.
+set(ZENDNNL_DEPENDS_AOCLUTILS ON
+  CACHE BOOL "zendnnl aocl-utils dependency" FORCE)
+set(ZENDNNL_DEPENDS_JSON ON
+  CACHE BOOL "zendnnl json dependency" FORCE)
+
 # aocl-dlp is a mandatory dependency.
 zendnnl_add_option(NAME ZENDNNL_DEPENDS_AOCLDLP
   VALUE ON
@@ -456,6 +478,32 @@ else()
       target_link_libraries(zendnnl_shared_library INTERFACE fbgemm::asmjit)
       target_link_libraries(zendnnl_shared_library INTERFACE fbgemm::cpuinfo)
     endif()
+  endif()
+
+  # Must match the usage requirements of the installed package (PIC from
+  # zendnnl/src/CMakeLists.txt, directory include dirs from
+  # find_install_dependencies in cmake/ZenDnnlMacros.cmake). Any difference
+  # changes consumer compile flags on the next configure, once zendnnl is
+  # found installed, and forces a full rebuild of the consumer.
+  zendnnl_public_compile_definitions(ZNL_INTERFACE_DEFINITIONS)
+
+  if(ZENDNNL_LIB_BUILD_ARCHIVE)
+    set_target_properties(zendnnl_library
+      PROPERTIES
+      INTERFACE_COMPILE_DEFINITIONS "${ZNL_INTERFACE_DEFINITIONS}"
+      INTERFACE_POSITION_INDEPENDENT_CODE ON)
+  endif()
+  if(ZENDNNL_LIB_BUILD_SHARED)
+    set_target_properties(zendnnl_shared_library
+      PROPERTIES
+      INTERFACE_COMPILE_DEFINITIONS "${ZNL_INTERFACE_DEFINITIONS}"
+      INTERFACE_POSITION_INDEPENDENT_CODE ON)
+  endif()
+
+  include_directories(${ZENDNNL_AOCLUTILS_INC_DIR})
+  include_directories(${ZENDNNL_JSON_INC_DIR})
+  if(ZENDNNL_DEPENDS_ONEDNN AND "${ZENDNNL_ONEDNN_INJECT_DIR}" STREQUAL "")
+    include_directories(${ZENDNNL_ONEDNN_INC_DIR})
   endif()
 
   message(STATUS "(ZENDNNL) ZNL_BYPRODUCTS=${ZNL_BYPRODUCTS}")
