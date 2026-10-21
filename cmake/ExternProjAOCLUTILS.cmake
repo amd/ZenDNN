@@ -28,6 +28,9 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
   list(APPEND AU_CMAKE_ARGS "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}")
   list(APPEND AU_CMAKE_ARGS "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}")
   list(APPEND AU_CMAKE_ARGS "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>")
+  # GNUInstallDirs defaults to lib64 on RHEL, AlmaLinux, and manylinux. Pin
+  # lib so BUILD_BYPRODUCTS and the fwk import paths stay the same everywhere.
+  list(APPEND AU_CMAKE_ARGS "-DCMAKE_INSTALL_LIBDIR=lib")
 
   # Strip -Werror from flags before passing to third-party AOCL-UTILS to prevent
   # parent build's zero-warning policy from breaking dependency code we don't control.
