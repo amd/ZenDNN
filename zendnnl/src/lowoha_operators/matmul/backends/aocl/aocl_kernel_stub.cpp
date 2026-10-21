@@ -64,7 +64,7 @@ void run_dlp(char, char, char, int, int, int, float, float, int, int, int, char,
 void matmul_batch_gemm_wrapper(char, char, char, int, int, int, float,
         const void *, int, const void *, int, float, void *, int,
         matmul_data_types &, int, int, int, char, char, size_t, size_t, size_t,
-        const matmul_params &, const void *, int) {
+        const matmul_params &, const void *, int, bool) {
     apilog_error(
             "AOCL-DLP batch matmul kernel (matmul_batch_gemm_wrapper) "
             "invoked but ZenDNNL was built without AOCL-DLP support "
@@ -121,11 +121,11 @@ void w4a8_cvt_and_cache_plain_s8(
     s8_plain = nullptr;
 }
 
-void w4a8_populate_plain_s8_cache(const std::vector<const void *> &,
+bool w4a8_populate_plain_s8_cache(const std::vector<const void *> &,
         const std::vector<int> &, const std::vector<int> &,
         const std::vector<int> &, const std::vector<bool> &,
-        const std::vector<matmul_params> &, int num_ops,
-        std::vector<void *> &w4a8_s8_out, bool &any_w4a8) {
+        const std::vector<matmul_params> &, const std::vector<bool> &,
+        int num_ops, std::vector<void *> &w4a8_s8_out, bool &any_w4a8) {
     // No AOCL plain-s8 LRU in this build; leave the side table empty so
     // downstream W4A8 AOCL paths are skipped (reference W4A8 still works).
     static std::atomic<bool> s_w4a8_plain_stub_announced {false};
@@ -139,6 +139,7 @@ void w4a8_populate_plain_s8_cache(const std::vector<const void *> &,
     }
     w4a8_s8_out.assign(num_ops, nullptr);
     any_w4a8 = false;
+    return true;
 }
 
 void w4a8ReorderAndCacheWeightsAocl(Key_matmul, const int8_t *,

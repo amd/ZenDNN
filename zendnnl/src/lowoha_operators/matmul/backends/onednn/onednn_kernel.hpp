@@ -45,6 +45,7 @@ namespace matmul {
  * @param batch_params Batch parameters including stride information
  * @param bias Optional bias vector pointer
  * @param kernel Algorithm selection for the matmul operation
+ * @param is_weights_const Whether weights are constant (enables weight caching)
  * @param src_batch_stride Source batch stride
  * @param weight_batch_stride Weight batch stride
  * @param dst_batch_stride Destination batch stride
@@ -53,7 +54,7 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N, int K,
         float alpha, const void *A, int lda, const void *B, int ldb, float beta,
         void *C, int ldc, matmul_params &lowoha_params,
         matmul_batch_params_t &batch_params, const void *bias,
-        zendnnl::common::matmul_algo_t &kernel,
+        zendnnl::common::matmul_algo_t &kernel, bool is_weights_const,
         size_t src_batch_stride = static_cast<size_t>(-1),
         size_t weight_batch_stride = static_cast<size_t>(-1),
         size_t dst_batch_stride = static_cast<size_t>(-1));
@@ -83,11 +84,12 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N, int K,
  * @param eng OneDNN engine
  * @param matmul_attr Primitive attributes
  * @param weight_cache_type 0 = disabled, 1 = out-of-place, 2 = in-place
+ * @param is_weights_const When false the cache is neither read nor populated
  */
 void getOrCreateBlockedWeights(bool transA, bool transB, int M, int K, int N,
         int lda, int ldb, onednn_utils_t::onednn_matmul_params &dnnl_params,
         const dnnl::engine &eng, const dnnl::primitive_attr &matmul_attr,
-        int32_t weight_cache_type);
+        int32_t weight_cache_type, bool is_weights_const);
 /** Clear oneDNN matmul weight cache. */
 void clear_onednn_matmul_weight_cache();
 #endif

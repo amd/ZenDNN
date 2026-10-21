@@ -66,7 +66,8 @@ void matmul_kernel_wrapper(char layout, char transA, char transB, int M, int N,
             || kernel == matmul_algo_t::onednn_blocked) {
         log_info("Using onednn kernel");
         matmul_onednn_wrapper(transA, transB, M, N, K, alpha, A, lda, B, ldb,
-                beta, C, ldc, lowoha_param, batch_params, bias, kernel);
+                beta, C, ldc, lowoha_param, batch_params, bias, kernel,
+                is_weights_const);
         return;
     }
 #endif
@@ -185,7 +186,7 @@ void matmul_execute(const char layout, const bool transA, const bool transB,
 
         matmul_onednn_wrapper(trans_input, trans_weight, M, N, K, alpha, src,
                 lda, weight, ldb, beta, dst, ldc, params, batch_params, bias,
-                kernel);
+                kernel, is_weights_const);
         return;
     }
 
@@ -548,8 +549,9 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
                     "per-group int8 matmul");
             return status_t::failure;
         }
-        status_t unpack_status = unpack_ggml_weights_and_cache(
-                exec_weight, N, K, ldb, transB ? 't' : 'n', exec_params);
+        status_t unpack_status = unpack_ggml_weights_and_cache(exec_weight, N,
+                K, ldb, transB ? 't' : 'n', exec_params,
+                /*skip_reorder=*/false, is_weights_const);
         if (unpack_status != status_t::success) { return unpack_status; }
     }
 

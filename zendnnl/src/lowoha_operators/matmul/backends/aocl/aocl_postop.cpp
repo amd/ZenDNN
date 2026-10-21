@@ -1059,8 +1059,8 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
         const void *bias, const matmul_data_types &dtypes, int N, int K, int M,
         int32_t *zp_comp_acc, int zp_comp_ndim,
         zendnnl::common::matmul_algo_t kernel, const void *weight_ptr,
-        const int32_t *reorder_colsum, int32_t neg_src_zp,
-        zendnnl::common::matmul_algo_t w4a8_algo) {
+        bool is_weights_const, const int32_t *reorder_colsum,
+        int32_t neg_src_zp, zendnnl::common::matmul_algo_t w4a8_algo) {
     const bool has_w4a8_algo
             = w4a8_algo != zendnnl::common::matmul_algo_t::none;
     // Normalize zp_comp presence at the API boundary: a zp_comp slot is
@@ -1082,20 +1082,14 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
             = reorder_colsum && !zp_comp_acc && zp_comp_ndim == 0;
     const int sig_zp_ndim = colsum_mode ? 3 : zp_comp_ndim;
 
-    // Runtime kill switch: ZENDNNL_ENABLE_POSTOP_CACHE=0 forces every
-    // call through the cold path by clearing the cache here, before the
-    // lookup below. The cold-path build still inserts into the cache at
-    // the tail of this function, so the freshly-built holder is owned
-    // and freed by the cache exactly as in the enabled path — the next
-    // disabled-mode call drops it on the way in, giving exactly-once
-    // ownership with no leak and no API change. Behavior with the flag
-    // off is bit-equivalent to pre-cache zendnnl; intended for triage
-    // and as a safety valve for integrators (zentorch, vLLM, etc.).
-    // The flag is sampled once per process inside is_postop_cache_enabled
-    // (static const cache), so this branch compiles to a single load.
-    const bool cache_enabled = zendnnl::common::is_postop_cache_enabled();
+    // Bypass the cache (cold path) on the ZENDNNL_ENABLE_POSTOP_CACHE=0 kill
+    // switch, or for non-const weights: the key carries weight_ptr, which
+    // integrators re-allocate per forward, so every call would miss and insert
+    // into an eviction-disabled cache.  Bypassed holders are flagged
+    // is_per_call at the tail so cleanup_dlp_post_op() releases them.
+    const bool cache_enabled
+            = zendnnl::common::is_postop_cache_enabled() && is_weights_const;
     auto &cache = get_postop_metadata_cache();
-    if (!cache_enabled) { cache.clear(); }
 
     // Build the cache key.
     const std::size_t sig = compute_postop_signature(
@@ -1104,10 +1098,9 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
             static_cast<unsigned int>(N),
             /*ldb=*/0, weight_ptr, static_cast<uint32_t>(kernel), sig);
 
-    // Hot path: cache hit. Unreachable when cache_enabled is false
-    // because the clear() above just emptied the cache.
+    // Hot path: cache hit. Skipped entirely when cache_enabled is false.
     dlp_postop_metadata_holder_t *cached_holder = nullptr;
-    if (cache.try_get(key, cached_holder)) {
+    if (cache_enabled && cache.try_get(key, cached_holder)) {
         if (cached_holder->no_metadata) { return nullptr; }
         patch_mutable_fields(&cached_holder->metadata, cached_holder,
                 lowoha_param, bias, dtypes, M, N, K, zp_comp_acc, zp_comp_ndim,
@@ -1341,9 +1334,15 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
             // Safe to cache.add this holder for the per-token-sym key too: we
             // haven't set is_per_call yet, so this becomes a regular cached
             // no_metadata sentinel and every subsequent call (per-token-sym
-            // or scalar) for this key short-circuits to nullptr.
+            // or scalar) for this key short-circuits to nullptr.  When
+            // bypassed we return nullptr, so nothing can reach this holder
+            // later; release it here.
             new_holder->no_metadata = true;
-            cache.add(key, new_holder);
+            if (cache_enabled) {
+                cache.add(key, new_holder);
+            } else {
+                zendnnl_aligned_free(new_holder);
+            }
             return nullptr;
         }
         const data_type_t src_scale_dt = lowoha_param.quant_params.src_scale.dt;
@@ -1634,11 +1633,16 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
     // Register the fully-built holder in the per-thread cache; subsequent
     // calls with the same key take the hot path above.
     //
-    // Per-call holders (currently only the BF16/INT8 per-token-sym path)
-    // are owned by the kernel call site's cleanup_dlp_post_op() and must
-    // NOT enter the cache: their inv_scales[M] buffer is length-variable
-    // and would leak if released by lru_cache_t's bare std::free eviction.
-    if (!new_holder->is_per_call) { cache.add(key, new_holder); }
+    // Per-call holders (the BF16/INT8 per-token-sym path) are owned by the
+    // kernel call site's cleanup_dlp_post_op() and must NOT enter the cache:
+    // their inv_scales[M] buffer is length-variable and would leak if
+    // released by lru_cache_t's bare std::free eviction.  A bypassed holder
+    // takes that same per-call ownership.
+    if (!cache_enabled) {
+        new_holder->is_per_call = true;
+    } else if (!new_holder->is_per_call) {
+        cache.add(key, new_holder);
+    }
 
     return dlp_metadata;
 }

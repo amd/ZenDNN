@@ -1056,14 +1056,16 @@ TEST_F(TestPostopCacheZpCompNegative, NullAccCollapsesToNoZpCompKey) {
     dlp_metadata_t *md_zero
             = create_dlp_post_op(params, /*bias=*/nullptr, dtypes, N, K, M,
                     /*zp_comp_acc=*/nullptr,
-                    /*zp_comp_ndim=*/0, algo, weight_ptr);
+                    /*zp_comp_ndim=*/0, algo, weight_ptr,
+                    /*is_weights_const=*/true);
     ASSERT_NE(md_zero, nullptr)
             << "INT8 path always builds metadata even with zero ops";
 
     dlp_metadata_t *md_bad_1d
             = create_dlp_post_op(params, /*bias=*/nullptr, dtypes, N, K, M,
                     /*zp_comp_acc=*/nullptr,
-                    /*zp_comp_ndim=*/1, algo, weight_ptr);
+                    /*zp_comp_ndim=*/1, algo, weight_ptr,
+                    /*is_weights_const=*/true);
     EXPECT_EQ(md_bad_1d, md_zero)
             << "Bad pair (ndim=1, acc=null) must canonicalize to the "
                "(ndim=0, acc=null) cache slot; differing pointers indicate the "
@@ -1073,7 +1075,8 @@ TEST_F(TestPostopCacheZpCompNegative, NullAccCollapsesToNoZpCompKey) {
     dlp_metadata_t *md_bad_2d
             = create_dlp_post_op(params, /*bias=*/nullptr, dtypes, N, K, M,
                     /*zp_comp_acc=*/nullptr,
-                    /*zp_comp_ndim=*/2, algo, weight_ptr);
+                    /*zp_comp_ndim=*/2, algo, weight_ptr,
+                    /*is_weights_const=*/true);
     EXPECT_EQ(md_bad_2d, md_zero)
             << "Bad pair (ndim=2, acc=null) must canonicalize to the same "
                "cache slot as (ndim=0, acc=null) for the matrix_add path too";
@@ -1109,7 +1112,8 @@ TEST_F(TestPostopCacheZpCompNegative, NullAccDistinctFromRealAccKey) {
     dlp_metadata_t *md_bad
             = create_dlp_post_op(params, /*bias=*/nullptr, dtypes, N, K, M,
                     /*zp_comp_acc=*/nullptr,
-                    /*zp_comp_ndim=*/1, algo, weight_ptr);
+                    /*zp_comp_ndim=*/1, algo, weight_ptr,
+                    /*is_weights_const=*/true);
     ASSERT_NE(md_bad, nullptr);
 
     // Real pair: signature now hashes ndim=1 (because acc is non-null,
@@ -1118,7 +1122,8 @@ TEST_F(TestPostopCacheZpCompNegative, NullAccDistinctFromRealAccKey) {
     dlp_metadata_t *md_real_1d
             = create_dlp_post_op(params, /*bias=*/nullptr, dtypes, N, K, M,
                     /*zp_comp_acc=*/zp_comp_storage,
-                    /*zp_comp_ndim=*/1, algo, weight_ptr);
+                    /*zp_comp_ndim=*/1, algo, weight_ptr,
+                    /*is_weights_const=*/true);
     ASSERT_NE(md_real_1d, nullptr);
     EXPECT_NE(md_real_1d, md_bad)
             << "Bad pair (ndim=1, acc=null) and real pair (ndim=1, acc!=null) "
@@ -1137,7 +1142,8 @@ TEST_F(TestPostopCacheZpCompNegative, NullAccDistinctFromRealAccKey) {
     dlp_metadata_t *md_real_2d
             = create_dlp_post_op(params, /*bias=*/nullptr, dtypes, N, K, M,
                     /*zp_comp_acc=*/zp_comp_storage,
-                    /*zp_comp_ndim=*/2, algo, weight_ptr);
+                    /*zp_comp_ndim=*/2, algo, weight_ptr,
+                    /*is_weights_const=*/true);
     ASSERT_NE(md_real_2d, nullptr);
     EXPECT_NE(md_real_2d, md_bad);
     EXPECT_NE(md_real_2d, md_real_1d)
@@ -1200,7 +1206,8 @@ TEST_F(TestPostopCacheQuantGranularity, ScaleLayoutsUseDistinctKeys) {
     auto create = [&](const matmul_params &params) {
         return create_dlp_post_op(params, /*bias=*/nullptr, dtypes, N, K, M,
                 /*zp_comp_acc=*/nullptr, /*zp_comp_ndim=*/0, algo,
-                static_cast<const void *>(weight_storage));
+                static_cast<const void *>(weight_storage),
+                /*is_weights_const=*/true);
     };
 
     dlp_metadata_t *md_token_channel = create(per_token_channel);
@@ -1437,7 +1444,7 @@ TEST_F(TestPostopCacheClearMechanism, ClearProducesFreshHolderForSameKey) {
     // Cold path: cache miss -> allocate + build + insert. Size 0 -> 1.
     dlp_metadata_t *md_first = create_dlp_post_op(params, /*bias=*/nullptr,
             params.dtypes, N, K, M, /*zp_comp_acc=*/nullptr,
-            /*zp_comp_ndim=*/0, algo, weight_ptr);
+            /*zp_comp_ndim=*/0, algo, weight_ptr, /*is_weights_const=*/true);
     ASSERT_NE(md_first, nullptr);
     EXPECT_EQ(get_aocl_postop_metadata_cache_size(), 1u)
             << "Cold-path build must insert exactly one holder into the cache";
@@ -1450,7 +1457,7 @@ TEST_F(TestPostopCacheClearMechanism, ClearProducesFreshHolderForSameKey) {
     // was empty before insert, but the pointer would differ).
     dlp_metadata_t *md_hit = create_dlp_post_op(params, /*bias=*/nullptr,
             params.dtypes, N, K, M, /*zp_comp_acc=*/nullptr,
-            /*zp_comp_ndim=*/0, algo, weight_ptr);
+            /*zp_comp_ndim=*/0, algo, weight_ptr, /*is_weights_const=*/true);
     EXPECT_EQ(md_hit, md_first)
             << "Same key + cache enabled (default) MUST return same holder; "
                "differing pointers indicate the cache is being unconditionally "
@@ -1477,7 +1484,7 @@ TEST_F(TestPostopCacheClearMechanism, ClearProducesFreshHolderForSameKey) {
     // the cache. Size going 0 -> 1 is the correct observable signal.
     dlp_metadata_t *md_after_clear = create_dlp_post_op(params,
             /*bias=*/nullptr, params.dtypes, N, K, M, /*zp_comp_acc=*/nullptr,
-            /*zp_comp_ndim=*/0, algo, weight_ptr);
+            /*zp_comp_ndim=*/0, algo, weight_ptr, /*is_weights_const=*/true);
     ASSERT_NE(md_after_clear, nullptr);
     EXPECT_EQ(get_aocl_postop_metadata_cache_size(), 1u)
             << "Post-clear cold-path call MUST reinsert into the cache";
@@ -1489,7 +1496,7 @@ TEST_F(TestPostopCacheClearMechanism, ClearProducesFreshHolderForSameKey) {
     // state for subsequent lookups.
     dlp_metadata_t *md_hit_after_clear = create_dlp_post_op(params,
             /*bias=*/nullptr, params.dtypes, N, K, M, /*zp_comp_acc=*/nullptr,
-            /*zp_comp_ndim=*/0, algo, weight_ptr);
+            /*zp_comp_ndim=*/0, algo, weight_ptr, /*is_weights_const=*/true);
     EXPECT_EQ(md_hit_after_clear, md_after_clear)
             << "Second post-clear call MUST hit the rebuilt holder; "
                "differing pointers indicate the rebuild path is not "

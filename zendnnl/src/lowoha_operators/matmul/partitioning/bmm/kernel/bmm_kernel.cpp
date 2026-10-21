@@ -65,7 +65,8 @@ void bmm_tile_execute(int batch_idx, int m_start, int m_len,
         log_info("Using onednn kernel");
         matmul_onednn_wrapper(ctx.trans_input, ctx.trans_weight, m_len, ctx.N,
                 ctx.K, ctx.alpha, A, ctx.lda, weight_ptr, ctx.ldb, ctx.beta, C,
-                ctx.ldc, tile_params, batch_params, ctx.bias, tile_kernel);
+                ctx.ldc, tile_params, batch_params, ctx.bias, tile_kernel,
+                ctx.is_weights_const);
         return;
     }
 #endif

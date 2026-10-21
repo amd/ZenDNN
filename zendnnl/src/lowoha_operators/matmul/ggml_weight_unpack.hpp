@@ -143,10 +143,14 @@ status_t validate_ggml_packed_inputs(const matmul_params &params,
  * @param params  [in/out] matmul_params whose wei_scale is populated on success
  * @param skip_reorder  hand back raw s8 (mem_format 'n') for the N-tile
  *                      per-group DLP path instead of pre-reordering
+ * @param is_weights_const  when false the unpack still runs but bypasses the
+ *                      cache entirely, re-unpacking into a thread-private
+ *                      buffer that stays valid for the rest of this call
  * @return status_t::success on success, status_t::failure on error
  */
 status_t unpack_ggml_weights_and_cache(const void *&weight, int N, int K,
-        int ldb, char trans, matmul_params &params, bool skip_reorder = false);
+        int ldb, char trans, matmul_params &params, bool skip_reorder = false,
+        bool is_weights_const = true);
 
 /** Clear cached GGML unpacked/reordered weight buffers. */
 void clear_ggml_weight_unpack_cache();

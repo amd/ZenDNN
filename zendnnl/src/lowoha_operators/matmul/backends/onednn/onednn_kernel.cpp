@@ -143,18 +143,21 @@ dnnl::matmul::primitive_desc create_blocked_matmul_pd(
 void getOrCreateBlockedWeights(bool transA, bool transB, int M, int K, int N,
         int lda, int ldb, onednn_utils_t::onednn_matmul_params &dnnl_params,
         const dnnl::engine &eng, const dnnl::primitive_attr &matmul_attr,
-        int32_t weight_cache_type) {
+        int32_t weight_cache_type, bool is_weights_const) {
 
     auto &hash_values = get_onednn_hash_values();
     auto &matmul_weight_cache = get_onednn_matmul_weight_cache();
     std::lock_guard<std::mutex> lock(get_onednn_blocked_weight_mutex());
 
+    // Cached entries snapshot the weight bytes, so non-const weights must
+    // neither read nor populate either cache.
+    const bool cache_enabled = weight_cache_type != 0 && is_weights_const;
     dnnl::memory cached_weight_mem;
 
     // WC=2: identity key on B (no M). Hit reuses packed memory. Miss packs
     // to a temp buffer, memcpy in-place iff blocked size == plain size (and
     // 64-byte pad) for BF16/F16/S8; else keep OOP. Always LRU-insert.
-    if (weight_cache_type == 2) {
+    if (weight_cache_type == 2 && is_weights_const) {
         const Key_matmul identity_key
                 = make_identity_weight_key(transB, K, N, ldb, dnnl_params);
         if (matmul_weight_cache.try_get(identity_key, cached_weight_mem)) {
@@ -222,7 +225,8 @@ void getOrCreateBlockedWeights(bool transA, bool transB, int M, int K, int N,
             dnnl_params.weights.buffer,
             static_cast<uint32_t>(matmul_algo_t::onednn_blocked));
 
-    auto hash_it = hash_values.find(full_key);
+    auto hash_it
+            = cache_enabled ? hash_values.find(full_key) : hash_values.end();
     if (hash_it != hash_values.end()) {
         const Key_matmul cache_key(transB, K, N, ldb,
                 dnnl_params.weights.buffer,
@@ -244,7 +248,9 @@ void getOrCreateBlockedWeights(bool transA, bool transB, int M, int K, int N,
             static_cast<uint32_t>(matmul_algo_t::onednn_blocked),
             blocking_hash);
 
-    if (matmul_weight_cache.try_get(cache_key, dnnl_params.weights.mem)) {
+    if (cache_enabled
+            && matmul_weight_cache.try_get(
+                    cache_key, dnnl_params.weights.mem)) {
         hash_values[full_key] = blocking_hash;
         apilog_info("Read onednn cached weights (blocking hash match)");
         return;
@@ -261,8 +267,11 @@ void getOrCreateBlockedWeights(bool transA, bool transB, int M, int K, int N,
     eng_stream.wait();
 
     dnnl_params.weights.mem = dnnl_blocked_weight_mem;
-    if (weight_cache_type == 0) {
-        apilog_info("onednn reorder weights (WEIGHT_CACHE_DISABLE)");
+    if (!cache_enabled) {
+        apilog_info("onednn reorder weights (",
+                weight_cache_type == 0 ? "WEIGHT_CACHE_DISABLE"
+                                       : "non-const weights",
+                ")");
         return;
     }
     apilog_info("onednn reorder weights (adding to cache)");
@@ -274,8 +283,9 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N, int K,
         float alpha, const void *A, int lda, const void *B, int ldb, float beta,
         void *C, int ldc, matmul_params &lowoha_params,
         matmul_batch_params_t &batch_params, const void *bias,
-        zendnnl::common::matmul_algo_t &kernel, size_t src_batch_stride,
-        size_t weight_batch_stride, size_t dst_batch_stride) {
+        zendnnl::common::matmul_algo_t &kernel, bool is_weights_const,
+        size_t src_batch_stride, size_t weight_batch_stride,
+        size_t dst_batch_stride) {
     int32_t weight_cache_type
             = effective_weight_cache_type(lowoha_params.weight_cache_type);
     onednn_utils_t::onednn_matmul_params dnnl_params;
@@ -624,7 +634,8 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N, int K,
 
     if (kernel == matmul_algo_t::onednn_blocked) {
         getOrCreateBlockedWeights(transA == 't', transB == 't', M, K, N, lda,
-                ldb, dnnl_params, eng, matmul_attr, weight_cache_type);
+                ldb, dnnl_params, eng, matmul_attr, weight_cache_type,
+                is_weights_const);
         dnnl_params.is_blocked = true;
     }
 

@@ -250,6 +250,12 @@ inline constexpr const char *kGrpMatmulErrTightNoFusedWriter
 /// the refused reorder left undefined.
 inline constexpr const char *kGrpMatmulErrMutatedWeightMiss
         = "error_mutated_weight_miss";
+/// Simulated W4A8 on grouped ALGO 3 (and AUTO, when that route is live)
+/// caches the s4→s8 conversion by weight address. A non-constant expert
+/// would reuse that conversion after the caller rewrites the same buffer,
+/// so the call is refused before GEMM.
+inline constexpr const char *kGrpMatmulErrW4a8NonConst
+        = "error_w4a8_nonconst_weight";
 
 inline bool gemm_mode_is_error(const char *mode) {
     return mode != nullptr

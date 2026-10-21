@@ -255,12 +255,18 @@ void w4a8_cvt_and_cache_plain_s8(Key_matmul key, const int8_t *weights,
 /// `w4a8_s8_out[e]` with the cached s8 pointer.  Iterates ALL experts
 /// (including M[e]==0 cold experts) so rotating MoE doesn't pay a
 /// first-fire conversion spike.  Does NOT mutate `weight[]` or `params`.
+/// A non-constant W4A8 expert is refused: the cache key is the weight
+/// address, so a later rewrite of that buffer would reuse a stale s8
+/// conversion. On refusal the outputs are cleared and the cache is left
+/// untouched for that expert.
 /// @param[out] w4a8_s8_out  Resized to num_ops; non-W4A8 slots are nullptr.
 /// @param[out] any_w4a8     Set to true if at least one expert was W4A8.
-void w4a8_populate_plain_s8_cache(const std::vector<const void *> &weight,
+/// @return false when a W4A8 expert has is_weights_const == false.
+bool w4a8_populate_plain_s8_cache(const std::vector<const void *> &weight,
         const std::vector<int> &K, const std::vector<int> &N,
         const std::vector<int> &ldb, const std::vector<bool> &transB,
-        const std::vector<matmul_params> &params, int num_ops,
+        const std::vector<matmul_params> &params,
+        const std::vector<bool> &is_weights_const, int num_ops,
         std::vector<void *> &w4a8_s8_out, bool &any_w4a8);
 
 inline bool w4a8_uses_native_s4(zendnnl::common::matmul_algo_t algo) {
@@ -365,7 +371,7 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
         int batch_count, int Batch_A, int Batch_B, char mem_format_a,
         char mem_format_b, size_t src_stride, size_t weight_stride,
         size_t dst_stride, const matmul_params &lowoha_param, const void *bias,
-        int num_threads);
+        int num_threads, bool is_weights_const);
 
 } // namespace matmul
 } // namespace lowoha

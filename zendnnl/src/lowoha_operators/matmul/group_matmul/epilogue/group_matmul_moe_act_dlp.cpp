@@ -76,7 +76,9 @@ dlp_metadata_t *build_act_and_mul_metadata(post_op_type_t act_kind,
             /*zp_comp_acc=*/nullptr, /*zp_comp_ndim=*/0,
             matmul_algo_t::aocl_dlp,
             /*weight_ptr=*/
-            nullptr); // weight_ptr is not used for MoE gated activations
+            nullptr, // weight_ptr is not used for MoE gated activations
+            // Keyed on shape + signature only, so entry count stays bounded.
+            /*is_weights_const=*/true);
 }
 
 // dst[m, 0:dim) = act(dst[m, 0:dim)) * dst[m, dim:2*dim), in-place.

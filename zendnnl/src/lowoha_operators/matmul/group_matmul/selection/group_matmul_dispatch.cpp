@@ -744,8 +744,17 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
             = w4a8_runtime_algo(/*scheduling_algo=*/3, resolve_kernel())
             == matmul_algo_t::aocl_dlp;
     if ((use_algo == 3 || use_algo == 0) && w4a8_algo3_simulated) {
-        w4a8_populate_plain_s8_cache(weight, K, N, ldb, transB, params,
-                dispatch_num_ops, w4a8_s8_ptrs, any_w4a8);
+        if (!w4a8_populate_plain_s8_cache(weight, K, N, ldb, transB, params,
+                    is_weights_const, dispatch_num_ops, w4a8_s8_ptrs,
+                    any_w4a8)) {
+            log_error(
+                    "group_matmul: simulated W4A8 refuses a non-constant "
+                    "expert weight. The plain-s8 conversion is cached by "
+                    "weight address, so a rewrite of that buffer would be "
+                    "ignored.");
+            set_mode(kGrpMatmulErrW4a8NonConst);
+            return false;
+        }
     }
 
     // Fail-closed baseline for the in-place mutation registry.  A reorder that

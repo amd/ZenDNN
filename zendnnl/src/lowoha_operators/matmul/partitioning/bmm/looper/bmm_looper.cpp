@@ -249,7 +249,8 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
                 batch_count, batch_params.Batch_A, batch_params.Batch_B,
                 params.mem_format_a, params.mem_format_b,
                 src_batch_stride_bytes, weight_batch_stride_bytes,
-                dst_batch_stride_bytes, params, bias, num_threads);
+                dst_batch_stride_bytes, params, bias, num_threads,
+                is_weights_const);
         return;
 #endif
     }
@@ -263,8 +264,8 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
 
         matmul_onednn_wrapper(trans_input, trans_weight, M, N, K, alpha, src,
                 lda, weight, ldb, beta, dst, ldc, params, batch_params, bias,
-                kernel, src_batch_stride_elems, weight_batch_stride_elems,
-                dst_batch_stride_elems);
+                kernel, is_weights_const, src_batch_stride_elems,
+                weight_batch_stride_elems, dst_batch_stride_elems);
         return;
     }
 #endif

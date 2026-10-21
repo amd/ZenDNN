@@ -132,6 +132,18 @@ std::mutex &get_ggml_reordered_weight_cache_mutex() {
     return mutex;
 }
 
+struct uncached_unpack_slot_t {
+    void *buf = nullptr;
+    ~uncached_unpack_slot_t() { zendnnl_aligned_free(buf); }
+};
+
+void *adopt_uncached_unpack(void *fresh) {
+    static thread_local uncached_unpack_slot_t slot;
+    zendnnl_aligned_free(slot.buf);
+    slot.buf = fresh;
+    return fresh;
+}
+
 size_t ggml_scale_bytes(int64_t N, int64_t K, bool use_bf16_scales) {
     return static_cast<size_t>(N * (K / 32)
             * (use_bf16_scales ? sizeof(uint16_t) : sizeof(float)));
@@ -447,7 +459,8 @@ int ggml_unpack_weight_buffer(const void *weight_data, int ggml_type,
 // aliases the AOCL-reordered entry (`aocl_dlp_blocked`) for the same
 // (weight, K, N, ldb, trans) tuple, in case a process runs both modes.
 static status_t unpack_ggml_raw_s8_and_cache(const void *&weight, int N, int K,
-        int ldb, char trans, matmul_params &params, int ggml_type) {
+        int ldb, char trans, matmul_params &params, int ggml_type,
+        bool is_weights_const) {
     const size_t weight_bytes = static_cast<size_t>(N) * static_cast<size_t>(K);
 
     Key_matmul cache_key(trans == 't', static_cast<unsigned int>(K),
@@ -459,7 +472,7 @@ static status_t unpack_ggml_raw_s8_and_cache(const void *&weight, int N, int K,
     std::mutex &cache_mutex = get_ggml_reordered_weight_cache_mutex();
 
     void *cached_buffer = nullptr;
-    {
+    if (is_weights_const) {
         std::lock_guard<std::mutex> lock(cache_mutex);
         if (weight_cache.try_get(cache_key, cached_buffer)) {
             apilog_info("GGML raw-s8 unpack cache hit: N=", N, ", K=", K);
@@ -482,7 +495,9 @@ static status_t unpack_ggml_raw_s8_and_cache(const void *&weight, int N, int K,
         }
         (void)unpacked_weights;
         (void)unpacked_scales;
-        {
+        if (!is_weights_const) {
+            cached_buffer = adopt_uncached_unpack(owned);
+        } else {
             std::lock_guard<std::mutex> lock(cache_mutex);
             if (weight_cache.try_get(cache_key, cached_buffer)) {
                 zendnnl_aligned_free(owned); // another thread filled it first
@@ -529,7 +544,8 @@ static status_t unpack_ggml_raw_s8_and_cache(const void *&weight, int N, int K,
 }
 
 status_t unpack_ggml_weights_and_cache(const void *&weight, int N, int K,
-        int ldb, char trans, matmul_params &params, bool skip_reorder) {
+        int ldb, char trans, matmul_params &params, bool skip_reorder,
+        bool is_weights_const) {
     // Infer the GGML block format from the weight dtype (contract:
     // pack_format_b == 1 means GGML; s4 -> Q4_0, s8/none -> Q8_0).  Q4_0 is
     // unpacked to packed s4 then widened to s8 before the (shared) sym-quant
@@ -562,14 +578,14 @@ status_t unpack_ggml_weights_and_cache(const void *&weight, int N, int K,
     // No AOCL sym-quant reorder: hand back raw s8 + per-group scales for the
     // reference kernel (mem_format 'n').
     return unpack_ggml_raw_s8_and_cache(
-            weight, N, K, ldb, trans, params, ggml_type);
+            weight, N, K, ldb, trans, params, ggml_type, is_weights_const);
 #endif
 
     // N-tile per-group DLP path: keep the weight raw so `do_tile` reorders it
     // per N-tile, instead of pre-reordering the full weight for AOCL here.
     if (skip_reorder) {
         return unpack_ggml_raw_s8_and_cache(
-                weight, N, K, ldb, trans, params, ggml_type);
+                weight, N, K, ldb, trans, params, ggml_type, is_weights_const);
     }
 
     // Default: unpack + AOCL sym-quant reorder + cache (mem_format 'r').
@@ -592,7 +608,7 @@ status_t unpack_ggml_weights_and_cache(const void *&weight, int N, int K,
     std::mutex &cache_mutex = get_ggml_reordered_weight_cache_mutex();
 
     void *cached_buffer = nullptr;
-    {
+    if (is_weights_const) {
         std::lock_guard<std::mutex> lock(cache_mutex);
         if (weight_cache.try_get(cache_key, cached_buffer)) {
             apilog_info("GGML unpack/reorder cache hit: N=", N, ", K=", K);
@@ -633,7 +649,12 @@ status_t unpack_ggml_weights_and_cache(const void *&weight, int N, int K,
                 unpacked_scales, scale_bytes);
         zendnnl_aligned_free(unpack_owned);
 
-        {
+        if (!is_weights_const) {
+            cached_buffer = adopt_uncached_unpack(new_cached_buffer);
+            new_cached_buffer = nullptr;
+            apilog_info("GGML unpack/reorder complete: ", total_cache_bytes,
+                    " bytes uncached (non-const weights)");
+        } else {
             std::lock_guard<std::mutex> lock(cache_mutex);
             if (weight_cache.try_get(cache_key, cached_buffer)) {
                 apilog_info(

@@ -293,10 +293,11 @@ void w4a8_cvt_and_cache_plain_s8(Key_matmul key, const int8_t *weights,
 }
 
 // Loop over all experts
-void w4a8_populate_plain_s8_cache(const std::vector<const void *> &weight,
+bool w4a8_populate_plain_s8_cache(const std::vector<const void *> &weight,
         const std::vector<int> &K, const std::vector<int> &N,
         const std::vector<int> &ldb, const std::vector<bool> &transB,
-        const std::vector<matmul_params> &params, int num_ops,
+        const std::vector<matmul_params> &params,
+        const std::vector<bool> &is_weights_const, int num_ops,
         std::vector<void *> &w4a8_s8_out, bool &any_w4a8) {
 
     w4a8_s8_out.assign(num_ops, nullptr);
@@ -311,6 +312,16 @@ void w4a8_populate_plain_s8_cache(const std::vector<const void *> &weight,
         if (weight[e] == nullptr || K[e] <= 0 || N[e] <= 0 || ldb[e] <= 0)
             continue;
         if (!is_w4a8_config(params[e])) continue;
+
+        if (static_cast<size_t>(e) < is_weights_const.size()
+                && !is_weights_const[e]) {
+            apilog_error("[W4A8.PLAIN] expert ", e,
+                    " is W4A8 with is_weights_const=false. Refusing the "
+                    "grouped call before the plain-s8 cache.");
+            w4a8_s8_out.assign(num_ops, nullptr);
+            any_w4a8 = false;
+            return false;
+        }
 
         const auto &wei_sc = params[e].quant_params.wei_scale;
         const bool wei_per_group
@@ -355,6 +366,7 @@ void w4a8_populate_plain_s8_cache(const std::vector<const void *> &weight,
         w4a8_s8_out[e] = buf;
         any_w4a8 = true;
     }
+    return true;
 }
 
 template <typename T>
@@ -547,7 +559,8 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
     // Add the key into map and value as nullptr
     // Modify the reorder_weight as weight.
     if (mem_format_b == 'r') {
-        matmul_weight_cache.add(key, nullptr);
+        // Sentinel insert honours weight_cache_type.
+        if (weight_cache_type != 0) { matmul_weight_cache.add(key, nullptr); }
         reorder_weights = const_cast<void *>(weights);
         return true;
     }
@@ -781,7 +794,8 @@ bool reorderAndCacheWeightsSymQuant(Key_matmul key, const void *weights,
     std::mutex &weight_cache_mutex = get_aocl_symquant_weight_cache_mutex();
 
     if (mem_format_b == 'r') {
-        matmul_weight_cache.add(key, nullptr);
+        // Sentinel insert honours weight_cache_type.
+        if (weight_cache_type != 0) { matmul_weight_cache.add(key, nullptr); }
         reorder_weights = const_cast<void *>(weights);
         return true;
     }
@@ -1133,12 +1147,14 @@ void w4a8ReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
 
     // A call that disabled caching (0) reads neither cache below: a weight
     // rewritten at the same address is converted and reordered again.
+    // The plain-s8 entry holds the s4->s8 widening, so it is only reusable
+    // for const weights.
     const bool read_cache = weight_cache_type != 0;
 
     // Check plain-s8 cache before blocked lock.
     int8_t *cvt_weights = nullptr;
     bool own_cvt_buf = false;
-    if (read_cache) {
+    if (is_weights_const && read_cache) {
         auto &plain_cache = get_w4a8_plain_cache();
         auto &plain_mtx = get_w4a8_plain_cache_mutex();
         std::lock_guard<std::mutex> plain_lock(plain_mtx);
@@ -1500,7 +1516,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
     // the GEMM dispatch below. May be null when the call has none of those.
     dlp_metadata_t *dlp_base_md = create_dlp_post_op(lowoha_param, bias,
             dtypes_for_postop, N, K, M, zp_comp_acc, zp_comp_ndim, kernel, B,
-            reorder_colsum, colsum_neg_src_zp, w4a8_algo);
+            is_weights_const, reorder_colsum, colsum_neg_src_zp, w4a8_algo);
 
     // What the GEMM gets: dlp_base_md with gemm_hints attached on the paths
     // that support them, otherwise dlp_base_md untouched.
@@ -2018,11 +2034,12 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
         int batch_count, int Batch_A, int Batch_B, char mem_format_a,
         char mem_format_b, size_t src_stride, size_t weight_stride,
         size_t dst_stride, const matmul_params &lowoha_param, const void *bias,
-        int num_threads) {
+        int num_threads, bool is_weights_const) {
 
     dlp_metadata_t *metadata_array = create_dlp_post_op(lowoha_param, bias,
             dtypes, N, K, /*M=*/0, /*zp_comp_acc=*/nullptr,
-            /*zp_comp_ndim=*/0, zendnnl::common::matmul_algo_t::aocl_dlp, B);
+            /*zp_comp_ndim=*/0, zendnnl::common::matmul_algo_t::aocl_dlp, B,
+            is_weights_const);
     md_t m_ = M;
     md_t n_ = N;
     md_t k_ = K;
