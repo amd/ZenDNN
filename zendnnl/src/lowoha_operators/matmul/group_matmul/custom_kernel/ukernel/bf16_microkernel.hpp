@@ -198,6 +198,11 @@ inline constexpr int kMaxMrNv2Prompt = 12;
 /// (returns nullptr) — see the `DstDt` doc-block above.
 ukernel_fn_t select_ukernel(int MR, int NV, ActKind act, DstDt dst_dt);
 
+/// Act=none FP32-dst kernel that starts from the partial sums already in
+/// `Cout` instead of zero (a K-blocked tile's chunks after the first).
+/// NV=2, MR 4..kMaxMrNv2Prompt; nullptr otherwise.  `bias` must be null.
+ukernel_fn_t select_ukernel_accumulate_f32(int MR, int NV);
+
 } // namespace custom_kernel
 } // namespace matmul
 } // namespace lowoha

@@ -96,6 +96,24 @@ inline int get_grp_matmul_requested_algo() {
     return v;
 }
 
+/// True when `ZENDNNL_GRP_MATMUL_ALGO` is explicitly `0`: AUTO with the
+/// single-expert prompt left on AOCL-DLP (ALGO 1) while its decode stays on
+/// the custom kernel.  Unset, AUTO runs a dense single-expert layer on the
+/// custom kernel in both phases.  An `AlgoEnvGuard` pin is plain AUTO.
+inline std::atomic<int> &test_api_algo_legacy_override();
+inline bool get_grp_matmul_algo_legacy() {
+    const int ovr
+            = test_api_algo_legacy_override().load(std::memory_order_relaxed);
+    if (ovr >= 0) return ovr != 0;
+    if (test_api_algo_override().load(std::memory_order_relaxed) >= 0)
+        return false;
+    static const bool v = []() {
+        const char *env = std::getenv("ZENDNNL_GRP_MATMUL_ALGO");
+        return env != nullptr && env[0] == '0';
+    }();
+    return v;
+}
+
 /// Generic scheduler selection. ALGO 4 is deliberately normalized to AUTO:
 /// it selects only the private W8A8 MoE hook and is not a sixth generic
 /// scheduler.
@@ -240,6 +258,8 @@ inline std::atomic<int> s_grp_matmul_kblock_override {-1};
 // `AlgoEnvGuard(N)` continues to flip the effective algo mid-process —
 // without paying the `std::getenv` cost on every production call site.
 inline std::atomic<int> s_grp_matmul_algo_override {-1};
+// Override of `get_grp_matmul_algo_legacy` (-1 = none, 0 = off, 1 = on).
+inline std::atomic<int> s_grp_matmul_algo_legacy_override {-1};
 
 // NOTE: `s_grp_matmul_n_tile_heavy_threshold_override` moved to
 // `group_matmul_n_tile.hpp` (Section A.3) together with the rest of
@@ -326,6 +346,9 @@ inline std::atomic<int> &test_api_auto_decode_algo_override() {
 }
 inline std::atomic<int> &test_api_algo_override() {
     return test_api::s_grp_matmul_algo_override;
+}
+inline std::atomic<int> &test_api_algo_legacy_override() {
+    return test_api::s_grp_matmul_algo_legacy_override;
 }
 // NOTE: `test_api_{decode,prompt}_algo5_gate_override()` moved to
 // `multi_expert/expert_parallel/group_matmul_expert_parallel_policy.hpp` together with the

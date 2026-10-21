@@ -118,6 +118,7 @@ struct Planned {
     ShapeKey key;
     Resolved r;
     const TeamMap *tm = nullptr;
+    int kc = 0; ///< K chunk of the call's tiles (`se_prompt_tile_kc`).
 };
 
 /// Resolves the call's knobs, fitted to its row alignment, and plans it.
@@ -148,6 +149,8 @@ ZENDNNL_FLATTEN Planned plan_call(const custom_kernel::CallContext &kctx,
     cfg.num_threads = T;
     cfg.single_dense
             = se_dense_prompt_plan(call.M.size(), p.fam == Family::kBf16);
+    p.kc = se_prompt_tile_kc(kctx, p.r.t[kKc], p.key.K);
+    cfg.kc = p.kc;
 
     plan_tiles(call.M.data(), call.N.data(), call.K.data(),
             static_cast<int>(call.M.size()), cfg, p.tm->team_size.data(),
@@ -202,12 +205,13 @@ bool should_run(const custom_kernel::CallContext &kctx, bool use_custom,
     return active > 1 && enabled(fam);
 }
 
-void execute(const custom_kernel::CallContext &kctx, const CallView &call,
+void execute(custom_kernel::CallContext &kctx, const CallView &call,
         int num_threads, bool log_plan) {
     const int T = std::max(num_threads, 1);
     Scratch &s = scratch();
     Plan &plan = s.plan;
     const Planned p = plan_call(kctx, call, T, plan);
+    kctx.prompt_kc = p.kc;
     const TeamMap &tm = *p.tm;
     const Tunables &k = p.r.t;
     const int num_ops = static_cast<int>(call.M.size());

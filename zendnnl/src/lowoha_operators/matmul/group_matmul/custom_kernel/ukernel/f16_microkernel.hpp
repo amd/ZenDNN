@@ -43,26 +43,22 @@
 ///     swiglu_oai_mul / silu_and_mul / gelu_and_mul).
 ///
 /// ── Compute strategy (native AVX-512-FP16) ──────────────────────────
-/// The inner loop accumulates in NATIVE FP16 (`__m512h`, 32 half lanes
-/// per zmm) via `_mm512_fmadd_ph`.  The epilogue widens each FP16
-/// accumulator to FP32 (`float16_t::cvt_f16_to_f32_vec` in
-/// `common/float16.hpp`) so the activation math and the cross-path
-/// numerical contract reuse the SAME FP32 primitives
-/// (`group_matmul_act_avx512.hpp`) the bf16 sibling and the
-/// separate-pass reference consume.
+/// The inner loop multiplies and accumulates in NATIVE FP16 (`__m512h`,
+/// 32 half lanes per zmm) via `_mm512_fmadd_ph`, for blocks of
+/// `kF16AccumBlockK` K steps.  After each block the FP16 accumulators are
+/// widened (`float16_t::cvt_f16_to_f32_vec` in `common/float16.hpp`) and
+/// added into FP32 sums, and the bias, the activation math and the store
+/// work from those sums, reusing the SAME FP32 primitives
+/// (`group_matmul_act_avx512.hpp`) the bf16 sibling and the separate-pass
+/// reference consume.
 ///
-/// PRECISION NOTE — native FP16 accumulation:
-///   FP16 has a 10-bit mantissa and saturates at ±65504, so a dot
-///   product accumulated entirely in FP16 over a large K can lose
-///   low-order bits (the same caveat `common/float16.hpp`'s
-///   `reduce_add_ph_to_fp32` documents for long-row reductions).  This
-///   is the deliberate trade made by the native-FP16-FMA path (chosen
-///   for its 2× lane throughput vs the convert-to-FP32 form); the F16
-///   destination's ~10-bit precision absorbs the difference for the
-///   decode-class K dimensions this kernel targets.  Callers needing
-///   strict FP32-accumulate parity should use the AOCL DLP fallback
-///   (custom kernel off for F16 via
-///   `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_F16=0`).
+/// PRECISION NOTE — blocked FP16 accumulation:
+///   FP16 has a 10-bit mantissa, so a running sum kept in FP16 over the
+///   whole K loses the contributions that fall below its last bit as it
+///   grows: over a long K the result degrades to noise.  Accumulating
+///   each block in FP16 and the blocks in FP32 bounds that error by one
+///   block, while keeping the 2x lane throughput of the native FP16
+///   FMA.
 ///
 /// Compile-time template parameters:
 ///   * MR ∈ {1..8}  — row count handled per call.
@@ -108,9 +104,8 @@ bool avx512f16_available();
 /// specialization.  Mirrors the bf16-side `ukernel_fn_t` exactly: the
 /// A panel and packed weight are FP16 (`float16_t`); whichever of
 /// `Cout` / `Cout_tight` is unused is passed nullptr / 0.  `bias` may
-/// be bf16, fp32, or f16 — the FP16 microkernel loads an f16 bias
-/// directly into the accumulator seed and narrows a bf16 / fp32 bias to
-/// f16 at accumulator init.  (`BiasKind::f16` is also accepted by the
+/// be bf16, fp32, or f16 — the FP16 microkernel widens it to FP32 and
+/// seeds its FP32 sums with it.  (`BiasKind::f16` is also accepted by the
 /// bf16 / DQ-INT8 kernels, which widen it to fp32 via `_mm512_cvtph_ps`.)
 /// `bias_kind` tells the kernel how to load it.  Pass `bias=nullptr` /
 /// `bias_kind=BiasKind::none` when no bias is applied.
@@ -141,6 +136,31 @@ using f16_ukernel_fn_t = void (*)(const float16_t *A, int lda,
 /// combination above.  `fill_kfn_table_f16` then fails on the first
 /// slot and `prepare_for_call` refuses, routing the call to AOCL DLP.
 f16_ukernel_fn_t select_f16_ukernel(int MR, int NV, ActKind act, DstDt dst_dt);
+
+/// K steps each FP16 accumulator covers before it is added into the FP32
+/// sums (see the PRECISION NOTE above).
+inline constexpr int kF16AccumBlockK = 512;
+
+/// Shape of the single-expert FP16 prompt microkernel: up to 12 rows over
+/// up to `kF16PromptNb` o-blocks (24 accumulators).
+inline constexpr int kMaxF16PromptMr = 12;
+inline constexpr int kF16PromptNb = 2;
+
+/// Single-expert prompt microkernel: `MR` rows over `NB` adjacent NR=32
+/// o-blocks, block `j` of B at `Bpacked + j * b_stride` and of the output
+/// at column `j * 32` (`j * 16` in the tight output of a gated `act`).
+/// With `load_c` (act = none only) the sums start from `Cout` rather than
+/// the bias, continuing a K-chunked reduction: exactly for an FP32 `Cout`,
+/// with one FP16 rounding per chunk for an F16 `Cout`.
+using f16_prompt_ukernel_fn_t = void (*)(const float16_t *A, int lda,
+        const float16_t *Bpacked, size_t b_stride, const void *bias,
+        BiasKind bias_kind, void *Cout, int ldc, void *Cout_tight,
+        int ldc_tight, int K, bool load_c);
+
+/// MR ∈ 1..kMaxF16PromptMr, NB ∈ 1..kF16PromptNb; nullptr otherwise, for
+/// a gated `act` with an FP32 dst, and on a toolchain without AVX-512-FP16.
+f16_prompt_ukernel_fn_t select_f16_prompt_ukernel(
+        int MR, int NB, ActKind act, DstDt dst_dt);
 
 } // namespace custom_kernel
 } // namespace matmul

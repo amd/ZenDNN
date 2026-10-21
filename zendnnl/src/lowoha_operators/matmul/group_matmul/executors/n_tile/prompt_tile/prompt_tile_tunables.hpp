@@ -46,6 +46,10 @@
 ///              M-block major (50)
 ///   SPAN_PCT   % of one team's work above which an expert is walked M-block
 ///              major (50)
+///   KC         K chunk of a single-expert prompt tile that can chunk (act=none
+///              BF16 without bias, or FP16), a depth of K or more keeps the
+///              full K (0 = `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_KC` where
+///              the call's B overflows L2, else the full K)
 /// The first three are env-only, so no profile changes whether the executor
 /// engages.
 ///
@@ -125,6 +129,7 @@ enum Knob : int {
     kSbL3Pct,
     kBmL3Pct,
     kSpanPct,
+    kKc,
     kNumKnobs
 };
 
@@ -158,6 +163,7 @@ inline constexpr KnobDef kKnobs[kNumKnobs] = {
         {kSbL3Pct, "sb_l3_pct", 1, 400, 50, Scope::kShape},
         {kBmL3Pct, "bm_l3_pct", 1, 400, 50, Scope::kShape},
         {kSpanPct, "span_pct", 1, 1000, 50, Scope::kShape},
+        {kKc, "kc", 0, 1 << 20, 0, Scope::kShape},
 };
 
 constexpr bool knob_rows_follow_ids() {

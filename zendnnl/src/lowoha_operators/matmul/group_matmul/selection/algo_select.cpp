@@ -194,9 +194,13 @@ static int auto_select_algo(const std::vector<int> &M,
             ? *precomputed_single_ck
             : grp_matmul_single_expert_call_ck(
                       M, N, K, params, fused_act, num_threads);
-    // A single expert whose decode runs on the custom kernel keeps ALGO 3 at
-    // one thread too.
-    const bool dense_algo3_layer = single_ck.decode;
+    const int max_M = max_active_grp_matmul_m(M, M.size());
+    const grp_matmul_phase phase = classify_grp_matmul_phase(max_M);
+    const bool is_decode = phase == grp_matmul_phase::decode;
+    // A single expert whose current phase runs on the custom kernel keeps
+    // ALGO 3 at one thread too: a covered prompt never falls back to AOCL.
+    const bool dense_algo3_layer
+            = is_decode ? single_ck.decode : single_ck.prompt;
     if (num_ops == 0
             || (num_threads <= 1 && !algo3_layer && !dense_algo3_layer)) {
         return pick(1, "auto_single_thread", 1);
@@ -224,9 +228,6 @@ static int auto_select_algo(const std::vector<int> &M,
         return pick(1, "auto_rule0_capacity", 1);
     }
 
-    const int max_M = max_active_grp_matmul_m(M, M.size());
-    const grp_matmul_phase phase = classify_grp_matmul_phase(max_M);
-    const bool is_decode = phase == grp_matmul_phase::decode;
     // One snapshot carries raw request, generic effective value, and pin
     // status. In particular, a request 4 fallback maps to the default
     // effective value without suppressing any default-policy refinement.

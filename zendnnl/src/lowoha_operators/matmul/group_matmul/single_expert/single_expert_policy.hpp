@@ -106,6 +106,10 @@ inline std::atomic<int> s_grp_matmul_single_expert_decode_tile_override {-1};
 // for the lifetime of a test; `-1` uses the cached env value.
 inline std::atomic<int> s_grp_matmul_single_expert_force_ck_override {-1};
 
+// `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_KC` for the lifetime of a test;
+// `-1` uses the cached env value.
+inline std::atomic<int> s_grp_matmul_single_expert_prompt_kc_override {-1};
+
 } // namespace test_api
 
 inline std::atomic<int> &test_api_dense_decode_ntile_override() {
@@ -172,7 +176,7 @@ inline int get_grp_n_tile_oversub() {
 // active expert of an MoE pool) at an N the custom-kernel pack divides.  A
 // covered phase runs ALGO 3 on the custom kernel (Rule 0.46), and
 // `matmul_direct` routes the layer.
-//   * ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE (default `none`) — prompt,
+//   * ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE (default `all`) — prompt,
 //     on the CK prompt tile executor; not static U8xS8, which the executor
 //     does not tile; not under `ZENDNNL_GRP_MATMUL_PROMPT_TILE=0`,
 //     K-blocking or `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=1`.
@@ -273,8 +277,10 @@ inline unsigned get_grp_matmul_single_expert_prompt_tile_dtypes() {
     const int ovr = test_api_single_expert_prompt_tile_override().load(
             std::memory_order_relaxed);
     if (ovr >= 0) return static_cast<unsigned>(ovr) & kSingleExpertAll;
+    // Explicit `ZENDNNL_GRP_MATMUL_ALGO=0` keeps every prompt on AOCL-DLP.
+    if (get_grp_matmul_algo_legacy()) return 0u;
     static const unsigned v = read_grp_matmul_single_expert_knob(
-            "ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE", 0u);
+            "ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE", kSingleExpertAll);
     return v;
 }
 inline unsigned get_grp_matmul_single_expert_decode_tile_dtypes() {
@@ -291,6 +297,31 @@ inline unsigned get_grp_matmul_single_expert_force_ck_dtypes() {
     if (ovr >= 0) return static_cast<unsigned>(ovr) & kSingleExpertAll;
     static const unsigned v = read_grp_matmul_single_expert_knob(
             "ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_FORCE_CK", kSingleExpertAll);
+    return v;
+}
+
+/// Default K chunk of a deep-K single-expert prompt tile.
+inline constexpr int kSingleExpertPromptKc = 4096;
+
+/// ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_KC = { 0, n } — cached, default
+///   `kSingleExpertPromptKc`.
+///   K chunk of a single-expert BF16 / FP16 prompt tile that can chunk and
+///   whose B of one call over the whole K overflows L2 (`se_prompt_kc`).
+///   `0` keeps the full K.  Rounded down to an even depth; non-numeric or negative
+///   input → default.
+inline int get_grp_matmul_single_expert_prompt_kc() {
+    const int ovr
+            = test_api::s_grp_matmul_single_expert_prompt_kc_override.load(
+                    std::memory_order_relaxed);
+    if (ovr >= 0) return ovr & ~1;
+    static const int v = []() {
+        const char *e
+                = std::getenv("ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_KC");
+        int parsed = 0;
+        if (!parse_env_int_strict(e, parsed) || parsed < 0)
+            return kSingleExpertPromptKc;
+        return parsed & ~1;
+    }();
     return v;
 }
 

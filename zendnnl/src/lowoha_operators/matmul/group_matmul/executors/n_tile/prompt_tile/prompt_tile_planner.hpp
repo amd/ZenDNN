@@ -94,6 +94,10 @@ struct PlannerConfig {
     /// The call is one dense layer (one BF16 expert): auto sizes give
     /// every team equal M-blocks and every thread equal N-slices.
     bool single_dense = false;
+    /// K chunk the tiles accumulate in (`CallContext::prompt_kc`; 0: the
+    /// full K).  The L2-derived M-block and N-slice sizes then hold one
+    /// chunk of A and B rather than the whole depth.
+    int kc = 0;
 };
 
 /// Planner temporaries, kept with the plan so a reused `Plan` plans
@@ -162,6 +166,7 @@ inline TileOrder expert_order(
 
 /// L2-derived N-slice width: the slice's B fills `ns_l2_pct` of L2.
 inline int auto_ns(int K, int N, const PlannerConfig &cfg) {
+    if (cfg.kc > 0) K = std::min(K, cfg.kc);
     const int64_t col_bytes
             = std::max<int64_t>(wei_col_bytes(std::max(K, 1), cfg), 1);
     int64_t ns = (cfg.l2_bytes * cfg.tun[kNsL2Pct] / 100) / col_bytes;
@@ -173,6 +178,7 @@ inline int auto_ns(int K, int N, const PlannerConfig &cfg) {
 /// L2-derived M-block rows: the block's A fills `mb_l2_pct` of L2, within
 /// [`mb_min`, `mb_max`].
 inline int auto_mb(int K, const PlannerConfig &cfg) {
+    if (cfg.kc > 0) K = std::min(K, cfg.kc);
     const int64_t row_bytes = std::max<int64_t>(
             static_cast<int64_t>(std::max(K, 1)) * cfg.a_bytes, 1);
     const int64_t align = std::max(cfg.row_align, 1);

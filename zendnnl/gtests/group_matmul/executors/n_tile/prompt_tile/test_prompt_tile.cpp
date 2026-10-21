@@ -71,6 +71,17 @@ using zendnnl::lowoha::matmul::grp_matmul_gated_act_t;
 /// Sets one prompt-tile knob for the scope.
 using PtOverride = pt::test_api::ScopedOverride;
 
+/// Shallowest even K whose B for one prompt call (`blocks` NR32 column
+/// blocks) overflows this host's custom-kernel L2 budget, so the default
+/// K-chunk gate engages whatever the L2 size.
+int prompt_kc_min_K(int blocks) {
+    const int64_t k
+            = zendnnl::lowoha::matmul::custom_kernel::ck_l2_budget_bytes()
+                    / (int64_t {32} * blocks * 2)
+            + 1;
+    return static_cast<int>((k + 1) & ~int64_t {1});
+}
+
 // ── Planner ─────────────────────────────────────────────────────────
 
 /// Every output cell of every active expert is covered by exactly one
@@ -510,7 +521,7 @@ struct GoldenKnobs {
 };
 
 pt::PlannerConfig golden_cfg(const GoldenKnobs &g) {
-    static_assert(pt::kNumKnobs == 18, "set every knob below");
+    static_assert(pt::kNumKnobs == 19, "set every knob below");
     pt::PlannerConfig cfg;
     cfg.tun = pt::Tunables {};
     cfg.tun[pt::kEnable] = 1;
@@ -531,6 +542,7 @@ pt::PlannerConfig golden_cfg(const GoldenKnobs &g) {
     cfg.tun[pt::kSbL3Pct] = 50;
     cfg.tun[pt::kBmL3Pct] = 50;
     cfg.tun[pt::kSpanPct] = 50;
+    cfg.tun[pt::kKc] = 0;
     cfg.pack_nr = g.pack_nr;
     cfg.max_mr = g.max_mr;
     cfg.l2_bytes = g.l2;
@@ -660,6 +672,7 @@ TEST(PromptTileTunables, EnvNamesAndValues) {
             "ZENDNNL_GRP_MATMUL_PROMPT_TILE_NS_L2_PCT");
     EXPECT_EQ(pt::env_name(pt::kSpanPct),
             "ZENDNNL_GRP_MATMUL_PROMPT_TILE_SPAN_PCT");
+    EXPECT_EQ(pt::env_name(pt::kKc), "ZENDNNL_GRP_MATMUL_PROMPT_TILE_KC");
     int v = -1;
     EXPECT_TRUE(pt::parse_knob_value(pt::kEnable, "15", v));
     EXPECT_EQ(v, 15);
@@ -1495,6 +1508,174 @@ TEST(PromptTileExecutor, SingleBf16ExpertWideMrMatchesNarrowRounds) {
         EXPECT_EQ(std::memcmp(narrow.dst[0].data(), wide.dst[0].data(),
                           narrow.dst[0].size()),
                 0);
+    }
+}
+
+// A deep-K single-expert BF16 prompt accumulates in `..._PROMPT_KC` chunks.
+// Each chunk after the first reloads the f32 partial sums and continues in K
+// order, so the output matches the full-K tile bit for bit.
+TEST(PromptTileExecutor, SingleBf16ExpertKChunksMatchFullK) {
+    SKIP_WITHOUT_BF16_CUSTOM_KERNEL();
+    using namespace moe_test_utils;
+    SingleExpertCkPolicy on(1, 1, 1);
+    // The second depth ends in a partial chunk.
+    const int deep_K = prompt_kc_min_K(1);
+    for (const auto &[M, N, K] : {std::tuple {300, 256, deep_K},
+                 std::tuple {517, 640, deep_K + 1000}}) {
+        for (const auto dst : {data_type_t::bf16, data_type_t::f32}) {
+            Case c;
+            c.M = {M};
+            c.N = N;
+            c.K = K;
+            c.dst_dt = dst;
+            c.wide = true;
+            SCOPED_TRACE(describe(c));
+            RunOut full, chunked;
+            {
+                SingleExpertPromptKcOverride kc(0);
+                full = run_case(c, 1);
+            }
+            {
+                SingleExpertPromptKcOverride kc(512);
+                KblockCaptureGuard capture;
+                chunked = run_case(c, 1);
+                EXPECT_TRUE(KblockCaptureGuard::used());
+            }
+            ASSERT_NE(
+                    chunked.mode.find("flat_n_tile_ptile_"), std::string::npos)
+                    << chunked.mode;
+            ASSERT_EQ(full.dst[0].size(), chunked.dst[0].size());
+            EXPECT_EQ(std::memcmp(full.dst[0].data(), chunked.dst[0].data(),
+                              full.dst[0].size()),
+                    0);
+        }
+    }
+}
+
+// A single FP16 expert's prompt runs the two-o-block prompt microkernel,
+// K-chunked or not.  It sums K in the decode microkernel's blocks and order,
+// so it is bitwise equal to the rounds run of a mask without FP16, across
+// odd o-block counts, MR tails, bias and every epilogue.
+TEST(PromptTileExecutor, SingleF16ExpertPromptKernelMatchesDecodeKernel) {
+    SKIP_WITHOUT_F16_CUSTOM_KERNEL();
+    using namespace moe_test_utils;
+    struct Shape {
+        int M, N, K, kc;
+    };
+    const int deep_K = prompt_kc_min_K(
+            zendnnl::lowoha::matmul::custom_kernel::kF16PromptNb);
+    for (const auto &s : {Shape {300, 256, 128, 0}, Shape {517, 288, 192, 0},
+                 Shape {301, 288, deep_K, 1000}}) {
+        for (const auto act : {grp_matmul_gated_act_t::none,
+                     grp_matmul_gated_act_t::silu_and_mul,
+                     grp_matmul_gated_act_t::gelu_and_mul,
+                     grp_matmul_gated_act_t::swiglu_oai_mul}) {
+            const bool gated = act != grp_matmul_gated_act_t::none;
+            for (const auto dst : {data_type_t::f16, data_type_t::f32}) {
+                for (const auto bias : {data_type_t::none, data_type_t::f16}) {
+                    const bool split_halves
+                            = act == grp_matmul_gated_act_t::silu_and_mul
+                            || act == grp_matmul_gated_act_t::gelu_and_mul;
+                    if (gated && (dst == data_type_t::f32 || s.kc > 0))
+                        continue;
+                    // The CK refuses a split-halves activation with bias.
+                    if (split_halves && bias != data_type_t::none) continue;
+                    Case c;
+                    c.M.push_back(s.M);
+                    c.N = s.N;
+                    c.K = s.K;
+                    c.src_dt = data_type_t::f16;
+                    c.dst_dt = dst;
+                    c.act = act;
+                    c.bias_dt = bias;
+                    c.wide = true;
+                    SCOPED_TRACE(describe(c));
+                    RunOut ref, got;
+                    {
+                        SingleExpertCkPolicy no_f16(
+                                zendnnl::lowoha::matmul::kSingleExpertInt8, 1,
+                                1);
+                        ref = run_case(c, /*FP16=*/8);
+                    }
+                    {
+                        SingleExpertCkPolicy on(1, 1, 1);
+                        SingleExpertPromptKcOverride kc(s.kc);
+                        KblockCaptureGuard capture;
+                        got = run_case(c, /*FP16=*/8);
+                        EXPECT_EQ(
+                                KblockCaptureGuard::used(), s.kc > 0 && !gated);
+                    }
+                    ASSERT_EQ(ref.mode.find("ptile"), std::string::npos)
+                            << ref.mode;
+                    ASSERT_NE(got.mode.find("flat_n_tile_ptile_"),
+                            std::string::npos)
+                            << got.mode;
+                    EXPECT_TRUE(ref.dst[0] == got.dst[0]);
+                }
+            }
+        }
+    }
+}
+
+// A single-expert prompt the prompt tile executor does not take (pinned
+// ALGO 3 with `ZENDNNL_GRP_MATMUL_PROMPT_TILE=0`) runs the multi-expert
+// kernels: no K chunks, though the call's B overflows L2.
+TEST(PromptTileExecutor, SingleExpertPromptOffTheTileRunsMultiExpertKernels) {
+    SKIP_WITHOUT_BF16_CUSTOM_KERNEL();
+    using namespace moe_test_utils;
+    SingleExpertCkPolicy on(1, 1, 1);
+    SingleExpertPromptKcOverride kc(512);
+    Case c;
+    c.M = {300};
+    c.K = prompt_kc_min_K(1);
+    c.wide = true;
+    SCOPED_TRACE(describe(c));
+    KblockCaptureGuard capture;
+    const RunOut r = run_case(c, /*prompt tile off=*/0);
+    EXPECT_EQ(r.mode.find("ptile"), std::string::npos) << r.mode;
+    EXPECT_FALSE(KblockCaptureGuard::used());
+}
+
+// The prompt tile's `kc` knob sets the K chunk of a tile that can chunk,
+// even where the call's B fits L2; a depth of K or more, or a gated
+// epilogue, keeps the full K.  Chunked output matches the full K bit for
+// bit.
+TEST(PromptTileExecutor, KcKnobSetsTheChunkOfEligibleTiles) {
+    SKIP_WITHOUT_BF16_CUSTOM_KERNEL();
+    using namespace moe_test_utils;
+    SingleExpertCkPolicy on(1, 1, 1);
+    Case c;
+    c.M = {300};
+    c.K = 4096;
+    c.wide = true;
+    SCOPED_TRACE(describe(c));
+    RunOut full;
+    {
+        KblockCaptureGuard capture;
+        full = run_case(c, 1);
+        EXPECT_FALSE(KblockCaptureGuard::used());
+    }
+    ASSERT_NE(full.mode.find("flat_n_tile_ptile_"), std::string::npos)
+            << full.mode;
+    {
+        PtOverride knob(pt::kKc, 1024);
+        KblockCaptureGuard capture;
+        const RunOut chunked = run_case(c, 1);
+        EXPECT_TRUE(KblockCaptureGuard::used());
+        EXPECT_TRUE(full.dst[0] == chunked.dst[0]);
+    }
+    {
+        PtOverride knob(pt::kKc, c.K);
+        KblockCaptureGuard capture;
+        run_case(c, 1);
+        EXPECT_FALSE(KblockCaptureGuard::used());
+    }
+    c.act = grp_matmul_gated_act_t::silu_and_mul;
+    {
+        PtOverride knob(pt::kKc, 1024);
+        KblockCaptureGuard capture;
+        run_case(c, 1);
+        EXPECT_FALSE(KblockCaptureGuard::used());
     }
 }
 

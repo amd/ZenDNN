@@ -5530,6 +5530,7 @@ void flat_n_tile(const std::vector<char> &layout,
         }
         pt_quant = rows.data();
     }
+    if (!run_prompt_tile) se_leave_prompt_tile(kctx);
 
     // ── Test-only snapshot of the finalised plan ─────────────────────
     // White-box hook for `gtests/group_matmul/test_algos.cpp` to

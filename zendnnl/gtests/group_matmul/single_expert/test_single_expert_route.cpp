@@ -424,7 +424,8 @@ void check_single_expert_env_junk_keeps_default() {
     EXPECT_EQ(mm::get_grp_matmul_single_expert_force_ck_dtypes(),
             mm::kSingleExpertAll)
             << "a value with no known token keeps the default";
-    EXPECT_EQ(mm::get_grp_matmul_single_expert_prompt_tile_dtypes(), 0u);
+    EXPECT_EQ(mm::get_grp_matmul_single_expert_prompt_tile_dtypes(),
+            mm::kSingleExpertAll);
     EXPECT_EQ(mm::get_grp_matmul_single_expert_decode_tile_dtypes(),
             mm::kSingleExpertAll);
 }

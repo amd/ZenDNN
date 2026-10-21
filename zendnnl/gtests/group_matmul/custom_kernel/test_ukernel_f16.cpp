@@ -58,11 +58,13 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "ck_test_helpers.hpp"
@@ -1021,6 +1023,72 @@ TEST(CkF16UkernelFallback, VectorizedGeluAvx512MatchesErfReference) {
                     << " m=" << m << " i=" << i << " g=" << g << " u=" << u
                     << " ref=" << ref << " got=" << got;
         }
+    }
+}
+
+// A long all-positive dot product: a running FP16 sum stalls once each
+// product falls below half its ulp (here near 2048 of an 8192-term sum
+// around 4600), so the kernels must add their FP16 blocks into FP32
+// sums.  Covers the decode microkernel (four experts, M 8) and the
+// single-expert prompt microkernel (one expert, M 256).
+TEST(CkF16UkernelLongK, BlocksAccumulateInFp32) {
+    CK_SKIP_IF_NO_F16_ISA();
+    mt::AlgoEnvGuard algo_guard(3);
+    mt::CustomKernelOverride ck_guard(true);
+    mt::CustomKernelF16Override ck_f16_guard(true);
+    mt::SingleExpertCkPolicy policy(1, 1, 1);
+    ::reset_grp_matmul_caches();
+    constexpr int K = 8192, N = 64;
+    for (const auto &[num_ops, M] : {std::pair {4, 8}, std::pair {1, 256}}) {
+        SCOPED_TRACE(
+                ::testing::Message() << "num_ops=" << num_ops << " M=" << M);
+        std::vector<float16_t> src(static_cast<size_t>(M) * K),
+                wei(static_cast<size_t>(K) * N);
+        for (size_t i = 0; i < src.size(); ++i)
+            src[i] = float16_t(0.5f + 0.03f * static_cast<float>(i % 17));
+        for (size_t i = 0; i < wei.size(); ++i)
+            wei[i] = float16_t(0.5f + 0.02f * static_cast<float>(i % 13));
+        std::vector<std::vector<float>> dst(
+                num_ops, std::vector<float>(static_cast<size_t>(M) * N, 0.f));
+        std::vector<char> layout(num_ops, 'r');
+        std::vector<bool> transA(num_ops, false), transB(num_ops, false),
+                is_wc(num_ops, true);
+        std::vector<int> Ms(num_ops, M), Ns(num_ops, N), Ks(num_ops, K),
+                lda(num_ops, K), ldb(num_ops, N), ldc(num_ops, N);
+        std::vector<float> alpha(num_ops, 1.f), beta(num_ops, 0.f);
+        std::vector<const void *> srcs(num_ops, src.data()),
+                weis(num_ops, wei.data()), biases(num_ops, nullptr);
+        std::vector<void *> dsts(num_ops);
+        for (int e = 0; e < num_ops; ++e)
+            dsts[e] = dst[e].data();
+        std::vector<mt::matmul_params> params(num_ops);
+        for (auto &p : params) {
+            p.dtypes.src = data_type_t::f16;
+            p.dtypes.wei = data_type_t::f16;
+            p.dtypes.dst = data_type_t::f32;
+            p.num_threads = kCkTestThreads;
+        }
+        moe_test_utils::GemmModeCaptureGuard gemm_mode_guard;
+        ASSERT_EQ(group_matmul_direct(layout, transA, transB, Ms, Ns, Ks, alpha,
+                          srcs, lda, weis, ldb, biases, beta, dsts, ldc, is_wc,
+                          params),
+                status_t::success);
+        const char *mode = zendnnl::lowoha::matmul::test_api ::
+                                   s_last_group_matmul_direct_gemm_mode.load(
+                                           std::memory_order_relaxed);
+        ASSERT_NE(mode, nullptr);
+        ASSERT_NE(std::strstr(mode, "_custom"), nullptr) << mode;
+        double worst = 0.0;
+        for (int m = 0; m < M; ++m)
+            for (int n = 0; n < N; ++n) {
+                double ref = 0.0;
+                for (int k = 0; k < K; ++k)
+                    ref += static_cast<double>(to_f32(src[m * K + k]))
+                            * to_f32(wei[k * N + n]);
+                worst = std::max(worst,
+                        std::abs(dst[0][m * N + n] - ref) / std::abs(ref));
+            }
+        EXPECT_LT(worst, 5e-3);
     }
 }
 

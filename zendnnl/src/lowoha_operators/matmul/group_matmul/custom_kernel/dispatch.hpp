@@ -141,6 +141,7 @@
 #define ZENDNNL_GROUP_MATMUL_CUSTOM_KERNEL_DISPATCH_HPP
 
 #include <array>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -352,6 +353,11 @@ inline KernelVariant resolve_variant(
 /// later pack/dispatch under, ensuring the cache key matches.
 int plan_pack_nr(int K, int N);
 
+/// Per-core L2 bytes a custom-kernel tile's working set may fill: 4/5 of
+/// the detected L2 (256 KiB when detection reports less than 64 KiB).
+/// Cached after the first call.
+int64_t ck_l2_budget_bytes();
+
 /// Per-call invariants the per-tile path needs, resolved once.
 /// The caller stack-allocates one of these and passes it to every
 /// dispatch inside its OMP region.
@@ -383,7 +389,11 @@ struct CallContext {
     // ── Internal — fields below are written by `prepare_for_call()`
     // and read only by `dispatch_tile()`.  Callers should not touch.
     int NV = 0; // = pack_nr / 16
-    int max_mr = 0; // = max_mr_for_nv(NV)
+    int max_mr = 0; // = max_mr_for_nv(NV), or a prompt kernel's bound
+    /// `max_mr` before the prompt kernels raised it, 0 when they did not;
+    /// restored when the prompt tile executor does not take the call
+    /// (`se_leave_prompt_tile`).
+    int base_max_mr = 0;
     /// AUTO deep-K K-blocking engage flag. Set by `prepare_for_call()` only
     /// for a single-expert (`num_ops == 1`) decode-class call and resolved by
     /// `dispatch_tile()` against the shared K-block policy (plus the narrower
@@ -391,6 +401,13 @@ struct CallContext {
     /// act=none, bias-free, deep-K, and `M > max_mr` conditions are still
     /// enforced by the per-tile gate.
     bool kblock_auto = false;
+    /// Single-expert BF16 / FP16 prompt K chunk (0: the full K): a tile of the
+    /// call taller than one MR call accumulates in chunks of this depth.  Set
+    /// by `prepare_for_call()` (`se_prompt_kc`) and refitted by the prompt
+    /// tile executor (`se_prompt_tile_kc`) before its tiles run.
+    int prompt_kc = 0;
+    /// Whether the call's prompt tiles may chunk K (`se_prompt_kc_eligible`).
+    bool prompt_kc_eligible = false;
     /// True when this call has exactly one expert (`num_ops == 1`).
     /// Gates the o-block-outer loop nesting in `dispatch_tile()`: that
     /// reordering was characterised only on dense single-expert FFN
@@ -441,6 +458,18 @@ struct CallContext {
     /// `kF16_F16_F16` / `kF16_F16_F32`; stays zero otherwise.
     /// `dispatch_tile()` reads it off `is_f16_variant(variant)`.
     f16_ukernel_fn_t kfn_table_f16[kMaxMR + 1] = {};
+    /// Single-expert FP16 prompt call: `dispatch_tile()` runs it on
+    /// `kfn_table_f16_prompt` (`[NB - 1][MR]`, MR up to `max_mr`) and
+    /// leaves `kfn_table_f16` unused.
+    bool f16_prompt = false;
+    f16_prompt_ukernel_fn_t kfn_table_f16_prompt[kF16PromptNb]
+                                                [kMaxF16PromptMr + 1]
+            = {};
+    /// FP32-destination act=none prompt kernels an F16-destination call's K
+    /// chunks accumulate with (`prompt_kc_eligible` F16 variant only).
+    f16_prompt_ukernel_fn_t kfn_table_f16_prompt_f32[kF16PromptNb]
+                                                    [kMaxF16PromptMr + 1]
+            = {};
     /// W4A8 per-MR table; zero for every other variant.  Valid MR
     /// range is `1..max_mr_for_nv_s4(NV)`, tighter than the int8
     /// table's.

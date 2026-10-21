@@ -11,6 +11,7 @@
 #include <omp.h>
 
 #include "../../kblock_test_hooks.hpp"
+#include "../../moe_test_utils.hpp"
 #include "../ck_test_helpers.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/qwen_gemma_llama/bf16_decode_microkernel.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/qwen_gemma_llama/bf16_decode_policy.hpp"
@@ -108,15 +109,23 @@ TEST(QwenBf16DecodePolicy, UsesOnePanelGatedKernelForWideDenseShape) {
 TEST(QwenBf16DecodePolicy, KeepsPromptOnEstablishedKernel) {
     CK_SKIP_IF_NO_BF16_ISA();
     ::reset_grp_matmul_caches();
+    moe_test_utils::SingleExpertCkPolicy policy(1, 1, 1);
     auto c = qwen_case("qwen35_prompt_plain");
     c.M = 128;
     c.N = 4096;
     c.K = 4096;
     ck_test::PrepCallStorage storage;
     ck::CallContext kctx;
-    ASSERT_EQ(
-            run_prepare_with_qwen_policy(c, storage, kctx), status_t::success);
-    EXPECT_EQ(kctx.max_mr, ck::max_mr_for_nv(kctx.NV));
+    ck::QwenBf16DecodeRoute route = ck::QwenBf16DecodeRoute::none;
+    ASSERT_EQ(run_prepare_with_qwen_policy(c, storage, kctx, &route),
+            status_t::success);
+    // The single-expert BF16 prompt kernel, not a Qwen decode one.
+    EXPECT_EQ(route, ck::QwenBf16DecodeRoute::none);
+    ASSERT_EQ(kctx.NV, 2);
+    EXPECT_EQ(kctx.max_mr, ck::kMaxMrNv2Prompt);
+    EXPECT_EQ(kctx.kfn_table[ck::kMaxMrNv2Prompt],
+            ck::select_ukernel(ck::kMaxMrNv2Prompt, 2, ck::ActKind::none,
+                    ck::dst_dt_for_variant(kctx.variant)));
     EXPECT_FALSE(kctx.kblock_auto);
 }
 

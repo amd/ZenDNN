@@ -20,42 +20,31 @@
 ///
 /// PER K-ELEMENT INNER LOOP (native AVX-512-FP16, `_mm512_fmadd_ph`):
 ///
-///   load Bpacked → NV_h zmms (bv[h] covers cols h*32..(h+1)*32 - 1)
+///   load Bpacked → one zmm per 32-column block (bv[j])
 ///   for m in 0..MR-1:
 ///     broadcast A[m, k] into 32 FP16 lanes
-///     for h in 0..NV_h-1:
-///       acc[m][h] = fmadd_ph(A_reg, bv[h], acc[m][h])
+///     for j: acc[m][j] = fmadd_ph(A_reg, bv[j], acc[m][j])
 ///
 /// Unlike the bf16 VDPBF16PS path (which consumes 2 K-elements per
 /// instruction via a K-pair pack) the native FP16 FMA consumes ONE
-/// K-element per lane, so the K loop is a plain stride-1 walk over
-/// `[0, K)` and the pack carries no K-interleave (see
-/// `pack_f16_simple_impl` in pack.cpp).  Accumulators are native FP16
-/// (`__m512h`, 32 cols/zmm), so `NV_h = NV / 2` zmms cover the
-/// NR = NV*16 columns of one o-block.
+/// K-element per lane, so the K loop is a plain stride-1 walk and the
+/// pack carries no K-interleave (see `pack_f16_simple_impl` in
+/// pack.cpp).  Every `kF16AccumBlockK` K steps the FP16 accumulators
+/// are widened and added into FP32 sums, which also carry the bias.
 ///
-/// EPILOGUE:
-///   Each FP16 accumulator is widened to two FP32 zmms via
-///   `float16_t::cvt_f16_to_f32_vec`, so the activation math and the
-///   FP32→F16 store reuse the SAME primitives
-///   (`group_matmul_act_avx512.hpp`) the bf16 sibling and the
-///   separate-pass reference use.  For `Act = none` with an F16 dst
-///   the accumulator is stored directly via `_mm512_storeu_ph` (no
-///   widen); for an FP32 dst it is widened and stored as two FP32
-///   halves.  Gated kinds deinterleave the (gate, up) pair out of the
-///   widened FP32 lanes (identical `vpermt2ps` indices as the bf16
-///   sibling), apply the activation, and store the half-width F16
+/// EPILOGUE (from the FP32 sums):
+///   Act = none stores F16 (one FP32→F16 narrowing) or FP32.  Gated
+///   kinds deinterleave the (gate, up) pair (identical `vpermt2ps`
+///   indices as the bf16 sibling), apply the shared FP32 activation
+///   (`group_matmul_act_avx512.hpp`) and store the half-width F16
 ///   result.
-///
-/// PRECISION: the accumulation is native FP16 (see the header's
-/// "PRECISION NOTE").  Callers needing FP32-accumulate parity disable
-/// the F16 custom kernel via `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_F16=0`
-/// and fall back to AOCL DLP.
 
 #include "f16_microkernel.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <utility>
 #include <type_traits>
 
 #include <immintrin.h>
@@ -145,17 +134,15 @@ static inline _Float16 f16_raw_to_scalar(const float16_t &v) {
     return hv;
 }
 
-// Apply swiglu_oai_mul in registers to one FP16 accumulator (32
-// interleaved cols) and store 16 activated F16 cols.  Widens to FP32,
-// deinterleaves gate/up (`vpermt2ps`), runs the shared
+// Apply swiglu_oai_mul to one 32-column (gate, up)-interleaved FP32 sum
+// (`lo` = columns 0..15, `hi` = 16..31) and store 16 activated F16 cols.
+// Deinterleaves gate/up (`vpermt2ps`), runs the shared
 // `swiglu_oai_avx512`, then narrows FP32→F16 via the shared
 // `f32_to_f16x16` and stores 256 bits.  Same structure as the bf16
-// `swiglu_oai_store_pair`, only the widen step (FP16→FP32) and the
-// final cvt (FP32→F16 instead of FP32→BF16) differ.
+// `swiglu_oai_store_pair`; only the final cvt (FP32→F16) differs.
 ZENDNNL_TARGET("avx512f,avx512fp16,avx512bw,avx512vl,fma")
-static inline void swiglu_oai_store_pair_f16(__m512h acc, float16_t *dst_row) {
-    __m512 lo, hi;
-    float16_t::cvt_f16_to_f32_vec(acc, lo, hi);
+static inline void swiglu_oai_store_pair_f16(
+        __m512 lo, __m512 hi, float16_t *dst_row) {
     const __m512i gate_idx = _mm512_load_si512(kGateLaneIdx);
     const __m512i up_idx = _mm512_load_si512(kUpLaneIdx);
     __m512 gate = _mm512_permutex2var_ps(lo, gate_idx, hi);
@@ -165,13 +152,11 @@ static inline void swiglu_oai_store_pair_f16(__m512h acc, float16_t *dst_row) {
     _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst_row), out);
 }
 
-// Apply silu_and_mul in registers — silu(gate) * up.  See the bf16
-// sibling's `silu_and_mul_store_pair` for the numerical contract.
+// silu_and_mul — silu(gate) * up.  See the bf16 sibling's
+// `silu_and_mul_store_pair` for the numerical contract.
 ZENDNNL_TARGET("avx512f,avx512fp16,avx512bw,avx512vl,fma")
 static inline void silu_and_mul_store_pair_f16(
-        __m512h acc, float16_t *dst_row) {
-    __m512 lo, hi;
-    float16_t::cvt_f16_to_f32_vec(acc, lo, hi);
+        __m512 lo, __m512 hi, float16_t *dst_row) {
     const __m512i gate_idx = _mm512_load_si512(kGateLaneIdx);
     const __m512i up_idx = _mm512_load_si512(kUpLaneIdx);
     __m512 gate = _mm512_permutex2var_ps(lo, gate_idx, hi);
@@ -181,14 +166,11 @@ static inline void silu_and_mul_store_pair_f16(
     _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst_row), out);
 }
 
-// Apply gelu_and_mul in registers — gelu(gate) * up (gelu_tanh form,
-// see the bf16 sibling's `gelu_and_mul_store_pair` for the numerical
-// contract).
+// gelu_and_mul — gelu(gate) * up (gelu_tanh form, see the bf16
+// sibling's `gelu_and_mul_store_pair` for the numerical contract).
 ZENDNNL_TARGET("avx512f,avx512fp16,avx512bw,avx512vl,fma")
 static inline void gelu_and_mul_store_pair_f16(
-        __m512h acc, float16_t *dst_row) {
-    __m512 lo, hi;
-    float16_t::cvt_f16_to_f32_vec(acc, lo, hi);
+        __m512 lo, __m512 hi, float16_t *dst_row) {
     const __m512i gate_idx = _mm512_load_si512(kGateLaneIdx);
     const __m512i up_idx = _mm512_load_si512(kUpLaneIdx);
     __m512 gate = _mm512_permutex2var_ps(lo, gate_idx, hi);
@@ -198,13 +180,176 @@ static inline void gelu_and_mul_store_pair_f16(
     _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst_row), out);
 }
 
+// Widens the 32 FP16 lanes of `v` to FP32 (`lo` = lanes 0..15).  Inline
+// intrinsics: an out-of-line convert would make the compiler spill every
+// live accumulator around each call.
+ZENDNNL_INLINE_TARGET("avx512f,avx512fp16,avx512bw,avx512vl,fma")
+static inline void widen_f16x32(__m512h v, __m512 &lo, __m512 &hi) {
+    const __m512i bits = _mm512_castph_si512(v);
+    lo = _mm512_cvtph_ps(_mm512_castsi512_si256(bits));
+    hi = _mm512_cvtph_ps(_mm512_extracti64x4_epi64(bits, 1));
+}
+
+// Stores 32 FP32 lanes (`lo`, `hi`) as F16 at `dst`.
+ZENDNNL_INLINE_TARGET("avx512f,avx512fp16,avx512bw,avx512vl,fma")
+static inline void store_f32x32_as_f16(float16_t *dst, __m512 lo, __m512 hi) {
+    constexpr int kRne = _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC;
+    _mm256_storeu_si256(
+            reinterpret_cast<__m256i *>(dst), _mm512_cvtps_ph(lo, kRne));
+    _mm256_storeu_si256(
+            reinterpret_cast<__m256i *>(dst + 16), _mm512_cvtps_ph(hi, kRne));
+}
+
+// Widens 16 bias columns starting at `col` to FP32.
+ZENDNNL_INLINE_TARGET("avx512f,avx512fp16,avx512bw,avx512vl,fma")
+static inline __m512 bias16_f32(const void *bias, BiasKind bias_kind, int col) {
+    if (bias_kind == BiasKind::bf16) {
+        return bf16x16_to_f32(
+                _mm256_loadu_si256(reinterpret_cast<const __m256i *>(
+                        static_cast<const bfloat16_t *>(bias) + col)));
+    }
+    if (bias_kind == BiasKind::f16) {
+        return _mm512_cvtph_ps(
+                _mm256_loadu_si256(reinterpret_cast<const __m256i *>(
+                        static_cast<const float16_t *>(bias) + col)));
+    }
+    return _mm512_loadu_ps(static_cast<const float *>(bias) + col);
+}
+
 // ─────────────────────────────────────────────────────────────────────
-// Templated microkernel — MR ∈ 1..8, NV ∈ {2, 4}, Act, DstT.
+// Shared FP16 microkernel body — MR rows over NJ 32-column accumulators
+// per row.  Column block j of B row k is at `B + j * jstride + k *
+// KStride`; its output columns start at j * 32 (j * 16 in the tight
+// output of a gated `Act`).
+//
+// The native FP16 FMAs accumulate K in blocks of `kF16AccumBlockK`;
+// each block is widened and added into FP32 sums (`sum`, MR x NJ * 32
+// floats on the stack, L1-resident), so the FP16 rounding error of the
+// running sum is bounded by one block instead of growing with the whole
+// K.  Bias, the epilogue and the store work from the FP32 sums.  With
+// `load_c` (Act = none only) the sums start from `Cout` instead of the
+// bias, continuing a K-chunked reduction.
+// ─────────────────────────────────────────────────────────────────────
+template <int MR, int NJ, int KStride, ActKind Act, typename DstT>
+ZENDNNL_INLINE_TARGET("avx512f,avx512fp16,avx512bw,avx512vl,fma")
+static inline void f16_kernel_body(const float16_t *__restrict A, int lda,
+        const float16_t *__restrict B, size_t jstride,
+        const void *__restrict bias, BiasKind bias_kind,
+        void *__restrict Cout_void, int ldc, void *__restrict Cout_tight_void,
+        int ldc_tight, int K, bool load_c) {
+    static_assert(Act == ActKind::none || std::is_same<DstT, float16_t>::value,
+            "Gated-activation kinds are F16-dst only");
+    static_assert(std::is_same<DstT, float16_t>::value
+                    || std::is_same<DstT, float>::value,
+            "DstT must be float16_t or float");
+    constexpr int kCols = NJ * 32;
+    DstT *__restrict Cout = static_cast<DstT *>(Cout_void);
+    float16_t *__restrict Cout_tight
+            = static_cast<float16_t *>(Cout_tight_void);
+
+    alignas(64) float sum[MR][kCols];
+    if (Act == ActKind::none && load_c) {
+#pragma GCC unroll 12
+        for (int m = 0; m < MR; ++m)
+#pragma GCC unroll 8
+            for (int c = 0; c < kCols; c += 16) {
+                const DstT *src = Cout + static_cast<size_t>(m) * ldc + c;
+                __m512 v;
+                if constexpr (std::is_same<DstT, float16_t>::value) {
+                    v = _mm512_cvtph_ps(_mm256_loadu_si256(
+                            reinterpret_cast<const __m256i *>(src)));
+                } else {
+                    v = _mm512_loadu_ps(src);
+                }
+                _mm512_store_ps(&sum[m][c], v);
+            }
+    } else if (bias != nullptr && bias_kind != BiasKind::none) {
+#pragma GCC unroll 8
+        for (int c = 0; c < kCols; c += 16) {
+            const __m512 b = bias16_f32(bias, bias_kind, c);
+#pragma GCC unroll 12
+            for (int m = 0; m < MR; ++m)
+                _mm512_store_ps(&sum[m][c], b);
+        }
+    } else {
+#pragma GCC unroll 12
+        for (int m = 0; m < MR; ++m)
+#pragma GCC unroll 8
+            for (int c = 0; c < kCols; c += 16)
+                _mm512_store_ps(&sum[m][c], _mm512_setzero_ps());
+    }
+
+    for (int k0 = 0; k0 < K; k0 += kF16AccumBlockK) {
+        const int k1 = std::min(K, k0 + kF16AccumBlockK);
+        __m512h acc[MR][NJ];
+#pragma GCC unroll 12
+        for (int m = 0; m < MR; ++m)
+#pragma GCC unroll 4
+            for (int j = 0; j < NJ; ++j)
+                acc[m][j] = _mm512_setzero_ph();
+        for (int k = k0; k < k1; ++k) {
+            __m512h bv[NJ];
+#pragma GCC unroll 4
+            for (int j = 0; j < NJ; ++j)
+                bv[j] = _mm512_loadu_ph(
+                        B + j * jstride + static_cast<size_t>(k) * KStride);
+#pragma GCC unroll 12
+            for (int m = 0; m < MR; ++m) {
+                const __m512h av = _mm512_set1_ph(
+                        f16_raw_to_scalar(A[static_cast<size_t>(m) * lda + k]));
+#pragma GCC unroll 4
+                for (int j = 0; j < NJ; ++j)
+                    acc[m][j] = _mm512_fmadd_ph(av, bv[j], acc[m][j]);
+            }
+        }
+#pragma GCC unroll 12
+        for (int m = 0; m < MR; ++m)
+#pragma GCC unroll 4
+            for (int j = 0; j < NJ; ++j) {
+                __m512 lo, hi;
+                widen_f16x32(acc[m][j], lo, hi);
+                float *s = &sum[m][j * 32];
+                _mm512_store_ps(s, _mm512_add_ps(_mm512_load_ps(s), lo));
+                _mm512_store_ps(
+                        s + 16, _mm512_add_ps(_mm512_load_ps(s + 16), hi));
+            }
+    }
+
+#pragma GCC unroll 12
+    for (int m = 0; m < MR; ++m)
+#pragma GCC unroll 4
+        for (int j = 0; j < NJ; ++j) {
+            const __m512 lo = _mm512_load_ps(&sum[m][j * 32]);
+            const __m512 hi = _mm512_load_ps(&sum[m][j * 32 + 16]);
+            if constexpr (Act != ActKind::none) {
+                float16_t *dst = Cout_tight + static_cast<size_t>(m) * ldc_tight
+                        + j * 16;
+                if constexpr (Act == ActKind::swiglu_oai_mul) {
+                    swiglu_oai_store_pair_f16(lo, hi, dst);
+                } else if constexpr (Act == ActKind::silu_and_mul) {
+                    silu_and_mul_store_pair_f16(lo, hi, dst);
+                } else {
+                    gelu_and_mul_store_pair_f16(lo, hi, dst);
+                }
+            } else {
+                DstT *dst = Cout + static_cast<size_t>(m) * ldc + j * 32;
+                if constexpr (std::is_same<DstT, float16_t>::value) {
+                    store_f32x32_as_f16(dst, lo, hi);
+                } else {
+                    _mm512_storeu_ps(dst, lo);
+                    _mm512_storeu_ps(dst + 16, hi);
+                }
+            }
+        }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Decode microkernel — MR ∈ 1..8, NV ∈ {2, 4}, Act, DstT: NV / 2
+// 32-column accumulators per row over one o-block (NR = NV * 16).
 //
 // `noinline` keeps each specialization a single callable the
 // dispatcher reaches through a function pointer (matches the bf16 /
-// int8 siblings).  NV_h = NV / 2 native `__m512h` accumulators per row
-// cover the NR = NV*16 columns of one o-block.
+// int8 siblings).
 // ─────────────────────────────────────────────────────────────────────
 template <int MR, int NV, ActKind Act, typename DstT>
 ZENDNNL_TARGET_NOINLINE("avx512f,avx512fp16,avx512bw,avx512vl,fma")
@@ -212,157 +357,87 @@ static void ukernel_impl(const float16_t *__restrict A, int lda,
         const float16_t *__restrict Bpacked, const void *__restrict bias,
         BiasKind bias_kind, void *__restrict Cout_void, int ldc,
         void *__restrict Cout_tight_void, int ldc_tight, int K) {
-
     static_assert(NV == 2 || NV == 4, "NV must be 2 or 4");
-    static_assert(Act == ActKind::none || (NV % 2 == 0),
-            "gated-activation epilogue requires even NV");
-    static_assert(std::is_same<DstT, float16_t>::value
-                    || std::is_same<DstT, float>::value,
-            "ukernel_impl: DstT must be float16_t or float");
-    // Gated kinds write 16 F16 lanes per (gate, up) pair via the
-    // pair-store helpers (no FP32 counterpart), so refuse (gated, FP32)
-    // at compile time — `select_f16_ukernel` refuses it earlier still.
-    static_assert(Act == ActKind::none || std::is_same<DstT, float16_t>::value,
-            "Gated-activation kinds are F16-dst only");
+    f16_kernel_body<MR, NV / 2, NV * 16, Act, DstT>(A, lda, Bpacked, 32, bias,
+            bias_kind, Cout_void, ldc, Cout_tight_void, ldc_tight, K, false);
+}
 
-    DstT *__restrict Cout = static_cast<DstT *>(Cout_void);
-    DstT *__restrict Cout_tight = static_cast<DstT *>(Cout_tight_void);
+// Single-expert prompt microkernel over NB ∈ 1..2 adjacent NR=32
+// o-blocks (`b_stride` elements apart) and MR ∈ 1..12 rows: up to 24
+// `__m512h` accumulators, against the 8 of the NV=2 `ukernel_impl`
+// at MR 8.
+template <int MR, int NB, ActKind Act, typename DstT>
+ZENDNNL_TARGET_NOINLINE("avx512f,avx512fp16,avx512bw,avx512vl,fma")
+static void prompt_ukernel_impl(const float16_t *__restrict A, int lda,
+        const float16_t *__restrict Bpacked, size_t b_stride,
+        const void *__restrict bias, BiasKind bias_kind,
+        void *__restrict Cout_void, int ldc, void *__restrict Cout_tight_void,
+        int ldc_tight, int K, bool load_c) {
+    static_assert(NB >= 1 && NB <= kF16PromptNb, "NB out of range");
+    static_assert(MR >= 1 && MR <= kMaxF16PromptMr, "MR out of range");
+    f16_kernel_body<MR, NB, 32, Act, DstT>(A, lda, Bpacked, b_stride, bias,
+            bias_kind, Cout_void, ldc, Cout_tight_void, ldc_tight, K, load_c);
+}
 
-    // NV_h native FP16 accumulators per row (32 cols each).  No double-
-    // buffering: FP16 packs 32 cols/zmm so the accumulator footprint is
-    // half the bf16 path's and small-MR specialisations stay within the
-    // register budget without it.  (A double-buffered variant matching
-    // the bf16 sibling's MR≤3 path is a possible latency-bound tuning
-    // follow-up.)
-    constexpr int NV_h = NV / 2;
-    // pack_nr (cols per o-block) in FP16 elements = NV*16 = NV_h*32.
-    constexpr int kPackNr = NV * 16;
+template <int NB, ActKind Act, typename DstT, int... MRs>
+f16_prompt_ukernel_fn_t pick_prompt_mr(
+        int MR, std::integer_sequence<int, MRs...>) {
+    f16_prompt_ukernel_fn_t fn = nullptr;
+    ((MR == MRs + 1 ? (fn = prompt_ukernel_impl<MRs + 1, NB, Act, DstT>) : fn),
+            ...);
+    return fn;
+}
 
-    __m512h acc[MR][NV_h];
+template <int NB, ActKind Act, typename DstT>
+f16_prompt_ukernel_fn_t pick_prompt(int MR) {
+    return pick_prompt_mr<NB, Act, DstT>(
+            MR, std::make_integer_sequence<int, kMaxF16PromptMr> {});
+}
 
-    // ── Bias fold into accumulator init ──────────────────────────────
-    // Bias is per-column (NR cols), in BF16, FP32, or F16.  Seed
-    // the accumulators with the FP16 bias columns; the K loop accumulates
-    // on top.  When no bias is present, zero-init.
-    //   * bf16 / fp32 bias is narrowed to FP16 here (one conversion per
-    //     tile), in keeping with the native-FP16-accumulate precision
-    //     profile of this path.
-    //   * f16 bias is loaded directly into the __m512h seed — no
-    //     conversion — matching the K-loop weight-load idiom.
-    const bool has_bias = (bias != nullptr && bias_kind != BiasKind::none);
-    if (has_bias) {
-        __m512h bias_vec[NV_h];
-        if (bias_kind == BiasKind::bf16) {
-            const auto *bias_bf16 = static_cast<const bfloat16_t *>(bias);
-#pragma GCC unroll 2
-            for (int h = 0; h < NV_h; ++h) {
-                __m256i b_lo = _mm256_loadu_si256(
-                        reinterpret_cast<const __m256i *>(bias_bf16 + h * 32));
-                __m256i b_hi
-                        = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(
-                                bias_bf16 + h * 32 + 16));
-                bias_vec[h] = float16_t::cvt_f32_to_f16_vec(
-                        bf16x16_to_f32(b_lo), bf16x16_to_f32(b_hi));
-            }
-        } else if (bias_kind == BiasKind::f16) {
-            const auto *bias_f16 = static_cast<const float16_t *>(bias);
-#pragma GCC unroll 2
-            for (int h = 0; h < NV_h; ++h) {
-                bias_vec[h] = _mm512_loadu_ph(bias_f16 + h * 32);
-            }
-        } else { // BiasKind::fp32
-            const auto *bias_fp32 = static_cast<const float *>(bias);
-#pragma GCC unroll 2
-            for (int h = 0; h < NV_h; ++h) {
-                __m512 lo = _mm512_loadu_ps(bias_fp32 + h * 32);
-                __m512 hi = _mm512_loadu_ps(bias_fp32 + h * 32 + 16);
-                bias_vec[h] = float16_t::cvt_f32_to_f16_vec(lo, hi);
-            }
-        }
-#pragma GCC unroll 8
-        for (int m = 0; m < MR; ++m)
-#pragma GCC unroll 2
-            for (int h = 0; h < NV_h; ++h)
-                acc[m][h] = bias_vec[h];
-    } else {
-#pragma GCC unroll 8
-        for (int m = 0; m < MR; ++m)
-#pragma GCC unroll 2
-            for (int h = 0; h < NV_h; ++h)
-                acc[m][h] = _mm512_setzero_ph();
-    }
-
-    // ── K loop: native FP16 FMA, one K-element per step ──────────────
-    for (int k = 0; k < K; ++k) {
-        __m512h bv[NV_h];
-        const float16_t *bp = Bpacked + static_cast<size_t>(k) * kPackNr;
-#pragma GCC unroll 2
-        for (int h = 0; h < NV_h; ++h) {
-            bv[h] = _mm512_loadu_ph(bp + h * 32);
-        }
-#pragma GCC unroll 8
-        for (int m = 0; m < MR; ++m) {
-            __m512h av = _mm512_set1_ph(
-                    f16_raw_to_scalar(A[static_cast<size_t>(m) * lda + k]));
-#pragma GCC unroll 2
-            for (int h = 0; h < NV_h; ++h)
-                acc[m][h] = _mm512_fmadd_ph(av, bv[h], acc[m][h]);
-        }
-    }
-
-    // ── Epilogue ─────────────────────────────────────────────────────
-    if constexpr (Act == ActKind::swiglu_oai_mul || Act == ActKind::silu_and_mul
-            || Act == ActKind::gelu_and_mul) {
-// One (gate, up) pair fills one FP16 accumulator (32 interleaved
-// cols → 16 outputs); n_pairs == NV_h.
-#pragma GCC unroll 8
-        for (int m = 0; m < MR; ++m) {
-#pragma GCC unroll 2
-            for (int p = 0; p < NV_h; ++p) {
-                float16_t *dst = Cout_tight + static_cast<size_t>(m) * ldc_tight
-                        + p * 16;
-                if constexpr (Act == ActKind::swiglu_oai_mul) {
-                    swiglu_oai_store_pair_f16(acc[m][p], dst);
-                } else if constexpr (Act == ActKind::silu_and_mul) {
-                    silu_and_mul_store_pair_f16(acc[m][p], dst);
-                } else { // ActKind::gelu_and_mul
-                    gelu_and_mul_store_pair_f16(acc[m][p], dst);
-                }
-            }
-        }
-    } else if constexpr (std::is_same<DstT, float16_t>::value) {
-// Act = none, F16 dst — store the FP16 accumulator (32 cols) per
-// NV_h zmm directly; no widen / cvt.
-#pragma GCC unroll 8
-        for (int m = 0; m < MR; ++m) {
-#pragma GCC unroll 2
-            for (int h = 0; h < NV_h; ++h) {
-                float16_t *dst = Cout + static_cast<size_t>(m) * ldc + h * 32;
-                _mm512_storeu_ph(dst, acc[m][h]);
-            }
-        }
-    } else {
-        // Act = none, FP32 dst — widen each FP16 accumulator to two FP32
-        // halves and store 32 FP32 cols per NV_h zmm.
-        static_assert(std::is_same<DstT, float>::value,
-                "Act=none non-f16 dst path requires DstT == float");
-#pragma GCC unroll 8
-        for (int m = 0; m < MR; ++m) {
-#pragma GCC unroll 2
-            for (int h = 0; h < NV_h; ++h) {
-                float *dst = Cout + static_cast<size_t>(m) * ldc + h * 32;
-                __m512 lo, hi;
-                float16_t::cvt_f16_to_f32_vec(acc[m][h], lo, hi);
-                _mm512_storeu_ps(dst, lo);
-                _mm512_storeu_ps(dst + 16, hi);
-            }
-        }
-    }
+template <ActKind Act, typename DstT>
+f16_prompt_ukernel_fn_t pick_prompt_nb(int MR, int NB) {
+    return NB == 1 ? pick_prompt<1, Act, DstT>(MR)
+                   : pick_prompt<2, Act, DstT>(MR);
 }
 
 } // namespace
 
 #endif // ZENDNNL_GRP_F16_CK_AVAILABLE
+
+f16_prompt_ukernel_fn_t select_f16_prompt_ukernel(
+        int MR, int NB, ActKind act, DstDt dst_dt) {
+#if ZENDNNL_GRP_F16_CK_AVAILABLE
+    if (MR < 1 || MR > kMaxF16PromptMr || NB < 1 || NB > kF16PromptNb)
+        return nullptr;
+    switch (act) {
+        case ActKind::swiglu_oai_mul:
+            return dst_dt == DstDt::kF16
+                    ? pick_prompt_nb<ActKind::swiglu_oai_mul, float16_t>(MR, NB)
+                    : nullptr;
+        case ActKind::silu_and_mul:
+            return dst_dt == DstDt::kF16
+                    ? pick_prompt_nb<ActKind::silu_and_mul, float16_t>(MR, NB)
+                    : nullptr;
+        case ActKind::gelu_and_mul:
+            return dst_dt == DstDt::kF16
+                    ? pick_prompt_nb<ActKind::gelu_and_mul, float16_t>(MR, NB)
+                    : nullptr;
+        case ActKind::none:
+            if (dst_dt == DstDt::kF16)
+                return pick_prompt_nb<ActKind::none, float16_t>(MR, NB);
+            if (dst_dt == DstDt::kF32)
+                return pick_prompt_nb<ActKind::none, float>(MR, NB);
+            return nullptr;
+        default: return nullptr;
+    }
+#else
+    (void)MR;
+    (void)NB;
+    (void)act;
+    (void)dst_dt;
+    return nullptr;
+#endif
+}
 
 // ── Function-pointer table dispatch (mirrors select_ukernel) ─────────
 //

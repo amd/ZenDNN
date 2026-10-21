@@ -131,6 +131,12 @@ void CallContext::reset() {
     pack_in_place = false;
     NV = 0;
     max_mr = 0;
+    base_max_mr = 0;
+    kblock_auto = false;
+    prompt_kc = 0;
+    prompt_kc_eligible = false;
+    single_expert = false;
+    f16_prompt = false;
     subtile_cols = 0;
     act_kind = ActKind::none;
     bias_kind = BiasKind::none;
@@ -146,6 +152,12 @@ void CallContext::reset() {
         fn = nullptr;
     for (auto &fn : kfn_table_f16)
         fn = nullptr;
+    for (auto &row : kfn_table_f16_prompt)
+        for (auto &fn : row)
+            fn = nullptr;
+    for (auto &row : kfn_table_f16_prompt_f32)
+        for (auto &fn : row)
+            fn = nullptr;
     for (auto &fn : kfn_table_s4)
         fn = nullptr;
     // A stale `group_size` across a CallContext reuse would make the s4
@@ -277,6 +289,16 @@ int plan_pack_nr(int /*K*/, int N) {
     return 0;
 }
 
+int64_t ck_l2_budget_bytes() {
+    static const int64_t budget = []() {
+        const int64_t l2
+                = zendnnl::lowoha::matmul::native::detect_uarch().l2_bytes;
+        const int64_t safe = (l2 >= 64 * 1024) ? l2 : (256 * 1024);
+        return (safe * 4) / 5;
+    }();
+    return budget;
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Internal helpers — owned entirely by this file.  The callers never call
 // these directly; the only public entries are `prepare_for_call()`
@@ -308,12 +330,7 @@ int pick_l2_subtile_cols(int M_max, int K, int pack_nr, int src_elem_bytes,
     if (M_max <= 0 || K <= 0 || pack_nr <= 0 || src_elem_bytes <= 0
             || wei_elem_bytes <= 0)
         return pack_nr;
-    static const int64_t l2_budget = []() {
-        const int64_t l2
-                = zendnnl::lowoha::matmul::native::detect_uarch().l2_bytes;
-        const int64_t safe = (l2 >= 64 * 1024) ? l2 : (256 * 1024);
-        return (safe * 4) / 5;
-    }();
+    const int64_t l2_budget = ck_l2_budget_bytes();
 
     const int64_t input_bytes
             = static_cast<int64_t>(M_max) * K * src_elem_bytes;
@@ -938,8 +955,11 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
     }
     out.kblock_auto = se_kblock_auto(num_ops, m_max);
     out.single_expert = (num_ops == 1);
-    out.max_mr = se_prompt_max_mr(
-            out.max_mr, out.single_expert, out.NV, m_max, variant);
+    const bool bf16_prompt
+            = se_bf16_prompt(out.single_expert, out.NV, m_max, variant);
+    out.f16_prompt = se_f16_prompt(out.single_expert, out.NV, m_max, variant);
+    out.base_max_mr = (bf16_prompt || out.f16_prompt) ? out.max_mr : 0;
+    out.max_mr = se_prompt_max_mr(out.max_mr, bf16_prompt, out.f16_prompt);
     // Map framework activation → CK ActKind.  Order matters: refusal
     // gate above guarantees `act` is one of {none, swiglu_oai_mul,
     // silu_and_mul, gelu_and_mul} at this point.
@@ -951,6 +971,11 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
             ? ActKind::gelu_and_mul
             : ActKind::none;
     out.bias_kind = bias_kind;
+    out.prompt_kc_eligible
+            = se_prompt_kc_eligible(bf16_prompt, out.f16_prompt, K_for_subtile,
+                    out.act_kind != ActKind::none, bias_kind != BiasKind::none);
+    out.prompt_kc = se_prompt_kc(out.prompt_kc_eligible, out.f16_prompt,
+            pack_nr, K_for_subtile, ck_l2_budget_bytes());
     // Representative subtile_cols (worst-case m_max) — used by APILOG /
     // debug.  Dispatch reads per-expert values below.  Byte model is
     // dtype-aware: bf16 family uses (2,2,0); int8 family uses (1,1,4)
@@ -991,6 +1016,30 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
                     "rejected (F16 dst only), and on a toolchain without "
                     "AVX-512-FP16 intrinsics every FP16 selector slot is "
                     "nullptr so the call falls back to AOCL DLP");
+        }
+        const bool f32_chunks = out.f16_prompt && out.prompt_kc_eligible
+                && out.variant == KernelVariant::kF16_F16_F16;
+        for (int nb = 1; f32_chunks && nb <= kF16PromptNb; ++nb) {
+            for (int mr = 1; mr <= out.max_mr; ++mr) {
+                out.kfn_table_f16_prompt_f32[nb - 1][mr]
+                        = select_f16_prompt_ukernel(
+                                mr, nb, ActKind::none, DstDt::kF32);
+                if (out.kfn_table_f16_prompt_f32[nb - 1][mr] == nullptr)
+                    return refuse("kfn_table_f16_prompt_fill_failed",
+                            "no FP32-destination FP16 prompt microkernel for "
+                            "the K chunks");
+            }
+        }
+        for (int nb = 1; out.f16_prompt && nb <= kF16PromptNb; ++nb) {
+            for (int mr = 1; mr <= out.max_mr; ++mr) {
+                out.kfn_table_f16_prompt[nb - 1][mr]
+                        = select_f16_prompt_ukernel(
+                                mr, nb, out.act_kind, dst_dt);
+                if (out.kfn_table_f16_prompt[nb - 1][mr] == nullptr)
+                    return refuse("kfn_table_f16_prompt_fill_failed",
+                            "no FP16 prompt microkernel for this (MR, NB, "
+                            "act_kind, dst_dt) tuple");
+            }
         }
     } else {
         const DstDt dst_dt = dst_dt_for_variant(out.variant);
@@ -1649,12 +1698,7 @@ inline void dispatch_tile_int8_kblocked(const CallContext &ctx, int expert_idx,
             = (n_big > 0) ? select_int8_accum_ukernel(mr_base + 1) : fn_small;
     assert(fn_small != nullptr && fn_big != nullptr);
 
-    static const int64_t l2_budget = []() {
-        const int64_t l2
-                = zendnnl::lowoha::matmul::native::detect_uarch().l2_bytes;
-        const int64_t safe = (l2 >= 64 * 1024) ? l2 : (256 * 1024);
-        return (safe * 4) / 5;
-    }();
+    const int64_t l2_budget = ck_l2_budget_bytes();
     int kc = static_cast<int>(
             l2_budget / static_cast<int64_t>(pack_nr + ctx.max_mr));
     kc &= ~(kVNNIInt8Quad - 1);
@@ -1834,9 +1878,118 @@ inline void dispatch_tile_s4(const CallContext &ctx, int expert_idx, int M,
 //     (F16 = 2B for kF16_F16_F16, FP32 = 4B for kF16_F16_F32); gated
 //     epilogues are F16-dst-only (2B) like the bf16 sibling.
 namespace {
+// Single-expert FP16 prompt tile (`ctx.f16_prompt`): groups of
+// `kF16PromptNb` o-blocks outer, MR calls inner, so a group's B strip
+// is read once and reused by every MR call.  No L2 sub-tiles: they would
+// cut a tall tile to one o-block per group.  An act=none tile taller than
+// one MR call with `ctx.prompt_kc` set walks K in chunks of that depth (at
+// least `kPromptKcMin`, rounded up to whole `kF16AccumBlockK` blocks)
+// outermost, each chunk continuing from the FP32 sums of the previous ones.
+// dst[r][c] = F16(src[r][c]) over `rows` x `cols` (cols a multiple of 16).
+ZENDNNL_TARGET("avx512f")
+inline void narrow_f32_rows_to_f16(float16_t *dst, int ldd, const float *src,
+        int lds, int rows, int cols) {
+    for (int r = 0; r < rows; ++r) {
+        float16_t *d = dst + static_cast<size_t>(r) * ldd;
+        const float *s = src + static_cast<size_t>(r) * lds;
+        for (int c = 0; c < cols; c += 16)
+            _mm256_storeu_si256(reinterpret_cast<__m256i *>(d + c),
+                    _mm512_cvtps_ph(_mm512_loadu_ps(s + c),
+                            _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
+    }
+}
+
+inline void dispatch_tile_f16_prompt(const CallContext &ctx, int expert_idx,
+        int M, int K, int n_tile, int col_start, const void *src, int lda,
+        const void *bias, void *tight_dst, int tight_ldc) {
+    const float16_t *Bpacked_full = ctx.packed_ptrs_f16[expert_idx];
+    const auto *A = static_cast<const float16_t *>(src);
+    const int pack_nr = ctx.pack_nr;
+    const size_t o_blk_stride = static_cast<size_t>(K) * pack_nr;
+    const size_t dst_elem_bytes = (ctx.variant == KernelVariant::kF16_F16_F32)
+            ? sizeof(float)
+            : sizeof(float16_t);
+    const size_t bias_elem_bytes = (ctx.bias_kind == BiasKind::fp32)
+            ? sizeof(float)
+            : sizeof(float16_t);
+    const bool gated = ctx.act_kind != ActKind::none;
+    const int kc = (!gated && ctx.prompt_kc > 0 && ctx.prompt_kc < K
+                           && M > ctx.max_mr)
+            ? (std::max(ctx.prompt_kc, kPromptKcMin) + kF16AccumBlockK - 1)
+                    / kF16AccumBlockK * kF16AccumBlockK
+            : K;
+    if (kc < K && test_api::s_capture_kblock.load(std::memory_order_relaxed))
+        test_api::s_last_kblock_used.store(true, std::memory_order_relaxed);
+    // K chunks of an F16 destination accumulate in an FP32 scratch and are
+    // narrowed once, so the result matches the full K bit for bit.
+    const bool f32_scratch
+            = kc < K && ctx.variant == KernelVariant::kF16_F16_F16;
+    thread_local std::vector<float> c32;
+    if (f32_scratch) c32.resize(static_cast<size_t>(M) * n_tile);
+    const int n_calls = (M + ctx.max_mr - 1) / ctx.max_mr;
+    const int mr_base = M / n_calls;
+    const int n_big = M - mr_base * n_calls;
+    const int n_blocks = n_tile / pack_nr;
+    const float16_t *B_tile = Bpacked_full
+            + static_cast<size_t>(col_start / pack_nr) * o_blk_stride;
+
+    for (int k0 = 0; k0 < K; k0 += kc) {
+        const int kk = std::min(kc, K - k0);
+        for (int b = 0; b < n_blocks; b += kF16PromptNb) {
+            const int nb = std::min(kF16PromptNb, n_blocks - b);
+            const int col = col_start + b * pack_nr;
+            const float16_t *B_blk = B_tile
+                    + static_cast<size_t>(b) * o_blk_stride
+                    + static_cast<size_t>(k0) * pack_nr;
+            const void *bias_blk = (bias != nullptr && k0 == 0)
+                    ? static_cast<const void *>(static_cast<const char *>(bias)
+                              + static_cast<size_t>(col) * bias_elem_bytes)
+                    : nullptr;
+            int m_off = 0;
+            for (int c = 0; c < n_calls; ++c) {
+                const int mr_now = (c < n_big) ? mr_base + 1 : mr_base;
+                const f16_prompt_ukernel_fn_t kfn
+                        = ctx.kfn_table_f16_prompt[nb - 1][mr_now];
+                const float16_t *A_chunk
+                        = A + static_cast<size_t>(m_off) * lda + k0;
+                if (gated) {
+                    float16_t *dst = static_cast<float16_t *>(tight_dst)
+                            + static_cast<size_t>(m_off) * tight_ldc + col / 2;
+                    kfn(A_chunk, lda, B_blk, o_blk_stride, bias_blk,
+                            ctx.bias_kind, nullptr, 0, dst, tight_ldc, kk,
+                            false);
+                } else if (f32_scratch) {
+                    float *dst = c32.data()
+                            + static_cast<size_t>(m_off) * n_tile
+                            + (col - col_start);
+                    ctx.kfn_table_f16_prompt_f32[nb - 1][mr_now](A_chunk, lda,
+                            B_blk, o_blk_stride, bias_blk, ctx.bias_kind, dst,
+                            n_tile, nullptr, 0, kk, k0 > 0);
+                } else {
+                    std::byte *dst = static_cast<std::byte *>(tight_dst)
+                            + (static_cast<size_t>(m_off) * tight_ldc + col)
+                                    * dst_elem_bytes;
+                    kfn(A_chunk, lda, B_blk, o_blk_stride, bias_blk,
+                            ctx.bias_kind, dst, tight_ldc, nullptr, 0, kk,
+                            k0 > 0);
+                }
+                m_off += mr_now;
+            }
+        }
+    }
+    if (f32_scratch)
+        narrow_f32_rows_to_f16(static_cast<float16_t *>(tight_dst) + col_start,
+                tight_ldc, c32.data(), n_tile, M, n_tile);
+}
+
 inline void dispatch_tile_f16(const CallContext &ctx, int expert_idx, int M,
         int K, int n_tile, int col_start, const void *src, int lda,
         const void *bias, void *tight_dst, int tight_ldc) {
+    if (ctx.f16_prompt) {
+        dispatch_tile_f16_prompt(ctx, expert_idx, M, K, n_tile, col_start, src,
+                lda, bias, tight_dst, tight_ldc);
+        return;
+    }
 
     const float16_t *Bpacked_full = ctx.packed_ptrs_f16[expert_idx];
     const auto *A = static_cast<const float16_t *>(src);
@@ -1998,6 +2151,20 @@ inline void dispatch_tile_f16(const CallContext &ctx, int expert_idx, int M,
 //   * M > max_mr AND the o-block B strip exceeds the L2 budget
 //     (otherwise the plain path is already optimal — no benefit).
 namespace {
+// dst[r][c] += src[r][c] over `rows` x `cols` f32 (cols a multiple of 16).
+ZENDNNL_TARGET("avx512f")
+inline void add_f32_rows(
+        float *dst, int ldd, const float *src, int lds, int rows, int cols) {
+    for (int r = 0; r < rows; ++r) {
+        float *d = dst + static_cast<size_t>(r) * ldd;
+        const float *s = src + static_cast<size_t>(r) * lds;
+        for (int c = 0; c < cols; c += 16)
+            _mm512_storeu_ps(d + c,
+                    _mm512_add_ps(
+                            _mm512_loadu_ps(d + c), _mm512_loadu_ps(s + c)));
+    }
+}
+
 ZENDNNL_TARGET("avx512f,avx512bf16,avx512bw,avx512vl,fma")
 inline void dispatch_tile_bf16_kblocked(const CallContext &ctx, int expert_idx,
         int M, int K, int n_tile, int col_start, const void *src, int lda,
@@ -2030,12 +2197,16 @@ inline void dispatch_tile_bf16_kblocked(const CallContext &ctx, int expert_idx,
     const ukernel_fn_t fn_big = (n_big > 0)
             ? select_ukernel(mr_base + 1, NV, ActKind::none, DstDt::kF32)
             : fn_small;
-    const ukernel_fn_t accumulate_small
-            = decode_specialized::select_plain_bf16_f32_accumulate(mr_base, NV);
-    const ukernel_fn_t accumulate_big = (n_big > 0)
-            ? decode_specialized::select_plain_bf16_f32_accumulate(
-                      mr_base + 1, NV)
-            : accumulate_small;
+    // A prompt tile runs the 12-row prompt kernels, whose accumulate form
+    // lives with them; the decode-tuned accumulate kernels stop at 8 rows.
+    const auto select_accumulate = [&](int mr) {
+        return ctx.prompt_kc > 0
+                ? select_ukernel_accumulate_f32(mr, NV)
+                : decode_specialized::select_plain_bf16_f32_accumulate(mr, NV);
+    };
+    const ukernel_fn_t accumulate_small = select_accumulate(mr_base);
+    const ukernel_fn_t accumulate_big
+            = (n_big > 0) ? select_accumulate(mr_base + 1) : accumulate_small;
     const bool direct_accumulate
             = accumulate_small != nullptr && accumulate_big != nullptr;
 
@@ -2046,12 +2217,7 @@ inline void dispatch_tile_bf16_kblocked(const CallContext &ctx, int expert_idx,
 
     // L2 budget (same model as `pick_l2_subtile_cols`).  Size the
     // K-chunk so one o-block's B slab plus a max_mr A strip fits.
-    static const int64_t l2_budget = []() {
-        const int64_t l2
-                = zendnnl::lowoha::matmul::native::detect_uarch().l2_bytes;
-        const int64_t safe = (l2 >= 64 * 1024) ? l2 : (256 * 1024);
-        return (safe * 4) / 5;
-    }();
+    const int64_t l2_budget = ck_l2_budget_bytes();
     int kc = static_cast<int>(
             l2_budget / (static_cast<int64_t>(pack_nr + max_mr) * 2));
     kc &= ~1; // even (K-pair aligned)
@@ -2065,11 +2231,64 @@ inline void dispatch_tile_bf16_kblocked(const CallContext &ctx, int expert_idx,
         // generic L2-derived chunk.
         kc = 512;
     }
+    // A prompt tile is tall: its A chunk and f32 accumulator overflow L2, so
+    // it walks MR calls outside the column blocks instead, and caps the
+    // chunk so the tile's whole B chunk (kc x n_tile) stays in L2 while
+    // every MR call sweeps it.
+    const bool prompt_order = ctx.prompt_kc > 0;
+    if (prompt_order) {
+        const int64_t fit = l2_budget / (static_cast<int64_t>(n_tile) * 2);
+        kc = static_cast<int>(std::min<int64_t>(ctx.prompt_kc, fit)) & ~1;
+        kc = std::max(kc, kPromptKcMin);
+    }
 
     // Small on-stack partial for k_chunk > 0 (max_mr × pack_nr f32).
     float ctmp[kMaxMR * 64];
 
-    for (int kc_off = 0; kc_off < K; kc_off += kc) {
+    auto mr_call = [&](int c, int m_off, int b, int kc_off, int kc_now,
+                           const bfloat16_t *Bpk, bool first) {
+        const int mr_now = (c < n_big) ? mr_base + 1 : mr_base;
+        const ukernel_fn_t kfn = (c < n_big) ? fn_big : fn_small;
+        const bfloat16_t *A_chunk
+                = A + static_cast<size_t>(m_off) * lda + kc_off;
+        float *Cdst = c_accum.data() + static_cast<size_t>(m_off) * n_tile
+                + static_cast<size_t>(b) * pack_nr;
+        if (first) {
+            kfn(A_chunk, lda, Bpk, /*bias=*/nullptr, BiasKind::none,
+                    /*Cout=*/Cdst, /*ldc=*/n_tile, /*Cout_tight=*/nullptr,
+                    /*ldc_tight=*/0, kc_now);
+        } else if (direct_accumulate) {
+            const ukernel_fn_t accumulate_kfn
+                    = (c < n_big) ? accumulate_big : accumulate_small;
+            accumulate_kfn(A_chunk, lda, Bpk, /*bias=*/nullptr, BiasKind::none,
+                    /*Cout=*/Cdst, /*ldc=*/n_tile,
+                    /*Cout_tight=*/nullptr, /*ldc_tight=*/0, kc_now);
+        } else {
+            kfn(A_chunk, lda, Bpk, /*bias=*/nullptr, BiasKind::none,
+                    /*Cout=*/ctmp, /*ldc=*/pack_nr, /*Cout_tight=*/nullptr,
+                    /*ldc_tight=*/0, kc_now);
+            add_f32_rows(Cdst, n_tile, ctmp, pack_nr, mr_now, pack_nr);
+        }
+    };
+
+    for (int kc_off = 0; prompt_order && kc_off < K; kc_off += kc) {
+        const int kc_now = std::min(kc, K - kc_off);
+        const size_t k_off_pk
+                = static_cast<size_t>(kc_off / 2) * kp_stride_bf16;
+        int m_off = 0;
+        for (int c = 0; c < n_calls; ++c) {
+            for (int b = 0; b < n_blocks; ++b) {
+                const bfloat16_t *Bpk = Bpacked_full
+                        + static_cast<size_t>(col_start / pack_nr + b)
+                                * o_blk_stride
+                        + k_off_pk;
+                mr_call(c, m_off, b, kc_off, kc_now, Bpk, kc_off == 0);
+            }
+            m_off += (c < n_big) ? mr_base + 1 : mr_base;
+        }
+    }
+
+    for (int kc_off = 0; !prompt_order && kc_off < K; kc_off += kc) {
         const int kc_now = std::min(kc, K - kc_off);
         const int kp0 = kc_off / 2;
         const bool first = (kc_off == 0);
@@ -2224,12 +2443,7 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
                 && int8_epilogue.binary_mul == nullptr
                 && int8_epilogue.binary_add == nullptr
                 && int8_epilogue.unary_postop == Int8UnaryPostOp::kNone;
-        static const int64_t int8_kblock_l2_budget = []() {
-            const int64_t l2
-                    = zendnnl::lowoha::matmul::native::detect_uarch().l2_bytes;
-            const int64_t safe = (l2 >= 64 * 1024) ? l2 : (256 * 1024);
-            return (safe * 4) / 5;
-        }();
+        const int64_t int8_kblock_l2_budget = ck_l2_budget_bytes();
         const int64_t int8_oblock_bytes
                 = static_cast<int64_t>(K) * 32 + 32 * sizeof(int32_t);
         const bool int8_kblock_policy
@@ -2287,16 +2501,14 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
     // strip exceeds L2 and M spans more than one MR-block — the exact
     // regime where the plain path re-streams B from DRAM per M-block.
     // Everything else falls through to the straight-line path below.
-    if (grp_matmul_kblock_enabled(ctx.kblock_auto)
+    const bool prompt_kblock = ctx.prompt_kc > 0 && ctx.prompt_kc < K;
+    if ((prompt_kblock || grp_matmul_kblock_enabled(ctx.kblock_auto))
             && ctx.act_kind == ActKind::none && bias == nullptr && (K % 2) == 0
             && M > ctx.max_mr) {
-        static const int64_t kblock_l2_budget = []() {
-            const int64_t l2
-                    = zendnnl::lowoha::matmul::native::detect_uarch().l2_bytes;
-            const int64_t safe = (l2 >= 64 * 1024) ? l2 : (256 * 1024);
-            return (safe * 4) / 5;
-        }();
-        if (static_cast<int64_t>(K) * ctx.pack_nr * 2 > kblock_l2_budget) {
+        const int64_t kblock_l2_budget = ck_l2_budget_bytes();
+        if (prompt_kblock
+                || static_cast<int64_t>(K) * ctx.pack_nr * 2
+                        > kblock_l2_budget) {
             if (test_api::s_capture_kblock.load(std::memory_order_relaxed)) {
                 test_api::s_last_kblock_used.store(
                         true, std::memory_order_relaxed);

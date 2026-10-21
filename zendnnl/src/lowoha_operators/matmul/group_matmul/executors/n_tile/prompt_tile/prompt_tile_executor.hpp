@@ -81,9 +81,10 @@ bool should_run(const custom_kernel::CallContext &kctx, bool use_custom,
         bool rounds_strategy, bool prompt_phase, const std::vector<int> &M,
         const std::vector<int> &N, bool single_expert_prompt);
 
-/// Run every tile of the call on an OMP region of `num_threads`.
-/// `log_plan` emits one `[GRP_MATMUL.PLAN.PTILE]` apilog line.
-void execute(const custom_kernel::CallContext &kctx, const CallView &call,
+/// Run every tile of the call on an OMP region of `num_threads`, first
+/// setting `kctx.prompt_kc` to the planned K chunk.  `log_plan` emits one
+/// `[GRP_MATMUL.PLAN.PTILE]` apilog line.
+void execute(custom_kernel::CallContext &kctx, const CallView &call,
         int num_threads, bool log_plan);
 
 /// `gemm_mode` literal for a prompt-tile call (keeps the `flat_n_tile`

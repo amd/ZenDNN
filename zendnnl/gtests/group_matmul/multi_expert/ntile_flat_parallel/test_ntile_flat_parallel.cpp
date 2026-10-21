@@ -1687,6 +1687,9 @@ TEST(W8A8MoEFallback, PromptGeometryMissInheritsAlgo1Policy) {
     // ALGO4 alignment, while latest main's unpinned prompt policy routes
     // the declined call to ALGO1.
     const int64_t prompt_m = static_cast<int64_t>(kDecodeMaxM) + 1;
+    // One expert: keep the single-expert CK prompt off so the decline falls
+    // to the generic prompt policy this test pins down.
+    moe_test_utils::SingleExpertPromptTileOverride se_prompt_off(0);
     const auto p = make_problem(/*E=*/1, /*H=*/48, /*I=*/32, /*T=*/prompt_m,
             /*topk=*/1, /*seed=*/139);
     auto generic_baseline = build_call(p, /*num_threads=*/2);

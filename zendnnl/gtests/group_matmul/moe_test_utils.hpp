@@ -652,6 +652,22 @@ struct AlgoEnvGuard {
     }
 };
 
+// Pins whether `ZENDNNL_GRP_MATMUL_ALGO` reads as an explicit `0` (the
+// single-expert prompt stays on AOCL-DLP) for the lifetime of a test.
+struct AlgoLegacyOverride {
+    int prev;
+    explicit AlgoLegacyOverride(bool on) {
+        prev = zendnnl::lowoha::matmul::test_api_algo_legacy_override()
+                       .exchange(on ? 1 : 0, std::memory_order_relaxed);
+    }
+    ~AlgoLegacyOverride() {
+        zendnnl::lowoha::matmul::test_api_algo_legacy_override().store(
+                prev, std::memory_order_relaxed);
+    }
+    AlgoLegacyOverride(const AlgoLegacyOverride &) = delete;
+    AlgoLegacyOverride &operator=(const AlgoLegacyOverride &) = delete;
+};
+
 // Generic RAII setter for any single env var (saves & restores prior
 // value).  Used to flip optional feature flags ON for tests that must
 // exercise the gated code path (e.g. ZENDNNL_GRP_MATMUL_N_TILE_FUSED_ACT for
@@ -918,6 +934,25 @@ struct AutoPromptAlgoOverride {
     AutoPromptAlgoOverride &operator=(const AutoPromptAlgoOverride &) = delete;
     AutoPromptAlgoOverride(AutoPromptAlgoOverride &&) = delete;
     AutoPromptAlgoOverride &operator=(AutoPromptAlgoOverride &&) = delete;
+};
+
+// Pins `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_KC` for the lifetime of a test.
+struct SingleExpertPromptKcOverride {
+    int prev;
+    explicit SingleExpertPromptKcOverride(int kc) {
+        prev = zendnnl::lowoha::matmul::test_api ::
+                       s_grp_matmul_single_expert_prompt_kc_override.exchange(
+                               kc, std::memory_order_relaxed);
+    }
+    ~SingleExpertPromptKcOverride() {
+        zendnnl::lowoha::matmul::test_api ::
+                s_grp_matmul_single_expert_prompt_kc_override.store(
+                        prev, std::memory_order_relaxed);
+    }
+    SingleExpertPromptKcOverride(const SingleExpertPromptKcOverride &) = delete;
+    SingleExpertPromptKcOverride &operator=(
+            const SingleExpertPromptKcOverride &)
+            = delete;
 };
 
 // Arms the K-blocked-tile capture and clears the previous verdict, so a test

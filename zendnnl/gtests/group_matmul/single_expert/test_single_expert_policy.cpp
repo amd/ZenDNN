@@ -44,10 +44,74 @@
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/ukernel/f16_microkernel.hpp"
 #include "lowoha_operators/matmul/group_matmul/executors/m_tile/group_matmul_m_tile.hpp"
 #include "lowoha_operators/matmul/group_matmul/executors/n_tile/group_matmul_n_tile.hpp"
+#include "lowoha_operators/matmul/group_matmul/single_expert/single_expert_hooks.hpp"
 #include "lowoha_operators/matmul/group_matmul/single_expert/single_expert_policy.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 
 using namespace auto_probe_test_utils;
+
+// Only an act=none BF16 prompt (even K, no bias) or FP16 prompt walks K in
+// chunks; the default chunk engages once the B of one call overflows L2.
+TEST(TestSingleExpertPromptKc, EligibilityAndDefaultChunk) {
+    using namespace zendnnl::lowoha::matmul;
+    moe_test_utils::SingleExpertPromptKcOverride kc(4096);
+    EXPECT_TRUE(se_prompt_kc_eligible(true, false, 16384, false, false));
+    EXPECT_FALSE(se_prompt_kc_eligible(true, false, 16384, true, false));
+    EXPECT_FALSE(se_prompt_kc_eligible(true, false, 16384, false, true));
+    EXPECT_FALSE(se_prompt_kc_eligible(true, false, 16385, false, false));
+    EXPECT_TRUE(se_prompt_kc_eligible(false, true, 16385, false, true));
+    EXPECT_FALSE(se_prompt_kc_eligible(false, true, 16384, true, false));
+    EXPECT_FALSE(se_prompt_kc_eligible(false, false, 16384, false, false));
+
+    const int64_t budget = 1000000;
+    // BF16: one 32-column block, 64 bytes per K row.
+    EXPECT_EQ(se_prompt_kc(true, false, 32, 16384, budget), 4096);
+    EXPECT_EQ(se_prompt_kc(true, false, 32, 14336, budget), 0);
+    // FP16: two blocks, 128 bytes per K row.
+    EXPECT_EQ(se_prompt_kc(true, true, 32, 8192, budget), 4096);
+    EXPECT_EQ(se_prompt_kc(true, true, 32, 7680, budget), 0);
+    EXPECT_EQ(se_prompt_kc(false, false, 32, 32768, budget), 0);
+    EXPECT_EQ(se_prompt_kc(true, false, 32, 4096, 0), 0);
+}
+
+// The prompt tile's `kc` knob replaces the default chunk of a tile that can
+// chunk; a depth of K or more keeps the full K.
+TEST(TestSingleExpertPromptKc, TileKnobOverridesTheDefault) {
+    namespace ck = zendnnl::lowoha::matmul::custom_kernel;
+    using zendnnl::lowoha::matmul::se_prompt_tile_kc;
+    ck::CallContext ctx;
+    ctx.prompt_kc = 4096;
+    ctx.prompt_kc_eligible = true;
+    EXPECT_EQ(se_prompt_tile_kc(ctx, 0, 16384), 4096);
+    EXPECT_EQ(se_prompt_tile_kc(ctx, 1024, 16384), 1024);
+    EXPECT_EQ(se_prompt_tile_kc(ctx, 16384, 16384), 0);
+    ctx.prompt_kc = 0;
+    ctx.prompt_kc_eligible = false;
+    EXPECT_EQ(se_prompt_tile_kc(ctx, 1024, 16384), 0);
+}
+
+// A prompt the prompt tile executor does not take drops the prompt MR
+// bound, K chunk and FP16 prompt kernel.
+TEST(TestSingleExpertPromptKc, LeavingThePromptTileRestoresTheCall) {
+    namespace ck = zendnnl::lowoha::matmul::custom_kernel;
+    ck::CallContext ctx;
+    ctx.base_max_mr = 8;
+    ctx.max_mr = ck::kMaxF16PromptMr;
+    ctx.prompt_kc = 4096;
+    ctx.prompt_kc_eligible = true;
+    ctx.f16_prompt = true;
+    zendnnl::lowoha::matmul::se_leave_prompt_tile(ctx);
+    EXPECT_EQ(ctx.max_mr, 8);
+    EXPECT_EQ(ctx.prompt_kc, 0);
+    EXPECT_FALSE(ctx.prompt_kc_eligible);
+    EXPECT_FALSE(ctx.f16_prompt);
+
+    // A decode policy's bound (the prompt kernels did not raise it) stays.
+    ctx.base_max_mr = 0;
+    ctx.max_mr = 12;
+    zendnnl::lowoha::matmul::se_leave_prompt_tile(ctx);
+    EXPECT_EQ(ctx.max_mr, 12);
+}
 
 // The balanced remainder split is a dense single-expert optimization. Its
 // default must remain the legacy split so multi-expert callers are unchanged.
@@ -292,10 +356,11 @@ TEST(TestGroupMatmulAutoPhaseEnv, SingleExpertCkKnobDefaults) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     SingleExpertCkPolicy env(-1, -1, -1);
-    // Prompt on AOCL-DLP, decode on the custom kernel at any N.
+    // Every prompt and decode on the custom kernel at any N.
     if (std::getenv("ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE")
             == nullptr) {
-        EXPECT_EQ(get_grp_matmul_single_expert_prompt_tile_dtypes(), 0u);
+        EXPECT_EQ(get_grp_matmul_single_expert_prompt_tile_dtypes(),
+                kSingleExpertAll);
     }
     if (std::getenv("ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_DECODE_TILE")
             == nullptr) {
@@ -491,6 +556,54 @@ std::vector<se_fam_t> served_se_fams() {
 
 } // namespace
 
+// Unset `ZENDNNL_GRP_MATMUL_ALGO` runs a dense single expert on the custom
+// kernel in both phases; an explicit `0` keeps its prompt on AOCL-DLP
+// (Rule 0.7, ALGO 1) while the decode stays on the custom kernel.
+TEST(TestGroupMatmulAutoPhaseEnv, ExplicitAlgoZeroKeepsTheSingleExpertPrompt) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    if (std::getenv("ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE") != nullptr
+            || std::getenv("ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_DECODE_TILE")
+                    != nullptr) {
+        GTEST_SKIP() << "single-expert knobs set in the environment";
+    }
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+    CustomKernelOverride ck_on(true);
+    CustomKernelInt8Override int8_on(true);
+    CustomKernelF16Override f16_on(true);
+    SingleExpertCkPolicy env(-1, -1, -1);
+    {
+        AlgoLegacyOverride legacy(true);
+        EXPECT_EQ(get_grp_matmul_single_expert_prompt_tile_dtypes(), 0u);
+        EXPECT_EQ(get_grp_matmul_single_expert_decode_tile_dtypes(),
+                static_cast<unsigned>(kSingleExpertAll));
+    }
+    EXPECT_FALSE(get_grp_matmul_algo_legacy()) << "an AlgoEnvGuard pin";
+    SKIP_IF_NO_SERVED_SE_FAMS();
+    for (const se_fam_t f : served_se_fams()) {
+        if (f == se_fam_t::static_u8s8) continue;
+        SCOPED_TRACE(se_fam_name(f));
+        auto prompt = build_auto_probe(/*M=*/1024, /*K=*/1280, /*N=*/1280,
+                /*num_ops=*/1, /*num_threads=*/8);
+        auto decode = build_auto_probe(/*M=*/1, /*K=*/1280, /*N=*/1280,
+                /*num_ops=*/1, /*num_threads=*/8);
+        apply_se_fam(prompt, f);
+        apply_se_fam(decode, f);
+        {
+            AlgoLegacyOverride legacy(false);
+            EXPECT_EQ(select_one(prompt), 3);
+            EXPECT_STREQ(
+                    select_reason(prompt), "auto_rule046_single_dense_prompt");
+        }
+        AlgoLegacyOverride legacy(true);
+        EXPECT_EQ(select_one(prompt), 1);
+        EXPECT_STREQ(select_reason(prompt), "auto_rule07_prompt_seq");
+        EXPECT_EQ(select_one(decode), 3);
+        EXPECT_STREQ(select_reason(decode), "auto_rule046_single_dense_decode");
+    }
+}
+
 // Each phase knob covers its phase for every dtype the custom kernel serves,
 // independently of the other, at an N with decode's N-tile count; with both
 // on, the layer stays on ALGO 3 even with Rule 0.45 off and at one thread.
@@ -542,10 +655,10 @@ TEST(TestGroupMatmulAutoPhaseEnv, SingleDenseExpertPerPhaseKnobs) {
                 EXPECT_EQ(select_one(decode), 1) << "Rule 0.45 off";
                 EXPECT_EQ(select_one(one_thread), 1) << "one thread";
             }
-            // A one-thread prompt keeps ALGO 3 only when the decode is on
-            // the custom kernel too (the layer's pack then has one owner).
+            // A one-thread call keeps ALGO 3 when the custom kernel covers
+            // its own phase: a covered prompt never falls back to AOCL.
             EXPECT_EQ(select_one(one_thread_prompt),
-                    pk && prompt_tileable && dk ? 3 : 1);
+                    pk && prompt_tileable ? 3 : 1);
             // At 32 threads the same N is below decode's N-tile count.
             auto narrow_prompt = prompt, narrow_decode = decode;
             narrow_prompt.num_threads = narrow_decode.num_threads = 32;

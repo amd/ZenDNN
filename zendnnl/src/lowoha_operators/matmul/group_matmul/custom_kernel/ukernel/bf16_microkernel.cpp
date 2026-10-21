@@ -261,7 +261,8 @@ static inline void silu_and_mul_store_pair(
 // MR×NV register footprint; `noinline` prevents the compiler from
 // duplicating the body at every dispatch site.
 // ─────────────────────────────────────────────────────────────────────
-template <int MR, int NV, ActKind Act, typename DstT>
+template <int MR, int NV, ActKind Act, typename DstT,
+        bool AccumulateF32 = false>
 ZENDNNL_TARGET_NOINLINE("avx512f,avx512bf16,avx512bw,avx512vl,fma")
 static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
         const bfloat16_t *__restrict Bpacked, const void *__restrict bias,
@@ -330,7 +331,19 @@ static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
     // branch produces identical accumulator state as the previous code.
     const bool has_bias = (bias != nullptr && bias_kind != BiasKind::none);
     __m512 bias_vec[NV];
-    if (has_bias) {
+    if constexpr (AccumulateF32) {
+        // A K chunk after the first continues from the f32 partial sums
+        // already in `Cout`, so the whole K still sums in order.
+        static_assert(Act == ActKind::none && std::is_same<DstT, float>::value
+                        && kBuffers == 1,
+                "FP32 accumulation requires Act=none, FP32 dst and MR >= 4");
+#pragma GCC unroll 16
+        for (int m = 0; m < MR; ++m)
+#pragma GCC unroll 4
+            for (int v = 0; v < NV; ++v)
+                acc[0][m][v] = _mm512_loadu_ps(
+                        Cout + static_cast<size_t>(m) * ldc + v * 16);
+    } else if (has_bias) {
         if (bias_kind == BiasKind::bf16) {
             const auto *bias_bf16 = static_cast<const bfloat16_t *>(bias);
 #pragma GCC unroll 4
@@ -715,6 +728,22 @@ ukernel_fn_t select_wide_nv2(ActKind act, DstDt dst_dt) {
     }
 }
 } // namespace
+
+ukernel_fn_t select_ukernel_accumulate_f32(int MR, int NV) {
+    if (NV != 2) return nullptr;
+    switch (MR) {
+        case 4: return ukernel_impl<4, 2, ActKind::none, float, true>;
+        case 5: return ukernel_impl<5, 2, ActKind::none, float, true>;
+        case 6: return ukernel_impl<6, 2, ActKind::none, float, true>;
+        case 7: return ukernel_impl<7, 2, ActKind::none, float, true>;
+        case 8: return ukernel_impl<8, 2, ActKind::none, float, true>;
+        case 9: return ukernel_impl<9, 2, ActKind::none, float, true>;
+        case 10: return ukernel_impl<10, 2, ActKind::none, float, true>;
+        case 11: return ukernel_impl<11, 2, ActKind::none, float, true>;
+        case 12: return ukernel_impl<12, 2, ActKind::none, float, true>;
+        default: return nullptr;
+    }
+}
 
 ukernel_fn_t select_ukernel(int MR, int NV, ActKind act, DstDt dst_dt) {
     if (dst_dt != DstDt::kBf16 && dst_dt != DstDt::kF32) return nullptr;

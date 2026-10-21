@@ -53,17 +53,84 @@ inline bool se_kblock_auto(int num_ops, int m_max) {
 
 // A dense BF16 prompt at pack NR 32 runs 12-row calls: 24 accumulator
 // chains instead of 16 keep VDPBF16PS issue full.  Each output element
-// still sums K in the same order, so the result is unchanged.  Returns
-// `max_mr` unchanged for any other call.
-inline int se_prompt_max_mr(int max_mr, bool single_expert, int NV, int m_max,
+// still sums K in the same order, so the result is unchanged.
+inline bool se_bf16_prompt(bool single_expert, int NV, int m_max,
         custom_kernel::KernelVariant variant) {
-    if (single_expert && NV == 2 && m_max > kDecodeMaxM
+    return single_expert && NV == 2 && m_max > kDecodeMaxM
             && (variant == custom_kernel::KernelVariant::kBF16_BF16_BF16
                     || variant == custom_kernel::KernelVariant::kBF16_BF16_F32)
             && (get_grp_matmul_single_expert_prompt_tile_dtypes()
-                    & kSingleExpertBf16))
-        return custom_kernel::kMaxMrNv2Prompt;
+                    & kSingleExpertBf16);
+}
+
+// A dense FP16 prompt at pack NR 32 runs the prompt microkernel: 12 rows
+// over two o-blocks per call, so 24 FP16 accumulator chains instead of the
+// decode kernel's 8.  Each output element sums K in the same order.
+inline bool se_f16_prompt(bool single_expert, int NV, int m_max,
+        custom_kernel::KernelVariant variant) {
+    return single_expert && NV == 2 && m_max > kDecodeMaxM
+            && custom_kernel::is_f16_variant(variant)
+            && (get_grp_matmul_single_expert_prompt_tile_dtypes()
+                    & kSingleExpertF16);
+}
+
+// MR bound of a call whose prompt runs the BF16 or FP16 prompt kernels;
+// `max_mr` unchanged otherwise.
+inline int se_prompt_max_mr(int max_mr, bool bf16_prompt, bool f16_prompt) {
+    if (bf16_prompt) return custom_kernel::kMaxMrNv2Prompt;
+    if (f16_prompt) return custom_kernel::kMaxF16PromptMr;
     return max_mr;
+}
+
+// Whether a prompt tile may walk its K in chunks: an act=none BF16 prompt
+// with an even K and no bias (its chunks accumulate in f32 scratch), or an
+// act=none FP16 prompt (its FP16 partial sums reload exactly from the
+// output).  A gated epilogue needs the whole K at once.
+inline bool se_prompt_kc_eligible(
+        bool bf16_prompt, bool f16_prompt, int K, bool gated, bool has_bias) {
+    if (gated) return false;
+    if (f16_prompt) return true;
+    return bf16_prompt && (K % 2) == 0 && !has_bias;
+}
+
+// Default K chunk of an eligible prompt tile.  When the B of one call (one
+// pack-width column block for BF16, `kF16PromptNb` for FP16) over the whole
+// K overflows `l2_budget`, every MR call of an M-block re-reads it from
+// memory; chunks of `..._PROMPT_KC` keep each chunk of B resident across the
+// M-block, and the prompt tile planner sizes its tiles for one chunk.
+// Returns 0 (the full K) otherwise.
+inline int se_prompt_kc(
+        bool eligible, bool f16_prompt, int pack_nr, int K, int64_t l2_budget) {
+    if (!eligible) return 0;
+    const int kc = get_grp_matmul_single_expert_prompt_kc();
+    if (kc <= 0 || K <= kc) return 0;
+    const int blocks = f16_prompt ? custom_kernel::kF16PromptNb : 1;
+    const int64_t call_b_bytes = static_cast<int64_t>(K) * pack_nr * blocks * 2;
+    return call_b_bytes > l2_budget ? kc : 0;
+}
+
+// Shallowest K chunk a prompt tile walks; shallower chunks only add
+// accumulator reloads.
+inline constexpr int kPromptKcMin = 64;
+
+// K chunk of a prompt tile: the prompt tile's `kc` knob when set (a depth of
+// K or more keeps the full K), else the call's default chunk.  A tile that
+// cannot chunk keeps the full K.
+inline int se_prompt_tile_kc(
+        const custom_kernel::CallContext &ctx, int kc_knob, int K) {
+    if (kc_knob <= 0) return ctx.prompt_kc;
+    return ctx.prompt_kc_eligible && kc_knob < K ? kc_knob : 0;
+}
+
+// A prompt the prompt tile executor does not take runs the multi-expert
+// kernels and loop orders: the prompt MR bound, K chunks and FP16 prompt
+// kernel are fitted to the prompt tile's blocking only.  A bound the prompt
+// kernels did not raise (a decode policy's) is kept.
+inline void se_leave_prompt_tile(custom_kernel::CallContext &ctx) {
+    if (ctx.base_max_mr > 0) ctx.max_mr = ctx.base_max_mr;
+    ctx.prompt_kc = 0;
+    ctx.prompt_kc_eligible = false;
+    ctx.f16_prompt = false;
 }
 
 // Minimum MR-call count at which the custom-kernel tile loops
