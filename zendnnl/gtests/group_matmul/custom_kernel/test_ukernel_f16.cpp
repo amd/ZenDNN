@@ -47,14 +47,12 @@
 /// up from cols [N/2, N), matching the split-halves public-API
 /// contract.
 ///
-/// PRECISION NOTE -- the FP16 microkernel accumulates the dot product
-/// in NATIVE FP16 (`_mm512_fmadd_ph`), unlike the bf16 sibling which
-/// accumulates in FP32.  So BOTH the f16 dst AND the f32 dst carry the
-/// native-FP16-accumulate divergence vs the FP32 scalar reference --
-/// the f32 dst is NOT FP32-accumulate-accurate here.  We therefore use
-/// the f16 tolerance band (`tol_act(data_type_t::f16)`) for EVERY
-/// comparison regardless of dst dtype, which is the documented contract
-/// for this kernel (see the PRECISION NOTE in f16_microkernel.hpp).
+/// PRECISION NOTE -- the FP16 microkernel accumulates each 512-step block
+/// with native FP16 FMAs, then widens and adds the block total into FP32.
+/// BOTH f16 and f32 destinations therefore retain bounded native-FP16 block
+/// divergence from the scalar FP32 reference.  We use the f16 tolerance band
+/// (`tol_act(data_type_t::f16)`) for every destination dtype, matching the
+/// documented contract in f16_microkernel.hpp.
 
 #include <gtest/gtest.h>
 
@@ -68,6 +66,7 @@
 #include <vector>
 
 #include "ck_test_helpers.hpp"
+#include "lowoha_operators/matmul/group_matmul/custom_kernel/dispatch.hpp"
 #include "moe_test_utils.hpp"
 
 // For the CK-engagement assertion: `group_matmul_direct` publishes the
@@ -428,6 +427,98 @@ TEST_P(CkF16UkernelCorrectness, MatchesScalarRef) {
     }
 }
 
+void run_deep_k_m32_k8192(bool all_positive) {
+    CK_SKIP_IF_NO_F16_ISA();
+
+    namespace ck = zendnnl::lowoha::matmul::custom_kernel;
+    constexpr int M = 32;
+    constexpr int K = 8192;
+    constexpr int N = 64;
+
+    mt::CustomKernelOverride ck_guard(true);
+    mt::CustomKernelF16Override ck_f16_guard(true);
+    ::reset_grp_matmul_caches();
+
+    std::vector<float16_t> src(static_cast<size_t>(M) * K);
+    std::vector<float16_t> wei(static_cast<size_t>(K) * N);
+    std::vector<float16_t> dst(static_cast<size_t>(M) * N, float16_t(0.0f));
+    if (all_positive) {
+        std::fill(src.begin(), src.end(), float16_t(1.0f));
+        std::fill(wei.begin(), wei.end(), float16_t(1.0f));
+    } else {
+        mt::fill_src(src, /*e=*/0, 0.02f);
+        mt::fill_wei1(wei, /*e=*/0, 0.005f);
+    }
+
+    const std::vector<bool> transA {false};
+    const std::vector<bool> transB {false};
+    const std::vector<int> Ms {M};
+    const std::vector<int> Ns {N};
+    const std::vector<int> Ks {K};
+    const std::vector<int> ldb {N};
+    const std::vector<float> alpha {1.0f};
+    const std::vector<float> beta {0.0f};
+    const std::vector<const void *> weights {wei.data()};
+    const std::vector<bool> is_weights_const {true};
+
+    ck::CallContext ctx;
+    ASSERT_EQ(ck::prepare_for_call(grp_matmul_gated_act_t::none,
+                      data_type_t::f16, data_type_t::f16, data_type_t::f16,
+                      data_type_t::f16, data_type_t::none, transA, transB, Ms,
+                      Ns, Ks, ldb, alpha, beta, weights, is_weights_const, ctx,
+                      /*dynamic_quant=*/false,
+                      /*compute_dtype=*/data_type_t::none,
+                      /*weights_prepacked=*/ {},
+                      /*group_size=*/0,
+                      /*wei_scale_grp_stride=*/0,
+                      /*weights_aocl_prepacked=*/ {},
+                      /*num_threads=*/kCkTestThreads,
+                      /*weight_cache_mode=*/1,
+                      /*allow_in_place=*/false),
+            status_t::success);
+    ASSERT_TRUE(ctx.enabled);
+    ASSERT_TRUE(ctx.single_expert);
+    ASSERT_EQ(ctx.variant, ck::KernelVariant::kF16_F16_F16);
+    ASSERT_EQ(ctx.act_kind, ck::ActKind::none);
+    ASSERT_EQ(ctx.bias_kind, ck::BiasKind::none);
+    ASSERT_EQ(ctx.pack_nr, 32);
+
+    mt::KblockCaptureGuard capture;
+    ck::dispatch_tile(ctx, /*expert_idx=*/0, M, K, N, /*col_start=*/0,
+            src.data(), /*lda=*/K, /*bias=*/nullptr, dst.data(),
+            /*tight_ldc=*/N,
+            /*src_scale=*/nullptr, /*src_zp=*/nullptr, /*wei_scale=*/nullptr,
+            ck::Int8EpilogueConfig {});
+    ASSERT_TRUE(mt::KblockCaptureGuard::used());
+
+    const auto tol = mt::tol_act(data_type_t::f16);
+    for (int m = 0; m < M; ++m) {
+        for (int n = 0; n < N; ++n) {
+            const float got = to_f32(dst[static_cast<size_t>(m) * N + n]);
+            if (all_positive) {
+                ASSERT_EQ(got, static_cast<float>(K))
+                        << "all-positive deep-K total was lost at m=" << m
+                        << " n=" << n;
+                continue;
+            }
+            const float ref = ref_matmul_elem(m, n, K, src.data(), K,
+                    wei.data(), N, /*bias=*/nullptr, data_type_t::none);
+            const float bound = std::abs(ref) * tol.rel + tol.abs;
+            ASSERT_NEAR(got, ref, bound)
+                    << "M32 K8192 N64 native FP16 K-block mismatch at m=" << m
+                    << " n=" << n << " ref=" << ref << " got=" << got;
+        }
+    }
+}
+
+TEST(CkF16Kblock, DeepKM32K8192MatchesScalarRef) {
+    run_deep_k_m32_k8192(/*all_positive=*/false);
+}
+
+TEST(CkF16Kblock, AllPositivePreservesFp32BlockTotals) {
+    run_deep_k_m32_k8192(/*all_positive=*/true);
+}
+
 // ------------------------------------------------------------------
 // Build the parameter set -- mirrors the bf16 sibling's focused matrix
 // (small-K full cross-product, moderate-K smoke subset, K-parity edge
@@ -517,7 +608,6 @@ static std::vector<UkernelCase> make_ukernel_cases() {
                             mk_label(s.M, s.K, s.N, t.act, t.bias, t.dst)});
         }
     }
-
     // K-parity / pack-NR-edge cases: act=none x bias in {none, bf16} x
     // dst in {f16, f32}.
     for (const auto &s : edge_shapes) {

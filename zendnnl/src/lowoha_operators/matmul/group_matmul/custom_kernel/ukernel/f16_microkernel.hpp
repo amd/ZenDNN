@@ -120,6 +120,12 @@ using f16_ukernel_fn_t = void (*)(const float16_t *A, int lda,
         const float16_t *Bpacked, const void *bias, BiasKind bias_kind,
         void *Cout, int ldc, void *Cout_tight, int ldc_tight, int K);
 
+/// Bias-free, act-none partial-K kernel. Each `kF16AccumBlockK` block uses
+/// native-FP16 FMAs and widens into `accum`; `add=true` continues from the
+/// prior FP32 cache-chunk totals. The dispatcher narrows only after the full K.
+using f16_kblock_ukernel_fn_t = void (*)(const float16_t *A, int lda,
+        const float16_t *Bpacked, float *accum, int ldacc, int K, bool add);
+
 /// Runtime selector — returns the function pointer for the requested
 /// (MR ∈ 1..max_mr_for_nv(NV), NV ∈ {2, 4}, Act, DstDt) tuple, or
 /// nullptr if the combination is not instantiated.
@@ -136,6 +142,7 @@ using f16_ukernel_fn_t = void (*)(const float16_t *A, int lda,
 /// combination above.  `fill_kfn_table_f16` then fails on the first
 /// slot and `prepare_for_call` refuses, routing the call to AOCL DLP.
 f16_ukernel_fn_t select_f16_ukernel(int MR, int NV, ActKind act, DstDt dst_dt);
+f16_kblock_ukernel_fn_t select_f16_kblock_ukernel(int MR, int NV);
 
 /// K steps each FP16 accumulator covers before it is added into the FP32
 /// sums (see the PRECISION NOTE above).

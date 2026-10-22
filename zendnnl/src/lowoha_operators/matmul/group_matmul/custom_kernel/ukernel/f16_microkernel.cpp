@@ -400,6 +400,17 @@ f16_prompt_ukernel_fn_t pick_prompt_nb(int MR, int NB) {
                    : pick_prompt<2, Act, DstT>(MR);
 }
 
+template <int MR, int NV>
+ZENDNNL_TARGET_NOINLINE("avx512f,avx512fp16,avx512bw,avx512vl,fma")
+static void kblock_ukernel_impl(const float16_t *__restrict A, int lda,
+        const float16_t *__restrict Bpacked, float *__restrict accum, int ldacc,
+        int K, bool add) {
+    static_assert(NV == 2 || NV == 4, "NV must be 2 or 4");
+    f16_kernel_body<MR, NV / 2, NV * 16, ActKind::none, float>(A, lda, Bpacked,
+            32, /*bias=*/nullptr, BiasKind::none, accum, ldacc,
+            /*Cout_tight=*/nullptr, /*ldc_tight=*/0, K, add);
+}
+
 } // namespace
 
 #endif // ZENDNNL_GRP_F16_CK_AVAILABLE
@@ -644,6 +655,39 @@ f16_ukernel_fn_t select_f16_ukernel(int MR, int NV, ActKind act, DstDt dst_dt) {
     (void)dst_dt;
     return nullptr;
 #endif
+}
+
+f16_kblock_ukernel_fn_t select_f16_kblock_ukernel(int MR, int NV) {
+#if ZENDNNL_GRP_F16_CK_AVAILABLE
+    if (NV == 2) {
+        switch (MR) {
+            case 1: return kblock_ukernel_impl<1, 2>;
+            case 2: return kblock_ukernel_impl<2, 2>;
+            case 3: return kblock_ukernel_impl<3, 2>;
+            case 4: return kblock_ukernel_impl<4, 2>;
+            case 5: return kblock_ukernel_impl<5, 2>;
+            case 6: return kblock_ukernel_impl<6, 2>;
+            case 7: return kblock_ukernel_impl<7, 2>;
+            case 8: return kblock_ukernel_impl<8, 2>;
+            default: return nullptr;
+        }
+    }
+    if (NV == 4) {
+        switch (MR) {
+            case 1: return kblock_ukernel_impl<1, 4>;
+            case 2: return kblock_ukernel_impl<2, 4>;
+            case 3: return kblock_ukernel_impl<3, 4>;
+            case 4: return kblock_ukernel_impl<4, 4>;
+            case 5: return kblock_ukernel_impl<5, 4>;
+            case 6: return kblock_ukernel_impl<6, 4>;
+            default: return nullptr;
+        }
+    }
+#else
+    (void)MR;
+    (void)NV;
+#endif
+    return nullptr;
 }
 
 } // namespace custom_kernel

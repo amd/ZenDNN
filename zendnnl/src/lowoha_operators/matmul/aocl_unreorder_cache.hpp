@@ -28,8 +28,8 @@ namespace matmul {
 
 /**
  * Convert an AOCL-DLP-blocked BF16 weight into the CK VNNI layout and retain
- * one final derived arena. The INT8 sibling below provides the same ownership
- * contract for pure static U8xS8 packs.
+ * one final derived arena. The FP16 and INT8 siblings below provide the same
+ * ownership contract for their respective packs.
  *
  * On a miss, AOCL unreorders into temporary strided raw storage and CK packs
  * directly into a right-sized final arena. The temporary raw representation
@@ -39,6 +39,16 @@ namespace matmul {
  * explicit cache clear cannot release the CK buffer while its caller uses it.
  */
 status_t get_or_cache_aocl_ck_weight(const void *aocl_packed, int K, int N,
+        int ldb, bool transB, int32_t num_threads, int pack_nr,
+        bool interleave_split_halves, std::shared_ptr<void> &ck_weight,
+        bool *was_hit = nullptr, int32_t weight_cache_mode = -1);
+
+/**
+ * FP16 sibling of `get_or_cache_aocl_ck_weight`. AOCL unreorders its blocked
+ * FP16 layout into temporary raw storage, then the custom-kernel FP16 packer
+ * writes the final `[O/pack_nr][K][pack_nr]` arena.
+ */
+status_t get_or_cache_aocl_ck_weight_f16(const void *aocl_packed, int K, int N,
         int ldb, bool transB, int32_t num_threads, int pack_nr,
         bool interleave_split_halves, std::shared_ptr<void> &ck_weight,
         bool *was_hit = nullptr, int32_t weight_cache_mode = -1);

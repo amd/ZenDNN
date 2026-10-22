@@ -458,6 +458,9 @@ struct CallContext {
     /// `kF16_F16_F16` / `kF16_F16_F32`; stays zero otherwise.
     /// `dispatch_tile()` reads it off `is_f16_variant(variant)`.
     f16_ukernel_fn_t kfn_table_f16[kMaxMR + 1] = {};
+    /// Bias-free act-none FP16 partial-K kernels. Used only by the native
+    /// deep-K blocking path; zero for every other family.
+    f16_kblock_ukernel_fn_t kfn_table_f16_kblock[kMaxMR + 1] = {};
     /// Single-expert FP16 prompt call: `dispatch_tile()` runs it on
     /// `kfn_table_f16_prompt` (`[NB - 1][MR]`, MR up to `max_mr`) and
     /// leaves `kfn_table_f16` unused.
@@ -486,11 +489,12 @@ struct CallContext {
     /// Maximum experts per call we cache packed pointers for.  Must
     /// match (or exceed) each caller's own expert-count cap.
     static constexpr int kMaxExperts = 256;
-    /// Call-scoped leases for final BF16 or static-U8xS8 CK packs derived from
-    /// AOCL-DLP blocked inputs. AOCL unreorders into temporary raw storage and
-    /// CK packs directly into the cached final arena. Keeping the leases here
-    /// prevents eviction or explicit clear from freeing a pack while a CK tile
-    /// uses it. AOCL sym-quant S8 is excluded because it has no unreorder API.
+    /// Call-scoped leases for final BF16, FP16, or static-U8xS8 CK packs
+    /// derived from AOCL-DLP blocked inputs. AOCL unreorders into temporary raw
+    /// storage and CK packs directly into the cached final arena. Keeping the
+    /// leases here prevents eviction or explicit clear from freeing a pack
+    /// while a CK tile uses it. AOCL sym-quant S8 is excluded because it has no
+    /// unreorder API.
     std::array<std::shared_ptr<void>, kMaxExperts> aocl_ck_weight_leases {};
     std::array<const bfloat16_t *, kMaxExperts> packed_ptrs {};
     /// DQ-INT8 packed-weight pointers (signed `int8_t *`).  Populated

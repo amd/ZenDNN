@@ -56,6 +56,8 @@ struct aligned_deleter {
 
 using aligned_ptr_t = std::unique_ptr<void, aligned_deleter>;
 
+enum class derived_ck_family : uint8_t { bf16, f16, int8_u8s8 };
+
 aligned_ptr_t allocate_buffer(size_t bytes) {
     if (bytes == 0
             || bytes > std::numeric_limits<size_t>::max()
@@ -73,12 +75,20 @@ aligned_ptr_t allocate_buffer(size_t bytes) {
 static status_t get_or_cache_aocl_ck_weight_impl(const void *aocl_packed, int K,
         int N, int ldb, bool transB, int32_t num_threads, int pack_nr,
         bool interleave_split_halves, std::shared_ptr<void> &ck_weight,
-        bool *was_hit, int32_t weight_cache_mode, bool int8_u8s8) {
+        bool *was_hit, int32_t weight_cache_mode, derived_ck_family family) {
     ck_weight.reset();
     if (was_hit != nullptr) *was_hit = false;
     if (aocl_packed == nullptr || K <= 0 || N <= 0 || ldb <= 0) {
         return status_t::failure;
     }
+    const bool is_f16 = family == derived_ck_family::f16;
+    const bool is_int8 = family == derived_ck_family::int8_u8s8;
+    const data_type_t src_dtype = is_int8
+            ? data_type_t::u8
+            : (is_f16 ? data_type_t::f16 : data_type_t::bf16);
+    const data_type_t wei_dtype = is_int8
+            ? data_type_t::s8
+            : (is_f16 ? data_type_t::f16 : data_type_t::bf16);
     auto &config = zendnnl::common::matmul_config_t::instance();
     const int32_t effective_cache_mode = weight_cache_mode >= 0
             ? effective_weight_cache_type(weight_cache_mode)
@@ -95,7 +105,9 @@ static status_t get_or_cache_aocl_ck_weight_impl(const void *aocl_packed, int K,
     // current num_threads may differ and cannot safely stand in for it.
     // Decline the derived route when M-hint packing is active; AOCL can still
     // consume its original blocked buffer directly.
-    if (config.get_dlp_m_hint() > 0) { return status_t::unimplemented; }
+    if (!is_f16 && config.get_dlp_m_hint() > 0) {
+        return status_t::unimplemented;
+    }
 
     size_t cache_extra_hash = 0;
     cache_extra_hash = zendnnl::common::hash_combine(
@@ -103,13 +115,11 @@ static status_t get_or_cache_aocl_ck_weight_impl(const void *aocl_packed, int K,
     cache_extra_hash = zendnnl::common::hash_combine(
             cache_extra_hash, interleave_split_halves);
     cache_extra_hash = zendnnl::common::hash_combine(
-            cache_extra_hash, static_cast<size_t>(int8_u8s8));
-    cache_extra_hash = zendnnl::common::hash_combine(cache_extra_hash,
-            static_cast<size_t>(
-                    int8_u8s8 ? data_type_t::u8 : data_type_t::bf16));
-    cache_extra_hash = zendnnl::common::hash_combine(cache_extra_hash,
-            static_cast<size_t>(
-                    int8_u8s8 ? data_type_t::s8 : data_type_t::bf16));
+            cache_extra_hash, static_cast<size_t>(family));
+    cache_extra_hash = zendnnl::common::hash_combine(
+            cache_extra_hash, static_cast<size_t>(src_dtype));
+    cache_extra_hash = zendnnl::common::hash_combine(
+            cache_extra_hash, static_cast<size_t>(wei_dtype));
 
     const Key_matmul key(transB, static_cast<unsigned int>(K),
             static_cast<unsigned int>(N), static_cast<unsigned int>(ldb),
@@ -135,17 +145,20 @@ static status_t get_or_cache_aocl_ck_weight_impl(const void *aocl_packed, int K,
     params.is_unreorder = true;
     params.num_threads = num_threads;
     params.prepack.algo = matmul_algo_t::aocl_dlp_blocked;
-    params.prepack.wei_dtype = int8_u8s8 ? data_type_t::s8 : data_type_t::bf16;
-    params.prepack.src_dtype = int8_u8s8 ? data_type_t::u8 : data_type_t::bf16;
+    params.prepack.wei_dtype = wei_dtype;
+    params.prepack.src_dtype = src_dtype;
     params.prepack.K = K;
     params.prepack.N = N;
     params.prepack.ldb = ldb;
     params.prepack.transposed = transB;
 
     const size_t raw_bytes = reorder::weight_unreorder_size(params);
-    const size_t ck_bytes = int8_u8s8
-            ? custom_kernel::packed_weight_size_int8(K, N, pack_nr)
-            : custom_kernel::packed_weight_size_bf16(K, N, pack_nr);
+    size_t ck_bytes = custom_kernel::packed_weight_size_bf16(K, N, pack_nr);
+    if (is_int8) {
+        ck_bytes = custom_kernel::packed_weight_size_int8(K, N, pack_nr);
+    } else if (is_f16) {
+        ck_bytes = custom_kernel::packed_weight_size_f16(K, N, pack_nr);
+    }
     if (raw_bytes == 0 || ck_bytes == 0) { return status_t::unimplemented; }
 
     aligned_ptr_t raw_temporary = allocate_buffer(raw_bytes);
@@ -156,15 +169,20 @@ static status_t get_or_cache_aocl_ck_weight_impl(const void *aocl_packed, int K,
             = reorder::reorder_direct(aocl_packed, raw_temporary.get(), params);
     if (unreorder_status != status_t::success) return unreorder_status;
 
-    const status_t pack_status = int8_u8s8
-            ? custom_kernel::prepack_weight_into_int8(
-                      static_cast<const int8_t *>(raw_temporary.get()), K, N,
-                      ldb, pack_nr, transB, interleave_split_halves,
-                      ck_arena.get())
-            : custom_kernel::prepack_weight_into_bf16(
-                      static_cast<const bfloat16_t *>(raw_temporary.get()), K,
-                      N, ldb, pack_nr, transB, interleave_split_halves,
-                      ck_arena.get());
+    status_t pack_status = status_t::failure;
+    if (is_int8) {
+        pack_status = custom_kernel::prepack_weight_into_int8(
+                static_cast<const int8_t *>(raw_temporary.get()), K, N, ldb,
+                pack_nr, transB, interleave_split_halves, ck_arena.get());
+    } else if (is_f16) {
+        pack_status = custom_kernel::prepack_weight_into_f16(
+                static_cast<const float16_t *>(raw_temporary.get()), K, N, ldb,
+                pack_nr, transB, interleave_split_halves, ck_arena.get());
+    } else {
+        pack_status = custom_kernel::prepack_weight_into_bf16(
+                static_cast<const bfloat16_t *>(raw_temporary.get()), K, N, ldb,
+                pack_nr, transB, interleave_split_halves, ck_arena.get());
+    }
     if (pack_status != status_t::success) return pack_status;
 
     cache_value_t candidate(ck_arena.release(), aligned_deleter {});
@@ -178,7 +196,16 @@ status_t get_or_cache_aocl_ck_weight(const void *aocl_packed, int K, int N,
         bool *was_hit, int32_t weight_cache_mode) {
     return get_or_cache_aocl_ck_weight_impl(aocl_packed, K, N, ldb, transB,
             num_threads, pack_nr, interleave_split_halves, ck_weight, was_hit,
-            weight_cache_mode, /*int8_u8s8=*/false);
+            weight_cache_mode, derived_ck_family::bf16);
+}
+
+status_t get_or_cache_aocl_ck_weight_f16(const void *aocl_packed, int K, int N,
+        int ldb, bool transB, int32_t num_threads, int pack_nr,
+        bool interleave_split_halves, std::shared_ptr<void> &ck_weight,
+        bool *was_hit, int32_t weight_cache_mode) {
+    return get_or_cache_aocl_ck_weight_impl(aocl_packed, K, N, ldb, transB,
+            num_threads, pack_nr, interleave_split_halves, ck_weight, was_hit,
+            weight_cache_mode, derived_ck_family::f16);
 }
 
 status_t get_or_cache_aocl_ck_weight_int8(const void *aocl_packed, int K, int N,
@@ -187,7 +214,7 @@ status_t get_or_cache_aocl_ck_weight_int8(const void *aocl_packed, int K, int N,
         bool *was_hit, int32_t weight_cache_mode) {
     return get_or_cache_aocl_ck_weight_impl(aocl_packed, K, N, ldb, transB,
             num_threads, pack_nr, interleave_split_halves, ck_weight, was_hit,
-            weight_cache_mode, /*int8_u8s8=*/true);
+            weight_cache_mode, derived_ck_family::int8_u8s8);
 }
 
 void clear_aocl_ck_weight_cache() {

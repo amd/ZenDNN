@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "common/bfloat16.hpp"
+#include "common/float16.hpp"
 #include "common/op_config.hpp"
 #include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/aocl_unreorder_cache.hpp"
@@ -34,6 +35,7 @@
 namespace {
 
 using zendnnl::common::bfloat16_t;
+using zendnnl::common::float16_t;
 using zendnnl::common::matmul_algo_t;
 using zendnnl::memory::data_type_t;
 using zendnnl::memory::status_t;
@@ -180,6 +182,91 @@ void run_derived_ck_cache_case(
 #endif
 }
 
+void run_derived_ck_cache_f16_case(
+        bool transposed, bool interleave_split_halves) {
+#if !ZENDNNL_DEPENDS_AOCLDLP
+    GTEST_SKIP() << "AOCL-DLP is unavailable";
+#else
+    if (!zendnnl::common::zendnnl_platform_info().get_avx512_f16_status()) {
+        GTEST_SKIP() << "AOCL FP16 prepack requires AVX512-FP16";
+    }
+    // AOCL's FP16 pack ignores M-hint metadata; the derived route must not
+    // decline merely because the process uses an M hint for BF16 layers.
+    DlpMHintGuard m_hint(32);
+
+    constexpr int K = 64;
+    constexpr int N = 128;
+    const int ldb = transposed ? K : N;
+    const int rows = transposed ? N : K;
+
+    std::vector<float16_t> original(static_cast<size_t>(rows) * ldb);
+    for (int k = 0; k < K; ++k) {
+        for (int n = 0; n < N; ++n) {
+            original[transposed ? static_cast<size_t>(n) * ldb + k
+                                : static_cast<size_t>(k) * ldb + n]
+                    = float16_t(0.01f
+                            * static_cast<float>((k * 17 + n * 7) % 19 - 9));
+        }
+    }
+
+    reorder::reorder_params_t prepack;
+    prepack.is_prepack = true;
+    prepack.num_threads = 4;
+    prepack.prepack.algo = matmul_algo_t::aocl_dlp_blocked;
+    prepack.prepack.wei_dtype = data_type_t::f16;
+    prepack.prepack.src_dtype = data_type_t::f16;
+    prepack.prepack.K = K;
+    prepack.prepack.N = N;
+    prepack.prepack.ldb = ldb;
+    prepack.prepack.transposed = transposed;
+
+    const size_t packed_bytes = reorder::weight_prepack_size(prepack);
+    ASSERT_GT(packed_bytes, 0u);
+    aligned_ptr_t packed(zendnnl_aligned_alloc(64, packed_bytes));
+    ASSERT_NE(packed, nullptr);
+    ASSERT_EQ(reorder::reorder_direct(original.data(), packed.get(), prepack),
+            status_t::success);
+
+    constexpr int pack_nr = 32;
+    const size_t ck_bytes = ck::packed_weight_size_f16(K, N, pack_nr);
+    ASSERT_GT(ck_bytes, 0u);
+    aligned_ptr_t expected_ck(zendnnl_aligned_alloc(64, ck_bytes));
+    ASSERT_NE(expected_ck, nullptr);
+    ASSERT_EQ(ck::prepack_weight_into_f16(original.data(), K, N, ldb, pack_nr,
+                      transposed, interleave_split_halves, expected_ck.get()),
+            status_t::success);
+
+    CacheCapacityGuard capacity_guard;
+    matmul::clear_aocl_ck_weight_cache();
+
+    std::shared_ptr<void> ck_first;
+    bool hit = true;
+    ASSERT_EQ(matmul::get_or_cache_aocl_ck_weight_f16(packed.get(), K, N, ldb,
+                      transposed, /*num_threads=*/4, pack_nr,
+                      interleave_split_halves, ck_first, &hit),
+            status_t::success);
+    EXPECT_FALSE(hit);
+    ASSERT_NE(ck_first, nullptr);
+    EXPECT_EQ(std::memcmp(ck_first.get(), expected_ck.get(), ck_bytes), 0);
+
+    std::shared_ptr<void> ck_second;
+    ASSERT_EQ(matmul::get_or_cache_aocl_ck_weight_f16(packed.get(), K, N, ldb,
+                      transposed, /*num_threads=*/4, pack_nr,
+                      interleave_split_halves, ck_second, &hit),
+            status_t::success);
+    EXPECT_TRUE(hit);
+    EXPECT_EQ(ck_first.get(), ck_second.get());
+
+    ck_second.reset();
+    matmul::clear_grp_matmul_weight_caches();
+    ASSERT_NE(ck_first, nullptr);
+    EXPECT_EQ(std::memcmp(ck_first.get(), expected_ck.get(), ck_bytes), 0);
+
+    ck_first.reset();
+    matmul::clear_aocl_matmul_weight_caches();
+#endif
+}
+
 TEST(TestAoclDerivedCkWeightCache, NonTransposedRoundTripAndHit) {
     run_derived_ck_cache_case(false);
 }
@@ -190,6 +277,16 @@ TEST(TestAoclDerivedCkWeightCache, TransposedRoundTripAndHit) {
 
 TEST(TestAoclDerivedCkWeightCache, OddKUsesCkSizedArena) {
     run_derived_ck_cache_case(/*transposed=*/true, /*K=*/65);
+}
+
+TEST(TestAoclDerivedCkWeightCache, F16NonTransposedRoundTripAndHit) {
+    run_derived_ck_cache_f16_case(
+            /*transposed=*/false, /*interleave_split_halves=*/false);
+}
+
+TEST(TestAoclDerivedCkWeightCache, F16TransposedInterleavedRoundTripAndHit) {
+    run_derived_ck_cache_f16_case(
+            /*transposed=*/true, /*interleave_split_halves=*/true);
 }
 
 TEST(TestAoclDerivedCkWeightCache, DisabledWeightCacheDeclinesPersistentEntry) {

@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "common/bfloat16.hpp"
+#include "common/float16.hpp"
 #include "common/op_config.hpp"
 #include "common/zendnnl_compat.hpp"
 #include "gtest_utils.hpp"
@@ -45,6 +46,7 @@
 namespace {
 
 using zendnnl::common::bfloat16_t;
+using zendnnl::common::float16_t;
 using zendnnl::common::matmul_algo_t;
 using zendnnl::common::matmul_config_t;
 using zendnnl::memory::data_type_t;
@@ -262,6 +264,126 @@ TEST(TestMatmulUnreorderRoute, PackedWeightWc2UsesCachedDerivedCkPath) {
     run_route_case(true, /*M=*/8, /*expect_custom=*/true,
             /*expect_derived_cache_hit=*/true, /*trans_b=*/true,
             /*ldb_padding=*/0, /*weight_cache_mode=*/2);
+}
+
+TEST(TestMatmulUnreorderRoute, F16PackedWeightRoutesAndReusesDerivedCkCache) {
+#if !ZENDNNL_DEPENDS_AOCLDLP
+    GTEST_SKIP() << "AOCL-DLP is unavailable";
+#else
+    if (!ck::avx512f16_available()) {
+        GTEST_SKIP() << "AVX-512-FP16 custom kernel is unavailable";
+    }
+
+    constexpr int M = 8;
+    constexpr int K = 64;
+    constexpr int N = 2048;
+    constexpr int threads = 8;
+    constexpr int ldb = K;
+
+    std::vector<float16_t> src(static_cast<size_t>(M) * K);
+    std::vector<float16_t> weight(static_cast<size_t>(N) * ldb);
+    std::vector<float> bias(N);
+    for (int m = 0; m < M; ++m)
+        for (int k = 0; k < K; ++k)
+            src[static_cast<size_t>(m) * K + k] = float16_t(
+                    0.01f * static_cast<float>((m * 11 + k * 3) % 13 - 6));
+    for (int n = 0; n < N; ++n)
+        for (int k = 0; k < K; ++k)
+            weight[static_cast<size_t>(n) * ldb + k]
+                    = float16_t(logical_weight(k, n));
+    for (int n = 0; n < N; ++n)
+        bias[n] = 0.001f * static_cast<float>(n % 7 - 3);
+
+    reorder::reorder_params_t prepack;
+    prepack.is_prepack = true;
+    prepack.num_threads = threads;
+    prepack.prepack.algo = matmul_algo_t::aocl_dlp_blocked;
+    prepack.prepack.wei_dtype = data_type_t::f16;
+    prepack.prepack.src_dtype = data_type_t::f16;
+    prepack.prepack.K = K;
+    prepack.prepack.N = N;
+    prepack.prepack.ldb = ldb;
+    prepack.prepack.transposed = true;
+    const size_t packed_bytes = reorder::weight_prepack_size(prepack);
+    ASSERT_GT(packed_bytes, 0u);
+    aligned_ptr_t packed(zendnnl_aligned_alloc(64, packed_bytes));
+    ASSERT_NE(packed, nullptr);
+    ASSERT_EQ(reorder::reorder_direct(weight.data(), packed.get(), prepack),
+            status_t::success);
+
+    RouteConfigGuard route_config;
+    WeightCacheGuard cache_mode(1);
+    mt::AlgoEnvGuard auto_algo(0);
+    mt::CustomKernelOverride custom_on(true);
+    mt::CustomKernelF16Override custom_f16_on(true);
+    mt::NTileStrategyOverride rounds(2);
+    mt::SingleExpertCkMasks f16_policy(matmul::kSingleExpertF16,
+            matmul::kSingleExpertF16, matmul::kSingleExpertF16);
+    matmul::clear_aocl_ck_weight_cache();
+
+    matmul::matmul_params params;
+    params.dtypes.src = data_type_t::f16;
+    params.dtypes.wei = data_type_t::f16;
+    params.dtypes.dst = data_type_t::f16;
+    params.dtypes.bias = data_type_t::f32;
+    params.mem_format_b = 'r';
+    params.lowoha_algo = matmul_algo_t::aocl_dlp_blocked;
+    params.num_threads = threads;
+    matmul::matmul_batch_params_t batch;
+
+    std::shared_ptr<void> first_cached_weight;
+    const auto tolerance = mt::tol_act(data_type_t::f16);
+    for (int call = 0; call < 2; ++call) {
+        std::vector<float16_t> dst(static_cast<size_t>(M) * N);
+        {
+            mt::GemmModeCaptureGuard mode_capture;
+            ASSERT_EQ(matmul::matmul_direct('r', false, true, M, N, K, 1.0f,
+                              src.data(), K, packed.get(), ldb, bias.data(),
+                              0.0f, dst.data(), N, true, batch, params),
+                    status_t::success);
+            const char *mode
+                    = matmul::test_api::s_last_group_matmul_direct_gemm_mode
+                              .load(std::memory_order_relaxed);
+            ASSERT_NE(mode, nullptr);
+            EXPECT_NE(std::string(mode).find("custom"), std::string::npos);
+        }
+
+        for (int m = 0; m < M; ++m) {
+            for (int n = 0; n < N; ++n) {
+                float reference = bias[n];
+                for (int k = 0; k < K; ++k) {
+                    reference += static_cast<float>(
+                                         src[static_cast<size_t>(m) * K + k])
+                            * static_cast<float>(
+                                    weight[static_cast<size_t>(n) * ldb + k]);
+                }
+                const float actual = static_cast<float>(
+                        dst[static_cast<size_t>(m) * N + n]);
+                EXPECT_NEAR(actual, reference,
+                        std::abs(reference) * tolerance.rel + tolerance.abs);
+            }
+        }
+
+        std::shared_ptr<void> cached_weight;
+        bool hit = false;
+        ASSERT_EQ(
+                matmul::get_or_cache_aocl_ck_weight_f16(packed.get(), K, N, ldb,
+                        /*transB=*/true, threads, ck::plan_pack_nr(K, N),
+                        /*interleave_split_halves=*/false, cached_weight, &hit),
+                status_t::success);
+        ASSERT_TRUE(hit) << "matmul_direct must populate and then reuse the "
+                            "derived cache";
+        ASSERT_NE(cached_weight, nullptr);
+        if (call == 0) {
+            first_cached_weight = cached_weight;
+        } else {
+            EXPECT_EQ(cached_weight.get(), first_cached_weight.get());
+        }
+    }
+
+    first_cached_weight.reset();
+    ::reset_grp_matmul_caches();
+#endif
 }
 
 TEST(TestMatmulUnreorderRoute, RawWeightUsesDirectGroupPath) {

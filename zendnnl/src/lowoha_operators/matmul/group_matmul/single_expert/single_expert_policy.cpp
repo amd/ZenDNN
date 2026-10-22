@@ -91,8 +91,9 @@ single_expert_ck_t grp_matmul_single_expert_ck(data_type_t src, data_type_t wei,
     if (K > 0 && fam == prompt_tile::Family::kW4a8
             && K % custom_kernel::kS4Octet != 0)
         return {};
-    // The custom kernel converts only BF16 and static U8xS8 AOCL-DLP packs.
-    if (aocl_prepacked && fam != prompt_tile::Family::kBf16 && !static_u8s8)
+    // The custom kernel converts BF16, FP16, and static U8xS8 AOCL-DLP packs.
+    if (aocl_prepacked && fam != prompt_tile::Family::kBf16
+            && fam != prompt_tile::Family::kF16 && !static_u8s8)
         return {};
 
     // The phase knobs choose the phases; `..._FORCE_CK` lifts decode's

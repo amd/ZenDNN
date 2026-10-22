@@ -152,6 +152,8 @@ void CallContext::reset() {
         fn = nullptr;
     for (auto &fn : kfn_table_f16)
         fn = nullptr;
+    for (auto &fn : kfn_table_f16_kblock)
+        fn = nullptr;
     for (auto &row : kfn_table_f16_prompt)
         for (auto &fn : row)
             fn = nullptr;
@@ -420,6 +422,16 @@ status_t fill_kfn_table_f16(int NV, ActKind act_kind, DstDt dst_dt,
     const int max_mr = max_mr_for_nv(NV);
     for (int mr = 1; mr <= max_mr; ++mr) {
         kfn_table[mr] = select_f16_ukernel(mr, NV, act_kind, dst_dt);
+        if (kfn_table[mr] == nullptr) return status_t::failure;
+    }
+    return status_t::success;
+}
+
+status_t fill_kfn_table_f16_kblock(
+        int NV, f16_kblock_ukernel_fn_t (&kfn_table)[kMaxMR + 1]) {
+    const int max_mr = max_mr_for_nv(NV);
+    for (int mr = 1; mr <= max_mr; ++mr) {
+        kfn_table[mr] = select_f16_kblock_ukernel(mr, NV);
         if (kfn_table[mr] == nullptr) return status_t::failure;
     }
     return status_t::success;
@@ -1017,6 +1029,11 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
                     "AVX-512-FP16 intrinsics every FP16 selector slot is "
                     "nullptr so the call falls back to AOCL DLP");
         }
+        if (fill_kfn_table_f16_kblock(out.NV, out.kfn_table_f16_kblock)
+                != status_t::success) {
+            return refuse("kfn_table_f16_kblock_fill_failed",
+                    "no FP16 partial-K microkernel for this NV/MR tuple");
+        }
         const bool f32_chunks = out.f16_prompt && out.prompt_kc_eligible
                 && out.variant == KernelVariant::kF16_F16_F16;
         for (int nb = 1; f32_chunks && nb <= kF16PromptNb; ++nb) {
@@ -1157,22 +1174,33 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
             const bool static_u8s8_variant = variant_is_int8
                     && src_dtype == data_type_t::u8
                     && wei_dtype == data_type_t::s8 && !dynamic_quant;
-            if (!bf16_variant && !static_u8s8_variant) {
+            if (!bf16_variant && !variant_is_f16 && !static_u8s8_variant) {
                 return refuse("aocl_unreorder_unsupported_variant",
-                        "AOCL unreorder-to-CK supports BF16 and pure static "
-                        "U8xS8 only; sym-quant INT8 has no inverse API");
+                        "AOCL unreorder-to-CK supports BF16, FP16, and pure "
+                        "static U8xS8 only; sym-quant INT8 has no inverse API");
             }
             bool derived_cache_hit = false;
             std::shared_ptr<void> derived_ck_weight;
-            const status_t conversion_status = static_u8s8_variant
-                    ? get_or_cache_aocl_ck_weight_int8(weight[i], K[i], N[i],
-                              ldb[i], transB[i], num_threads, pack_nr,
-                              interleave_split_halves, derived_ck_weight,
-                              &derived_cache_hit, wc_mode)
-                    : get_or_cache_aocl_ck_weight(weight[i], K[i], N[i], ldb[i],
-                              transB[i], num_threads, pack_nr,
-                              interleave_split_halves, derived_ck_weight,
-                              &derived_cache_hit, wc_mode);
+            status_t conversion_status = status_t::failure;
+            const char *family_name = "bf16";
+            if (static_u8s8_variant) {
+                family_name = "u8s8";
+                conversion_status = get_or_cache_aocl_ck_weight_int8(weight[i],
+                        K[i], N[i], ldb[i], transB[i], num_threads, pack_nr,
+                        interleave_split_halves, derived_ck_weight,
+                        &derived_cache_hit, wc_mode);
+            } else if (variant_is_f16) {
+                family_name = "f16";
+                conversion_status = get_or_cache_aocl_ck_weight_f16(weight[i],
+                        K[i], N[i], ldb[i], transB[i], num_threads, pack_nr,
+                        interleave_split_halves, derived_ck_weight,
+                        &derived_cache_hit, wc_mode);
+            } else {
+                conversion_status = get_or_cache_aocl_ck_weight(weight[i], K[i],
+                        N[i], ldb[i], transB[i], num_threads, pack_nr,
+                        interleave_split_halves, derived_ck_weight,
+                        &derived_cache_hit, wc_mode);
+            }
             if (conversion_status != status_t::success || !derived_ck_weight) {
                 return refuse("aocl_to_ck_conversion_failed",
                         "CK declined; AOCL fallback keeps the original "
@@ -1182,12 +1210,15 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
             if (static_u8s8_variant) {
                 out.packed_ptrs_int8[i]
                         = static_cast<const int8_t *>(derived_ck_weight.get());
+            } else if (variant_is_f16) {
+                out.packed_ptrs_f16[i] = static_cast<const float16_t *>(
+                        derived_ck_weight.get());
             } else {
                 out.packed_ptrs[i] = static_cast<const bfloat16_t *>(
                         derived_ck_weight.get());
             }
             apilog_verbose("[GRP_MATMUL.CK AOCL->CK] expert=", i,
-                    " family=", (static_u8s8_variant ? "u8s8" : "bf16"),
+                    " family=", family_name,
                     " cache=", (derived_cache_hit ? "hit" : "miss"),
                     " K=", K[i], " N=", N[i], " transB=", (transB[i] ? 1 : 0));
             if (per_expert_subtile) {
@@ -1878,6 +1909,71 @@ inline void dispatch_tile_s4(const CallContext &ctx, int expert_idx, int M,
 //     (F16 = 2B for kF16_F16_F16, FP32 = 4B for kF16_F16_F32); gated
 //     epilogues are F16-dst-only (2B) like the bf16 sibling.
 namespace {
+ZENDNNL_TARGET("avx512f")
+inline void narrow_f32_rows_to_f16(
+        float16_t *dst, int ldd, const float *src, int lds, int rows, int cols);
+
+inline bool dispatch_tile_f16_kblocked(const CallContext &ctx, int expert_idx,
+        int M, int K, int n_tile, int col_start, const void *src, int lda,
+        void *dst, int ldc) {
+    if (ctx.variant != KernelVariant::kF16_F16_F16
+            || ctx.act_kind != ActKind::none || !ctx.single_expert
+            || ctx.f16_prompt || M != 32)
+        return false;
+
+    static const int64_t l2_budget = []() {
+        const int64_t l2
+                = zendnnl::lowoha::matmul::native::detect_uarch().l2_bytes;
+        const int64_t safe = (l2 >= 64 * 1024) ? l2 : (256 * 1024);
+        return (safe * 4) / 5;
+    }();
+    const int64_t bytes_per_k
+            = static_cast<int64_t>(ctx.pack_nr + M) * sizeof(float16_t);
+    if (static_cast<int64_t>(K) * bytes_per_k <= l2_budget) return false;
+
+    int k_block = static_cast<int>(l2_budget / bytes_per_k);
+    k_block = (k_block / 64) * 64;
+    if (k_block < 256 || k_block >= K) return false;
+    if (test_api::s_capture_kblock.load(std::memory_order_relaxed))
+        test_api::s_last_kblock_used.store(true, std::memory_order_relaxed);
+
+    const auto *A = static_cast<const float16_t *>(src);
+    const float16_t *Bpacked_full = ctx.packed_ptrs_f16[expert_idx];
+    auto *C = static_cast<float16_t *>(dst);
+    const size_t o_blk_stride = static_cast<size_t>(K) * ctx.pack_nr;
+    const int n_blocks = n_tile / ctx.pack_nr;
+    const int n_calls = (M + ctx.max_mr - 1) / ctx.max_mr;
+    const int mr_base = M / n_calls;
+    const int n_big = M - mr_base * n_calls;
+    thread_local std::vector<float> c32;
+    c32.resize(static_cast<size_t>(M) * ctx.pack_nr);
+
+    for (int b = 0; b < n_blocks; ++b) {
+        const int block_col = col_start + b * ctx.pack_nr;
+        const float16_t *Bpacked_block = Bpacked_full
+                + static_cast<size_t>(block_col / ctx.pack_nr) * o_blk_stride;
+        for (int k_begin = 0; k_begin < K; k_begin += k_block) {
+            const int k_len = std::min(k_block, K - k_begin);
+            const bool add = k_begin != 0;
+            int m_off = 0;
+            for (int c = 0; c < n_calls; ++c) {
+                const int mr_now = (c < n_big) ? mr_base + 1 : mr_base;
+                const f16_kblock_ukernel_fn_t kfn
+                        = ctx.kfn_table_f16_kblock[mr_now];
+                kfn(A + static_cast<size_t>(m_off) * lda + k_begin, lda,
+                        Bpacked_block
+                                + static_cast<size_t>(k_begin) * ctx.pack_nr,
+                        c32.data() + static_cast<size_t>(m_off) * ctx.pack_nr,
+                        ctx.pack_nr, k_len, add);
+                m_off += mr_now;
+            }
+        }
+        narrow_f32_rows_to_f16(
+                C + block_col, ldc, c32.data(), ctx.pack_nr, M, ctx.pack_nr);
+    }
+    return true;
+}
+
 // Single-expert FP16 prompt tile (`ctx.f16_prompt`): groups of
 // `kF16PromptNb` o-blocks outer, MR calls inner, so a group's B strip
 // is read once and reused by every MR call.  No L2 sub-tiles: they would
@@ -2014,6 +2110,13 @@ inline void dispatch_tile_f16(const CallContext &ctx, int expert_idx, int M,
     const int n_calls = (M + ctx.max_mr - 1) / ctx.max_mr;
     const int mr_base = M / n_calls;
     const int n_big = M - mr_base * n_calls;
+    const bool oblk_outer = se_oblock_outer(ctx.single_expert, n_calls);
+    const auto mr_of = [mr_base, n_big](int c) {
+        return (c < n_big) ? mr_base + 1 : mr_base;
+    };
+    const auto m_off_of = [mr_base, n_big](int c) {
+        return c * mr_base + std::min(c, n_big);
+    };
 
     // Per-col bias byte stride.  The FP16 microkernel accepts a bf16,
     // fp32, or f16 bias.  Only the fp32 case is 4 bytes; bf16 and
@@ -2044,9 +2147,13 @@ inline void dispatch_tile_f16(const CallContext &ctx, int expert_idx, int M,
                                     * bias_elem_bytes
                     : nullptr;
 
-            int m_off = 0;
-            for (int c = 0; c < n_calls; ++c) {
-                const int mr_now = (c < n_big) ? mr_base + 1 : mr_base;
+            // At M=32 the FP16 kernel spans four to six MR calls. Walking
+            // o-blocks first keeps each deep-K weight slab hot across those
+            // calls, matching the dense BF16/DQ-INT8 execution order.
+            for_each_call_block(
+                    oblk_outer, n_calls, n_blocks, [&](int c, int b) {
+                const int mr_now = mr_of(c);
+                const int m_off = m_off_of(c);
                 const f16_ukernel_fn_t kfn = ctx.kfn_table_f16[mr_now];
 
                 const float16_t *A_chunk = A + static_cast<size_t>(m_off) * lda;
@@ -2062,23 +2169,20 @@ inline void dispatch_tile_f16(const CallContext &ctx, int expert_idx, int M,
                         + static_cast<size_t>(m_off) * tight_ldc
                         + (sub_col_base / 2);
 
-                for (int b = 0; b < n_blocks; ++b) {
-                    const float16_t *Bpacked_blk = Bpacked_blk_base
-                            + static_cast<size_t>(b) * o_blk_stride;
-                    const void *bias_blk = (bias_blk_base != nullptr)
-                            ? static_cast<const void *>(bias_blk_base
-                                      + static_cast<size_t>(b) * ctx.pack_nr
-                                              * bias_elem_bytes)
-                            : nullptr;
-                    float16_t *Tight_row = Tight_row_base
-                            + static_cast<size_t>(b) * (ctx.pack_nr / 2);
+                const float16_t *Bpacked_blk = Bpacked_blk_base
+                        + static_cast<size_t>(b) * o_blk_stride;
+                const void *bias_blk = (bias_blk_base != nullptr)
+                        ? static_cast<const void *>(bias_blk_base
+                                  + static_cast<size_t>(b) * ctx.pack_nr
+                                          * bias_elem_bytes)
+                        : nullptr;
+                float16_t *Tight_row = Tight_row_base
+                        + static_cast<size_t>(b) * (ctx.pack_nr / 2);
 
-                    kfn(A_chunk, lda, Bpacked_blk, bias_blk, ctx.bias_kind,
-                            /*Cout=*/nullptr, /*ldc=*/0,
-                            static_cast<void *>(Tight_row), tight_ldc, K);
-                }
-                m_off += mr_now;
-            }
+                kfn(A_chunk, lda, Bpacked_blk, bias_blk, ctx.bias_kind,
+                        /*Cout=*/nullptr, /*ldc=*/0,
+                        static_cast<void *>(Tight_row), tight_ldc, K);
+            });
         }
         return;
     }
@@ -2097,9 +2201,9 @@ inline void dispatch_tile_f16(const CallContext &ctx, int expert_idx, int M,
                         + static_cast<size_t>(sub_col_base) * bias_elem_bytes
                 : nullptr;
 
-        int m_off = 0;
-        for (int c = 0; c < n_calls; ++c) {
-            const int mr_now = (c < n_big) ? mr_base + 1 : mr_base;
+        for_each_call_block(oblk_outer, n_calls, n_blocks, [&](int c, int b) {
+            const int mr_now = mr_of(c);
+            const int m_off = m_off_of(c);
             const f16_ukernel_fn_t kfn = ctx.kfn_table_f16[mr_now];
 
             const float16_t *A_chunk = A + static_cast<size_t>(m_off) * lda;
@@ -2107,23 +2211,20 @@ inline void dispatch_tile_f16(const CallContext &ctx, int expert_idx, int M,
                     + (static_cast<size_t>(m_off) * tight_ldc + sub_col_base)
                             * dst_elem_bytes;
 
-            for (int b = 0; b < n_blocks; ++b) {
-                const float16_t *Bpacked_blk = Bpacked_blk_base
-                        + static_cast<size_t>(b) * o_blk_stride;
-                const void *bias_blk = (bias_blk_base != nullptr)
-                        ? static_cast<const void *>(bias_blk_base
-                                  + static_cast<size_t>(b) * ctx.pack_nr
-                                          * bias_elem_bytes)
-                        : nullptr;
-                std::byte *Wide_row = Wide_row_base
-                        + static_cast<size_t>(b) * ctx.pack_nr * dst_elem_bytes;
+            const float16_t *Bpacked_blk
+                    = Bpacked_blk_base + static_cast<size_t>(b) * o_blk_stride;
+            const void *bias_blk = (bias_blk_base != nullptr)
+                    ? static_cast<const void *>(bias_blk_base
+                              + static_cast<size_t>(b) * ctx.pack_nr
+                                      * bias_elem_bytes)
+                    : nullptr;
+            std::byte *Wide_row = Wide_row_base
+                    + static_cast<size_t>(b) * ctx.pack_nr * dst_elem_bytes;
 
-                kfn(A_chunk, lda, Bpacked_blk, bias_blk, ctx.bias_kind,
-                        static_cast<void *>(Wide_row), tight_ldc,
-                        /*Cout_tight=*/nullptr, /*ldc_tight=*/0, K);
-            }
-            m_off += mr_now;
-        }
+            kfn(A_chunk, lda, Bpacked_blk, bias_blk, ctx.bias_kind,
+                    static_cast<void *>(Wide_row), tight_ldc,
+                    /*Cout_tight=*/nullptr, /*ldc_tight=*/0, K);
+        });
     }
 }
 } // namespace
@@ -2478,6 +2579,10 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
     // path, so the scale / zp / wei_scale args are unused (asserted null
     // below for the bf16 branch; the f16 branch returns before that).
     if (is_f16_variant(ctx.variant)) {
+        if (bias == nullptr
+                && dispatch_tile_f16_kblocked(ctx, expert_idx, M, K, n_tile,
+                        col_start, src, lda, tight_dst, tight_ldc))
+            return;
         dispatch_tile_f16(ctx, expert_idx, M, K, n_tile, col_start, src, lda,
                 bias, tight_dst, tight_ldc);
         return;

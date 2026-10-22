@@ -800,6 +800,9 @@ inline bool check_m_tile_safe(const std::vector<char> &layout,
                 = params[i].dtypes.src == data_type_t::bf16
                 && params[i].dtypes.wei == data_type_t::bf16
                 && params[i].postop_.empty();
+        const bool aocl_prepacked_f16 = params[i].dtypes.src == data_type_t::f16
+                && params[i].dtypes.wei == data_type_t::f16
+                && params[i].postop_.empty();
         // Static U8xS8 post-ops are validated by check_n_tile_extra (which has
         // N) and by the effective CK gate. Do not require an empty chain here:
         // PR #745's supported unary and dense mul+add epilogues must remain
@@ -814,7 +817,8 @@ inline bool check_m_tile_safe(const std::vector<char> &layout,
                         || params[i].lowoha_algo
                                 == zendnnl::common::matmul_algo_t::
                                         aocl_dlp_blocked)
-                && (aocl_prepacked_bf16 || aocl_prepacked_static_u8s8);
+                && (aocl_prepacked_bf16 || aocl_prepacked_f16
+                        || aocl_prepacked_static_u8s8);
         if (params[i].mem_format_b != 'n' && !reordered_pergroup_s8
                 && !ck_prepacked_b_ok && !aocl_prepacked_for_ck_ok) {
             return false;
