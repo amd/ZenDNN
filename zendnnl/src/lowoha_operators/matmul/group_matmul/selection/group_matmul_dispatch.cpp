@@ -273,7 +273,7 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
     //       call's weights at out-of-place caching.
     // Process-wide verdicts (A)/(B) are derived from process-constant env, so
     // their decision (and one-shot log) is stable for the rest of the run.
-    // Under (A), a BF16/FP16 MoE call (`grp_matmul_auto_algo3_call`) that
+    // Under (A), a BF16/FP16 MoE call (`grp_matmul_auto_algo3_family`) that
     // runs ALGO 3 while neither phase can leave it also gets a per-call
     // custom-kernel layout licence: AOCL DLP reorders are capped
     // out-of-place, and families with in-place CK support may use it.
@@ -296,18 +296,25 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
     const bool single_expert_epilogue_ok = M.size() != 1
             || ck_serves_single_expert_epilogue(alpha[0], beta[0], bias[0],
                     /*tight=*/ldc[0] == N[0] / 2, fused_act, act_dtype);
-    // One single-expert classification serves the licence and the selector.
-    const single_expert_ck_t single_ck
-            = single_expert_epilogue_ok && M.size() == 1
+    // The call's verdicts, classified once for the licence, the selector,
+    // the executor and prepack (`grp_matmul_call_route`).
+    grp_matmul_call_route route;
+    route.single_ck = single_expert_epilogue_ok && M.size() == 1
             ? grp_matmul_single_expert_call_ck(
                       M, N, K, params, fused_act, num_threads)
             : single_expert_ck_t {};
+    route.moe_family = grp_matmul_auto_algo3_family(M, N, K, params);
+    // The custom-kernel layout licence matters only where the pack can take
+    // the caller's buffer: a BF16 / FP16 MoE layer or a covered single
+    // expert.  An INT8 / W4A8 MoE layer's pack is out of place, so it keeps
+    // the mixed WEIGHT_CACHE=2 policy.
     const bool auto_algo3_layer
-            = grp_matmul_auto_algo3_call(M, params) || single_ck.both();
+            = route.moe_family == grp_matmul_algo3_family::float_family
+            || route.single_ck.both();
     // Capture the effective per-call cache mode before any ownership policy
     // caps the AOCL side; CK preparation consumes this original value.
-    int32_t ck_weight_cache_mode
-            = matmul_config_t::instance().get_weight_cache();
+    int32_t &ck_weight_cache_mode = route.ck_weight_cache_mode;
+    ck_weight_cache_mode = matmul_config_t::instance().get_weight_cache();
     for (size_t i = 0; i < params.size() && i < M.size(); ++i) {
         if (M[i] <= 0) { continue; }
         ck_weight_cache_mode
@@ -317,8 +324,9 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
                 M, N, K, params, num_threads)) {
         log_error(
                 "group_matmul: WEIGHT_CACHE=2 with a non-AUTO global ALGO "
-                "and phase overrides that split BF16/FP16 prompt/decode "
-                "layout ownership is unsupported. Use WEIGHT_CACHE=1, remove "
+                "and phase overrides that split BF16/FP16 (or "
+                "capacity-declared INT8) prompt/decode layout ownership is "
+                "unsupported. Use WEIGHT_CACHE=1, remove "
                 "the phase override, or set ZENDNNL_GRP_MATMUL_ALGO=0.");
         if (gemm_mode_out != nullptr) {
             *gemm_mode_out = kGrpMatmulErrWc2PhaseSplitUnsupported;
@@ -326,7 +334,7 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
         return false;
     }
 
-    bool ck_inplace_licence = false;
+    bool &ck_inplace_licence = route.ck_inplace_licence;
     track_grouped_inplace_mutation = prepare_grouped_auto_weight_cache(params,
             custom_kernel_en, nullptr, auto_algo3_layer, &ck_inplace_licence);
     // Without the licence, a process downgraded to WEIGHT_CACHE=1 just now
@@ -339,9 +347,9 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
     mutation_tracking.set(track_grouped_inplace_mutation);
 
     auto_algo_trace algo_trace;
-    const int use_algo = select_grp_matmul_algo(layout, M, N, K, params,
-            num_threads, &algo_trace, fused_act, single_expert_epilogue_ok,
-            &single_ck);
+    const int use_algo
+            = select_grp_matmul_algo(layout, M, N, K, params, num_threads,
+                    &algo_trace, fused_act, single_expert_epilogue_ok, &route);
 
     // A call ALGO 3 cannot serve follows the mixed policy.  `params` is a
     // per-call copy, so the cap does not reach the caller.
@@ -349,6 +357,17 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
     if (ck_inplace_licence) {
         for (auto &p : params) {
             p.weight_cache_type = std::min<int32_t>(p.weight_cache_type, 1);
+        }
+    }
+    // An INT8 / W4A8 ALGO-3 MoE layer has no AOCL layout owner: prepack never
+    // orders a warm before an AOCL mutation of it, so an AOCL tile this call
+    // falls back to must not reorder a capacity-declared weight in place.
+    if (use_algo == 3
+            && route.moe_family == grp_matmul_algo3_family::quant_family) {
+        for (auto &p : params) {
+            if (p.wei_buffer_capacity_bytes > 0) {
+                p.weight_cache_type = std::min<int32_t>(p.weight_cache_type, 1);
+            }
         }
     }
 
@@ -799,8 +818,7 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
                     num_threads,
                     a3_fuses ? fused_act : grp_matmul_gated_act_t::none,
                     act_dtype, gemm_mode_out,
-                    any_w4a8 ? &w4a8_s8_ptrs : nullptr, ck_weight_cache_mode,
-                    ck_inplace_licence);
+                    any_w4a8 ? &w4a8_s8_ptrs : nullptr, &route);
             break;
         case kGrpMatmulAlgoMultilevel:
             // parallel_multilevel owns its gemm_mode (multilevel_concurrent /

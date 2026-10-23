@@ -19,14 +19,15 @@
 ///        each dtype family it plans for.
 ///
 /// A call's knobs resolve in this order, later steps winning: the knob's
-/// default (`KnobDef::def`), its env var (an invalid or out-of-range value
+/// default (`KnobDef::def`, then `kFamilyDefaults` for the call's family), its
+/// env var (an invalid or out-of-range value
 /// is ignored), the first matching env profile entry, then gtest overrides.
 /// The executor then fits `mb_min` / `mb_max` to the call's row alignment
 /// (`sanitize`).  Env vars and profiles are read once.
 ///
 /// Knobs, as `ZENDNNL_GRP_MATMUL_PROMPT_TILE[_NAME]` (default):
 ///   (none)     family bitmask: 1 BF16, 2 INT8, 4 W4A8, 8 FP16;
-///              0 = off (9, BF16 + FP16)
+///              0 = off (15, every family)
 ///   TEAM       0 = teams from sysfs L3 domains, n = contiguous teams of n (0)
 ///   SUBTEAM    max threads per sub-team of an L3 domain, 0 = whole (4)
 ///   MB         forced M-block rows, rounded up to the row alignment (0 = auto)
@@ -39,7 +40,7 @@
 ///   GRAB       tiles per queue grab (1)
 ///   ORDER      0 N-slice major, 1 M-block major, 2 per expert by A vs B (2)
 ///   STEAL      1 drains other teams' queues when idle (1)
-///   MIN_TILES  tiles per thread before auto sizes shrink (8)
+///   MIN_TILES  tiles per thread before auto sizes shrink (8; 32 for W4A8)
 ///   L3SB       1 splits heavy experts into L3-resident superblocks (1)
 ///   SB_L3_PCT  % of a team's L3 a superblock's A fills (50)
 ///   BM_L3_PCT  % of a team's L3 an expert's B may fill and still be walked
@@ -145,7 +146,7 @@ struct KnobDef {
 };
 
 inline constexpr KnobDef kKnobs[kNumKnobs] = {
-        {kEnable, "enable", 0, 15, 9, Scope::kGlobal},
+        {kEnable, "enable", 0, 15, 15, Scope::kGlobal},
         {kTeam, "team", 0, 4096, 0, Scope::kGlobal},
         {kSubteam, "subteam", 0, 4096, 4, Scope::kGlobal},
         {kMb, "mb", 0, 1 << 16, 0, Scope::kShape},
@@ -185,6 +186,36 @@ constexpr Tunables defaults() {
     Tunables t {};
     for (int i = 0; i < kNumKnobs; ++i)
         t.v[i] = kKnobs[i].def;
+    return t;
+}
+
+/// A family's default for a `Scope::kShape` knob where it differs from
+/// `KnobDef::def`.
+struct FamilyDefault {
+    Family fam;
+    Knob knob;
+    int value;
+};
+
+/// W4A8's skewed MoE prompts balance better on more, smaller tiles.
+inline constexpr FamilyDefault kFamilyDefaults[] = {
+        {Family::kW4a8, kMinTiles, 32},
+};
+
+constexpr bool family_defaults_are_shape_knobs() {
+    for (const FamilyDefault &d : kFamilyDefaults)
+        if (kKnobs[d.knob].scope != Scope::kShape || d.value < kKnobs[d.knob].lo
+                || d.value > kKnobs[d.knob].hi)
+            return false;
+    return true;
+}
+static_assert(family_defaults_are_shape_knobs(),
+        "family defaults must be in-range shape knobs");
+
+constexpr Tunables defaults(Family f) {
+    Tunables t = defaults();
+    for (const FamilyDefault &d : kFamilyDefaults)
+        if (d.fam == f) t[d.knob] = d.value;
     return t;
 }
 

@@ -695,7 +695,7 @@ TEST(PromptTileTunables, KnobTableIsConsistent) {
     const pt::PlannerConfig cfg;
     const pt::FamilyFacts &bf16 = pt::facts(pt::Family::kBf16);
     EXPECT_EQ(cfg.tun.v, pt::defaults().v);
-    EXPECT_EQ(cfg.tun[pt::kEnable], 9);
+    EXPECT_EQ(cfg.tun[pt::kEnable], 15);
     EXPECT_EQ(cfg.a_bytes, bf16.a_bytes);
     EXPECT_EQ(cfg.wei_bits, bf16.wei_bits);
     EXPECT_EQ(cfg.min_mr, bf16.min_mr);
@@ -826,6 +826,35 @@ TEST(PromptTileTunables, PrecedenceRunsDefaultsEnvProfile) {
     EXPECT_EQ(r.t[pt::kMb], 0);
     EXPECT_EQ(r.t[pt::kRb], 16);
     EXPECT_EQ(r.t[pt::kGrab], 1);
+}
+
+TEST(PromptTileTunables, FamilyDefaultsSitUnderEnvAndProfile) {
+    for (const pt::Family f : {pt::Family::kBf16, pt::Family::kInt8,
+                 pt::Family::kW4a8, pt::Family::kF16}) {
+        const pt::Tunables d = pt::defaults(f);
+        for (int k = 0; k < pt::kNumKnobs; ++k) {
+            if (f == pt::Family::kW4a8 && k == pt::kMinTiles) continue;
+            EXPECT_EQ(d.v[k], pt::kKnobs[k].def) << pt::kKnobs[k].name;
+        }
+    }
+    EXPECT_EQ(pt::defaults(pt::Family::kW4a8)[pt::kMinTiles], 32);
+
+    pt::ShapeKey key;
+    key.fam = pt::Family::kW4a8;
+    key.K = 2048;
+    const pt::ProfileEntry none;
+    EXPECT_EQ(pt::resolve_with(key, none, {}).t[pt::kMinTiles], 32);
+    key.fam = pt::Family::kInt8;
+    EXPECT_EQ(pt::resolve_with(key, none, {}).t[pt::kMinTiles], 8);
+
+    key.fam = pt::Family::kW4a8;
+    pt::ProfileEntry env;
+    env.set = 1u << pt::kMinTiles;
+    env.val[pt::kMinTiles] = 4;
+    EXPECT_EQ(pt::resolve_with(key, env, {}).t[pt::kMinTiles], 4);
+    pt::Profile profile;
+    ASSERT_TRUE(pt::parse_profile("fam=w4a8:min_tiles=16", profile));
+    EXPECT_EQ(pt::resolve_with(key, none, profile).t[pt::kMinTiles], 16);
 }
 
 TEST(PromptTileTunables, OverridesWinAndKeepTheFloors) {
@@ -1982,7 +2011,8 @@ TEST(PromptTileAuto, AutoSendsF16PromptsToAlgo3) {
                 300, 1024, 2048, 8, data_type_t::f16, data_type_t::f16);
         mixed.params[1].dtypes.src = data_type_t::bf16;
         mixed.params[1].dtypes.wei = data_type_t::bf16;
-        EXPECT_FALSE(mm::grp_matmul_auto_algo3_call(mixed.M, mixed.params));
+        EXPECT_FALSE(mm::grp_matmul_auto_algo3_call(
+                mixed.M, mixed.N, mixed.K, mixed.params));
         EXPECT_EQ(auto_pick(mixed), kShapeRulePrompt);
     }
     {
@@ -1990,8 +2020,8 @@ TEST(PromptTileAuto, AutoSendsF16PromptsToAlgo3) {
                 300, 1024, 2048, 8, data_type_t::f16, data_type_t::f16);
         for (auto &p : mismatch.params)
             p.dtypes.wei = data_type_t::bf16;
-        EXPECT_FALSE(
-                mm::grp_matmul_auto_algo3_call(mismatch.M, mismatch.params));
+        EXPECT_FALSE(mm::grp_matmul_auto_algo3_call(
+                mismatch.M, mismatch.N, mismatch.K, mismatch.params));
         EXPECT_EQ(auto_pick(mismatch), kShapeRulePrompt);
     }
     {
@@ -2001,7 +2031,8 @@ TEST(PromptTileAuto, AutoSendsF16PromptsToAlgo3) {
             p.mem_format_b = 'r';
             p.lowoha_algo = zendnnl::common::matmul_algo_t::aocl_dlp_blocked;
         }
-        EXPECT_FALSE(mm::grp_matmul_auto_algo3_call(packed.M, packed.params));
+        EXPECT_FALSE(mm::grp_matmul_auto_algo3_call(
+                packed.M, packed.N, packed.K, packed.params));
         EXPECT_EQ(auto_pick(packed), kShapeRulePrompt);
     }
 }

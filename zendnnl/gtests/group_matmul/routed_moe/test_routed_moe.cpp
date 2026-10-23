@@ -1961,6 +1961,45 @@ TEST_F(RoutedMoESuperset,
     }
 }
 
+// The generic path quantizes each token once while grouping it: large enough
+// here to group in parallel, with enough experts to seed their descriptors in
+// parallel, and with tokens routed only to another rank's experts.
+TEST_F(RoutedMoESuperset, GenericQuantizingGatherMatchesReference) {
+    constexpr int kLocal = 48;
+    constexpr int kGlobal = 64;
+    std::vector<int32_t> map(kGlobal);
+    for (int g = 0; g < kGlobal; ++g) {
+        map[static_cast<size_t>(g)] = g < kLocal ? g : -1;
+    }
+    for (const bool bf16_scales : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << "bf16_scales=" << bf16_scales);
+        moe_problem pb;
+        pb.build(512, 256, 128, kLocal, 4, 0x9a7eu);
+        pb.unit_gate();
+        std::mt19937 rng(0x51u);
+        std::uniform_int_distribution<int> pick(0, kGlobal - 1);
+        for (size_t s = 0; s < pb.ids.size(); ++s) {
+            // The first 8 tokens route only to remote experts.
+            pb.ids[s] = s < 8 * static_cast<size_t>(pb.topk)
+                    ? kLocal + static_cast<int>(s % pb.topk)
+                    : pick(rng);
+        }
+        da8w8_call call(pb, bf16_scales);
+        call.routing.expert_map = map.data();
+        call.routing.expert_map_size = kGlobal;
+        const auto expected_output = reference_moe(pb, map.data());
+
+        disable_routed_guard disable;
+        grouped_call_probe probe;
+        ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
+        EXPECT_TRUE(probe.grouped_ran());
+        EXPECT_LT(rel_mae(pb.dst, expected_output), 2e-2);
+        for (size_t i = 0; i < 8 * static_cast<size_t>(pb.K); ++i) {
+            ASSERT_EQ(pb.dst[i], 0) << "remote-only token, element " << i;
+        }
+    }
+}
+
 TEST_F(RoutedMoESuperset, ConcurrentGenericReadSerializesFirstInplacePacking) {
     routed_weight_cache_mode_guard cache_mode_guard;
     moe_problem pb;

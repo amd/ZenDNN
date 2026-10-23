@@ -682,13 +682,14 @@ TEST(GroupMatmulW4A8PerGroup, Algo3Qwen3DecodeBF16) {
 
 // Validate that prepack warms the W4A8 cache for ALL experts (including
 // inactive ones) so a later decode iteration that routes to a currently-cold
-// expert pays no first-fire reorder spike.  The decode runs ALGO 3 and the
-// layer's prompts ALGO 2, so the ALGO 3 prepack cross-warms the W4A8 layout
-// ALGO 2 reads.
+// expert pays no first-fire reorder spike.  Under the shape rules (an
+// explicit ALGO 0) the decode runs ALGO 3 and the layer's prompts ALGO 1, so
+// the ALGO 3 prepack cross-warms the W4A8 layout the prompt reads.
 TEST(GroupMatmulW4A8PerGroup, PrepackWarmsAllExpertsBF16) {
     namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
     moe_test_utils::LastInvocationCaptureGuard prepack_capture;
     moe_test_utils::AlgoEnvGuard auto_algo(0);
+    moe_test_utils::AlgoLegacyOverride legacy(true);
     prepack::clear_fingerprint_cache_for_test();
     prepack::test_api::clear_last_invocation_stats();
 
@@ -706,7 +707,7 @@ TEST(GroupMatmulW4A8PerGroup, PrepackWarmsAllExpertsBF16) {
                 static_cast<int>(
                         prepack::CrossWarmRegime::aocl_full_weight_sym_quant))
                 << "the decode prepack must warm the layout the W4A8 prompt "
-                   "reads on ALGO 2";
+                   "reads on ALGO 1";
         // The prepack warmer should attempt all 15 experts (total_attempted >= 15),
         // not just the 6 routed ones.
         EXPECT_GE(stats.aocl.total_attempted, 15)
@@ -727,12 +728,13 @@ TEST(GroupMatmulW4A8PerGroup, PrepackWarmsAllExpertsBF16) {
     }
 }
 
-// The AUTO prompt runs ALGO 1, and its prepack also warms the ALGO 3 layout
-// the decode will read.
+// Under the shape rules (an explicit ALGO 0) the AUTO prompt runs ALGO 1,
+// and its prepack also warms the ALGO 3 layout the decode will read.
 TEST(GroupMatmulW4A8PerGroup, AutoPromptPrepackWarmsDecodeLayout) {
     namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
     moe_test_utils::LastInvocationCaptureGuard prepack_capture;
     moe_test_utils::AlgoEnvGuard auto_algo(0);
+    moe_test_utils::AlgoLegacyOverride legacy(true);
     prepack::clear_fingerprint_cache_for_test();
     prepack::test_api::clear_last_invocation_stats();
 
@@ -748,6 +750,43 @@ TEST(GroupMatmulW4A8PerGroup, AutoPromptPrepackWarmsDecodeLayout) {
                 static_cast<int>(prepack::CrossWarmRegime::none))
                 << "the decode runs ALGO 3, so its layout has a reader";
     }
+}
+
+// Unpinned, the layer runs both phases on ALGO 3 from one custom-kernel pack:
+// the prompt runs on the prompt tile executor, and its prepack warms that pack
+// for every expert of the pool (the cold ones included) and no AOCL layout.
+TEST(GroupMatmulW4A8PerGroup, AutoPromptPrepackWarmsOnlyTheCustomKernelPack) {
+    namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+    namespace mm = zendnnl::lowoha::matmul;
+    if (!mm::custom_kernel::avx512vnni_available()) {
+        GTEST_SKIP() << "the W4A8 custom kernel needs AVX-512 VNNI";
+    }
+    moe_test_utils::LastInvocationCaptureGuard prepack_capture;
+    moe_test_utils::AlgoEnvGuard auto_algo(0);
+    moe_test_utils::CustomKernelOverride ck_on(true);
+    moe_test_utils::GemmModeCaptureGuard capture;
+    prepack::clear_fingerprint_cache_for_test();
+    prepack::test_api::clear_last_invocation_stats();
+
+    std::vector<int> rows(15, 0);
+    for (int e : {1, 3, 5, 8, 11, 14})
+        rows[e] = 128; // 6 of 15 routed
+    run_w4a8_per_group_scenario("prompt prepack ck", rows, /*K=*/128,
+            /*N=*/64, /*group_size=*/32);
+
+    const auto stats = prepack::test_api::get_last_invocation_stats();
+    ASSERT_TRUE(stats.valid) << "prepack must fire for the W4A8 prompt";
+    EXPECT_EQ(stats.scheduling_algo, 3);
+    EXPECT_EQ(static_cast<int>(stats.cross_warm_regime),
+            static_cast<int>(prepack::CrossWarmRegime::none));
+    EXPECT_GE(stats.ck.total_attempted, 15)
+            << "the custom-kernel pack is warmed for every expert";
+    EXPECT_EQ(stats.ck.skipped_invalid, 0);
+    EXPECT_EQ(stats.aocl.total_attempted, 0) << "no AOCL layout is warmed";
+    const char *m = mm::test_api::s_last_group_matmul_direct_gemm_mode.load(
+            std::memory_order_relaxed);
+    const std::string mode = m != nullptr ? m : "";
+    EXPECT_NE(mode.find("ptile"), std::string::npos) << mode;
 }
 
 // ═══════════════════════════════════════════════════════════════════════

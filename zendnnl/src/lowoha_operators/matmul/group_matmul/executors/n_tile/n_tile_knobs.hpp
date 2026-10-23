@@ -204,7 +204,7 @@ inline bool get_grp_n_tile_fused_act() {
 //     = 256`).  Stack-array bound on the planner; demoting to
 //     Sequential is the only safe recourse.  Auto-select rule 0 also
 //     captures this upstream by routing to ALGO 1.  `flat_n_tile`
-//     slices a larger BF16/FP16 MoE call, or one whose weights only the
+//     slices a larger ALGO-3 MoE call, or one whose weights only the
 //     custom kernel can read, so neither reaches the planner.
 //
 //   * F3 narrow-N escape — only reachable when the strict-stable

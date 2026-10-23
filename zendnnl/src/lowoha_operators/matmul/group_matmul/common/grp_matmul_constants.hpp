@@ -227,8 +227,9 @@ inline constexpr const char *kGrpMatmulErrPrepackedNoCk
 /// the raw weight.
 inline constexpr const char *kGrpMatmulErrPackedInPlaceNoCk
         = "error_packed_in_place_no_ck";
-/// WC=2 cannot safely serve a BF16/FP16 MoE layer when a phase override
-/// splits a non-AUTO global pin across different weight-layout owners.
+/// WC=2 cannot safely serve a BF16/FP16 MoE layer (or an INT8 one with a
+/// declared writable capacity) when a phase override splits a non-AUTO global
+/// pin across different weight-layout owners.
 inline constexpr const char *kGrpMatmulErrWc2PhaseSplitUnsupported
         = "error_wc2_global_phase_split_unsupported";
 /// ALGO 3 could not leave dst defined: a per-thread scratch allocation failed,
@@ -324,8 +325,8 @@ inline int executed_algo_from_gemm_mode(const char *mode) {
 // `executors/n_tile/group_matmul_n_tile_planner.hpp` (re-included by the
 // public N-tile header `executors/n_tile/group_matmul_n_tile.hpp`) with the
 // other N-tile-specific constants.  The auto-selector still reads it
-// for its rule-0 capacity exit to ALGO 1, which a BF16/FP16 layer of several
-// experts skips because ALGO 3 slices such a call; the dispatcher
+// for its rule-0 capacity exit to ALGO 1, which an ALGO-3 MoE layer
+// skips because ALGO 3 slices such a call; the dispatcher
 // includes the public N-tile header directly to call `flat_n_tile()`,
 // so the symbol remains visible unchanged.
 

@@ -207,6 +207,18 @@ inline bool get_grp_matmul_custom_kernel_f16() {
     return v;
 }
 
+/// The variant whose pack serves a (K, N) weight of this dtype tuple, or
+/// `kUnsupported`: the family sub-toggle and ISA, the pack width, the INT8
+/// and W4A8 K alignment, the INT8 accumulation depth, and an AOCL-prepacked
+/// weight the kernel cannot convert (every family but BF16, FP16 and static
+/// U8xS8).  A non-positive K skips the K gates, and the pack-width gate also
+/// needs a positive N.  The master knob and the per-call quant metadata are
+/// the caller's.
+custom_kernel::KernelVariant grp_matmul_ck_weight_variant(data_type_t src,
+        data_type_t wei, data_type_t dst, bool dynamic_quant,
+        data_type_t compute, bool static_u8s8, bool aocl_prepacked, int K,
+        int N);
+
 /// The EFFECTIVE per-call custom-kernel verdict: the master knob folded
 /// with the family sub-toggle and the per-group disqualifier.
 ///

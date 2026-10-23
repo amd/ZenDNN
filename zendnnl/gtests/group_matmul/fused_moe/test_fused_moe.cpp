@@ -64,6 +64,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <sstream>
 #include <gtest/gtest.h>
 
@@ -3454,6 +3455,12 @@ struct MoEInt8PreQuantHarnessT {
     std::vector<tensor_t> w2_s8_t, down_scale_t, down_zp_t;
     std::vector<const void *> wei1_p, wei2_p, no_bias;
     grp_matmul_gated_act_t act_type = grp_matmul_gated_act_t::swiglu_oai_mul;
+    // Op1's compute dtype on the dynamically quantized path: s8 symmetric,
+    // u8 asymmetric (the pre-quantized path is always s8).
+    data_type_t dq_compute = data_type_t::s8;
+    // The per-token source zero points an asymmetric dynamic quantization
+    // writes, one buffer per expert.
+    mutable std::vector<std::vector<int32_t>> dq_src_zp;
 
     // When non-empty, every expert's Op1 `wei_scale.buff` is redirected at
     // this caller-owned address instead of the weight's own attached scale
@@ -3543,8 +3550,14 @@ struct MoEInt8PreQuantHarnessT {
             p[i].dtypes.src = prequant ? data_type_t::s8 : data_type_t::bf16;
             p[i].dtypes.wei = data_type_t::s8;
             p[i].dtypes.dst = data_type_t::bf16;
-            p[i].dtypes.compute = data_type_t::s8;
+            p[i].dtypes.compute = prequant ? data_type_t::s8 : dq_compute;
             p[i].dynamic_quant = !prequant;
+            if (!prequant && dq_compute == data_type_t::u8) {
+                dq_src_zp.resize(num_ops, std::vector<int32_t>(M, 0));
+                p[i].quant_params.src_zp.buff = dq_src_zp[i].data();
+                p[i].quant_params.src_zp.dt = data_type_t::s32;
+                p[i].quant_params.src_zp.dims = {M, 1};
+            }
             copy_attached_scale(prequant ? src_s8_t[i] : src_bf16_t[i],
                     p[i].quant_params.src_scale);
             copy_attached_scale(w1_s8_t[i], p[i].quant_params.wei_scale);
@@ -4102,16 +4115,21 @@ TEST(TestFusedMoEPreQuantSrc, SharedScaleWorkspaceTracksWeightIdentity) {
     }
 }
 
+/// Row-scaled tolerance of an INT8 fused MoE on the custom kernel's
+/// in-register activation against an AOCL two-call reference: twice the
+/// worst row error these tests measure (1.5% of the row's peak).
+constexpr float kInt8FusedActRowFrac = 0.03f;
+
 // Absolute correctness of the pre-quantized path against an independent
-// unfused 2-call reference: bit-exact on every ALGO listed.
-//
-// ALGO 3 is excluded: it engages the TIGHT Op1 layout, which fuses the
-// gated activation into Op1's epilogue and rounds f32 -> bf16 ONCE, while
-// the reference stores bf16 and then activates those rounded values.  Op2
-// re-quantizes per token, so one differing element shifts a row's scale and
-// with it the whole row.  Not a defect: the same divergence appears on the
-// library-side-DQ path, and ALGO 3 is covered bit-exactly by
-// `PreQuantMatchesLibrarySideDq`.
+// unfused 2-call reference, bit-exact on ALGO 1 / 2 / 5 / 6.  AUTO and a
+// declined W8A8 request (`4`) run this INT8 layer on ALGO 3, which engages
+// the TIGHT Op1 layout: it fuses the gated activation into Op1's epilogue and
+// rounds f32 -> bf16 ONCE, while the reference stores bf16 and then activates
+// those rounded values.  Op2 re-quantizes per token, so one differing element
+// shifts a row's scale and with it the whole row.  Those two compare with a
+// row-scaled tolerance against the AOCL (ALGO 1) reference; ALGO 3 is also
+// covered bit-exactly by `PreQuantMatchesLibrarySideDq`.
+
 TEST(TestFusedMoEPreQuantSrc, BothPassesVsTwoCallReference) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
@@ -4135,9 +4153,10 @@ TEST(TestFusedMoEPreQuantSrc, BothPassesVsTwoCallReference) {
         out_fused.alloc(
                 HW::num_ops, static_cast<size_t>(HW::M) * HW::H, HW::is_bf16);
 
+        const bool on_algo3 = algo == 0 || algo == 4;
         {
             reset_grp_matmul_caches();
-            AlgoEnvGuard algo_guard(algo);
+            AlgoEnvGuard algo_guard(on_algo3 ? 1 : algo);
             ASSERT_NO_FATAL_FAILURE(h.run_two_call_reference(
                     /*prequant=*/true, d1_ref, out_ref))
                     << "algo=" << algo;
@@ -4145,16 +4164,32 @@ TEST(TestFusedMoEPreQuantSrc, BothPassesVsTwoCallReference) {
         {
             reset_grp_matmul_caches();
             AlgoEnvGuard algo_guard(algo);
+            GemmModeCaptureGuard capture;
             ASSERT_EQ(h.run_fused(/*prequant=*/true, out_fused),
                     status_t::success)
                     << "algo=" << algo << " fused";
+            if (on_algo3) {
+                const char *m
+                        = test_api::s_last_group_matmul_direct_gemm_mode.load(
+                                std::memory_order_relaxed);
+                const std::string mode = m != nullptr ? m : "";
+                EXPECT_NE(mode.find("flat_n_tile"), std::string::npos)
+                        << "algo=" << algo << " mode=" << mode;
+            }
         }
 
         ASSERT_NO_FATAL_FAILURE(assert_not_all_zero(out_fused, HW::num_ops,
                 all_active, "pre-quantized fused path"));
-        verify_per_expert_2d(out_fused, HW::H, out_ref, HW::H, HW::num_ops,
-                HW::M, HW::H, HW::is_bf16, Tol {0.0f, 0.0f},
-                "PreQuantSrcVsTwoCallRef algo=" + std::to_string(algo));
+        const std::string label
+                = "PreQuantSrcVsTwoCallRef algo=" + std::to_string(algo);
+        if (on_algo3) {
+            verify_per_expert_2d_row_scaled(out_fused, HW::H, out_ref, HW::H,
+                    all_active, HW::H, bool_to_fp_dt(HW::is_bf16),
+                    kInt8FusedActRowFrac, label);
+        } else {
+            verify_per_expert_2d(out_fused, HW::H, out_ref, HW::H, HW::num_ops,
+                    HW::M, HW::H, HW::is_bf16, Tol {0.0f, 0.0f}, label);
+        }
     }
 }
 
@@ -4703,6 +4738,9 @@ TEST(TestFusedMoEPreQuantSrc, InactiveExpertsPaddedLdaAsymmetricNDown) {
     const int M_max = 32;
 
     reset_grp_matmul_caches();
+    // The two-call reference runs on AOCL (ALGO 1), independent of the custom
+    // kernel the fused call uses.
+    auto ref_algo = std::make_unique<AlgoEnvGuard>(1);
 
     tensor_factory_t factory {};
     // Allocate every expert at M_max rows and lda_pad stride, then hand
@@ -4820,6 +4858,8 @@ TEST(TestFusedMoEPreQuantSrc, InactiveExpertsPaddedLdaAsymmetricNDown) {
             status_t::success)
             << "ref Op2";
 
+    // The fused call runs under AUTO (ALGO 3 for this INT8 layer).
+    ref_algo.reset();
     grp_matmul_gated_act_params act {};
     act.act = act_type;
     auto fused = make_fused_moe_op2(num_ops, H, wei2_p, no_bias);
@@ -4865,8 +4905,86 @@ TEST(TestFusedMoEPreQuantSrc, InactiveExpertsPaddedLdaAsymmetricNDown) {
 
     ASSERT_NO_FATAL_FAILURE(assert_not_all_zero(
             d2_test, num_ops, Ms, "pre-quantized fused path"));
-    verify_per_expert_2d(d2_test, H, d2_ref, H, Ms, H, is_bf16,
-            tol_fused(is_bf16), "PreQuantSrc_InactiveExperts_PaddedLda");
+    // AUTO runs this INT8 layer on ALGO 3 and its in-register activation.
+    verify_per_expert_2d_row_scaled(d2_test, H, d2_ref, H, Ms, H,
+            bool_to_fp_dt(is_bf16), kInt8FusedActRowFrac,
+            "PreQuantSrc_InactiveExperts_PaddedLda");
+}
+
+// AUTO runs a symmetric INT8 MoE prompt (128 rows per expert) on ALGO 3 in
+// both passes: the prompt tile executor and the custom kernel's in-register
+// activation, with the Op1 arena owned by the library.  It matches the AOCL
+// (ALGO 1) two-call reference for every gated activation and both source
+// forms.  An asymmetric (`compute=u8`) one keeps the shape rules, so its
+// arena and its route agree through the group DQ rewrite and the call
+// succeeds off the prompt tile.  Its numbers are not checked: asymmetric
+// DQ-INT8 grouped matmul disagrees with an FP32 ground truth on main as well
+// (a separate issue), whatever the ALGO.
+TEST(TestFusedMoEInt8AutoPrompt, MatchesAoclAndRunsThePromptTile) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    using zendnnl::common::data_type_t;
+    if (!custom_kernel::avx512vnni_available()) {
+        GTEST_SKIP() << "Requires AVX-512 VNNI for the INT8 custom kernel.";
+    }
+    using HW = MoEInt8PreQuantHarnessT<128>;
+    const std::vector<int> all_active(HW::num_ops, HW::M);
+    CustomKernelOverride ck_on(true);
+    CustomKernelInt8Override ck_int8_on(true);
+    for (const auto act : {grp_matmul_gated_act_t::swiglu_oai_mul,
+                 grp_matmul_gated_act_t::silu_and_mul,
+                 grp_matmul_gated_act_t::gelu_and_mul}) {
+        for (const bool prequant : {true, false}) {
+            for (const bool asym : {false, true}) {
+                if (asym && prequant) continue;
+                const std::string label = std::string("act=")
+                        + std::to_string(static_cast<int>(act))
+                        + (prequant ? " prequant" : " dq")
+                        + (asym ? " asym" : " sym");
+                SCOPED_TRACE(label);
+                HW h;
+                h.act_type = act;
+                h.dq_compute = asym ? data_type_t::u8 : data_type_t::s8;
+                ASSERT_NO_FATAL_FAILURE(h.build());
+                TypedBuffers d1_ref, out_ref, out;
+                d1_ref.alloc(HW::num_ops,
+                        static_cast<size_t>(HW::M) * HW::N_gate_up,
+                        HW::is_bf16);
+                out_ref.alloc(HW::num_ops, static_cast<size_t>(HW::M) * HW::H,
+                        HW::is_bf16);
+                out.alloc(HW::num_ops, static_cast<size_t>(HW::M) * HW::H,
+                        HW::is_bf16);
+                {
+                    reset_grp_matmul_caches();
+                    AlgoEnvGuard aocl(1);
+                    ASSERT_NO_FATAL_FAILURE(h.run_two_call_reference(
+                            prequant, d1_ref, out_ref));
+                }
+                std::string mode;
+                {
+                    reset_grp_matmul_caches();
+                    AlgoEnvGuard auto_algo(0);
+                    GemmModeCaptureGuard capture;
+                    ASSERT_EQ(h.run_fused(prequant, out), status_t::success);
+                    const char *m
+                            = test_api::s_last_group_matmul_direct_gemm_mode
+                                      .load(std::memory_order_relaxed);
+                    mode = m != nullptr ? m : "";
+                }
+                if (asym) {
+                    EXPECT_EQ(mode.find("ptile"), std::string::npos) << mode;
+                    continue;
+                }
+                EXPECT_NE(mode.find("ptile"), std::string::npos) << mode;
+                EXPECT_NE(mode.find("custom"), std::string::npos) << mode;
+                ASSERT_NO_FATAL_FAILURE(assert_not_all_zero(
+                        out, HW::num_ops, all_active, "AUTO INT8 prompt"));
+                verify_per_expert_2d_row_scaled(out, HW::H, out_ref, HW::H,
+                        all_active, HW::H, bool_to_fp_dt(HW::is_bf16),
+                        kInt8FusedActRowFrac, label);
+            }
+        }
+    }
 }
 
 // One INSTANTIATE_TEST_SUITE_P per fixture subclass, each binding

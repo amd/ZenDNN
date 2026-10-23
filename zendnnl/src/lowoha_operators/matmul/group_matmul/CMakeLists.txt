@@ -26,6 +26,7 @@ set(lowoha_group_matmul_sources
   group_matmul/executors/n_tile/n_tile_admission.cpp
   group_matmul/multi_expert/expert_parallel/group_matmul_expert_parallel.cpp
   group_matmul/multi_expert/multilevel/parallel_multilevel.cpp
+  group_matmul/multi_expert/multi_expert_policy.cpp
   group_matmul/single_expert/single_expert_policy.cpp
   group_matmul/single_expert/single_expert_plan.cpp
   group_matmul/single_expert/single_expert_executor.cpp
@@ -45,6 +46,7 @@ set(lowoha_group_matmul_sources
   group_matmul/custom_kernel/ukernel/s4_microkernel.cpp
   group_matmul/custom_kernel/ukernel/f16_microkernel.cpp
   group_matmul/custom_kernel/dispatch.cpp
+  group_matmul/custom_kernel/ck_enable.cpp
   group_matmul/multi_expert/ntile_flat_parallel/ntile_flat_parallel.cpp
   group_matmul/executors/n_tile/prompt_tile/prompt_tile_topology.cpp
   group_matmul/executors/n_tile/prompt_tile/prompt_tile_tunables.cpp

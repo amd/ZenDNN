@@ -29,6 +29,7 @@
 #include "lowoha_operators/matmul/group_matmul/common/grp_matmul_constants.hpp"
 #include "lowoha_operators/matmul/group_matmul/common/grp_matmul_env.hpp"
 #include "lowoha_operators/matmul/group_matmul/multi_expert/multi_expert_policy.hpp"
+#include "lowoha_operators/matmul/group_matmul/selection/call_route.hpp"
 #include "lowoha_operators/matmul/group_matmul/single_expert/single_expert_policy.hpp"
 
 namespace zendnnl {
@@ -44,9 +45,9 @@ namespace matmul {
 //   every unpinned prompt to ALGO 1. ALGO 2 therefore remains explicit-only.
 //   AUTO_DECODE_ALGO default = 3 (flat_n_tile and its default refinements).
 //
-// A BF16 or FP16 layer of at least two experts
-// (`grp_matmul_auto_algo3_layer`) runs ALGO 3 in both phases instead while
-// its phase is unset.
+// An ALGO-3 MoE layer (`grp_matmul_auto_algo3_layer`: at least two experts
+// in a custom-kernel family) runs ALGO 3 in both phases instead while its
+// phase is unset.
 //
 // Accepted explicit values are {0,1,2,3,4,5,6}:
 // scheduler identities beyond that set:
@@ -214,9 +215,12 @@ inline bool grp_matmul_wc2_global_phase_split_unsupported() {
 
 /// Call-level form of the policy above. Each weight pool is considered
 /// independently so fused MoE covers both W13 and W2: a pool is hazardous only
-/// when it is an eligible BF16/FP16 ALGO-3 layer (or a single dense layer
-/// under a single-expert CK policy) and at least one active weight can
-/// actually use WC=2.
+/// when one of its active weights can be rewritten in place at WC=2 — a
+/// BF16 / FP16 multi-expert layer or a single dense layer under a
+/// single-expert CK policy (their custom-kernel pack), or an S8 weight with a
+/// declared writable capacity (its AOCL reorder).  INT8 / W4A8 custom-kernel
+/// packs are always out of place.  The AUTO-only MoE knobs do not enter: under
+/// a pin they do not decide who writes the buffer.
 inline bool grp_matmul_wc2_global_phase_split_unsupported_for_call(
         const std::vector<int> &M, const std::vector<int> &N,
         const std::vector<int> &K, const std::vector<matmul_params> &params,
@@ -231,12 +235,15 @@ inline bool grp_matmul_wc2_global_phase_split_unsupported_for_call(
     const auto pool_is_hazardous = [&](const std::vector<matmul_params> &pool,
                                            const std::vector<int> &pool_N,
                                            const std::vector<int> &pool_K) {
-        if (!grp_matmul_auto_algo3_call(M, pool)
-                && !grp_matmul_single_dense_call(
-                        M, pool_N, pool_K, pool, num_threads))
-            return false;
+        const bool ck_owned = grp_matmul_float_moe_layer(M, pool)
+                || grp_matmul_single_dense_call(
+                        M, pool_N, pool_K, pool, num_threads);
         for (size_t i = 0; i < M.size() && i < pool.size(); ++i) {
-            if (M[i] > 0 && pool[i].weight_cache_type >= 2) return true;
+            if (M[i] > 0 && pool[i].weight_cache_type >= 2
+                    && (ck_owned
+                            || (pool[i].dtypes.wei == data_type_t::s8
+                                    && pool[i].wei_buffer_capacity_bytes > 0)))
+                return true;
         }
         return false;
     };
@@ -283,7 +290,7 @@ inline bool grp_matmul_phase_pinned_to_algo3(grp_matmul_phase phase) {
     return setting.pins_generic_policy() && setting.generic_effective_algo == 3;
 }
 
-/// Can this phase of a BF16/FP16 `grp_matmul_auto_algo3_layer` run an
+/// Can this phase of a `grp_matmul_auto_algo3_layer` run an
 /// n_tile_safe call on an ALGO other than 3?  Unset, it runs ALGO 3.  A pin
 /// other than 3 can; the legacy cascade (`=0`) and an `=5` pin may pick
 /// another ALGO, so they count.
@@ -325,7 +332,7 @@ inline bool grp_matmul_auto_algo3_only(bool auto_algo3_layer) {
 ///     layout.  An UNSET prompt must stay reachable: Rule 0.7 sends it to
 ///     ALGO 1, which is precisely the case the warm exists for.
 ///
-/// A BF16/FP16 `grp_matmul_auto_algo3_layer` runs both unset phases on
+/// A `grp_matmul_auto_algo3_layer` runs both unset phases on
 /// ALGO 3, so either target has a reader only when a pin sends some phase
 /// off ALGO 3, and the ALGO 3 arena only while some phase can still reach it.
 inline bool grp_matmul_cross_warm_target_reachable(
@@ -469,16 +476,16 @@ struct auto_algo_trace {
 
 /// `single_expert_epilogue_ok` is false when the custom kernel would refuse a
 /// single expert's epilogue (see `ck_serves_single_expert_epilogue`); the
-/// selector sees none of those terms itself.  `single_ck`, when given, is the
-/// call's single-expert policy already resolved for those inputs (so the
-/// dispatcher classifies the call once).
+/// selector sees none of those terms itself.  `route`, when given, carries
+/// the dispatcher's single-expert and MoE verdicts for these inputs, so the
+/// call is classified once.
 int select_grp_matmul_algo(const std::vector<char> &layout,
         const std::vector<int> &M, const std::vector<int> &N,
         const std::vector<int> &K, const std::vector<matmul_params> &params,
         int num_threads, auto_algo_trace *trace = nullptr,
         grp_matmul_gated_act_t fused_act = grp_matmul_gated_act_t::none,
         bool single_expert_epilogue_ok = true,
-        const single_expert_ck_t *single_ck = nullptr);
+        const grp_matmul_call_route *route = nullptr);
 
 } // namespace matmul
 } // namespace lowoha

@@ -1634,10 +1634,11 @@ status_t group_matmul_fused_moe_execute(
             op1_internal, act, custom_kernel_en, env_algo_fused, resolved_algo);
 
     // Publish the arena the DECODE call will get, for the prompt-side
-    // cross-warm.  Under AUTO a prompt-shaped call outside a BF16/FP16 layer
-    // of several experts resolves to ALGO 1, so `want_tight` above is false
-    // for it while the decode call -- same layer, same weights, same
-    // activation -- resolves to ALGO 3 and gets the tight arena.  A warmer
+    // cross-warm.  Under AUTO a prompt-shaped call outside an ALGO-3 MoE
+    // layer (`grp_matmul_auto_algo3_layer`) resolves to ALGO 1, so
+    // `want_tight` above is false for it while the decode call -- same
+    // layer, same weights, same activation -- resolves to ALGO 3 and gets the
+    // tight arena.  A warmer
     // that read this call's `ldc` would predict the wide split and warm
     // per-tile keys the decode never queries.
     // Asking the same predicate with `resolved_algo = 3` answers for the
@@ -1713,8 +1714,9 @@ status_t group_matmul_fused_moe_execute(
                 &scratch.K_down)) {
         log_error(
                 "group_matmul_fused_moe: WEIGHT_CACHE=2 with a non-AUTO "
-                "global ALGO and phase overrides that split BF16/FP16 "
-                "prompt/decode layout ownership is unsupported. Use "
+                "global ALGO and phase overrides that split BF16/FP16 (or "
+                "capacity-declared INT8) prompt/decode layout ownership is "
+                "unsupported. Use "
                 "WEIGHT_CACHE=1, remove the phase override, or set "
                 "ZENDNNL_GRP_MATMUL_ALGO=0.");
         if (gemm_mode_out != nullptr) {
@@ -1768,8 +1770,8 @@ status_t group_matmul_fused_moe_execute(
     // RESOLVED algo for this call is ALGO 2: under a pinned env algo
     // ({1,2,3,5,6}) that is exactly the pinned value; under AUTO (env 0)
     // the resolved prompt algo is 1 for every unpinned shape-rule dtype
-    // (Rule 0.7), while decode defaults to 3; a BF16/FP16 layer of several
-    // experts runs ALGO 3 when ALGO 3 can serve it.
+    // (Rule 0.7), while decode defaults to 3; an ALGO-3 MoE layer
+    // (`grp_matmul_auto_algo3_layer`) runs ALGO 3 when ALGO 3 can serve it.
     // Vertical fusion therefore remains an M-tile-path only.  This keeps
     // vertical fusion inside the ALGO-2 decision
     // tree and stops it from overriding a pinned ALGO 1/3/5/6 (e.g. an

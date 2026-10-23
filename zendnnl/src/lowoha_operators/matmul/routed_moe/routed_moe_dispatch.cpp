@@ -25,6 +25,7 @@
 #include <omp.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -172,7 +173,6 @@ struct generic_scratch_t {
     std::vector<const void *> secondary_src;
     std::vector<int> local_experts;
     std::vector<int> counts;
-    std::vector<int8_t> token_quant;
     std::vector<float> token_scale_f32;
     std::vector<uint16_t> token_scale_bf16;
 };
@@ -199,6 +199,9 @@ void reserve_elements(std::vector<T> &buffer, size_t elements) {
 /// Below this much bulk copy, forking an OpenMP team costs more than the
 /// copy itself.  Small decode batches stay on the calling thread.
 constexpr size_t kParallelCopyBytes = 256u * 1024u;
+/// Below this many active experts the descriptor seeds stay serial: a team
+/// wake-up costs more than the few microseconds they take.
+constexpr size_t kParallelSeedExperts = 32;
 
 bool checked_mul_size(size_t a, size_t b, size_t &result) {
     if (a != 0 && b > std::numeric_limits<size_t>::max() / a) { return false; }
@@ -398,12 +401,17 @@ void copy_logical_source_row(uint8_t *dst, const uint8_t *src,
     }
 }
 
+/// With @p quant_scale set, @p token_src is a tight BF16 [num_tokens, K]
+/// matrix: each token is quantized to S8 once, into its first routed row, and
+/// copied to its other routed rows, with its scale stored at
+/// `quant_scale[token]`.  Otherwise rows are copied as they are.
 status_t build_grouped_tokens(const char layout_src, const bool trans_src,
         const void *token_src, const int token_src_ld, const int num_tokens,
         const int num_experts, const int topk,
         const group_matmul_projection_params &primary,
         const data_type_t backing_dtype, const std::vector<int> &local_experts,
-        const std::vector<int> &counts, grouped_tokens_t &grouped) {
+        const std::vector<int> &counts, grouped_tokens_t &grouped,
+        float *quant_scale = nullptr) {
     grouped.active_experts.clear();
     grouped.expert_order.clear();
     grouped.counts.clear();
@@ -425,8 +433,9 @@ status_t build_grouped_tokens(const char layout_src, const bool trans_src,
     }
 
     const size_t active = grouped.active_experts.size();
-    const size_t source_element_size
-            = static_cast<size_t>(size_of(primary.params.dtypes.src));
+    const size_t source_element_size = quant_scale != nullptr
+            ? sizeof(int8_t)
+            : static_cast<size_t>(size_of(primary.params.dtypes.src));
     const size_t backing_element_size
             = static_cast<size_t>(size_of(backing_dtype));
     size_t live_rows = std::accumulate(grouped.counts.begin(),
@@ -507,9 +516,61 @@ status_t build_grouped_tokens(const char layout_src, const bool trans_src,
         }
     };
 
+    // Quantizing form: one pass per token, so its BF16 row is read once and
+    // its S8 row is copied from cache to the rest of its routed rows.
+    const auto quantize_tokens = [&](int first, int last) {
+        const auto *bf16 = static_cast<const uint16_t *>(token_src);
+        const int K = primary.input_size;
+        for (int m = first; m < last; ++m) {
+            uint8_t *row0 = nullptr;
+            for (int k = 0; k < topk; ++k) {
+                const slot_ref_t ref
+                        = grouped.slots[static_cast<size_t>(m) * topk + k];
+                if (ref.active < 0) { continue; }
+                // Same layout as `copy_rows`: expert bases at the backing
+                // stride, rows inside an expert at the source stride.
+                uint8_t *row = storage
+                        + grouped.row_base[static_cast<size_t>(ref.active)]
+                                * backing_row_bytes
+                        + static_cast<size_t>(ref.row) * source_row_bytes;
+                if (row0 == nullptr) {
+                    zendnnl::lowoha::reorder::
+                            dynamic_per_token_quant_bf16_s8_native(
+                                    bf16 + static_cast<size_t>(m) * K,
+                                    reinterpret_cast<int8_t *>(row),
+                                    quant_scale + m, 1, K);
+                    row0 = row;
+                } else {
+                    std::memcpy(row, row0, source_row_bytes);
+                }
+            }
+            // A token routed only to other ranks' experts is never read.
+            if (row0 == nullptr) { quant_scale[m] = 0.f; }
+        }
+    };
+
     size_t gathered_bytes = 0;
     const int threads
             = routed_moe::effective_num_threads(primary.params.num_threads);
+    if (quant_scale != nullptr) {
+        if (threads > 1 && num_tokens > 1
+                && checked_mul_size(live_rows, source_row_bytes, gathered_bytes)
+                && gathered_bytes >= kParallelCopyBytes) {
+#pragma omp parallel num_threads(threads)
+            {
+                const int count = omp_get_num_threads();
+                const int rank = omp_get_thread_num();
+                quantize_tokens(
+                        static_cast<int>(static_cast<int64_t>(num_tokens) * rank
+                                / count),
+                        static_cast<int>(static_cast<int64_t>(num_tokens)
+                                * (rank + 1) / count));
+            }
+        } else {
+            quantize_tokens(0, num_tokens);
+        }
+        return status_t::success;
+    }
     if (threads > 1 && live_rows > 1
             && checked_mul_size(live_rows, source_row_bytes, gathered_bytes)
             && gathered_bytes >= kParallelCopyBytes) {
@@ -747,7 +808,9 @@ status_t build_projection_params(
     // pointers. Do not forward it as mutation permission to group Matmul's
     // global-WC prepack warmers.
     grouped_params.wei_buffer_capacity_bytes = 0;
-    params.assign(grouped.active_experts.size(), grouped_params);
+    // Every element is re-seeded from `grouped_params` below, so a reused,
+    // longer vector keeps no stale state.
+    params.resize(grouped.active_experts.size());
     const size_t live_rows = grouped.row_base.back();
     status_t status = gather_source_quant(
             projection.params.quant_params.src_scale, grouped.token_rows,
@@ -789,43 +852,65 @@ status_t build_projection_params(
         if (status != status_t::success) { return status; }
     }
 
-    size_t scale_offset = 0;
-    size_t zp_offset = 0;
-    for (size_t a = 0; a < params.size(); ++a) {
+    // Expert a's source-quant rows start at its first grouped row.
+    const auto seed = [&](size_t a) -> status_t {
         auto &p = params[a];
+        p = grouped_params;
         const int expert = grouped.active_experts[a];
-        status = slice_expert_quant(p.quant_params.wei_scale, expert,
+        status_t st = slice_expert_quant(p.quant_params.wei_scale, expert,
                 num_experts, projection.output_size);
-        if (status != status_t::success) { return status; }
-        status = slice_expert_quant(p.quant_params.wei_zp, expert, num_experts,
+        if (st != status_t::success) { return st; }
+        st = slice_expert_quant(p.quant_params.wei_zp, expert, num_experts,
                 projection.output_size);
-        if (status != status_t::success) { return status; }
-        status = slice_expert_quant(p.quant_params.dst_scale, expert,
-                num_experts, projection.output_size);
-        if (status != status_t::success) { return status; }
-        status = slice_expert_quant(p.quant_params.dst_zp, expert, num_experts,
+        if (st != status_t::success) { return st; }
+        st = slice_expert_quant(p.quant_params.dst_scale, expert, num_experts,
                 projection.output_size);
-        if (status != status_t::success) { return status; }
-        status = slice_expert_postops(p.postop_, expert, num_experts);
-        if (status != status_t::success) { return status; }
+        if (st != status_t::success) { return st; }
+        st = slice_expert_quant(p.quant_params.dst_zp, expert, num_experts,
+                projection.output_size);
+        if (st != status_t::success) { return st; }
+        st = slice_expert_postops(p.postop_, expert, num_experts);
+        if (st != status_t::success) { return st; }
 
         if (token_scale) {
             auto &q = p.quant_params.src_scale;
             q.dims[0] = grouped.counts[a];
-            q.buff = scratch.src_scale.data() + scale_offset;
-            scale_offset
-                    += static_cast<size_t>(grouped.counts[a]) * scale_row_bytes;
+            q.buff = scratch.src_scale.data()
+                    + grouped.row_base[a] * scale_row_bytes;
         }
         if (token_zp) {
             auto &q = p.quant_params.src_zp;
             q.dims[0] = grouped.counts[a];
-            q.buff = scratch.src_zp.data() + zp_offset;
-            zp_offset
-                    += static_cast<size_t>(grouped.counts[a]) * zp_row_elements;
+            q.buff = scratch.src_zp.data()
+                    + grouped.row_base[a] * zp_row_elements;
         }
         p.mem_format_a = 'n';
         p.active_matmul = 0;
         p.total_matmul = 0;
+        return status_t::success;
+    };
+    // Each seed copies a whole descriptor and re-slices its quant metadata,
+    // about a microsecond, so a many-expert layer splits them over the team.
+    const int threads
+            = routed_moe::effective_num_threads(projection.params.num_threads);
+    if (threads > 1 && params.size() >= kParallelSeedExperts) {
+        std::atomic<int> first_error {static_cast<int>(status_t::success)};
+#pragma omp parallel for schedule(static) num_threads(threads)
+        for (long long a = 0; a < static_cast<long long>(params.size()); ++a) {
+            const status_t st = seed(static_cast<size_t>(a));
+            if (st != status_t::success) {
+                int expected = static_cast<int>(status_t::success);
+                first_error.compare_exchange_strong(
+                        expected, static_cast<int>(st));
+            }
+        }
+        status = static_cast<status_t>(first_error.load());
+        if (status != status_t::success) { return status; }
+    } else {
+        for (size_t a = 0; a < params.size(); ++a) {
+            status = seed(a);
+            if (status != status_t::success) { return status; }
+        }
     }
     if (!params.empty()) {
         params[0].active_matmul = static_cast<uint32_t>(params.size());
@@ -1452,19 +1537,8 @@ status_t run_generic(const char layout_src, const bool trans_src,
             && zendnnl::common::zendnnl_platform_info()
                        .get_avx512_bw_vl_status();
     if (can_prequantize_source) {
-        size_t quant_elements = 0;
-        if (!checked_mul_size(static_cast<size_t>(num_tokens),
-                    static_cast<size_t>(primary.input_size), quant_elements)) {
-            return status_t::memory_bad_size;
-        }
-        reserve_elements(scratch.token_quant, quant_elements);
         reserve_elements(
                 scratch.token_scale_f32, static_cast<size_t>(num_tokens));
-        zendnnl::lowoha::reorder::dynamic_per_token_quant_bf16_s8_native(
-                static_cast<const uint16_t *>(token_src),
-                scratch.token_quant.data(), scratch.token_scale_f32.data(),
-                num_tokens, primary.input_size);
-
         prequantized_primary = primary;
         auto &effective_params = prequantized_primary.params;
         effective_params.dtypes.src = data_type_t::s8;
@@ -1475,29 +1549,30 @@ status_t run_generic(const char layout_src, const bool trans_src,
         if (source_scale.dt == data_type_t::bf16) {
             reserve_elements(
                     scratch.token_scale_bf16, static_cast<size_t>(num_tokens));
-            for (int m = 0; m < num_tokens; ++m) {
-                scratch.token_scale_bf16[static_cast<size_t>(m)]
-                        = zendnnl::lowoha::reorder::float_to_bf16(
-                                scratch.token_scale_f32[static_cast<size_t>(
-                                        m)]);
-            }
             source_scale.buff = scratch.token_scale_bf16.data();
         } else {
             source_scale.buff = scratch.token_scale_f32.data();
         }
         effective_primary = &prequantized_primary;
-        effective_token_src = scratch.token_quant.data();
-        effective_token_src_ld = primary.input_size;
         backing_dtype = primary.params.dtypes.dst;
     }
 
     grouped_tokens_t &grouped = scratch.grouped;
-    status_t status = build_grouped_tokens(
-            can_prequantize_source ? 'r' : layout_src,
-            can_prequantize_source ? false : trans_src, effective_token_src,
-            effective_token_src_ld, num_tokens, num_experts, topk,
-            *effective_primary, backing_dtype, local_experts, counts, grouped);
+    status_t status = build_grouped_tokens(layout_src, trans_src,
+            effective_token_src, effective_token_src_ld, num_tokens,
+            num_experts, topk, *effective_primary, backing_dtype, local_experts,
+            counts, grouped,
+            can_prequantize_source ? scratch.token_scale_f32.data() : nullptr);
     if (status != status_t::success) { return status; }
+    if (can_prequantize_source
+            && prequantized_primary.params.quant_params.src_scale.dt
+                    == data_type_t::bf16) {
+        for (int m = 0; m < num_tokens; ++m) {
+            scratch.token_scale_bf16[static_cast<size_t>(m)]
+                    = zendnnl::lowoha::reorder::float_to_bf16(
+                            scratch.token_scale_f32[static_cast<size_t>(m)]);
+        }
+    }
     if (grouped.active_experts.empty()) {
         const size_t element_size = static_cast<size_t>(
                 size_of(secondary != nullptr ? secondary->params.dtypes.dst

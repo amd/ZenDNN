@@ -1832,9 +1832,9 @@ TEST(TestGroupMatmulInt8PromptTile, BitwiseMatchesRounds) {
     }
 }
 
-// The family bitmask defaults to BF16+FP16 (mask 9), so without the INT8 bit
-// an INT8 custom-kernel prompt runs on the round executor.
-TEST(TestGroupMatmulInt8PromptTile, DefaultMaskKeepsRounds) {
+// The family bitmask defaults to every family (mask 15), so an INT8
+// custom-kernel prompt runs on the prompt tile executor.
+TEST(TestGroupMatmulInt8PromptTile, DefaultMaskRunsTheTile) {
     using namespace moe_test_utils;
     namespace ck = zendnnl::lowoha::matmul::custom_kernel;
     namespace pt = zendnnl::lowoha::matmul::prompt_tile;
@@ -1871,14 +1871,13 @@ TEST(TestGroupMatmulInt8PromptTile, DefaultMaskKeepsRounds) {
                       /*moe_postop=*/nullptr, /*gated_act=*/nullptr,
                       /*pack_format_b=*/ {}, rows, data_type_t::s8),
             status_t::success);
-    EXPECT_FALSE(pt::enabled(pt::Family::kInt8));
-    EXPECT_EQ(pt::test_api::s_calls_served.load(), served0);
+    EXPECT_TRUE(pt::enabled(pt::Family::kInt8));
+    EXPECT_GT(pt::test_api::s_calls_served.load(), served0);
     const char *m = zendnnl::lowoha::matmul::test_api::
                             s_last_group_matmul_direct_gemm_mode.load(
                                     std::memory_order_relaxed);
     const std::string mode = m != nullptr ? m : "";
     EXPECT_NE(mode.find("_custom"), std::string::npos) << mode;
-    EXPECT_EQ(mode.find("ptile"), std::string::npos) << mode;
 }
 
 // ===============================================================================
@@ -6222,9 +6221,10 @@ TEST(TestGroupMatmulExpertKernel, AppliesPolicyOnlyToW4A8Experts) {
             << "non-W4A8 experts must preserve the selected inner kernel";
 }
 
-// W4A8 follows the same unpinned ALGO 1 prompt default as other shape-rule
-// dtypes. An explicit prompt pin may still select ALGO 2.
-TEST(TestGroupMatmulAutoPhaseEnv, W4A8PromptDefaultsToAlgo1) {
+// A W4A8 MoE layer runs its unpinned prompt on ALGO 3 with the custom
+// kernel; an explicit `ZENDNNL_GRP_MATMUL_ALGO=0` keeps the shape rules'
+// ALGO 1 prompt default.
+TEST(TestGroupMatmulAutoPhaseEnv, W4A8PromptRunsAlgo3) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     reset_grp_matmul_caches();
@@ -6233,11 +6233,21 @@ TEST(TestGroupMatmulAutoPhaseEnv, W4A8PromptDefaultsToAlgo1) {
     auto s = build_auto_probe(/*M=*/512, /*K=*/4096, /*N=*/14336,
             /*num_ops=*/8, /*num_threads=*/32);
     apply_w4a8_auto_probe(s);
+    // Without AVX-512 VNNI the custom kernel cannot serve W4A8, so the prompt
+    // keeps the shape rules.
+    const bool vnni
+            = zendnnl::lowoha::matmul::custom_kernel::avx512vnni_available();
     auto_algo_trace trace;
     EXPECT_EQ(select_grp_matmul_algo(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads, &trace),
+            vnni ? 3 : 1);
+    EXPECT_STREQ(trace.reason, vnni ? "auto_algo3" : "auto_rule07_prompt_seq");
+
+    AlgoLegacyOverride legacy(true);
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads, &trace),
             1)
-            << "an unpinned W4A8 prompt must use the common ALGO 1 default";
+            << "an explicit ALGO 0 W4A8 prompt must use the ALGO 1 default";
     EXPECT_STREQ(trace.reason, "auto_rule07_prompt_seq");
 }
 
@@ -6281,9 +6291,9 @@ TEST(TestGroupMatmulAutoPhaseEnv, CrossWarmReachableFollowsLayerScope) {
     }
 }
 
-// Every layer outside BF16/FP16 keeps the shape rules: a per-group `{G, N}`
-// INT8 weight, like a per-token one, runs its prompt on ALGO 1 (Rule 0.7)
-// and its decode by Rule 0.5's occupancy test or the ALGO 3 decode default.
+// A per-group `{G, N}` INT8 weight keeps the shape rules: its prompt runs on
+// ALGO 1 (Rule 0.7) and its decode by Rule 0.5's occupancy test or the ALGO 3
+// decode default.  A per-channel one (`groups == 1`) is an ALGO-3 MoE layer.
 TEST(TestGroupMatmulAutoPhaseEnv, PerGroupInt8KeepsShapeRules) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
@@ -6297,11 +6307,16 @@ TEST(TestGroupMatmulAutoPhaseEnv, PerGroupInt8KeepsShapeRules) {
     };
     // M == kDecodeMaxM is decode. Prompt cases sit one row above it.
     const int prompt_m = kDecodeMaxM + 1;
+    // Without AVX-512 VNNI a per-channel layer keeps the shape rules too.
+    const bool vnni
+            = zendnnl::lowoha::matmul::custom_kernel::avx512vnni_available();
     for (const auto &c :
             {layer_case {90, 4, prompt_m, 1, "auto_rule07_prompt_seq"},
                     layer_case {90, 4, 2, 1, "auto_rule05_few_active"},
                     layer_case {90, 16, 2, 3, "auto_phase_env"},
-                    layer_case {1, 4, prompt_m, 1, "auto_rule07_prompt_seq"}}) {
+                    vnni ? layer_case {1, 4, prompt_m, 3, "auto_algo3"}
+                         : layer_case {1, 4, prompt_m, 1,
+                                   "auto_rule07_prompt_seq"}}) {
         auto s = build_auto_probe(c.m, /*K=*/2880, /*N=*/5760, c.num_ops,
                 /*num_threads=*/32);
         for (size_t i = 0; i < s.params.size(); ++i) {
@@ -6653,12 +6668,15 @@ TEST(TestGroupMatmulAutoPhaseEnv, S8FewExpertsDecodeStillTakesRule05) {
                "ALGO 1";
 }
 
+// The Rule 0.5 tests below run W4A8 under the shape rules, which an explicit
+// `ZENDNNL_GRP_MATMUL_ALGO=0` keeps; unset, the layer runs ALGO 3.
 TEST(TestGroupMatmulAutoPhaseEnv,
         W4A8FewExpertsDecodeFullOccupancyRoutesToAlgo3) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     reset_grp_matmul_caches();
     AlgoEnvGuard reset_algo(0);
+    AlgoLegacyOverride legacy(true);
 
     auto s = build_auto_probe(/*M=*/1, /*K=*/4096, /*N=*/14336,
             /*num_ops=*/8, /*num_threads=*/32);
@@ -6678,6 +6696,7 @@ TEST(TestGroupMatmulAutoPhaseEnv,
     using namespace moe_test_utils;
     reset_grp_matmul_caches();
     AlgoEnvGuard reset_algo(0);
+    AlgoLegacyOverride legacy(true);
 
     auto s = build_auto_probe(/*M=*/16, /*K=*/4096, /*N=*/14336,
             /*num_ops=*/8, /*num_threads=*/128);
@@ -6696,6 +6715,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, W4A8InactiveLeftoverUsesRule05Occupancy) {
     using namespace moe_test_utils;
     reset_grp_matmul_caches();
     AlgoEnvGuard reset_algo(0);
+    AlgoLegacyOverride legacy(true);
 
     auto s = build_auto_probe(/*M=*/16, /*K=*/4096, /*N=*/14336,
             /*num_ops=*/8, /*num_threads=*/28);
@@ -7122,8 +7142,9 @@ TEST(TestGroupMatmulAutoPhaseEnv, TraceNamesTheMatchedRule) {
     EXPECT_EQ(rule05.rfind("auto_rule05_", 0), 0u)
             << "few-expert decode must report a Rule 0.5 arm, got " << rule05;
 
-    // W4A8 uses the same Rule 0.5 occupancy decision.
+    // W4A8 under the shape rules uses the same Rule 0.5 occupancy decision.
     {
+        AlgoLegacyOverride legacy(true);
         auto s = build_auto_probe(/*M=*/8, /*K=*/2048, /*N=*/8192,
                 /*num_ops=*/4, /*num_threads=*/64);
         apply_w4a8_auto_probe(s);
@@ -7146,7 +7167,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, TraceNamesTheMatchedRule) {
             "auto_rule07_prompt_seq");
     EXPECT_EQ(algo, 1);
 
-    // A BF16/FP16 layer of several experts, in either phase.
+    // An ALGO-3 MoE layer, in either phase.
     for (const int M : {8, kDecodeMaxM + 1}) {
         EXPECT_EQ(reason_for(M, /*K=*/2048, /*N=*/8192, /*num_ops=*/4,
                           /*num_threads=*/64, &algo, /*shape_rules=*/false),

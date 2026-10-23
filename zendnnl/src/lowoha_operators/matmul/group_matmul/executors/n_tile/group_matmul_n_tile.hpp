@@ -129,6 +129,7 @@
 #include "../../common/group_matmul_parallel_common.hpp"
 #include "lowoha_operators/matmul/group_matmul/common/per_thread_scratch.hpp"
 #include "lowoha_operators/matmul/group_matmul/executors/n_tile/n_tile_knobs.hpp"
+#include "lowoha_operators/matmul/group_matmul/selection/call_route.hpp"
 // `group_matmul_n_tile_planner.hpp` provides the planner output
 // types (`GroupNTileStrategy`, `GroupNTileTopology`, `GroupNTilePlan`,
 // `RoundCandidates`, `RoundPick`) plus the test-only Phase-B capture
@@ -470,18 +471,17 @@ inline void fill_ntile_expert_order(int *out, int &out_size, int max_size,
 /// gemm_mode_out so benchdnn / profiler output reveals whether the
 /// custom microkernel engaged.
 ///
-/// A BF16/FP16 MoE call, or one whose weights only the custom kernel can
+/// An ALGO-3 MoE call, or one whose weights only the custom kernel can
 /// read, with more than `kNTilePlanMaxExperts` experts runs as consecutive
 /// expert slices of at most that many; `gemm_mode_out` then names the last
 /// slice's path, or the first failing slice's `error_` sentinel, after which
 /// no further slice runs.
 ///
-/// `ck_weight_cache_mode` is the weight-cache mode the custom kernel packs
-/// with: the least of the process mode and every expert's per-call
-/// `weight_cache_type`, taken before any cap the caller applies to its AOCL
-/// reorders.  -1 derives it from the process mode and `params`.
-/// `ck_inplace_licence` lets that pack be written in place while AUTO mixed
-/// in-place mode is active (`prepare_grouped_auto_weight_cache`).
+/// `route` carries the dispatcher's per-call verdicts
+/// (`grp_matmul_call_route`): the MoE family, the custom-kernel weight-cache
+/// mode, and the licence to write that pack in place while AUTO mixed
+/// in-place mode is active (`prepare_grouped_auto_weight_cache`).  Without
+/// one, the executor classifies the call itself and grants no licence.
 void flat_n_tile(const std::vector<char> &layout,
         const std::vector<bool> &transA, const std::vector<bool> &transB,
         const std::vector<int> &M, const std::vector<int> &N,
@@ -496,7 +496,7 @@ void flat_n_tile(const std::vector<char> &layout,
         data_type_t act_dtype = data_type_t::none,
         const char **gemm_mode_out = nullptr,
         const std::vector<void *> *w4a8_s8_weights = nullptr,
-        int32_t ck_weight_cache_mode = -1, bool ck_inplace_licence = false);
+        const grp_matmul_call_route *route = nullptr);
 
 /// @brief Drop every memoized f32 weight-scale view.
 ///

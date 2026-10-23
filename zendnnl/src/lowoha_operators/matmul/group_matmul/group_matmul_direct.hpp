@@ -773,7 +773,8 @@ void clear_fused_moe_scratch();
  * process-wide weight-cache mode or the mixed flag.
  * Returns true only when this call is authorised to register the single
  * in-place AOCL mutation used by mixed prompt/decode caching.
- * `auto_algo3_layer` (`grp_matmul_auto_algo3_call`) marks a BF16/FP16 MoE call;
+ * `auto_algo3_layer` marks a BF16/FP16 ALGO-3 MoE call
+ * (`grp_matmul_auto_algo3_family`) or a single expert covered in both phases;
  * when the process keeps mixed mode and no phase can send the call off
  * ALGO 3, `*ck_inplace_licence` reports that, if the call runs ALGO 3, its
  * AOCL layouts must stay out-of-place and its custom-kernel pack may use

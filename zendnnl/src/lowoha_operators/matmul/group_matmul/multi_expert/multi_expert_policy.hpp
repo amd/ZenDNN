@@ -21,6 +21,7 @@
 #define ZENDNNL_GROUP_MATMUL_MULTI_EXPERT_POLICY_HPP
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -34,48 +35,68 @@ namespace zendnnl {
 namespace lowoha {
 namespace matmul {
 
-/// Does unpinned AUTO run this layer on ALGO 3 in both phases?  BF16 and
-/// FP16 layers of at least two experts do: the custom kernel serves both
-/// phases from one family-specific pack.  A single-expert call, such as a
-/// routed `matmul_direct`, and every other dtype keep the shape rules of
-/// `auto_select_algo`, so their prompt and decode may run different ALGOs.
+/// Does unpinned AUTO run this layer on ALGO 3 in both phases (an "ALGO-3
+/// MoE layer")?  A layer of at least two experts in a custom-kernel family
+/// does: the kernel serves both phases from one family-specific pack.  A
+/// single-expert call, such as a routed `matmul_direct`, and every other
+/// layer keep the shape rules of `auto_select_algo`, so their prompt and
+/// decode may run different ALGOs.
 /// `layer_experts` counts the pool (`total_matmul` under the framework
 /// opt-in), so a call with one active expert of a larger pool stays with its
 /// layer.
-inline bool grp_matmul_auto_algo3_layer(
-        bool supported_float_family, int layer_experts) {
-    return supported_float_family && layer_experts >= 2;
+inline bool grp_matmul_auto_algo3_layer(bool ck_family, int layer_experts) {
+    return ck_family && layer_experts >= 2;
 }
 
-/// `grp_matmul_auto_algo3_layer` for one call: every active expert is
-/// uniformly bf16 x bf16 or f16 x f16 on a weight the caller did not
-/// AOCL-prepack (such a weight keeps the AOCL prompt path).
-inline bool grp_matmul_auto_algo3_call(
-        const std::vector<int> &M, const std::vector<matmul_params> &params) {
-    if (params.size() < M.size()) { return false; }
-    bool any_active = false;
-    data_type_t layer_dtype = data_type_t::none;
-    for (size_t i = 0; i < M.size(); ++i) {
-        if (M[i] <= 0) { continue; }
-        const auto &p = params[i];
-        const data_type_t dt = p.dtypes.src;
-        if ((dt != data_type_t::bf16 && dt != data_type_t::f16)
-                || p.dtypes.wei != dt
-                || (layer_dtype != data_type_t::none && layer_dtype != dt)
-                || is_aocl_prepacked_weight(p)) {
-            return false;
-        }
-        layer_dtype = dt;
-        any_active = true;
-    }
-    int layer_experts = static_cast<int>(M.size());
-    if (!params.empty() && params[0].active_matmul > 0) {
-        layer_experts = std::max(
-                layer_experts, static_cast<int>(params[0].total_matmul));
-    }
-    return any_active
-            && grp_matmul_auto_algo3_layer(
-                    layer_dtype != data_type_t::none, layer_experts);
+namespace test_api {
+// A `single_expert_dtype` mask for `ZENDNNL_GRP_MATMUL_MULTI_EXPERT_ALGO3` for
+// the lifetime of a test; `-1` uses the cached env value.
+inline std::atomic<int> s_grp_matmul_multi_expert_algo3_override {-1};
+} // namespace test_api
+
+/// `ZENDNNL_GRP_MATMUL_MULTI_EXPERT_ALGO3`: the dtypes (`single_expert_dtype`
+/// bits, same tokens as the single-expert knobs) whose MoE layers unpinned
+/// AUTO keeps on ALGO 3 in both phases.  Default every dtype; under an
+/// explicit `ZENDNNL_GRP_MATMUL_ALGO=0` the default is `bf16,f16`.
+unsigned get_grp_matmul_multi_expert_algo3_dtypes();
+
+/// Is this INT8 or W4A8 expert one the custom kernel serves in both phases?
+/// Symmetric per-channel INT8 or per-group W4A8 weights, one source scale per
+/// row, no zero point, no post-op, every per-weight gate of
+/// `grp_matmul_ck_weight_variant`, its dtype in
+/// `get_grp_matmul_multi_expert_algo3_dtypes`, and a family the prompt tile
+/// executor serves.  Asymmetric INT8 is excluded: the group DQ pre-pass turns
+/// it into a static-U8xS8-shaped call, so its verdict would change between
+/// the fused-MoE arena choice and the pass that runs.
+bool grp_matmul_auto_algo3_quant_expert(const matmul_params &p, int K, int N);
+
+/// The families an ALGO-3 MoE layer comes in: BF16 / FP16, whose
+/// custom-kernel pack may take the caller's buffer, and INT8 / W4A8, whose
+/// pack is always out of place.
+enum class grp_matmul_algo3_family { none, float_family, quant_family };
+
+/// `grp_matmul_auto_algo3_layer` for one call: every active expert has the
+/// same dtypes, and is either bf16 x bf16 or f16 x f16 (its dtype in
+/// `get_grp_matmul_multi_expert_algo3_dtypes`) on a weight the caller did not
+/// AOCL-prepack (such a weight keeps the AOCL prompt path), or an INT8 / W4A8
+/// expert `grp_matmul_auto_algo3_quant_expert` admits.  The dispatcher
+/// computes it once per call and hands it to the selector and the executor.
+grp_matmul_algo3_family grp_matmul_auto_algo3_family(const std::vector<int> &M,
+        const std::vector<int> &N, const std::vector<int> &K,
+        const std::vector<matmul_params> &params);
+
+/// A layer of at least two experts, every active one uniformly bf16 x bf16 or
+/// f16 x f16 on a weight the caller did not AOCL-prepack: the layers whose
+/// custom-kernel pack may take the caller's buffer.  Independent of every
+/// AUTO-only knob, for the ownership guards that also hold under a pin.
+bool grp_matmul_float_moe_layer(
+        const std::vector<int> &M, const std::vector<matmul_params> &params);
+
+inline bool grp_matmul_auto_algo3_call(const std::vector<int> &M,
+        const std::vector<int> &N, const std::vector<int> &K,
+        const std::vector<matmul_params> &params) {
+    return grp_matmul_auto_algo3_family(M, N, K, params)
+            != grp_matmul_algo3_family::none;
 }
 
 // ── DecodeDynamic generic decision-tree knobs ────────────────────────

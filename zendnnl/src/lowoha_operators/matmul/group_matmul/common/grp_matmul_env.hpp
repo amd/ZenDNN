@@ -432,8 +432,8 @@ inline int get_grp_matmul_fused_moe_tight() {
 //   cache regime that auto-select would route the OTHER phase to in the
 //   same process, so a deployment that fires only prompt during warmup
 //   still arrives at decode with both regimes warm — no first-decode-
-//   call prepack spike.  A BF16/FP16 layer of several experts runs both unset
-//   phases on ALGO 3, so for it this only fires when an
+//   call prepack spike.  An ALGO-3 MoE layer runs both unset phases on
+//   ALGO 3, so for it this only fires when an
 //   `AUTO_{PROMPT,DECODE}_ALGO` pin splits them
 //   (`grp_matmul_cross_warm_target_reachable`).
 //

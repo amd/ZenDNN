@@ -797,6 +797,43 @@ TEST_F(Int8InPlaceWarm, AutoPromptThenDecodeMatchesPristineReference) {
     // exist.  A pinned ALGO would make this test vacuous.
     moe_test_utils::AlgoEnvGuard algo_guard(0);
 
+    // Unpinned, the layer runs ALGO 3 in both phases from an out-of-place
+    // custom-kernel pack: the declared capacity is never used, and the
+    // outputs match the capacity-free run.
+    {
+        moe_test_utils::CustomKernelInt8Override ck_int8(true);
+        std::vector<std::vector<int8_t>> wei_ref, wei_cap;
+        std::vector<std::vector<bfloat16_t>> ref_prompt, ref_decode, cap_prompt,
+                cap_decode;
+        make_banks(wei_ref);
+        reset_grp_matmul_caches();
+        set_mode(/*wc=*/2, /*mixed=*/false);
+        phase(wei_ref, 0, kPromptM, src_prompt.data(), 32, ref_prompt);
+        phase(wei_ref, 0, kDecodeM, src_decode.data(), 32, ref_decode);
+        make_banks(wei_cap);
+        const auto pristine = wei_cap;
+        reset_grp_matmul_caches();
+        set_mode(/*wc=*/2, /*mixed=*/false);
+        phase(wei_cap, cap, kPromptM, src_prompt.data(), 32, cap_prompt);
+        phase(wei_cap, cap, kDecodeM, src_decode.data(), 32, cap_decode);
+        ASSERT_FALSE(::testing::Test::HasFatalFailure());
+        for (int e = 0; e < kE; ++e) {
+            EXPECT_EQ(wei_cap[e], pristine[e]) << "expert " << e;
+            EXPECT_EQ(std::memcmp(cap_prompt[e].data(), ref_prompt[e].data(),
+                              ref_prompt[e].size() * sizeof(bfloat16_t)),
+                    0)
+                    << "expert " << e;
+            EXPECT_EQ(std::memcmp(cap_decode[e].data(), ref_decode[e].data(),
+                              ref_decode[e].size() * sizeof(bfloat16_t)),
+                    0)
+                    << "expert " << e;
+        }
+    }
+
+    // The explicit ALGO 0 shape rules keep the AOCL prompt reorder, the
+    // in-place writer the rest of this test covers.
+    moe_test_utils::AlgoLegacyOverride legacy(true);
+
     int non_vacuous = 0;
     for (const auto &r : regimes) {
         SCOPED_TRACE(r.what);

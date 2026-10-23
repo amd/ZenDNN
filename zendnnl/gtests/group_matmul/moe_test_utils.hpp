@@ -1873,6 +1873,39 @@ inline status_t run_legacy_2call_ref(int num_ops, int M, int K_in,
             bool_to_fp_dt(is_bf16), act_type, src, wei1, wei2, d1_ref, d2_ref);
 }
 
+/// Per-row tolerance check: each element of a row may differ from the
+/// reference by `row_frac` of that row's largest reference magnitude.  For
+/// an INT8 fused MoE on the custom kernel's in-register activation, which
+/// rounds the gated pair once in FP32 where the two-call reference rounds it
+/// to BF16 first; W2's per-token requantization turns that into an error
+/// scaled to the row, not to each element.  M=0 experts are skipped.
+template <typename Label>
+inline void verify_per_expert_2d_row_scaled(const TypedBuffers &got,
+        size_t got_row_stride, const TypedBuffers &ref, size_t ref_row_stride,
+        const std::vector<int> &Ms, int N, data_type_t fp, float row_frac,
+        Label &&label) {
+    float worst = 0.0f;
+    for (int e = 0; e < (int)Ms.size(); ++e) {
+        for (int r = 0; r < Ms[e]; ++r) {
+            float peak = 0.0f;
+            for (int c = 0; c < N; ++c)
+                peak = std::max(peak,
+                        std::abs(
+                                ref.at(e, (size_t)r * ref_row_stride + c, fp)));
+            for (int c = 0; c < N; ++c) {
+                const float g = got.at(e, (size_t)r * got_row_stride + c, fp);
+                const float f = ref.at(e, (size_t)r * ref_row_stride + c, fp);
+                if (peak > 0.0f)
+                    worst = std::max(worst, std::abs(g - f) / peak);
+                ASSERT_NEAR(g, f, static_cast<double>(peak) * row_frac)
+                        << label << " e=" << e << " M_e=" << Ms[e] << " r=" << r
+                        << " c=" << c;
+            }
+        }
+    }
+    ::testing::Test::RecordProperty("worst_row_frac", std::to_string(worst));
+}
+
 // Per-expert × per-row × per-col tolerance check.  `got_row_stride`
 // and `ref_row_stride` let the caller compare buffers with different
 // row strides (e.g. in-place src reuse stride-K vs reference stride-H).

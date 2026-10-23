@@ -39,8 +39,9 @@ namespace {
 
 // Auto-select (ALGO 0) heuristic — used when the caller leaves
 // ZENDNNL_GRP_MATMUL_ALGO unset.  The out-of-the-box routing is:
-//   * BF16 or FP16 layer of at least two experts
-//     (`grp_matmul_auto_algo3_layer`) that ALGO 3 can serve (`n_tile_safe`) —
+//   * MoE layer of at least two experts in a custom-kernel family (BF16,
+//     FP16, DQ-INT8, W4A8; `grp_matmul_auto_algo3_layer`) that ALGO 3 can
+//     serve (`n_tile_safe`) —
 //     ALGO 3 in both phases while the phase is not pinned: the custom kernel
 //     serves prompt and decode from one pack.
 //   * Single expert (Rule 0.46) — ALGO 3 for each phase whose
@@ -65,7 +66,7 @@ namespace {
 //
 // Decision precedence (tightest first):
 //
-//   BF16/FP16 MoE — an `n_tile_safe` call of a
+//   ALGO-3 MoE — an `n_tile_safe` call of a
 //      `grp_matmul_auto_algo3_layer` whose phase is not pinned → 3 (label:
 //      auto_algo3).  Such a layer skips the single-thread exit and Rule 0,
 //      because ALGO 3 slices a call past `kNTilePlanMaxExperts`; a pinned
@@ -94,8 +95,10 @@ namespace {
 //                                        when !n_tile_safe)
 //        otherwise                     → ALGO 1 (full-team sequential)
 //      Never ALGO 2 — that is opt-in only (see the no-auto-2 invariant).
-//      Mixtral-class shapes (8 experts, topk=2 → 2 active) take the ALGO 1
-//      arm on any real host.  Models with >8 experts never reach this rule
+//      Mixtral-class shapes (8 experts, topk=2 → 2 active) outside an
+//      ALGO-3 MoE layer take the ALGO 1 arm on any real host (an ALGO-3 MoE
+//      layer never reaches this rule).  Models with >8 experts never reach
+//      this rule
 //      and inherit the ALGO 3 decode default from Rule 1.
 //      Prompt is handled by Rule 0.7; this rule never fires for prompt.
 //      Yields to an explicit decode pin.
@@ -169,7 +172,7 @@ static int auto_select_algo(const std::vector<int> &M,
         const std::vector<matmul_params> &params, int num_threads,
         bool m_tile_safe, bool n_tile_safe, auto_algo_trace *trace,
         grp_matmul_gated_act_t fused_act, bool single_expert_epilogue_ok,
-        const single_expert_ck_t *precomputed_single_ck) {
+        const grp_matmul_call_route *route) {
     // Every return below goes through this, so the reported rule cannot
     // disagree with the rule that ran.  `want` is the rule's own answer;
     // `algo` is that answer after the safety clamps, and the two differing is
@@ -183,17 +186,18 @@ static int auto_select_algo(const std::vector<int> &M,
     };
 
     const int num_ops = static_cast<int>(M.size());
-    const bool algo3_layer
-            = n_tile_safe && grp_matmul_auto_algo3_call(M, params);
+    const bool algo3_layer = n_tile_safe
+            && (route != nullptr
+                            ? route->moe_family != grp_matmul_algo3_family::none
+                            : grp_matmul_auto_algo3_call(M, N, K, params));
     // Rule 0.46's layer keeps ALGO 3 at any team size, like an MoE layer: its
     // custom-kernel pack may already own the weight buffer.
     const single_expert_ck_t single_ck
             = !(n_tile_safe && single_expert_epilogue_ok && num_ops == 1)
             ? single_expert_ck_t {}
-            : precomputed_single_ck != nullptr
-            ? *precomputed_single_ck
-            : grp_matmul_single_expert_call_ck(
-                      M, N, K, params, fused_act, num_threads);
+            : route != nullptr ? route->single_ck
+                               : grp_matmul_single_expert_call_ck(M, N, K,
+                                         params, fused_act, num_threads);
     const int max_M = max_active_grp_matmul_m(M, M.size());
     const grp_matmul_phase phase = classify_grp_matmul_phase(max_M);
     const bool is_decode = phase == grp_matmul_phase::decode;
@@ -295,8 +299,8 @@ static int auto_select_algo(const std::vector<int> &M,
     // expert.  Below that the team is far wider than the expert count and the
     // full-team sequential ALGO 1 wins, because each expert then gets the
     // whole team for its own N-split with no round overhead.  The
-    // Mixtral-class shape lands here: 8 experts with topk=2 means 2 active,
-    // so `2*4 = 8 < 32` on any real host → ALGO 1.  Models with more than
+    // Mixtral-class shape outside an ALGO-3 MoE layer lands here: 8 experts
+    // with topk=2 means 2 active, so `2*4 = 8 < 32` on any real host → ALGO 1.  Models with more than
     // `kFewExpertsDecodeThreshold` experts never reach this rule and take
     // the ALGO 3 decode default from Rule 1.
     //
@@ -392,7 +396,7 @@ static int auto_select_algo(const std::vector<int> &M,
 
     // Rule 2 — LEGACY RULES (phase env == 0).
     //
-    // A BF16/FP16 MoE layer skipped the single-thread and capacity exits above;
+    // An ALGO-3 MoE layer skipped the single-thread and capacity exits above;
     // the cascade applies them, as the callers that opt into it expect.
     if (algo3_layer && num_threads <= 1) {
         return pick(1, "auto_single_thread", 1);
@@ -449,7 +453,7 @@ int select_grp_matmul_algo(const std::vector<char> &layout,
         const std::vector<int> &K, const std::vector<matmul_params> &params,
         int num_threads, auto_algo_trace *trace,
         grp_matmul_gated_act_t fused_act, bool single_expert_epilogue_ok,
-        const single_expert_ck_t *single_ck) {
+        const grp_matmul_call_route *route) {
 
     // `M.size()` is the active matmul count after `group_matmul_direct`
     // sliced the M vector to honour `params[0].active_matmul`.  Pass it
@@ -552,8 +556,7 @@ int select_grp_matmul_algo(const std::vector<char> &layout,
     }
 
     return auto_select_algo(M, N, K, params, num_threads, m_tile_safe,
-            n_tile_safe, trace, fused_act, single_expert_epilogue_ok,
-            single_ck);
+            n_tile_safe, trace, fused_act, single_expert_epilogue_ok, route);
 }
 
 } // namespace matmul

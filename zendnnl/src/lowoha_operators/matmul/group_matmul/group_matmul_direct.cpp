@@ -1825,7 +1825,8 @@ status_t group_matmul_direct(const std::vector<char> &layout,
                     log_error(
                             "group_matmul_direct: WEIGHT_CACHE=2 does not "
                             "support a global ALGO pin split by a phase "
-                            "override for multi-expert BF16/FP16. Use "
+                            "override for multi-expert BF16/FP16 or "
+                            "capacity-declared INT8 weights. Use "
                             "WEIGHT_CACHE=1, remove the phase override, or "
                             "select global AUTO.");
                 } else {

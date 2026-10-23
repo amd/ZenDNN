@@ -233,7 +233,7 @@ int match_profile(const Profile &p, const ShapeKey &key) {
 Resolved resolve_with(const ShapeKey &key, const ProfileEntry &env,
         const Profile &env_profile) {
     Resolved r;
-    r.t = defaults();
+    r.t = defaults(key.fam);
     apply(r.t, env);
     r.env_entry = match_profile(env_profile, key);
     if (r.env_entry >= 0) apply(r.t, env_profile[r.env_entry]);

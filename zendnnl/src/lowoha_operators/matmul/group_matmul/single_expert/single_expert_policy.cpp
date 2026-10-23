@@ -53,48 +53,28 @@ single_expert_ck_t grp_matmul_single_expert_ck(data_type_t src, data_type_t wei,
     // Strategy 0 plans a lone expert as Sequential AOCL.
     if (get_grp_n_tile_strategy() == 0) return {};
     using custom_kernel::KernelVariant;
-    const KernelVariant v = custom_kernel::resolve_variant(
-            src, wei, dst, dynamic_quant, compute);
+    const KernelVariant v = grp_matmul_ck_weight_variant(src, wei, dst,
+            dynamic_quant, compute, static_u8s8, aocl_prepacked, K, N);
+    if (v == KernelVariant::kUnsupported) return {};
     prompt_tile::Family fam;
     unsigned dt = 0;
-    if (v == KernelVariant::kBF16_BF16_BF16
-            || v == KernelVariant::kBF16_BF16_F32) {
-        if (!custom_kernel::dispatch_supported()) return {};
-        fam = prompt_tile::Family::kBf16;
-        dt = kSingleExpertBf16;
-    } else if (custom_kernel::is_int8_variant(v)) {
-        if (!get_grp_matmul_custom_kernel_int8()
-                || !custom_kernel::avx512vnni_available())
-            return {};
+    if (custom_kernel::is_int8_variant(v)) {
         fam = prompt_tile::Family::kInt8;
         dt = static_u8s8 ? kSingleExpertU8s8 : kSingleExpertInt8;
     } else if (custom_kernel::is_s4_variant(v)) {
-        if (!custom_kernel::avx512vnni_available()) return {};
         fam = prompt_tile::Family::kW4a8;
         dt = kSingleExpertW4a8;
     } else if (custom_kernel::is_f16_variant(v)) {
-        if (!get_grp_matmul_custom_kernel_f16()
-                || !custom_kernel::avx512f16_available())
-            return {};
         fam = prompt_tile::Family::kF16;
         dt = kSingleExpertF16;
+    } else if (v == KernelVariant::kBF16_BF16_BF16
+            || v == KernelVariant::kBF16_BF16_F32) {
+        fam = prompt_tile::Family::kBf16;
+        dt = kSingleExpertBf16;
     } else {
         return {};
     }
     if (((prompt_dt | decode_dt) & dt) == 0) return {};
-    if (K > 0 && N > 0 && custom_kernel::plan_pack_nr(K, N) <= 0) return {};
-    // Shapes `prepare_for_call` always refuses.
-    if (K > 0 && fam == prompt_tile::Family::kInt8
-            && (K % custom_kernel::kVNNIInt8Quad != 0
-                    || K > custom_kernel::kMaxSafeInt8AccumK))
-        return {};
-    if (K > 0 && fam == prompt_tile::Family::kW4a8
-            && K % custom_kernel::kS4Octet != 0)
-        return {};
-    // The custom kernel converts BF16, FP16, and static U8xS8 AOCL-DLP packs.
-    if (aocl_prepacked && fam != prompt_tile::Family::kBf16
-            && fam != prompt_tile::Family::kF16 && !static_u8s8)
-        return {};
 
     // The phase knobs choose the phases; `..._FORCE_CK` lifts decode's
     // N-tile count for the dtypes it lists.

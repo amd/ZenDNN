@@ -1155,7 +1155,7 @@ TEST(W8A8MoEDispatch, AutoDecodePhase4ClassifiesActivePrefixBeforeFallback) {
     // Framework prepack extras may extend M beyond active_matmul. These rows
     // are not part of this call; a large cold-expert M must not select prompt.
     generic_baseline->M.resize(static_cast<size_t>(p.num_experts), 4096);
-    ASSERT_EQ(generic_baseline->run(/*algo=*/1), status_t::success);
+    ASSERT_EQ(generic_baseline->run(/*algo=*/3), status_t::success);
 
     auto call = build_call(p);
     call->M.resize(static_cast<size_t>(p.num_experts), 4096);
@@ -1168,9 +1168,9 @@ TEST(W8A8MoEDispatch, AutoDecodePhase4ClassifiesActivePrefixBeforeFallback) {
     const char *mode = test_api::s_last_group_matmul_direct_gemm_mode.load(
             std::memory_order_relaxed);
     ASSERT_NE(mode, nullptr);
-    // The inherited decode default is refined by the existing few-expert
-    // wide-N rule to ALGO 1. Prompt ALGO 6 would prove tail leakage.
-    EXPECT_EQ(executed_algo_from_gemm_mode(mode), 1) << "mode=" << mode;
+    // The inherited decode default of an INT8 MoE layer is ALGO 3. Prompt
+    // ALGO 6 would prove tail leakage.
+    EXPECT_EQ(executed_algo_from_gemm_mode(mode), 3) << "mode=" << mode;
     EXPECT_EQ(call->output, generic_baseline->output)
             << "the active decode prefix must inherit its refined default "
                "policy, not prompt ALGO 6";
@@ -1822,14 +1822,22 @@ TEST(W8A8MoECache, DisabledDeclinesWithoutPublishingOrWriting) {
     EXPECT_EQ(w8a8::packed_weight_cache_size(), 0u);
 
     // The public dispatcher must still complete through its generic fallback;
-    // disabling cache disables this optimization, not the operation. Four
-    // total experts select the normal few-expert ALGO-2 refinement, so compare
-    // against that generic scheduler directly rather than against ALGO 4's
-    // intentionally different rounding sequence.
+    // disabling cache disables this optimization, not the operation. AUTO
+    // runs an INT8 MoE layer on ALGO 3, so compare against that generic
+    // scheduler directly rather than against ALGO 4's intentionally different
+    // rounding sequence.
     auto generic_baseline = build_call(p);
-    ASSERT_EQ(generic_baseline->run(/*algo=*/2), status_t::success);
+    ASSERT_EQ(generic_baseline->run(/*algo=*/3), status_t::success);
     auto fallback = build_call(p);
-    ASSERT_EQ(fallback->run(), status_t::success);
+    {
+        moe_test_utils::GemmModeCaptureGuard capture;
+        ASSERT_EQ(fallback->run(), status_t::success);
+        const char *mode = zendnnl::lowoha::matmul::test_api::
+                                   s_last_group_matmul_direct_gemm_mode.load(
+                                           std::memory_order_relaxed);
+        ASSERT_NE(mode, nullptr);
+        EXPECT_EQ(executed_algo_from_gemm_mode(mode), 3) << "mode=" << mode;
+    }
     EXPECT_EQ(fallback->output, generic_baseline->output);
     EXPECT_EQ(w8a8::packed_weight_cache_size(), 0u);
     clear_fused_moe_scratch();

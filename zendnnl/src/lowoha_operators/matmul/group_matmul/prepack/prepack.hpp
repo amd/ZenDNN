@@ -86,9 +86,12 @@
 #include <algorithm> // std::min (per-expert capacity lower bound)
 #include <atomic>
 #include <vector>
+#include <type_traits>
 
 #include "common/data_types.hpp"
 #include "lowoha_operators/matmul/group_matmul/group_matmul_direct.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/multi_expert_policy.hpp"
+#include "lowoha_operators/matmul/group_matmul/selection/call_route.hpp"
 #include "lowoha_operators/matmul/lowoha_common.hpp"
 // Backend probe-stats structs surface in `test_api::LastInvocationStats`
 // below.  Production callers never reach for either of these; pulling
@@ -313,6 +316,17 @@ struct PrepackParams {
     /// site; acted on only where a WC=2 warm runs at all
     /// (`should_warm_weight_cache`).
     bool ck_in_place = false;
+
+    /// The call's per-expert params, for verdicts derived on demand.
+    const std::vector<matmul_params> *params = nullptr;
+
+    /// The dispatcher's verdicts for this call, so prepack and dispatch agree
+    /// on which layout owns the weight.  Without one the MoE family is derived
+    /// from `params` on first use and kept in `derived_moe_family`.
+    const grp_matmul_call_route *route = nullptr;
+    mutable bool has_derived_moe_family = false;
+    mutable grp_matmul_algo3_family derived_moe_family
+            = grp_matmul_algo3_family::none;
 
     int num_threads = 0;
 
@@ -592,6 +606,10 @@ inline PrepackParams build_prepack_params(
             p.w4a8_group_size
                     = static_cast<int>(static_cast<int64_t>(K[rep]) / g);
         }
+    }
+
+    if constexpr (std::is_same_v<ParamsVec, std::vector<matmul_params>>) {
+        p.params = &params;
     }
 
     return p;
