@@ -614,11 +614,10 @@ void scalar_microkernel(const float *pa, int a_stride, const float *pb,
         int b_stride, float *C, int ldc, int k, int mr_count, int nr_count,
         float beta, const float *bias, fused_postop_t fused_op) {
 
-    if (beta == 0.0f) {
-        for (int m = 0; m < mr_count; ++m)
-            for (int n = 0; n < nr_count; ++n)
-                C[m * ldc + n] = 0.0f;
-    }
+    for (int m = 0; m < mr_count; ++m)
+        for (int n = 0; n < nr_count; ++n)
+            C[m * ldc + n] = beta == 0.0f ? 0.0f : beta * C[m * ldc + n];
+
     for (int kk = 0; kk < k; ++kk)
         for (int m = 0; m < mr_count; ++m) {
             float a = pa[m * a_stride + kk];
