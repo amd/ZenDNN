@@ -244,7 +244,8 @@ else()
       INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR}"
       INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR}")
 
-    target_link_options(zendnnl_library INTERFACE "-fopenmp")
+    # OpenMP::OpenMP_CXX lets the consumer pick the runtime. A bare -fopenmp
+    # link option would make clang add its default libomp next to it.
     target_link_libraries(zendnnl_library
       INTERFACE OpenMP::OpenMP_CXX
       INTERFACE ${CMAKE_DL_LIBS})
@@ -261,7 +262,6 @@ else()
       IMPORTED_LOCATION "${ZENDNNL_LIBRARY_LIB_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}zendnnl${CMAKE_SHARED_LIBRARY_SUFFIX}"
       INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR}")
 
-    target_link_options(zendnnl_shared_library INTERFACE "-fopenmp")
     target_link_libraries(zendnnl_shared_library
       INTERFACE OpenMP::OpenMP_CXX
       INTERFACE ${CMAKE_DL_LIBS})

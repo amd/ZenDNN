@@ -57,13 +57,9 @@ if(ZENDNNL_LIB_BUILD_ARCHIVE)
     PRIVATE "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>"
     INTERFACE "$<INSTALL_INTERFACE:$<INSTALL_PREFIX>/zendnnl/include>")
 
-  # OpenMP::OpenMP_CXX already carries the right flag (/openmp on MSVC,
-  # -fopenmp on GCC/Clang); the explicit -fopenmp link option is GCC/Clang-only.
-  if(NOT MSVC)
-    target_link_options(zendnnl_archive
-      PUBLIC "-fopenmp")
-  endif()
-
+  # OpenMP comes only from OpenMP::OpenMP_CXX, so a consumer's own OpenMP choice
+  # carries through the exported target. A bare -fopenmp link option would make
+  # clang add its default libomp next to the consumer's runtime.
   target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_JSON=1)
   target_link_libraries(zendnnl_archive
     PUBLIC OpenMP::OpenMP_CXX
@@ -185,13 +181,7 @@ if(ZENDNNL_LIB_BUILD_SHARED)
     PRIVATE "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>"
     INTERFACE "$<INSTALL_INTERFACE:$<INSTALL_PREFIX>/zendnnl/include>")
 
-  # OpenMP::OpenMP_CXX already carries the right flag (/openmp on MSVC,
-  # -fopenmp on GCC/Clang); the explicit -fopenmp link option is GCC/Clang-only.
-  if(NOT MSVC)
-    target_link_options(zendnnl
-      PUBLIC "-fopenmp")
-  endif()
-
+  # See zendnnl_archive above: OpenMP comes only from OpenMP::OpenMP_CXX.
   target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_JSON=1)
   target_link_libraries(zendnnl
     PUBLIC OpenMP::OpenMP_CXX
