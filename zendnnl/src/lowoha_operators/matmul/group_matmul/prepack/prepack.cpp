@@ -918,7 +918,12 @@ inline bool int8_aocl_warm_candidate(const PrepackParams &p) {
 // of sym-quant is handled at the source instead — see
 // `src_scale_is_collapsed_per_token` in aocl_postop.hpp.
 inline bool int8_sym_quant_warm_candidate(const PrepackParams &p) {
-    return p.wei_dtype == data_type_t::s8 && p.compute_dtype == data_type_t::s8
+    // s4 is the packed-nibble GGML Q4_0 form.  It shares this warmer; the
+    // reorder call selects aocl_reorder_s8s4s32os32.  bf16-destination s4 is
+    // W4A8 and is claimed by w4a8_aocl_warm_candidate first.
+    const bool wei_ok
+            = p.wei_dtype == data_type_t::s8 || p.wei_dtype == data_type_t::s4;
+    return wei_ok && p.compute_dtype == data_type_t::s8
             && (p.dst_dtype == data_type_t::bf16
                     || p.dst_dtype == data_type_t::f32);
 }
@@ -938,7 +943,10 @@ inline bool s8_without_aocl_warmer(const PrepackParams &p) {
 
 inline bool w4a8_aocl_warm_candidate(const PrepackParams &p) {
     // Key on wei/compute, not dynamic_quant (group DQ clears it before prepack).
-    return p.wei_dtype == data_type_t::s4 && p.compute_dtype == data_type_t::s8;
+    // Destination must be bf16: an f32 s4 weight is GGML Q4_0 and belongs on
+    // the sym-quant warmer (int8_sym_quant_warm_candidate), not the W4A8 LRU.
+    return p.wei_dtype == data_type_t::s4 && p.compute_dtype == data_type_t::s8
+            && p.dst_dtype == data_type_t::bf16;
 }
 
 // Compute max(N[i]) over `[0, num_ops_total)`.  Mirrors what the
@@ -1051,22 +1059,27 @@ inline const char *cross_warm_regime_name(CrossWarmRegime r) {
 // lookup the runtime can make is one the warm populated.  Safe unconditionally.
 //
 // A PER-TILE regime additionally keys on `n_tile`, so it covers the runtime
-// only as far as the runtime's split matches the warm's.  The strict-stable
-// plan pins `n_thr_fixed` to the same `aocl_stable_n_thr(num_threads)` the
-// warm used, but `nr_align` and a narrow-N escape evaluated over the ACTIVE
-// expert set both move independently of it, so a decode call can build keys
-// this warm never populated.  Once the raw weights are gone those cannot be
-// rebuilt, and the call ends at `kGrpMatmulErrMutatedWeightMiss`.
-//
-// A per-tile regime therefore does not license a mutation.
-inline bool cross_warm_regime_licenses_mutation(CrossWarmRegime r) {
+// only as far as the runtime's split matches the warm's.  Under the AOCL
+// strict-stable planner, it does: `n_thr_fixed` is
+// `aocl_stable_n_thr(num_threads)`, `nr_align` is selected before the warm,
+// and the narrow-N escape uses the same max-N check in both paths.  The
+// resulting tiles are therefore invariant for a fixed thread configuration,
+// even when the active-expert set changes.  The legacy dynamic planner has no
+// such guarantee, so its per-tile warm cannot license mutation.
+inline bool cross_warm_regime_licenses_mutation(
+        CrossWarmRegime r, const PrepackParams &p) {
     switch (r) {
         case CrossWarmRegime::aocl_full_weight:
         case CrossWarmRegime::aocl_full_weight_sym_quant:
         case CrossWarmRegime::custom_kernel_pack: return true;
-        case CrossWarmRegime::none:
+        case CrossWarmRegime::none: return false;
         case CrossWarmRegime::aocl_per_tile:
-        case CrossWarmRegime::aocl_per_tile_sym_quant: return false;
+        case CrossWarmRegime::aocl_per_tile_sym_quant:
+            // Same decomposition as the dispatch licence. A stable-N flag
+            // does not cover a call whose planner selects DecodeD or
+            // DecodeDynamic before the strict-stable branch.
+            return aocl_strict_stable_decode_plan(p.M, p.N, p.K, p.num_threads,
+                    zendnnl::common::size_of(p.wei_dtype));
     }
     return false;
 }
@@ -1472,7 +1485,7 @@ inline bool ck_eligible_bf16(const PrepackParams &p) {
 //     `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_INT8 = 1` (a Phase-1 user
 //     who wants only bf16 CK can flip the sub-knob off and the
 //     warmer will not commit an int8 arena).
-//   * dtype tuple: src=bf16, wei=s8, dst=bf16, dynamic_quant=true,
+//   * dtype tuple: src=bf16 or f32, wei=s8, dst=bf16, dynamic_quant=true,
 //     compute ∈ {s8, u8}.
 //   * Activation: same four (none / swiglu_oai_mul / silu_and_mul
 //     / gelu_and_mul) as bf16, with the silu/gelu + bias refusal
@@ -1508,14 +1521,16 @@ inline bool ck_eligible_int8(const PrepackParams &p) {
     if (p.group_size > 0) { return false; }
     // Three int8 entry forms reach the CK microkernel (mirror
     // resolve_variant in custom_kernel/dispatch.cpp):
-    //   * runtime hoist     — `dynamic_quant=true` with bf16 src;
+    //   * runtime hoist     — `dynamic_quant=true` with bf16 or f32 src;
     //   * grouped pre-quant — `group_dynamic_quant` produced an s8 src
     //     and CLEARED `dynamic_quant` (the default-on production path);
     //   * static U8xS8      — `dynamic_quant=false` with u8 src.
     // Keying on `dynamic_quant && src==bf16` alone missed the grouped
     // form, so the prepack never warmed the int8 CK pack for it.
     const bool dq_int8_form
-            = (p.dynamic_quant && p.src_dtype == data_type_t::bf16)
+            = (p.dynamic_quant
+                      && (p.src_dtype == data_type_t::bf16
+                              || p.src_dtype == data_type_t::f32))
             || (!p.dynamic_quant && p.src_dtype == data_type_t::s8);
     const bool static_u8s8_form
             = !p.dynamic_quant && p.src_dtype == data_type_t::u8;
@@ -1960,25 +1975,24 @@ inline void cross_warm(const PrepackParams &p, matmul_algo_t inner_kernel,
         // Shared by the int8 and bf16 arms alike: both reorder the full
         // weight, so both can mutate it once a capacity is declared.
         //
-        // Nor is "the primary skipped no expert" enough on its own, for a
-        // reason the counters cannot express: a PER-TILE primary warms the
-        // column tiles of ONE N-split, `stable = aocl_stable_n_thr(
-        // num_threads, max_N)` wide, while the runtime splits N with
-        // `plan_group_n_tile`.  The two are not the same number, and the
-        // per-tile cache key embeds `n_tile` — so the executor asks for keys
-        // the primary never warmed, reports no skip, and reorders each miss
-        // from whatever the buffer holds.  Before the mutation that is the raw
-        // weight and the miss is merely slow; after it, the miss is silently
-        // wrong.  Only a WHOLE-WEIGHT primary is provably complete: the CK
-        // pack and the narrow-N full-weight warm both key on the whole
-        // expert, independent of any split, so every lookup the executor makes
-        // is one they populated.
+        // A per-tile primary is complete only under the strict-stable AOCL
+        // plan.  There, the warmer and `plan_group_n_tile` use the same fixed
+        // `aocl_stable_n_thr(num_threads)` decomposition and `nr_align`, so
+        // every decode key is already present before this full-weight prompt
+        // reorder destroys the raw bytes.  The legacy dynamic plan remains
+        // ineligible because its per-call split can change.
         const bool primary_attempted
                 = (st_ck.total_attempted + st_aocl.total_attempted) > 0;
-        const bool primary_covers_whole_weight
-                = primary_did_custom || primary_did_aocl_fw;
+        const size_t stable_wei_elem = zendnnl::common::size_of(p.wei_dtype);
+        const bool strict_stable_per_tile_primary = !primary_did_custom
+                && !primary_did_aocl_fw
+                && aocl_strict_stable_decode_plan(
+                        p.M, p.N, p.K, p.num_threads, stable_wei_elem)
+                && p.nr_align > 0;
+        const bool primary_covers_decode_layout = primary_did_custom
+                || primary_did_aocl_fw || strict_stable_per_tile_primary;
         const bool primary_complete = primary_attempted
-                && primary_covers_whole_weight && st_ck.skipped_invalid == 0
+                && primary_covers_decode_layout && st_ck.skipped_invalid == 0
                 && st_aocl.skipped_invalid == 0;
 
         if (w4a8) {
@@ -2234,14 +2248,14 @@ static void prepack_aocl_only_algo(
         // mutates the weights, and decode re-derives its layout from the
         // mutated bytes on the fallback the missing ISA forces it onto.
         //
-        // A PER-TILE regime does not qualify: its keys embed `n_tile`, so a
-        // decode call on a different split asks for keys this warm never
-        // populated, and with the raw weights gone they cannot be rebuilt.
-        // See `cross_warm_regime_licenses_mutation`.
+        // A PER-TILE regime qualifies only under the strict-stable planner:
+        // then its split is invariant, so every future decode key was warmed.
+        // The legacy dynamic planner remains out-of-place.  See
+        // `cross_warm_regime_licenses_mutation`.
         const bool cross_warm_attempted
                 = (st_ck.total_attempted + st_aocl.total_attempted) > 0;
         const bool cross_warm_complete = cwr != CrossWarmRegime::none
-                && cross_warm_regime_licenses_mutation(cwr)
+                && cross_warm_regime_licenses_mutation(cwr, p)
                 && cross_warm_attempted && st_ck.skipped_invalid == 0
                 && st_aocl.skipped_invalid == 0;
         // A call whose experts are all capped below 2 writes no weight in

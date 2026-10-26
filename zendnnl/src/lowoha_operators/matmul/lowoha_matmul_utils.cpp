@@ -484,8 +484,8 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
         // quantization (`params.dynamic_quant`) converts the source to s8/u8
         // and lands on the same kernel, so it falls in the same bucket.  So do
         // GGML packed weights: a Q4_0 weight is still s4 here, so
-        // is_sym_quant_config does not recognise it yet, but the unpack widens
-        // it to s8 and the call runs on that same sym_quant kernel.
+        // is_sym_quant_config does not recognise it yet, but the unpack keeps
+        // packed s4 and the call runs on the s8×s4 sym_quant kernel.
         else if (po.po_type == post_op_type_t::mish) {
             if (!dlp_int8_path_checked) {
                 dlp_int8_path = is_sym_quant_config(params)
@@ -949,12 +949,20 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
             && (params.dtypes.dst == data_type_t::f32
                     || params.dtypes.dst == data_type_t::bf16);
 
-    const bool is_sym_quant = params.dtypes.wei == data_type_t::s8
+    const bool is_s8_sym_quant = params.dtypes.wei == data_type_t::s8
             && !params.quant_params.src_zp.buff && src_scale_nelems > 1
             && (params.dtypes.dst == data_type_t::f32
                     || params.dtypes.dst == data_type_t::bf16)
             && (params.dtypes.src == data_type_t::s8
                     || is_bf16_f32_per_token_sym);
+    // Packed GGML Q4_0 is s8 x s4. oneDNN has no per-group primitive for it,
+    // so an explicit oneDNN selection takes the same AOCL path as s8.
+    const bool is_s4_sym_quant = params.dtypes.wei == data_type_t::s4
+            && params.dtypes.src == data_type_t::s8
+            && !params.quant_params.src_zp.buff && src_scale_nelems > 1
+            && (params.dtypes.dst == data_type_t::f32
+                    || params.dtypes.dst == data_type_t::bf16);
+    const bool is_sym_quant = is_s8_sym_quant || is_s4_sym_quant;
 
     if (is_sym_quant && kernel != matmul_algo_t::aocl_dlp_blocked) {
         kernel = matmul_algo_t::aocl_dlp_blocked;

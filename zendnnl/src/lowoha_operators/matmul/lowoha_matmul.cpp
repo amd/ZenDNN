@@ -383,27 +383,54 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
     const int32_t omp_mt = thread_guard::max_threads();
     const int32_t num_threads
             = resolve_num_threads(exec_params.num_threads, omp_mt);
-    // A weight may have been mutated by an earlier scalar call that routed
-    // through grouped AUTO. AOCL refuses any later reorder miss from that
-    // blocked buffer, but its inner API cannot propagate status. Snapshot the
-    // pointer-local refusal generation across both the optional grouped route
-    // and the standard scalar fallback so this public scalar boundary fails
-    // closed instead of returning an invalid destination.
+
+    // Unpack GGML before the group route. The route rejects pack_format_b==1,
+    // so a still-packed weight can never enter group_matmul_direct. After
+    // unpack the weight is raw per-group s8 in a buffer sized for the AOCL
+    // blocked image, and the same route that accepts a caller-provided s8
+    // weight can hand that buffer to group_matmul_direct.
+    const void *exec_weight = weight;
+    if (exec_params.packing.pack_format_b == 1) {
+        status_t ggml_val_status
+                = zendnnl::common::op_instrumentation::validate([&]() {
+            return validate_ggml_packed_inputs(exec_params, is_weights_const,
+                    exec_batch_params.Batch_B, transB);
+        });
+        if (ggml_val_status != status_t::success) { return ggml_val_status; }
+        // Unpack reads only the packed weight. The GEMM contract is checked
+        // here, before that unpack: an f32/bf16 activation with dynamic_quant
+        // is accepted, and source quantization runs later. A scalar source
+        // scale is not a sym-quant per-group matmul.
+        if (!ggml_packed_gemm_supported(exec_params)) {
+            log_error(
+                    "GGML packed weights require sym-quant per-group int8: "
+                    "an s8 source, or an f32/bf16 source with dynamic_quant, "
+                    "and a non-scalar source scale");
+            return status_t::failure;
+        }
+        status_t unpack_status = unpack_ggml_weights_and_cache(exec_weight, N,
+                K, ldb, transB ? 't' : 'n', exec_params, is_weights_const);
+        if (unpack_status != status_t::success) { return unpack_status; }
+    }
+
+    // AOCL records a reorder refusal against the buffer it was asked to
+    // reorder. After unpack that is exec_weight, not the caller's packed
+    // pointer. Snapshot here so a miss on the materialized buffer fails this
+    // call instead of returning success or falling through to scalar.
     const uint64_t scalar_mutated_conflicts_before
-            = aocl_mutated_source_conflict_count(weight);
+            = aocl_mutated_source_conflict_count(exec_weight);
     auto scalar_mutation_conflict = [&]() {
-        return aocl_mutated_source_conflict_count(weight)
+        return aocl_mutated_source_conflict_count(exec_weight)
                 != scalar_mutated_conflicts_before;
     };
 
     // Wide-N projections and gated activations run as a one-op group.  Wide-N
     // calls use this route to reach the single-expert custom kernel.  Gated
-    // activation has no equivalent in the standard scalar fallback, so an
-    // active request always enters the grouped path and propagates its status.
-    // Safe to sit ahead of the reorder-quant and GGML-unpack blocks below:
-    // routed INT8 and W4A8 calls are quantized by group_matmul_direct's own
-    // pre-pass, while the custom-kernel predicate still excludes GGML-packed
-    // weights.
+    // activation has no equivalent in the normal matmul_direct continuation,
+    // so an active request always enters the grouped path and propagates its
+    // status. Routed INT8 and W4A8 calls are quantized by
+    // group_matmul_direct's own pre-pass. GGML weights have already been
+    // unpacked above.
     if (run_gated_act
             || custom_kernel_routable(layout, M, N, K, num_threads, batch_count,
                     transA, transB, alpha, beta, bias, ldb, is_weights_const,
@@ -423,7 +450,7 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
         // Preserve the caller's weight representation through AUTO. AOCL
         // consumes its blocked buffer directly; only a selected CK path may
         // unreorder it into a CK-local raw lease.
-        const std::vector<const void *> grp_weight {weight};
+        const std::vector<const void *> grp_weight {exec_weight};
         const std::vector<int> grp_ldb {ldb};
         const std::vector<const void *> grp_bias {bias};
         const std::vector<float> grp_beta {beta};
@@ -511,13 +538,6 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
         return status_t::failure;
     }
 
-    status_t ggml_val_status
-            = zendnnl::common::op_instrumentation::validate([&]() {
-        return validate_ggml_packed_inputs(exec_params, is_weights_const,
-                exec_batch_params.Batch_B, transB);
-    });
-    if (ggml_val_status != status_t::success) { return ggml_val_status; }
-
     // Reorder quant mutates exec_params / exec_batch_params and may redirect
     // exec_src to an internal contiguous buffer (quant_buffers).
     const void *exec_src = src;
@@ -539,21 +559,6 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
     const bool w4a8_source_reordered = scalar_dynamic_w4a8 && exec_src != src
             && exec_params.dtypes.src == data_type_t::s8;
     if (w4a8_source_reordered) { exec_params.dynamic_quant = false; }
-
-    // GGML unpack mutates weight pointer and exec_params mem_format / wei_scale.
-    const void *exec_weight = weight;
-    if (exec_params.packing.pack_format_b == 1) {
-        if (!ggml_is_sym_quant(exec_params)) {
-            log_error(
-                    "GGML packed weights are supported only for sym-quant "
-                    "per-group int8 matmul");
-            return status_t::failure;
-        }
-        status_t unpack_status = unpack_ggml_weights_and_cache(exec_weight, N,
-                K, ldb, transB ? 't' : 'n', exec_params,
-                /*skip_reorder=*/false, is_weights_const);
-        if (unpack_status != status_t::success) { return unpack_status; }
-    }
 
     matmul_algo_t kernel = kernel_select(exec_params, exec_batch_params.Batch_A,
             exec_batch_params.Batch_B, batch_count, M, N, K, num_threads, bias,

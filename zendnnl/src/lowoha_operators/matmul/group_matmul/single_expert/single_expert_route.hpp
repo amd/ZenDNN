@@ -65,12 +65,34 @@ inline bool matmul_custom_kernel_quant_supported(int M, int N, int K,
         if (signed_compute && qp.src_zp.buff != nullptr) return false;
         if (qp.dst_scale.buff != nullptr || qp.dst_zp.buff != nullptr)
             return false;
-        if (!src_per_token || qp.wei_scale.buff == nullptr
-                || qp.wei_zp.buff != nullptr)
-            return false;
+        if (qp.wei_zp.buff != nullptr) return false;
         if (!params.dynamic_quant && qp.src_scale.buff == nullptr) return false;
 
-        return quant_param_is_per_channel(qp.wei_scale, N);
+        // Same pairs check_n_tile_extra serves: per-token `{M,1}` or
+        // per-group `{M,G}` source, with a per-channel `{N}`/`{1,N}` or
+        // per-group `{G,N}` weight scale. A per-group source requires the
+        // matching per-group weight scale. Grouped ALGO 3 runs these on
+        // AOCL; the custom kernel stays off for per-group metadata.
+        const bool src_per_group = M > 0 && qp.src_scale.dims.size() == 2
+                && qp.src_scale.dims[0] == static_cast<int64_t>(M)
+                && qp.src_scale.dims[1] > 1;
+        const bool wei_per_group = N > 0 && qp.wei_scale.buff != nullptr
+                && qp.wei_scale.dims.size() == 2 && qp.wei_scale.dims[0] > 1
+                && qp.wei_scale.dims[1] == static_cast<int64_t>(N);
+        if (!src_per_token && !src_per_group) return false;
+        if (src_per_group && qp.src_zp.buff != nullptr) return false;
+        if (!quant_param_is_per_channel(qp.wei_scale, N) && !wei_per_group)
+            return false;
+        if (src_per_group && !wei_per_group) return false;
+        if (wei_per_group && params.mem_format_b != 'n') return false;
+        if (src_per_group && qp.src_scale.dims[1] != qp.wei_scale.dims[0])
+            return false;
+        if (wei_per_group
+                && (K <= 0
+                        || (static_cast<int64_t>(K) % qp.wei_scale.dims[0])
+                                != 0))
+            return false;
+        return true;
     }
 
     if (custom_kernel::is_s4_variant(variant)) {
@@ -79,7 +101,10 @@ inline bool matmul_custom_kernel_quant_supported(int M, int N, int K,
         }
         if (qp.dst_scale.buff != nullptr || qp.dst_zp.buff != nullptr)
             return false;
-        if (!src_per_token || qp.wei_scale.buff == nullptr
+        const bool src_per_group = M > 0 && qp.src_scale.dims.size() == 2
+                && qp.src_scale.dims[0] == static_cast<int64_t>(M)
+                && qp.src_scale.dims[1] > 1;
+        if ((!src_per_token && !src_per_group) || qp.wei_scale.buff == nullptr
                 || qp.src_zp.buff != nullptr || qp.wei_zp.buff != nullptr) {
             return false;
         }
@@ -96,6 +121,7 @@ inline bool matmul_custom_kernel_quant_supported(int M, int N, int K,
                 || static_cast<int64_t>(K) % wei_dims[0] != 0) {
             return false;
         }
+        if (src_per_group && qp.src_scale.dims[1] != wei_dims[0]) return false;
         const int64_t group_size = static_cast<int64_t>(K) / wei_dims[0];
         return group_size > 0 && (group_size % custom_kernel::kS4Octet) == 0;
     }

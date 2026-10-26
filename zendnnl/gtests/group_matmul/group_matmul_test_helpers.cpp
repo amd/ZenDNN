@@ -111,7 +111,7 @@ status_t group_matmul_kernel_test(std::vector<tensor_t> &inputs,
         const grp_matmul_gated_act_params *gated_act,
         const std::vector<int> &pack_format_b,
         const std::vector<int> &active_rows, data_type_t dq_compute,
-        int32_t weight_cache_type) {
+        int32_t weight_cache_type, const std::vector<int> &ggml_superblock) {
     using namespace zendnnl::lowoha::matmul;
     try {
         const size_t num_ops = inputs.size();
@@ -126,6 +126,11 @@ status_t group_matmul_kernel_test(std::vector<tensor_t> &inputs,
         }
         if (!active_rows.empty() && active_rows.size() != num_ops) {
             log_error("group_matmul_kernel_test: active_rows size mismatch");
+            return status_t::failure;
+        }
+        if (!ggml_superblock.empty() && ggml_superblock.size() != num_ops) {
+            log_error(
+                    "group_matmul_kernel_test: ggml_superblock size mismatch");
             return status_t::failure;
         }
 
@@ -183,8 +188,13 @@ status_t group_matmul_kernel_test(std::vector<tensor_t> &inputs,
             // populates params.lowoha_algo before invoking matmul_direct.
             params_v[i].lowoha_algo = algo;
             params_v[i].weight_cache_type = weight_cache_type;
-            if (!pack_format_b.empty()) {
+            const bool is_ggml_packed
+                    = !pack_format_b.empty() && pack_format_b[i] == 1;
+            if (is_ggml_packed) {
                 params_v[i].packing.pack_format_b = pack_format_b[i];
+            }
+            if (!ggml_superblock.empty()) {
+                params_v[i].packing.is_superblock = ggml_superblock[i] != 0;
             }
 
             const bool is_int4_wei = (src_dt == data_type_t::bf16
@@ -192,8 +202,13 @@ status_t group_matmul_kernel_test(std::vector<tensor_t> &inputs,
                             || wei_dt == data_type_t::u4));
             const bool is_w4a8 = (src_dt == data_type_t::bf16
                     && wei_dt == data_type_t::s4 && inputs[i].is_quantized());
+            // GGML Q4_0 arrives as s4.  Its scales live in the packed blob, but
+            // the pre-quantized s8 source scale must still reach the API, and
+            // the weight must be constant so the unpack cache can keep it.
+            const bool is_ggml_packed_s4
+                    = is_ggml_packed && wei_dt == data_type_t::s4;
             bool is_wei_s8 = (wei_dt == data_type_t::s8);
-            is_wt_c[i] = is_int4_wei || is_wei_s8;
+            is_wt_c[i] = is_int4_wei || is_wei_s8 || is_ggml_packed;
 
             auto extract_quant
                     = [](const tensor_t &t,
@@ -220,7 +235,7 @@ status_t group_matmul_kernel_test(std::vector<tensor_t> &inputs,
                 }
             };
 
-            if (is_int4_wei || is_wei_s8) {
+            if (is_int4_wei || is_wei_s8 || is_ggml_packed_s4) {
                 extract_quant(inputs[i], params_v[i].quant_params.src_scale,
                         params_v[i].quant_params.src_zp);
                 extract_quant(weights[i], params_v[i].quant_params.wei_scale,

@@ -327,14 +327,14 @@ inline bool is_dynamic_quant_config(const matmul_params &params) {
     // Cheapest short-circuit: the dynamic_quant flag is unset for the
     // vast majority of matmul calls.
     if (!params.dynamic_quant) { return false; }
-    // GGML packed weights are exempt from the s8 requirement: a Q4_0 weight is
-    // still s4 here and only widens to s8 AFTER this source quantization, which
-    // group_matmul_direct runs before the unpack.  Demanding s8 would skip the
-    // quant and leave a bf16 source that ggml_is_sym_quant then rejects.  Plain
-    // (unpacked) s4 stays out — that is W4A8, which reaches
-    // `reorder_quantization_wrapper` through is_w4a8_config instead and carries
-    // different source-scale shapes.
+    // GGML Q4_0 is s4 both before unpack (pack_format_b == 1) and after
+    // (packed nibbles, pack_format_b cleared).  The source is still f32/bf16
+    // and must be quantized to s8 before the s8×s4 GEMM.  Demanding an s8
+    // weight here would skip that quant.  W4A8 (bf16 destination) is also s4;
+    // reorder_quantization_wrapper prefers is_w4a8_config for that shape, and
+    // admitting it here as well does not change that branch.
     if (params.dtypes.wei != data_type_t::s8
+            && params.dtypes.wei != data_type_t::s4
             && params.packing.pack_format_b != 1) {
         return false;
     }

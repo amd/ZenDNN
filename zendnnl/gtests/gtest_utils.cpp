@@ -37,6 +37,11 @@ struct block_q4_0 {
     uint8_t qs[16];
 };
 
+struct block_q4_0x8 {
+    uint16_t d[8];
+    uint8_t qs[128];
+};
+
 inline uint32_t gtest_fp32_to_bits(float f) {
     uint32_t bits;
     std::memcpy(&bits, &f, sizeof(f));
@@ -137,6 +142,40 @@ void repack_weights_q8_0(const int8_t *weight_buffer, const float *scale_buffer,
             block_q8_0 *b = &out[row * ng + g];
             b->d = gtest_fp32_to_fp16(scale_buffer[g * M + row]);
             std::memcpy(b->qs, weight_buffer + row * K + g * 32, 32);
+        }
+    }
+}
+
+void repack_weights_q4_0_superblock(const int8_t *weight_buffer,
+        const float *scale_buffer, int64_t M, int64_t K, void *out_blocks) {
+    const int64_t ng = K / 32;
+    auto *out = static_cast<uint8_t *>(out_blocks);
+    const size_t block_bytes = sizeof(block_q4_0x8);
+
+    for (int64_t r8 = 0; r8 < M / 8; r8++) {
+        for (int64_t g = 0; g < ng; g++) {
+            block_q4_0x8 local {};
+            for (int ri = 0; ri < 8; ri++) {
+                const int64_t row = r8 * 8 + ri;
+                local.d[ri] = gtest_fp32_to_fp16(scale_buffer[g * M + row]);
+                const int8_t *w = weight_buffer + row * K + g * 32;
+                // Inverse of the superblock unpack: low nibble is quant[j],
+                // high nibble is quant[j + 16], stored as the signed 4-bit
+                // code (no +8).  The first 8 of those bytes sit at qs[ri*8],
+                // the second 8 at qs[64 + ri*8].
+                uint8_t src[16];
+                for (int j = 0; j < 16; j++) {
+                    uint8_t lo = static_cast<uint8_t>(w[j] & 0x0F);
+                    uint8_t hi = static_cast<uint8_t>(w[j + 16] & 0x0F);
+                    src[j] = static_cast<uint8_t>(lo | (hi << 4));
+                }
+                for (int i = 0; i < 8; i++) {
+                    local.qs[ri * 8 + i] = src[i];
+                    local.qs[64 + ri * 8 + i] = src[i + 8];
+                }
+            }
+            std::memcpy(out + static_cast<size_t>(r8 * ng + g) * block_bytes,
+                    &local, block_bytes);
         }
     }
 }
@@ -2802,7 +2841,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         const std::vector<post_op_type_t> &po_types,
         const std::vector<tensor_t> &binary_tensors, bool use_LOWOHA,
         matmul_algo_t algo, float alpha, float beta, bool use_reference,
-        int pack_format_b) {
+        int pack_format_b, bool is_superblock) {
     try {
 
         if (use_LOWOHA) {
@@ -3016,6 +3055,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
                 params.num_threads = 0; // Use default (omp_get_max_threads)
                 if (!use_reference) {
                     params.packing.pack_format_b = pack_format_b;
+                    params.packing.is_superblock = is_superblock;
                 }
 
                 // For WOQ: Extract quantization parameters from weight tensor

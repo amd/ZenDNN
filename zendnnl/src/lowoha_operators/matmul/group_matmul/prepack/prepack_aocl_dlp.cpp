@@ -338,9 +338,9 @@ status_t warm_pack_all_aocl_dlp_experts_sym_quant(
             weight.size(), K.size(), N.size(), ldb.size(), transB.size()});
 
 #if ZENDNNL_DEPENDS_AOCLDLP
-    // Only the s8 sym-quant family is wired here; any other dtype counts
+    // s8 and packed s4 (GGML Q4_0) share this LRU.  Any other dtype counts
     // every reachable entry as skipped so the PROBE line stays accurate.
-    if (wei_dtype != data_type_t::s8) {
+    if (wei_dtype != data_type_t::s8 && wei_dtype != data_type_t::s4) {
         stats.total_attempted += static_cast<int>(bound);
         stats.skipped_invalid += static_cast<int>(bound);
         return status_t::success;
@@ -413,14 +413,26 @@ status_t warm_pack_all_aocl_dlp_experts_sym_quant(
         const int32_t warm_wct = allow_inplace
                 ? warm_wct_for_full_weight(weight_cache_type)
                 : 1;
-        const bool warmed = reorderAndCacheWeightsSymQuant<int8_t>(key,
-                weight[i], reordered_unused, K[i], N[i], ldb[i],
-                /*order=*/'r',
-                /*trans=*/(transB[i] ? 't' : 'n'),
-                /*mem_format_b=*/'n',
-                aocl_get_reorder_buf_size_s8s8s32os32_sym_quant,
-                aocl_reorder_s8s8s32os32_sym_quant, &symq_meta,
-                /*weight_cache_type=*/warm_wct, wei_buffer_capacity_bytes);
+        const bool packed_s4 = wei_dtype == data_type_t::s4;
+        const bool warmed = packed_s4
+                ? reorderAndCacheWeightsSymQuant<int8_t>(key, weight[i],
+                          reordered_unused, K[i], N[i], ldb[i],
+                          /*order=*/'r',
+                          /*trans=*/(transB[i] ? 't' : 'n'),
+                          /*mem_format_b=*/'n',
+                          aocl_get_reorder_buf_size_s8s4s32os32,
+                          aocl_reorder_s8s4s32os32, &symq_meta,
+                          /*weight_cache_type=*/warm_wct,
+                          wei_buffer_capacity_bytes)
+                : reorderAndCacheWeightsSymQuant<int8_t>(key, weight[i],
+                          reordered_unused, K[i], N[i], ldb[i],
+                          /*order=*/'r',
+                          /*trans=*/(transB[i] ? 't' : 'n'),
+                          /*mem_format_b=*/'n',
+                          aocl_get_reorder_buf_size_s8s8s32os32_sym_quant,
+                          aocl_reorder_s8s8s32os32_sym_quant, &symq_meta,
+                          /*weight_cache_type=*/warm_wct,
+                          wei_buffer_capacity_bytes);
         if (warmed) {
             ++stats.packed_ok;
         } else {
@@ -707,10 +719,10 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile_sym_quant(
             weight.size(), K.size(), N.size(), ldb.size(), transB.size()});
 
 #if ZENDNNL_DEPENDS_AOCLDLP
-    // s8 sym-quant family only; any other dtype counts every reachable
-    // entry as skipped so the PROBE line stays accurate (per-expert
-    // granularity, matching the bf16 `..._n_tile` skip path).
-    if (wei_dtype != data_type_t::s8) {
+    // s8 and packed s4 share this per-tile LRU.  Any other dtype counts
+    // every reachable entry as skipped so the PROBE line stays accurate
+    // (per-expert granularity, matching the bf16 `..._n_tile` skip path).
+    if (wei_dtype != data_type_t::s8 && wei_dtype != data_type_t::s4) {
         stats.total_attempted += static_cast<int>(bound);
         stats.skipped_invalid += static_cast<int>(bound);
         return status_t::success;
@@ -744,7 +756,13 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile_sym_quant(
         const int n_thr_e = std::max(1, std::min(stable, align_cap));
 
         for (int tid = 0; tid < n_thr_e; ++tid) {
-            const auto split = aligned_n_split(N[i], n_thr_e, tid, nr_align);
+            // Packed s4 snaps column bounds to even nibbles, matching
+            // do_tile's n_split_for_tile(..., even_boundaries=true).
+            const bool packed_s4 = wei_dtype == data_type_t::s4;
+            const auto split = packed_s4
+                    ? n_split_for_tile(N[i], n_thr_e, tid, nr_align,
+                              /*even_boundaries=*/true)
+                    : aligned_n_split(N[i], n_thr_e, tid, nr_align);
             const int col_start = split.first;
             const int col_end = split.second;
             const int n_tile = col_end - col_start;
@@ -756,9 +774,11 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile_sym_quant(
                 continue;
             }
 
-            const size_t wei_off = transB[i]
-                    ? static_cast<size_t>(col_start) * ldb[i] * wei_elem
-                    : static_cast<size_t>(col_start) * wei_elem;
+            const size_t wei_off = packed_s4
+                    ? packed_s4_col_byte_off(col_start, ldb[i], transB[i])
+                    : (transB[i] ? static_cast<size_t>(col_start) * ldb[i]
+                                              * wei_elem
+                                 : static_cast<size_t>(col_start) * wei_elem);
             const void *w_tile = static_cast<const char *>(weight[i]) + wei_off;
 
             // Sym-quant per-tile key: same (transB, K, n_tile, ldb, w_tile)
@@ -789,14 +809,23 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile_sym_quant(
             // reachable on the alloc-failure paths of weight_cache_type 0/2
             // (unused here), so this is always `true` today.  Honour it so a
             // future failure is counted as `skipped_invalid`, not packed_ok.
-            const bool warmed = reorderAndCacheWeightsSymQuant<int8_t>(key,
-                    w_tile, reordered_unused, K[i], n_tile, ldb[i],
-                    /*order=*/'r',
-                    /*trans=*/(transB[i] ? 't' : 'n'),
-                    /*mem_format_b=*/'n',
-                    aocl_get_reorder_buf_size_s8s8s32os32_sym_quant,
-                    aocl_reorder_s8s8s32os32_sym_quant, &symq_meta,
-                    /*weight_cache_type=*/1);
+            const bool warmed = packed_s4
+                    ? reorderAndCacheWeightsSymQuant<int8_t>(key, w_tile,
+                              reordered_unused, K[i], n_tile, ldb[i],
+                              /*order=*/'r',
+                              /*trans=*/(transB[i] ? 't' : 'n'),
+                              /*mem_format_b=*/'n',
+                              aocl_get_reorder_buf_size_s8s4s32os32,
+                              aocl_reorder_s8s4s32os32, &symq_meta,
+                              /*weight_cache_type=*/1)
+                    : reorderAndCacheWeightsSymQuant<int8_t>(key, w_tile,
+                              reordered_unused, K[i], n_tile, ldb[i],
+                              /*order=*/'r',
+                              /*trans=*/(transB[i] ? 't' : 'n'),
+                              /*mem_format_b=*/'n',
+                              aocl_get_reorder_buf_size_s8s8s32os32_sym_quant,
+                              aocl_reorder_s8s8s32os32_sym_quant, &symq_meta,
+                              /*weight_cache_type=*/1);
             if (warmed) {
                 ++stats.packed_ok;
             } else {

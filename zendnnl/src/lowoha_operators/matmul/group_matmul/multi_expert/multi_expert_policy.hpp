@@ -29,6 +29,7 @@
 
 #include "lowoha_operators/matmul/group_matmul/common/grp_matmul_constants.hpp"
 #include "lowoha_operators/matmul/group_matmul/common/grp_matmul_env.hpp"
+#include "lowoha_operators/matmul/group_matmul/common/grp_matmul_n_split.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 
 namespace zendnnl {
@@ -206,6 +207,35 @@ inline bool get_grp_n_tile_ccd_fill() {
 // single CCD working — precisely the case this clause excludes.
 inline bool grp_matmul_decode_dynamic_multi_expert(int active_ops) {
     return active_ops > 1;
+}
+
+/// True when a CK-off AUTO call may reorder the prompt weight in place.
+/// DecodeDynamic and forced DecodeD build different per-tile keys than
+/// `aocl_stable_n_thr`. `flat_n_tile` retargets those plans onto the
+/// strict-stable split once mixed in-place is active and the custom kernel
+/// was not the warmed decode layout, so the prompt reorder still writes the
+/// caller's buffer for both a single expert and a multi-expert pool.
+inline bool aocl_strict_stable_decode_plan(const std::vector<int> *M,
+        const std::vector<int> *N, const std::vector<int> *K, int num_threads,
+        size_t wei_elem) {
+    if (!get_grp_matmul_aocl_stable_ntile() || num_threads <= 0 || wei_elem == 0
+            || M == nullptr || N == nullptr || K == nullptr) {
+        return false;
+    }
+    const int slots = static_cast<int>(
+            std::min(M->size(), std::min(N->size(), K->size())));
+    if (slots <= 0) { return false; }
+    int active = 0;
+    int max_n = 0;
+    int max_k = 0;
+    for (int i = 0; i < slots; ++i) {
+        max_n = std::max(max_n, (*N)[i]);
+        max_k = std::max(max_k, (*K)[i]);
+        if ((*M)[i] > 0) { ++active; }
+    }
+    if (active == 0 || max_n <= 0 || max_k <= 0) { return false; }
+    const int stable = aocl_stable_n_thr(num_threads, max_n);
+    return stable > 0 && stable <= max_n;
 }
 
 } // namespace matmul

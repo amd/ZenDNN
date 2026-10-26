@@ -745,7 +745,8 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
         const std::vector<post_op_type_t> &po_types,
         const std::vector<tensor_t> &binary_tensors, bool use_LOWOHA,
         matmul_algo_t algo, float alpha = 1.0f, float beta = 0.0f,
-        bool use_reference = false, int pack_format_b = 0);
+        bool use_reference = false, int pack_format_b = 0,
+        bool is_superblock = false);
 
 // `group_matmul_kernel_test` was lifted into
 // `group_matmul/group_matmul_test_helpers.hpp` during the gtests folder
@@ -825,6 +826,18 @@ void repack_weights_q8_0(const int8_t *weight_buffer, const float *scale_buffer,
  */
 void repack_weights_q4_0(const int8_t *weight_buffer, const float *scale_buffer,
         int64_t M, int64_t K, void *out_blocks);
+
+/**
+ * @brief Repack signed-int8 weights and fp32 scales into GGML Q4_0 superblock
+ *        format (block_q4_0x8: 8 fp16 scales + 128 interleaved nibble bytes).
+ *
+ * Nibbles are stored already signed (no +8 bias).  M must be divisible by 8
+ * and K by 32.  Weight values MUST lie in [-8, 7].
+ *
+ * @param out_blocks  Output buffer, at least (M/8) * (K/32) * 144 bytes
+ */
+void repack_weights_q4_0_superblock(const int8_t *weight_buffer,
+        const float *scale_buffer, int64_t M, int64_t K, void *out_blocks);
 
 /** @fn compare_tensor_2D
  *  @brief Function to compare two 2D tensor

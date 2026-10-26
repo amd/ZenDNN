@@ -175,13 +175,17 @@ struct matmul_batch_params_t {
  *                     group fp16 scales), s4 -> Q4_0 (4-bit weights that the
  *                     unpack path widens to s8 before the sym-quant reorder).
  *
- * Q4_0 is accepted in its plain block_q4_0 form only; the 8-row interleaved
- * (block_q4_0x8) repack is not supported.
+ * Q4_0 defaults to plain block_q4_0.  Set is_superblock to select the 8-row
+ * interleaved block_q4_0x8 repack.  Superblock Q4_0 requires an s4 weight and
+ * an output-channel count (N) divisible by 8.  Its nibbles are already signed;
+ * the plain Q4_0 path is the one that removes GGML's +8 bias.
  */
 struct pack_format {
     int pack_format_b; ///< 0 = unpacked (default), 1 = GGML packed weights
+    /// Q4_0 only.  false = block_q4_0; true = 8-row block_q4_0x8.
+    bool is_superblock;
 
-    pack_format() : pack_format_b(0) {}
+    pack_format() : pack_format_b(0), is_superblock(false) {}
 };
 
 /**

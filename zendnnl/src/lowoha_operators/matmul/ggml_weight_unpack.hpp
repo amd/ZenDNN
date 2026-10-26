@@ -55,29 +55,47 @@ int64_t ggml_unpack_weight_buffer_size(
  *   *wei_ptr  -> start of the buffer (int8 weight bytes)
  *   *scl_ptr  -> weight region + weight_bytes (fp32 or bf16 scale bytes)
  *
- * Q4_0 weights are emitted as packed SIGNED nibbles: the GGML +8 bias is
- * removed here so the downstream sign-extending s4 -> s8 upcast is correct.
+ * Plain Q4_0 weights are emitted as packed SIGNED nibbles: the GGML +8 bias
+ * is removed here so the s4 GEMM sign-extends the true code.  Superblock
+ * Q4_0 (block_q4_0x8, @p is_superblock) already stores signed nibbles, so
+ * that bias is left in place.  Superblock requires ggml_type 2 and N
+ * divisible by 8.
  *
  * @return 0 on success, -1 on error.
  */
 int ggml_unpack_weight_buffer(const void *weight_data, int ggml_type,
         bool use_bf16_scales, int64_t N, int64_t K, int8_t **wei_ptr,
-        void **scl_ptr, void *unpack_buffer = nullptr);
+        void **scl_ptr, void *unpack_buffer = nullptr,
+        bool is_superblock = false);
 
 /**
- * @brief Returns true when @p params is configured for sym-quant per-group
- *        int8 matmul, the only mode supported by the GGML packed-weight path.
+ * @brief Returns true when @p params is already a sym-quant per-group int8
+ *        matmul: s8 source, s4 or s8 weight, no source zero-point, more than
+ *        one source scale, f32 or bf16 destination.
  *
- * Callers should validate this BEFORE invoking unpack_ggml_weights_and_cache
- * to fail-fast on misconfigured matmul setups.
+ * This describes the GEMM after source quantization.  It is not a
+ * precondition of unpack_ggml_weights_and_cache.  An f32 or bf16 activation
+ * with dynamic_quant set is a valid entry to the packed-weight path; the
+ * source is quantized later.
  */
 bool ggml_is_sym_quant(const matmul_params &params);
+
+/**
+ * @brief True when a GGML packed weight can run the sym-quant GEMM.
+ *
+ * Accepts the post-quantization shape from ggml_is_sym_quant, and the
+ * pre-quantization entry llama.cpp uses: an f32 or bf16 activation with
+ * dynamic_quant set and a non-scalar source scale.  A scalar source scale
+ * is rejected in both forms.  Cold-expert warming does not call this; unpack
+ * itself still ignores the activation.
+ */
+bool ggml_packed_gemm_supported(const matmul_params &params);
 
 /**
  * @brief Pre-quantization validation for the GGML packed-weight matmul path.
  *
  * No-op (returns success) when params.packing.pack_format_b != 1. Otherwise
- * verifies the static preconditions that the GGML unpack/reorder pipeline
+ * verifies the static preconditions that the GGML out-of-place unpack
  * requires:
  *   - weights must be constant (so the LRU cache can keep them across calls)
  *   - Batch_B must be 1 (single-buffer unpack/reorder cache)
@@ -90,69 +108,53 @@ status_t validate_ggml_packed_inputs(const matmul_params &params,
         bool is_weights_const, int Batch_B, bool transB);
 
 /**
- * @brief Unpack GGML packed weights out of place, reorder them for AOCL
- *        blocked sym-quant execution, and cache the final reordered buffer.
+ * @brief Unpack GGML packed weights out of place and cache the raw result.
  *
  * The block format is taken from params.dtypes.wei: s8 (or none, the default
  * carried by the fused-MoE Op2 scratch params) selects Q8_0, which unpacks
- * straight to s8, and s4 selects Q4_0, whose nibbles are unpacked to packed s4
- * and then widened to s8 so both formats share one reorder.  Any other weight
- * dtype is rejected.
+ * straight to s8, and s4 selects Q4_0, which stays packed signed s4 (two
+ * nibbles per byte).  Any other weight dtype is rejected.
+ * params.packing.is_superblock selects the 8-row block_q4_0x8 layout for an
+ * s4 weight; it is rejected for every other dtype.
+ *
+ * This function never reorders.  On success @p weight points at a freshly
+ * allocated raw matrix — s8 [N, K] for Q8_0, packed s4 [N, K/2] for Q4_0 —
+ * with writable capacity covering the matching AOCL sym-quant blocked image
+ * (Q8_0 also covers the custom-kernel INT8 pack), then {K/32, N} bf16 scales
+ * past that capacity.  params.mem_format_b is 'n', packing.pack_format_b /
+ * is_superblock are cleared, dtypes.wei stays s8 or s4, weight_cache_type
+ * is 2 because the call entered with pack_format_b == 1, and
+ * wei_buffer_capacity_bytes is that capacity so a later AOCL reorder can
+ * write its blocked image into this buffer.  The caller-owned packed GGML
+ * buffer is not modified (llama.cpp may map it read-only).  bf16 / fp32
+ * weights never enter this path and keep the caller's cache mode.
  *
  * Uses an LRU cache keyed on the tuple
- *   (trans, K, N, ldb, weight pointer, algo = aocl_dlp_blocked)
- * to avoid re-running the unpack and reorder if the same packed buffer is
- * presented again with the same geometry. The activation row count M and
- * the (constant) sym-quant group size are intentionally NOT part of the
- * cache key, since the reordered weight bytes do not depend on them.
- *
- * On success, @p weight is redirected to the cached AOCL sym-quant-reordered
- * int8 weight buffer, params.mem_format_b is set to reordered, and
- * params.quant_params.wei_scale is populated with the cached bf16 scale array.
- * The caller-owned packed GGML buffer is not modified.
+ *   (trans, K, N, ldb, weight pointer, ggml type, is_superblock)
+ * so the same packed buffer is unpacked once.  M is not part of the key.
  *
  * Precondition: trans must be 't' (GGML stores weights as N x K row-major,
- * i.e. the transpose of B).  ggml_is_sym_quant(params) is required and
- * validated by the caller only for ACTIVE experts; cold-expert cache warming
- * (M==0) may call this before src_scale is populated — the unpack needs only
- * the packed weight + shape, not the src_scale, so the sym-quant check does
- * not gate warming.
- *
- * @p skip_reorder selects the downstream weight layout:
- *   - false (default) — REORDER path: unpack + AOCL sym-quant reorder +
- *     cache; @p weight -> reordered buffer, mem_format_b = 'r'.  Consumed
- *     directly by the AOCL full-weight GEMM (ALGO 1 etc.).
- *   - true — RAW-S8 path: unpack to a cached raw s8 buffer (N x K) +
- *     {K/32, N} bf16 scales and hand it back UN-reordered
- *     (mem_format_b = 'n', packing.pack_format_b cleared to 0).  The weight
- *     is then a plain per-group s8 weight, so the flat_n_tile (ALGO 3)
- *     per-group path reorders it INTERNALLY per N-tile
- *     (`do_tile`'s `{G, n_tile}` sym-quant repack) — the GEMM handles the
- *     reorder after N-tiling, instead of this function pre-reordering the
- *     full weight.  Identical to how a caller-provided per-group s8 weight
- *     already flows.  The two layouts are cached under DISTINCT keys so
- *     they never alias.  Callers set this when the call may run on N-tile
- *     (ALGO 3 pinned, or AUTO where the selector can pick ALGO 3).
+ * i.e. the transpose of B).  The activation dtype is not an input.  Cold
+ * experts (M==0) may call this before src_scale is populated; the unpack
+ * needs only the packed weight and its shape.
  *
  * @param weight  [in/out] Pointer to packed weight data; redirected to the
- *                cached reordered (or raw s8) weights on success.
+ *                cached raw s8 weights on success.
  * @param N       Number of output channels (rows in the GGML weight matrix)
  * @param K       Number of input features (columns, must be divisible by 32)
  * @param ldb     Leading dimension for the unpacked weight matrix
- * @param trans   AOCL transpose flag for matrix B (must be 't' for GGML)
+ * @param trans   Transpose flag for matrix B (must be 't' for GGML)
  * @param params  [in/out] matmul_params whose wei_scale is populated on success
- * @param skip_reorder  hand back raw s8 (mem_format 'n') for the N-tile
- *                      per-group DLP path instead of pre-reordering
  * @param is_weights_const  when false the unpack still runs but bypasses the
- *                      cache entirely, re-unpacking into a thread-private
- *                      buffer that stays valid for the rest of this call
+ *                cache entirely, re-unpacking into a thread-private buffer
+ *                that stays valid for the rest of this call
  * @return status_t::success on success, status_t::failure on error
  */
 status_t unpack_ggml_weights_and_cache(const void *&weight, int N, int K,
-        int ldb, char trans, matmul_params &params, bool skip_reorder = false,
+        int ldb, char trans, matmul_params &params,
         bool is_weights_const = true);
 
-/** Clear cached GGML unpacked/reordered weight buffers. */
+/** Clear cached GGML unpacked weight buffers. */
 void clear_ggml_weight_unpack_cache();
 
 /** Number of cached GGML unpacked/reordered weight buffers currently resident.

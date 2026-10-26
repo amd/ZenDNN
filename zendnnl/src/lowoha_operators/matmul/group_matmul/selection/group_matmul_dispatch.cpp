@@ -85,7 +85,7 @@ using detail::sequential_experts;
 bool prepare_grouped_auto_weight_cache(std::vector<matmul_params> &params,
         bool custom_kernel_effective,
         std::vector<matmul_params> *secondary_params, bool auto_algo3_layer,
-        bool *ck_inplace_licence) {
+        bool *ck_inplace_licence, bool strict_stable_decode_plan) {
     auto &config = matmul_config_t::instance();
     if (ck_inplace_licence != nullptr) { *ck_inplace_licence = false; }
     if (config.get_weight_cache() != 2) { return false; }
@@ -149,9 +149,19 @@ bool prepare_grouped_auto_weight_cache(std::vector<matmul_params> &params,
 #else
     const bool aocl_dlp_compiled = false;
 #endif
+    // DLP's per-tile cache normally cannot licence a destructive prompt
+    // reorder because its keys include the N split.  The strict-stable AOCL
+    // planner is the exception: it fixes that split from `num_threads` for
+    // every active expert, and cross-warm prepopulates those exact decode
+    // entries before ALGO 1 rewrites the full weight into the caller's
+    // buffer.  DecodeDynamic and forced DecodeD would ask for a different
+    // split; once this licence is on, flat_n_tile retargets those plans
+    // onto the warmed split instead of allocating a second prompt copy.
+    const bool strict_stable_dlp_decode
+            = !custom_kernel_effective && strict_stable_decode_plan;
     const bool process_mixed_eligible = aocl_dlp_compiled
             && get_grp_matmul_prepack() && get_grp_matmul_cross_warm()
-            && custom_kernel_effective
+            && (custom_kernel_effective || strict_stable_dlp_decode)
             && config.get_lru_cache_capacity()
                     == std::numeric_limits<uint32_t>::max();
     if (process_mixed_eligible) {
@@ -161,11 +171,11 @@ bool prepare_grouped_auto_weight_cache(std::vector<matmul_params> &params,
             apilog_info(
                     "[GRP_MATMUL.WEIGHT_CACHE] weight_cache_type=2 AUTO "
                     "mixed-in-place ENABLED "
-                    "(prepack+cross_warm+custom_kernel on, unlimited LRU "
-                    "capacity): AOCL full-weight prompt reorder mutates the "
-                    "weight buffer in place; CK / AOCL per-tile decode stay "
-                    "out-of-place, pre-warmed from raw weights before the "
-                    "mutation.");
+                    "(prepack+cross_warm plus effective custom-kernel or "
+                    "strict-stable AOCL DLP decode, unlimited LRU capacity): "
+                    "AOCL full-weight prompt reorder mutates the weight buffer "
+                    "in place; CK / AOCL per-tile decode stay out-of-place, "
+                    "pre-warmed from raw weights before the mutation.");
         }
         // Per call, a BF16/FP16 MoE layer AUTO keeps on ALGO 3
         // (`grp_matmul_auto_algo3_only`) has the custom-kernel pack as the
@@ -191,8 +201,9 @@ bool prepare_grouped_auto_weight_cache(std::vector<matmul_params> &params,
         return true;
     }
 
-    // Without a split-independent CK decode pack, AUTO cannot safely retain
-    // raw bytes after the prompt's irreversible in-place AOCL reorder.
+    // Without either a split-independent CK decode pack or strict-stable DLP
+    // decode tiles, AUTO cannot safely retain raw bytes after the prompt's
+    // irreversible in-place AOCL reorder.
     config.downgrade_weight_cache(1);
     static std::atomic<bool> s_wc2_downgrade_warned {false};
     if (!s_wc2_downgrade_warned.exchange(true, std::memory_order_relaxed)) {
@@ -207,10 +218,10 @@ bool prepare_grouped_auto_weight_cache(std::vector<matmul_params> &params,
         apilog_warning(
                 "[GRP_MATMUL.WEIGHT_CACHE] weight_cache_type=2 (in-place) is "
                 "unsafe under AUTO scheduling without prepack+cross_warm, an "
-                "effective custom-kernel decode pack and unlimited LRU "
-                "capacity. Downgrading process-wide to out-of-place "
-                "(weight_cache_type=1) for the rest of the run; kernel "
-                "selection unchanged.");
+                "effective custom-kernel or strict-stable AOCL-DLP decode "
+                "pack and unlimited LRU capacity. Downgrading process-wide "
+                "to out-of-place (weight_cache_type=1) for the rest of the "
+                "run; kernel selection unchanged.");
 #endif
     }
     return false;
@@ -335,8 +346,13 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
     }
 
     bool &ck_inplace_licence = route.ck_inplace_licence;
+    const size_t stable_wei_elem
+            = params.empty() ? 1 : size_of(params.front().dtypes.wei);
+    const bool strict_stable_decode_plan = aocl_strict_stable_decode_plan(
+            &M, &N, &K, num_threads, stable_wei_elem);
     track_grouped_inplace_mutation = prepare_grouped_auto_weight_cache(params,
-            custom_kernel_en, nullptr, auto_algo3_layer, &ck_inplace_licence);
+            custom_kernel_en, nullptr, auto_algo3_layer, &ck_inplace_licence,
+            strict_stable_decode_plan);
     // Without the licence, a process downgraded to WEIGHT_CACHE=1 just now
     // must not see this first call pack in place.
     if (!ck_inplace_licence) {
@@ -527,7 +543,7 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
         // not visible here; the hint is informational, not a guarantee.
         // Two structural forms reach the DQ-INT8 CK microkernel, both with
         // wei=s8, dst=bf16, compute=s8/u8 (mirrors `resolve_variant`):
-        //   1. runtime hoist  — dynamic_quant=true with a bf16 src that the
+        //   1. runtime hoist  — dynamic_quant=true with a bf16/f32 src that the
         //      N-tile executor quantizes to s8 before dispatch_tile.
         //   2. grouped pre-quant — the group_dynamic_quant pre-pass already
         //      produced an s8 src + per-token src_scale and CLEARED
@@ -547,11 +563,12 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
                 && (params[rep].dtypes.dst == data_type_t::bf16
                         || params[rep].dtypes.dst == data_type_t::f32
                         || params[rep].dtypes.dst == data_type_t::u8);
+        const bool ck_runtime_hoist = params[rep].dynamic_quant
+                && (params[rep].dtypes.src == data_type_t::bf16
+                        || params[rep].dtypes.src == data_type_t::f32);
         const bool ck_hint_int8
                 = (ck_dq_int8_shapes
-                          && ((params[rep].dynamic_quant
-                                      && params[rep].dtypes.src
-                                              == data_type_t::bf16)
+                          && (ck_runtime_hoist
                                   || (params[rep].dtypes.src == data_type_t::s8
                                           && params[rep].quant_params.src_scale
                                                           .buff

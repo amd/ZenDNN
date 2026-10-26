@@ -201,8 +201,8 @@ KernelVariant resolve_variant(data_type_t src, data_type_t wei, data_type_t dst,
     // DQ-INT8 family — two ways the per-token-quantized s8/u8 src reaches
     // the CK microkernel, both with `wei == s8` and the same dequant math:
     //
-    //   1. Runtime hoist (legacy): caller passes bf16 src with
-    //      `dynamic_quant = true`; the N-tile executor hoists bf16 → s8/u8
+    //   1. Runtime hoist (legacy): caller passes bf16/f32 src with
+    //      `dynamic_quant = true`; the N-tile executor hoists it to s8/u8
     //      (per-token src_scale) before `dispatch_tile`.
     //   2. Grouped pre-quant (ZENDNNL_ENABLE_GROUP_DQ, default on): the
     //      `group_dynamic_quant` pre-pass already quantized the src to s8,
@@ -218,8 +218,11 @@ KernelVariant resolve_variant(data_type_t src, data_type_t wei, data_type_t dst,
     //   * `compute_dtype = s8` → kS8_S8_BF16_SYM  (sym, no src_zp).
     //   * `compute_dtype = u8` → kU8_S8_BF16_ASYM (asym, with src_zp).
     const bool dq_int8_src
-            = (dynamic_quant && src == data_type_t::bf16) // (1) runtime hoist
-            || (src == data_type_t::s8); // (2) grouped pre-quant
+            = (dynamic_quant
+                      && (src == data_type_t::bf16 || src == data_type_t::f32))
+            || (src
+                    == data_type_t::
+                            s8); // (1) runtime hoist, (2) grouped pre-quant
     if (dq_int8_src && wei == data_type_t::s8) {
         if (dst == data_type_t::bf16) {
             if (compute_dtype == data_type_t::s8)

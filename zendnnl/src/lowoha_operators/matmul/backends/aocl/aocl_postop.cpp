@@ -736,6 +736,19 @@ static void patch_mutable_fields(dlp_metadata_t *md,
     bool is_int8 = dtypes.wei == data_type_t::s8 || is_w4a8_native_sym;
     size_t src_scale_nelems
             = get_num_elements(lowoha_param.quant_params.src_scale.dims);
+    // Packed s4 with an already-s8 source and per-group/per-token scales is
+    // the GGML Q4_0 sym-quant form (f32 dst is not W4A8).  Attach the same
+    // a_quant_op / b_quant_op metadata the s8 sym-quant path uses.
+    if (!is_int8 && dtypes.wei == data_type_t::s4
+            && dtypes.src == data_type_t::s8
+            && !lowoha_param.quant_params.src_zp.buff
+            && (src_scale_nelems > 1
+                    || src_scale_is_collapsed_per_token(
+                            lowoha_param.quant_params, M, N))
+            && (dtypes.dst == data_type_t::f32
+                    || dtypes.dst == data_type_t::bf16)) {
+        is_int8 = true;
+    }
     const bool is_bf16_f32_per_token_sym = is_int8
             && (dtypes.src == data_type_t::bf16
                     || dtypes.src == data_type_t::f32)
@@ -1129,6 +1142,17 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
 
     size_t src_scale_nelems
             = get_num_elements(lowoha_param.quant_params.src_scale.dims);
+    // Packed s4 × s8 per-group (GGML Q4_0).  Same quant metadata as s8.
+    if (!is_int8 && dtypes.wei == data_type_t::s4
+            && dtypes.src == data_type_t::s8
+            && !lowoha_param.quant_params.src_zp.buff
+            && (src_scale_nelems > 1
+                    || src_scale_is_collapsed_per_token(
+                            lowoha_param.quant_params, M, N))
+            && (dtypes.dst == data_type_t::f32
+                    || dtypes.dst == data_type_t::bf16)) {
+        is_int8 = true;
+    }
     // bf16/f32 + s8 with per-token symmetric scales: a_quant_op carries the
     // per-row src scales, while the weight scale remains a SCALE post-op.
     const bool is_bf16_f32_per_token_sym = is_int8
@@ -1450,7 +1474,8 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
         dlp_metadata->b_quant_op = &new_holder->b_quant_op;
         dlp_metadata->b_quant_op->quant_op_kind = DLP_QUANT_OP_QUANTIZE;
         const bool b_uses_native_s4
-                = w4a8_algo == zendnnl::common::matmul_algo_t::aocl_dlp_blocked;
+                = w4a8_algo == zendnnl::common::matmul_algo_t::aocl_dlp_blocked
+                || (!has_w4a8_algo && dtypes.wei == data_type_t::s4);
         const DLP_TYPE b_sym_dtype = b_uses_native_s4 ? DLP_S4 : DLP_S8;
         dlp_metadata->b_quant_op->src_type = b_sym_dtype;
         dlp_metadata->b_quant_op->dst_type = b_sym_dtype;

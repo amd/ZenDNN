@@ -593,6 +593,16 @@ void compute_quantized_matmul(int batch_size, int M, int N, int K, int lda,
     }
 
     const size_t accum_batch_stride = static_cast<size_t>(M) * N;
+    const auto *packed_s4 = static_cast<const uint8_t *>(weights);
+    auto weight_at = [&](size_t wt_idx) -> int32_t {
+        if (weight_dtype != data_type_t::s4) {
+            return read_and_cast<int32_t>(weights, weight_dtype, wt_idx);
+        }
+        const uint8_t byte = packed_s4[wt_idx >> 1];
+        const int nib = (wt_idx & 1) ? static_cast<int>(byte >> 4)
+                                     : static_cast<int>(byte & 0x0F);
+        return (nib & 8) ? (nib - 16) : nib;
+    };
 
     ref_parallel_3d(batch_size, M, N, [&](int bs, int i, int j) {
         size_t op_idx = static_cast<size_t>(bs) * offset_out
@@ -642,9 +652,7 @@ void compute_quantized_matmul(int batch_size, int M, int N, int K, int lda,
                         src_val = read_and_cast<int32_t>(
                                 input, input_dtype, ip_idx);
                     }
-                    group_sum += src_val
-                            * read_and_cast<int32_t>(
-                                    weights, weight_dtype, wt_idx);
+                    group_sum += src_val * weight_at(wt_idx);
                 }
                 float grp_scale = read_and_cast<float>(
                         quant_param.src_scale.buff, quant_param.src_scale.dt,
@@ -690,14 +698,11 @@ void compute_quantized_matmul(int batch_size, int M, int N, int K, int lda,
                     int32_t ip_s32 = static_cast<int32_t>(
                                              std::nearbyint(ip_f32 / src_scale))
                             + src_zero_point;
-                    sum_s32 += ip_s32
-                            * read_and_cast<int32_t>(
-                                    weights, weight_dtype, wt_idx);
+                    sum_s32 += ip_s32 * weight_at(wt_idx);
                 } else {
                     sum_s32 += read_and_cast<int32_t>(
                                        input, input_dtype, ip_idx)
-                            * read_and_cast<int32_t>(
-                                    weights, weight_dtype, wt_idx);
+                            * weight_at(wt_idx);
                 }
             }
             sum = static_cast<float>(sum_s32);
@@ -1030,6 +1035,15 @@ status_t reference_matmul_execute(const char layout, const bool transA,
     bool is_woq = !is_w4a8 && input_dtype == data_type_t::bf16
             && (weight_dtype == data_type_t::s4
                     || weight_dtype == data_type_t::u4);
+    // Packed s4 with an s8/f32/bf16 source is the GGML Q4_0 sym-quant form.
+    // It is not W4A8 (bf16 destination) and not bf16-source WOQ.
+    const bool is_packed_s4_sym = !is_w4a8 && !is_woq
+            && weight_dtype == data_type_t::s4
+            && (input_dtype == data_type_t::s8 || input_dtype == data_type_t::u8
+                    || input_dtype == data_type_t::bf16
+                    || input_dtype == data_type_t::f32)
+            && (output_dtype == data_type_t::f32
+                    || output_dtype == data_type_t::bf16);
     // Interim buffer  size
     size_t output_size = static_cast<size_t>(batch_size) * M * N;
     // Interim accumulation buffer with float type
@@ -1051,7 +1065,14 @@ status_t reference_matmul_execute(const char layout, const bool transA,
         free(accum_buff_f32);
         return status_t::failure;
     }
-    if (is_int8) {
+    if (is_packed_s4_sym
+            && (params.quant_params.src_zp.buff
+                    || params.quant_params.wei_zp.buff)) {
+        log_error("Packed s4 reference matmul does not support zero points");
+        free(accum_buff_f32);
+        return status_t::failure;
+    }
+    if (is_int8 || is_packed_s4_sym) {
         compute_quantized_matmul(batch_size, M, N, K, lda, ldb, ldc, offset_src,
                 offset_wei, offset_out, batch_a_count, batch_b_count, alpha,
                 beta, is_transpose_src, is_transpose_weights, input, weights,

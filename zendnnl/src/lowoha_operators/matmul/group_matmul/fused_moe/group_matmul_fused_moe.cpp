@@ -1164,12 +1164,13 @@ inline status_t setup_op2_dispatch_scratch(FusedMoEScratch &scratch,
         const bool op2_src_is_float = (p.dtypes.src == data_type_t::bf16
                 || p.dtypes.src == data_type_t::f32);
         p.dynamic_quant = op2_int8_compute && op2_src_is_float;
-        // GGML-packed down weights are unpacked + AOCL sym-quant-reordered by
-        // the caller (group_matmul_direct) into the same layout as Op1's
-        // weight, and `down_scale[i]` carries the resulting {K_down/32, N_down}
-        // scale.  Inherit Op1's reorder/pack flags so Op2 consumes the
-        // already-reordered down_weight instead of re-reordering plain bytes.
-        // Gated on Op1 being packed → exact no-op for the non-GGML path.
+        // GGML down weights are unpacked out of place by the caller
+        // (group_matmul_direct) to raw s8, which clears pack_format_b, and
+        // `down_scale[i]` carries the resulting {K_down/32, N_down} scale.
+        // Op2 then takes the plain branch below.  The later reorder reads
+        // that raw buffer.  Gated on Op1 still being packed, which is a
+        // no-op once the unpack has cleared the flag and for every non-GGML
+        // call.
         if (params[i].packing.pack_format_b == 1) {
             p.mem_format_b = params[i].mem_format_b; // 'r' (reordered)
             p.packing.pack_format_b = params[i].packing.pack_format_b;
@@ -1733,10 +1734,21 @@ status_t group_matmul_fused_moe_execute(
     // out-of-place caching.
     const bool op2_custom_kernel_en = grp_matmul_custom_kernel_effective(
             scratch.params_down, M, fused.N_down, grp_matmul_gated_act_t::none);
+    const size_t op1_wei_elem
+            = params.empty() ? 1 : size_of(params.front().dtypes.wei);
+    const size_t op2_wei_elem = scratch.params_down.empty()
+            ? op1_wei_elem
+            : size_of(scratch.params_down.front().dtypes.wei);
+    const bool strict_stable_decode_plan
+            = aocl_strict_stable_decode_plan(
+                      &M, &N, &K, num_threads, op1_wei_elem)
+            && aocl_strict_stable_decode_plan(&M, &fused.N_down,
+                    &scratch.K_down, num_threads, op2_wei_elem);
     const bool track_grouped_inplace_mutation
             = prepare_grouped_auto_weight_cache(params,
                     custom_kernel_en && op2_custom_kernel_en,
-                    &scratch.params_down);
+                    &scratch.params_down, /*auto_algo3_layer=*/false,
+                    /*ck_inplace_licence=*/nullptr, strict_stable_decode_plan);
     mutation_tracking.set(track_grouped_inplace_mutation);
     const uint64_t mutated_conflicts_before
             = aocl_mutated_source_conflict_count(

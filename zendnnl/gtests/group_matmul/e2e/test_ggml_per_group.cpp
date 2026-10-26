@@ -42,12 +42,16 @@
 #include <string>
 #include <vector>
 
+#include <omp.h>
+
+#include "common/op_config.hpp"
 #include "group_matmul_test_helpers.hpp"
 #include "gtest_utils.hpp"
 #include "lowoha_operators/common/omp_thread_control.hpp"
 #include "lowoha_operators/matmul/ggml_weight_unpack.hpp"
 #include "lowoha_operators/matmul/group_matmul/common/group_matmul_parallel_common.hpp"
 #include "lowoha_operators/matmul/group_matmul/prepack/prepack.hpp"
+#include "lowoha_operators/matmul/group_matmul/single_expert/single_expert_route.hpp"
 #include "moe_test_utils.hpp"
 
 namespace {
@@ -214,6 +218,134 @@ void run_ggml_per_group_scenario(const std::string &label,
                           packed_before[e].size()),
                 0)
                 << label << ": packed weight bytes mutated on expert " << e;
+    }
+}
+
+/// Q4_0 group matmul: pack each expert as plain block_q4_0 or block_q4_0x8 and
+/// compare group_matmul_direct with the unpacked s8 reference.
+void run_ggml_q4_group_scenario(const std::string &label,
+        const std::vector<int> &rows, uint64_t K, uint64_t N, bool superblock) {
+    ASSERT_EQ(K % kGgmlBlock, 0u) << label;
+    if (superblock) {
+        ASSERT_EQ(N % 8, 0u)
+                << label << ": superblock N must be a multiple of 8";
+    }
+    const uint64_t ng = K / kGgmlBlock;
+    const int E = static_cast<int>(rows.size());
+    reset_grp_matmul_caches();
+
+    const matmul_algo_t algo = matmul_algo_t::aocl_dlp_blocked;
+    const data_type_t ref_dt = data_type_t::bf16;
+    const data_type_t scale_dt = data_type_t::bf16;
+    const std::vector<int64_t> wei_sd
+            = {static_cast<int64_t>(ng), static_cast<int64_t>(N)};
+    tensor_factory_t tf;
+
+    std::vector<tensor_t> inp(E), wpacked(E), wref(E), bias(E), out(E),
+            out_ref(E);
+    std::vector<std::vector<uint8_t>> packed_storage(E), packed_before(E);
+    std::vector<int> pack_fmt(E, 1);
+    std::vector<int> super_flag(E, superblock ? 1 : 0);
+    std::vector<int> active(E);
+    const int64_t saved_seed = seed;
+
+    for (int e = 0; e < E; ++e) {
+        active[e] = rows[e];
+        seed = saved_seed + 17 + static_cast<int64_t>(e);
+        const uint64_t Mbuf = static_cast<uint64_t>(rows[e] > 0 ? rows[e] : 4);
+
+        auto wei_ref_f = tf.uniform_dist_tensor({K, N}, ref_dt, 2.0f, false);
+        tensor_t weight_tensor, wei_scale, wei_zp;
+        ASSERT_EQ(quant_params_compute(tf, wei_ref_f, ref_dt, data_type_t::s8,
+                          wei_sd, scale_dt, wei_scale, wei_zp, &weight_tensor),
+                status_t::success)
+                << label << ": weight quant failed (expert " << e << ")";
+        auto *wt_mut
+                = static_cast<int8_t *>(weight_tensor.get_raw_handle_unsafe());
+        for (uint64_t i = 0; i < K * N; ++i) {
+            wt_mut[i] = static_cast<int8_t>(
+                    static_cast<int>(
+                            ((i + static_cast<uint64_t>(e)) * 7 + 3) % 16)
+                    - 8);
+        }
+        wref[e] = weight_tensor;
+
+        const int8_t *raw_wt = wt_mut;
+        const uint16_t *raw_scl = static_cast<const uint16_t *>(
+                wei_scale.get_raw_handle_unsafe());
+        std::vector<float> scl_f32(static_cast<size_t>(ng * N));
+        for (size_t i = 0; i < scl_f32.size(); ++i) {
+            uint32_t bits = static_cast<uint32_t>(raw_scl[i]) << 16;
+            std::memcpy(&scl_f32[i], &bits, sizeof(float));
+        }
+        std::vector<int8_t> wt_nk(static_cast<size_t>(K) * N);
+        for (uint64_t ki = 0; ki < K; ++ki)
+            for (uint64_t ni = 0; ni < N; ++ni)
+                wt_nk[ni * K + ki] = raw_wt[ki * N + ni];
+
+        const size_t packed_size = superblock
+                ? static_cast<size_t>(N / 8) * ng * 144
+                : static_cast<size_t>(N) * ng * 18;
+        packed_storage[e].resize(packed_size);
+        if (superblock) {
+            repack_weights_q4_0_superblock(wt_nk.data(), scl_f32.data(),
+                    static_cast<int64_t>(N), static_cast<int64_t>(K),
+                    packed_storage[e].data());
+        } else {
+            repack_weights_q4_0(wt_nk.data(), scl_f32.data(),
+                    static_cast<int64_t>(N), static_cast<int64_t>(K),
+                    packed_storage[e].data());
+        }
+        wpacked[e] = tf.copy_tensor({K, N}, data_type_t::s4,
+                std::make_pair(packed_size,
+                        static_cast<void *>(packed_storage[e].data())),
+                /*trans=*/true, /*is_blocked=*/false);
+        packed_before[e].assign(
+                packed_storage[e].begin(), packed_storage[e].end());
+
+        const std::vector<int64_t> src_sd
+                = {static_cast<int64_t>(Mbuf), static_cast<int64_t>(ng)};
+        auto src_ref_f
+                = tf.uniform_dist_tensor({Mbuf, K}, ref_dt, 25.0f, false);
+        tensor_t input_tensor, src_scale, src_zp;
+        ASSERT_EQ(quant_params_compute(tf, src_ref_f, ref_dt, data_type_t::s8,
+                          src_sd, scale_dt, src_scale, src_zp, &input_tensor),
+                status_t::success)
+                << label << ": source quant failed (expert " << e << ")";
+        inp[e] = input_tensor;
+        bias[e] = tf.uniform_dist_tensor({1, N}, ref_dt, 2.0);
+        out[e] = tf.uniform_dist_tensor({Mbuf, N}, ref_dt, 2.0);
+        out_ref[e] = tf.uniform_dist_tensor({Mbuf, N}, ref_dt, 2.0);
+    }
+    seed = saved_seed;
+
+    status_t st = group_matmul_kernel_test(inp, wpacked, bias, out, algo, 1.0f,
+            0.0f, /*moe_postop=*/nullptr, /*gated_act=*/nullptr, pack_fmt,
+            active, data_type_t::s8, /*weight_cache_type=*/2, super_flag);
+    ASSERT_EQ(st, status_t::success) << label << ": group_matmul_direct failed";
+
+    const std::vector<post_op_type_t> ref_po;
+    for (int e = 0; e < E; ++e) {
+        if (rows[e] == 0) continue;
+        std::vector<tensor_t> bin;
+        status_t rst = matmul_kernel_test(inp[e], wref[e], bias[e], out_ref[e],
+                ref_po, bin, /*use_LOWOHA=*/true, algo, 1.0f, 0.0f,
+                /*use_reference=*/true);
+        ASSERT_EQ(rst, status_t::success)
+                << label << ": reference failed (expert " << e << ")";
+        bool expert_ok = true;
+        compare_tensor_2D_matrix(out[e], out_ref[e],
+                static_cast<uint64_t>(rows[e]), N, K, rtol_bf16,
+                18.0f * epsilon_bf16, expert_ok,
+                /*enable_f32_relaxation=*/false, 1.0f);
+        EXPECT_TRUE(expert_ok) << label << ": output mismatch on expert " << e;
+    }
+    for (int e = 0; e < E; ++e) {
+        EXPECT_EQ(std::memcmp(packed_before[e].data(),
+                          wpacked[e].get_raw_handle_unsafe(),
+                          packed_before[e].size()),
+                0)
+                << label << ": packed Q4_0 bytes mutated on expert " << e;
     }
 }
 
@@ -423,4 +555,159 @@ TEST(GroupMatmulGgmlPerGroup, ColdExpertsWarmedFullPoolBF16) {
             << "all 15 experts' GGML weights must be unpacked + cached after "
                "one "
                "call (full-pool warm), not just the 6 routed experts";
+}
+
+// Three experts, one cold.  Plain Q4_0 and the 8-row superblock both go
+// through group_matmul_direct and must match the unpacked s8 reference.
+TEST(GroupMatmulGgmlQ4, PlainQ4MatchesUnpackedReference) {
+    run_ggml_q4_group_scenario(
+            "q4 plain", {4, 0, 8}, /*K=*/64, /*N=*/16, /*superblock=*/false);
+}
+
+TEST(GroupMatmulGgmlQ4, SuperblockQ4MatchesUnpackedReference) {
+    run_ggml_q4_group_scenario("q4 superblock", {4, 0, 8}, /*K=*/64, /*N=*/16,
+            /*superblock=*/true);
+}
+
+// The route predicate still rejects a weight that is still GGML-packed.
+// matmul_direct unpacks before that check, so the predicate sees raw s8.
+// This shape is too narrow to take the group route after unpack.
+TEST(GroupMatmulGgmlQ4, PackedQ4PredicateRejectsUntilUnpacked) {
+    using zendnnl::lowoha::matmul::custom_kernel_routable;
+    using zendnnl::lowoha::matmul::matmul_params;
+    using zendnnl::lowoha::matmul::test_api::
+            s_last_group_matmul_direct_gemm_mode;
+
+    SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
+    if (!zendnnl::lowoha::matmul::custom_kernel::avx512vnni_available()) {
+        GTEST_SKIP() << "AVX-512 VNNI is required for the s4 group route";
+    }
+
+    // An unpacked s4 W4A8 call is eligible for the one-op group route.
+    // The predicate itself still rejects pack_format_b=1. matmul_direct
+    // unpacks before calling it, so this check is of the predicate only.
+    {
+        auto &config = zendnnl::common::matmul_config_t::instance();
+        const int32_t old_algo = config.get_algo();
+        const int32_t old_cache = config.get_weight_cache();
+        const bool old_route = config.get_custom_kernel_route();
+        const int old_dynamic = omp_get_dynamic();
+        config.set_custom_kernel_route(true);
+        config.set_algo(static_cast<int32_t>(matmul_algo_t::aocl_dlp_blocked));
+        config.set_weight_cache(2);
+        omp_set_dynamic(0);
+        moe_test_utils::CustomKernelOverride ck_on(true);
+        moe_test_utils::NTileStrategyOverride ntile(2);
+
+        constexpr int M = 8;
+        constexpr int N = 2048;
+        constexpr int K = 256;
+        float src_scale = 1.0f;
+        float wei_scale = 1.0f;
+        matmul_params unpacked;
+        unpacked.dtypes.src = data_type_t::s8;
+        unpacked.dtypes.wei = data_type_t::s4;
+        unpacked.dtypes.dst = data_type_t::bf16;
+        unpacked.dtypes.bias = data_type_t::none;
+        unpacked.dtypes.compute = data_type_t::s8;
+        unpacked.mem_format_a = 'n';
+        unpacked.mem_format_b = 'n';
+        unpacked.lowoha_algo = matmul_algo_t::none;
+        unpacked.weight_cache_type = 2;
+        unpacked.quant_params.src_scale.buff = &src_scale;
+        unpacked.quant_params.src_scale.dt = data_type_t::f32;
+        unpacked.quant_params.src_scale.dims = {M, 1};
+        unpacked.quant_params.wei_scale.buff = &wei_scale;
+        unpacked.quant_params.wei_scale.dt = data_type_t::f32;
+        unpacked.quant_params.wei_scale.dims = {K / 32, N};
+
+        auto route = [&](const matmul_params &p) {
+            return custom_kernel_routable('r', M, N, K, /*num_threads=*/32,
+                    /*batch_count=*/1, /*transA=*/false, /*transB=*/true, 1.0f,
+                    0.0f, /*bias=*/nullptr, /*ldb=*/K,
+                    /*is_weights_const=*/true, p);
+        };
+        ASSERT_TRUE(route(unpacked))
+                << "unpacked s4 control did not enter the group route";
+
+        matmul_params q4 = unpacked;
+        q4.packing.pack_format_b = 1;
+        EXPECT_FALSE(route(q4))
+                << "GGML Q4_0 was accepted by the matmul_direct group route";
+        q4.packing.is_superblock = true;
+        EXPECT_FALSE(route(q4))
+                << "GGML Q4_0 superblock was accepted by the group route";
+
+        config.set_algo(old_algo);
+        config.set_weight_cache(old_cache);
+        config.set_custom_kernel_route(old_route);
+        omp_set_dynamic(old_dynamic);
+    }
+
+    // matmul_direct Q4_0 must still match the unpacked reference. N=16 is not
+    // a group-route width, so this call stays on matmul_direct after unpack.
+    moe_test_utils::GemmModeCaptureGuard capture;
+
+    const uint64_t n = 16;
+    const uint64_t k = 64;
+    const uint64_t m = 4;
+    const uint64_t ng = k / 32;
+    tensor_factory_t tf;
+    auto wei_ref_f
+            = tf.uniform_dist_tensor({k, n}, data_type_t::bf16, 2.0f, false);
+    tensor_t weight_tensor, wei_scale, wei_zp;
+    ASSERT_EQ(quant_params_compute(tf, wei_ref_f, data_type_t::bf16,
+                      data_type_t::s8,
+                      {static_cast<int64_t>(ng), static_cast<int64_t>(n)},
+                      data_type_t::bf16, wei_scale, wei_zp, &weight_tensor),
+            status_t::success);
+    auto *wt = static_cast<int8_t *>(weight_tensor.get_raw_handle_unsafe());
+    for (uint64_t i = 0; i < k * n; ++i)
+        wt[i] = static_cast<int8_t>(static_cast<int>((i * 7 + 3) % 16) - 8);
+
+    std::vector<float> scl(static_cast<size_t>(ng * n));
+    const auto *raw_scl
+            = static_cast<const uint16_t *>(wei_scale.get_raw_handle_unsafe());
+    for (size_t i = 0; i < scl.size(); ++i) {
+        uint32_t bits = static_cast<uint32_t>(raw_scl[i]) << 16;
+        std::memcpy(&scl[i], &bits, sizeof(float));
+    }
+    std::vector<int8_t> wt_nk(k * n);
+    for (uint64_t ki = 0; ki < k; ++ki)
+        for (uint64_t ni = 0; ni < n; ++ni)
+            wt_nk[ni * k + ki] = wt[ki * n + ni];
+    std::vector<uint8_t> packed(static_cast<size_t>(n) * ng * 18);
+    repack_weights_q4_0(wt_nk.data(), scl.data(), static_cast<int64_t>(n),
+            static_cast<int64_t>(k), packed.data());
+    auto packed_w = tf.copy_tensor({k, n}, data_type_t::s4,
+            std::make_pair(packed.size(), static_cast<void *>(packed.data())),
+            true, false);
+
+    auto src_ref
+            = tf.uniform_dist_tensor({m, k}, data_type_t::bf16, 25.0f, false);
+    tensor_t input, src_scale, src_zp;
+    ASSERT_EQ(quant_params_compute(tf, src_ref, data_type_t::bf16,
+                      data_type_t::s8,
+                      {static_cast<int64_t>(m), static_cast<int64_t>(ng)},
+                      data_type_t::bf16, src_scale, src_zp, &input),
+            status_t::success);
+    auto bias = tf.uniform_dist_tensor({1, n}, data_type_t::bf16, 2.0f);
+    auto got = tf.uniform_dist_tensor({m, n}, data_type_t::bf16, 2.0f);
+    auto ref = tf.uniform_dist_tensor({m, n}, data_type_t::bf16, 2.0f);
+    const std::vector<post_op_type_t> po;
+    const std::vector<tensor_t> bin;
+    ASSERT_EQ(matmul_kernel_test(input, packed_w, bias, got, po, bin, true,
+                      matmul_algo_t::aocl_dlp_blocked, 1.0f, 0.0f, false, 1),
+            status_t::success);
+    ASSERT_EQ(matmul_kernel_test(input, weight_tensor, bias, ref, po, bin, true,
+                      matmul_algo_t::aocl_dlp_blocked, 1.0f, 0.0f, true),
+            status_t::success);
+    bool ok = true;
+    compare_tensor_2D_matrix(got, ref, m, n, k, rtol_bf16, 18.0f * epsilon_bf16,
+            ok, false, 1.0f);
+    EXPECT_TRUE(ok);
+    EXPECT_EQ(s_last_group_matmul_direct_gemm_mode.load(
+                      std::memory_order_relaxed),
+            nullptr)
+            << "matmul_direct Q4_0 published a group_matmul gemm mode";
 }

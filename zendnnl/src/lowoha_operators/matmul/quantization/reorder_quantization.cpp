@@ -499,11 +499,12 @@ status_t group_reorder_quantization_wrapper(
         // granularity that is neither per_token nor M<=1 per_tensor) would
         // needlessly force the WHOLE group onto the slow per-expert fallback.
         if (M[i] == 0) { continue; }
-        // s8 (W8A8) or s4 (W4A8).  The grouped kernel only ever touches the
-        // SOURCE, so the weight dtype is irrelevant to it beyond identifying
-        // a supported quant scheme; `is_w4a8_config` covers the rest of the
-        // W4A8 contract (bf16 dst, s8 compute, no zero points).
+        // s8 (Q8_0 / W8A8) or s4 (Q4_0 packed nibbles, or W4A8).  The grouped
+        // kernel only ever touches the SOURCE, so the weight dtype only
+        // identifies a supported quant scheme.  `is_w4a8_config` covers the
+        // bf16-destination W4A8 contract; f32-destination Q4_0 is plain s4.
         const bool wei_dtype_ok = params[i].dtypes.wei == data_type_t::s8
+                || params[i].dtypes.wei == data_type_t::s4
                 || is_w4a8_config(params[i]);
         if (!params[i].dynamic_quant || !wei_dtype_ok
                 || params[i].dtypes.src != src_dtype

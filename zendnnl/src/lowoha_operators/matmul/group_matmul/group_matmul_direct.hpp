@@ -783,7 +783,8 @@ void clear_fused_moe_scratch();
 bool prepare_grouped_auto_weight_cache(std::vector<matmul_params> &params,
         bool custom_kernel_effective,
         std::vector<matmul_params> *secondary_params = nullptr,
-        bool auto_algo3_layer = false, bool *ck_inplace_licence = nullptr);
+        bool auto_algo3_layer = false, bool *ck_inplace_licence = nullptr,
+        bool strict_stable_decode_plan = false);
 
 bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
         const std::vector<bool> &transA, const std::vector<bool> &transB,

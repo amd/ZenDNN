@@ -69,6 +69,7 @@
 #include <omp.h>
 
 #include "../../common/group_matmul_parallel_common.hpp"
+#include "../../custom_kernel/ck_enable.hpp"
 #include "../../custom_kernel/dispatch.hpp"
 #include "../../custom_kernel/qwen_gemma_llama/bf16_decode_policy.hpp"
 #include "../../prepack/prepack.hpp"
@@ -843,8 +844,15 @@ inline void GroupNTileContext::do_tile(const GroupNTilePlan &plan, int e,
     }
     if (local_tid >= n_thr) return;
 
+    // W4A8 native keeps packed s4.  GGML Q4_0 (f32 dst, not the bf16 W4A8
+    // route) also stays packed s4, so column slices must be nibble-aligned.
+    const bool ggml_packed_s4 = params[e].dtypes.wei == data_type_t::s4
+            && params[e].dtypes.dst != data_type_t::bf16
+            && (params[e].dtypes.src == data_type_t::s8
+                    || params[e].dynamic_quant);
     const bool native_s4_wei
-            = w4a8_native && params[e].dtypes.wei == data_type_t::s4;
+            = (w4a8_native && params[e].dtypes.wei == data_type_t::s4)
+            || ggml_packed_s4;
     const auto split = n_split_for_tile(N[e], n_thr, local_tid, plan.nr_align,
             /*even_boundaries=*/native_s4_wei,
             /*balance_remainder=*/
@@ -3266,8 +3274,14 @@ inline void execute_sequential(
         const void *wei_for_call = ctx.weight[e];
         int ldb_for_call = ctx.ldb[e];
         bool transB_for_call = ctx.transB[e];
+        const bool ggml_packed_s4 = local_params.dtypes.wei == data_type_t::s4
+                && local_params.dtypes.dst != data_type_t::bf16
+                && (local_params.dtypes.src == data_type_t::s8
+                        || local_params.dynamic_quant);
         const bool native_s4_wei
-                = ctx.w4a8_native && local_params.dtypes.wei == data_type_t::s4;
+                = (ctx.w4a8_native
+                          && local_params.dtypes.wei == data_type_t::s4)
+                || ggml_packed_s4;
         const bool w4a8_plain_s8 = native_s4_wei
                 ? false
                 : ctx.apply_w4a8_substitution(
@@ -5483,29 +5497,62 @@ void flat_n_tile(const std::vector<char> &layout,
     //
     // Sequential gives up cross-expert parallelism for this call.
     //
-    // An active mixed-in-place mode proves the process licensed mutation on a
-    // split-independent CK decode pack. If this call cannot use CK for any
-    // reason (including a refusal before kctx was prepared), it must use the
-    // whole-weight key. When CK is off process-wide, mixed mode is never
-    // enabled, so this fallback remains inactive.  A call holding the
-    // custom-kernel licence keeps its AOCL DLP layouts out-of-place, so it
-    // keeps its plan.
+    // An active mixed-in-place mode means the prompt ALGO 1 reorder already
+    // rewrote the caller's weight buffer.  Two warms are possible:
+    //   * custom kernel effective — the decode layout is the full-N CK pack.
+    //     A later CK refusal must use Sequential's whole-weight key, which
+    //     is the in-place image.
+    //   * custom kernel not effective — cross-warm packed strict-stable
+    //     per-tile keys.  DecodeDynamic and forced DecodeD split on a CCD
+    //     lane count instead, so those plans are retargeted onto
+    //     `aocl_stable_n_thr` and the prompt still does not allocate a
+    //     second weight buffer.  A call holding the custom-kernel licence
+    //     keeps its AOCL DLP layouts out-of-place, so it keeps its plan.
     if (!use_custom && !ck_inplace_licence && is_grp_auto_mixed_inplace_active()
             && plan.strategy != GroupNTileStrategy::Sequential) {
-        plan.strategy = GroupNTileStrategy::Sequential;
-        // Sequential re-detects a tight caller from `ldc[e] < N[e]` and owns
-        // its own wide-scratch path, so the per-thread flag must not survive.
-        plan.tight_fused_epilogue = false;
-        static const bool s_mixed_seq_log = apilog_warning_enabled();
-        if (s_mixed_seq_log) {
-            apilog_warning(
-                    "[GRP_MATMUL.PLAN.FALLBACK] strategy=Sequential "
-                    "reason=mixed_inplace_ck_refused: AUTO mixed in-place has "
-                    "mutated the weight buffer and the warmed decode layout "
-                    "is the CK pack, but the custom kernel was refused for "
-                    "this call.  AOCL per-tile keys were never warmed and "
-                    "would re-reorder the mutated bytes as raw, so this call "
-                    "is routed to the whole-weight key instead.");
+        int max_n = 0;
+        for (int n : N)
+            max_n = std::max(max_n, n);
+        const int stable = aocl_stable_n_thr(num_threads, max_n);
+        const int nr_align_safe = std::max(1, plan.nr_align);
+        const int max_align_slots = std::max(1, max_n / nr_align_safe);
+        const bool stable_tiles = get_grp_matmul_aocl_stable_ntile()
+                && stable > 0 && max_n > 0 && stable <= max_align_slots;
+        const bool ck_warm
+                = grp_matmul_custom_kernel_effective(params, M, N, fused_act);
+        if (!ck_warm && stable_tiles) {
+            if (plan.strategy != GroupNTileStrategy::ManyExperts
+                    || plan.n_thr_fixed != stable) {
+                plan.strategy = GroupNTileStrategy::ManyExperts;
+                plan.n_thr_fixed = stable;
+                plan.max_n_thr = stable;
+                const int batch_max = std::max(1, num_threads / stable);
+                plan.batch_size = std::min(num_ops, batch_max);
+                for (int e = 0; e < num_ops && e < GroupNTilePlan::kMaxExperts;
+                        ++e) {
+                    plan.stable_n_thr_per_expert[e] = (M[e] > 0)
+                            ? static_cast<int16_t>(stable)
+                            : static_cast<int16_t>(0);
+                }
+            }
+        } else {
+            plan.strategy = GroupNTileStrategy::Sequential;
+            // Sequential re-detects a tight caller from `ldc[e] < N[e]` and
+            // owns its own wide-scratch path, so the per-thread flag must
+            // not survive.
+            plan.tight_fused_epilogue = false;
+            static const bool s_mixed_seq_log = apilog_warning_enabled();
+            if (s_mixed_seq_log) {
+                apilog_warning(
+                        "[GRP_MATMUL.PLAN.FALLBACK] strategy=Sequential "
+                        "reason=mixed_inplace_ck_refused: AUTO mixed in-place "
+                        "has mutated the weight buffer and the warmed decode "
+                        "layout is the CK pack, but the custom kernel was "
+                        "refused for this call.  AOCL per-tile keys were "
+                        "never warmed and would re-reorder the mutated bytes "
+                        "as raw, so this call is routed to the whole-weight "
+                        "key instead.");
+            }
         }
     }
 

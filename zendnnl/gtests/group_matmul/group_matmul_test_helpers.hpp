@@ -109,9 +109,12 @@ void PrintTo(const GroupQuantMatmulType &value, ::std::ostream *os);
  *                    expert's output (requires even N and f32/bf16 dst).
  *  @param pack_format_b Optional per-expert weight pack format (default empty
  *                    = all 0/unpacked).  Pass `1` for an expert whose weight
- *                    tensor holds GGML Q8_0 block-quantized bytes so the API
- *                    unpacks them internally (mirrors the single-matmul
- *                    `matmul_kernel_test` pack_format_b argument).
+ *                    tensor holds GGML block-quantized bytes (Q8_0 when the
+ *                    weight dtype is s8, Q4_0 when it is s4) so the API
+ *                    unpacks them internally.
+ *  @param ggml_superblock Optional per-expert Q4_0 superblock selector
+ *                    (default empty = plain block_q4_0).  A non-zero entry
+ *                    sets `params.packing.is_superblock` for that expert.
  *  @param active_rows Optional per-expert row-count override (default empty =
  *                    derive M from each output tensor's leading dim).  When
  *                    provided, `M[i]` is forced to `active_rows[i]`, letting a
@@ -134,8 +137,8 @@ status_t group_matmul_kernel_test(std::vector<tensor_t> &inputs,
         const grp_matmul_gated_act_params *gated_act = nullptr,
         const std::vector<int> &pack_format_b = {},
         const std::vector<int> &active_rows = {},
-        data_type_t dq_compute = data_type_t::s8,
-        int32_t weight_cache_type = 2);
+        data_type_t dq_compute = data_type_t::s8, int32_t weight_cache_type = 2,
+        const std::vector<int> &ggml_superblock = {});
 
 /** @fn expect_prompt_tile_matches_rounds
  *  @brief Runs one `group_matmul_kernel_test` call on ALGO 3's custom kernel

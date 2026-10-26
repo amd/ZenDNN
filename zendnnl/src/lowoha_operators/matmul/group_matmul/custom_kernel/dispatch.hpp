@@ -296,8 +296,8 @@ inline size_t dst_elem_bytes(KernelVariant v) noexcept {
 ///     `(bf16, bf16, f32 , _, _)`            → `kBF16_BF16_F32`
 ///
 ///   * DQ-INT8 family — accepted in TWO equivalent src forms:
-///       1. Runtime hoist (legacy): `src == bf16 && dynamic_quant ==
-///          true`; the N-tile executor reorder-quantises bf16 → s8/u8
+///       1. Runtime hoist (legacy): `src ∈ {bf16, f32} && dynamic_quant ==
+///          true`; the N-tile executor reorder-quantises it → s8/u8
 ///          (per-token src_scale) before `dispatch_tile`.
 ///       2. Grouped pre-quant (`ZENDNNL_ENABLE_GROUP_DQ`, default on):
 ///          the `group_dynamic_quant` pre-pass already produced an s8
@@ -305,7 +305,8 @@ inline size_t dst_elem_bytes(KernelVariant v) noexcept {
 ///          directly (dynamic_quant may be false here).
 ///     `wei` is always `s8`; `compute_dtype` discriminates sym (s8, no
 ///     src_zp) vs asym (u8, with src_zp); `dst` selects the store dtype.
-///     Writing `s8*` for "s8 (hoist) or bf16+dynamic_quant (runtime)":
+///     Writing `s8*` for "s8 (pre-quant) or {bf16,f32}+dynamic_quant
+///     (runtime hoist)":
 ///       bf16 dst:
 ///         `(s8*, s8, bf16, _, s8)`           → `kS8_S8_BF16_SYM`
 ///         `(s8*, s8, bf16, _, u8)`           → `kU8_S8_BF16_ASYM`

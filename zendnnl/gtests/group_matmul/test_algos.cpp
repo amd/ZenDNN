@@ -4619,45 +4619,41 @@ TEST(TestGroupMatmulWeightCacheDowngrade,
                "finite capacity makes process mixed-inplace ineligible";
 }
 
-// CK OFF downgrades to out-of-place.  The decode layout cross-warm packs with
-// the custom kernel off is the AOCL per-tile one, whose keys embed
-// `(col_start, n_tile)`.  That tracks `nr_align` and a narrow-N escape
-// evaluated over the ACTIVE expert set, so a later decode call can build keys
-// the warm never populated; once the prompt has rewritten the weight buffer
-// those cannot be rebuilt.  Only the shape-keyed custom-kernel pack licenses
-// the mutation, so WC falls back to 1 here and every in-place-eligible weight
-// keeps its out-of-place copy.
-TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkOffWc2Downgrades) {
+// With CK OFF, the AOCL strict-stable planner fixes every expert's N split
+// from the thread count.  The prompt cross-warm therefore fills the exact
+// per-tile DLP keys ALGO 3 will query before prompt ALGO 1 overwrites the raw
+// buffer.  WC=2 keeps that one in-place full-weight image instead of an
+// out-of-place duplicate.
+TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkOffStrictStableWc2Inplace) {
     SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     reset_grp_matmul_caches();
     AlgoEnvGuard reset_algo(0); // AUTO
     AutoPromptAlgoOverride prompt_on_algo1(1); // split the phases
+    NTileStrategyOverride rounds(2); // reach the strict-stable plan
     CustomKernelOverride ck_off(false);
     WeightCacheGuard wc(2);
     run_min_grp_matmul();
     auto &cfg = zendnnl::common::matmul_config_t::instance();
-    EXPECT_EQ(cfg.get_weight_cache(), 1)
-            << "AUTO + WC=2 with the custom kernel OFF must downgrade to "
-               "out-of-place: the AOCL per-tile decode layout is split-keyed "
-               "and cannot license the in-place prompt mutation";
-    EXPECT_FALSE(is_grp_auto_mixed_inplace_active())
-            << "WC=1 must disable mixed-in-place without the custom-kernel "
-               "pack";
+    EXPECT_EQ(cfg.get_weight_cache(), 2)
+            << "strict-stable AOCL DLP tiles must licence the WC=2 prompt "
+               "mutation after cross-warm";
+    EXPECT_TRUE(is_grp_auto_mixed_inplace_active())
+            << "strict-stable AOCL DLP must enable mixed-in-place without "
+               "the custom-kernel pack";
 }
 
-// Correctness companion: with CK OFF the WC=2 request is downgraded, so the
-// numbers must match the WC=1 reference exactly -- nothing mutated the weight
-// buffer on either leg.  Keeping the comparison guards the downgrade itself:
-// were the licence ever widened back, this is the test that would catch decode
-// reading an in-place-mutated buffer as raw.
-TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkOffWc2MatchesWc1) {
+// Correctness companion: CK-off strict-stable WC=2 mutates the prompt weight
+// in place after warming ALGO 3's per-tile DLP cache.  Its result must still
+// equal the out-of-place WC=1 reference.
+TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkOffStrictStableWc2MatchesWc1) {
     SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     AlgoEnvGuard reset_algo(0);
     AutoPromptAlgoOverride prompt_on_algo1(1); // split the phases
+    NTileStrategyOverride rounds(2); // reach the strict-stable plan
     MinRunResult ref, downgraded;
     {
         reset_grp_matmul_caches();
@@ -4665,21 +4661,44 @@ TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkOffWc2MatchesWc1) {
         WeightCacheGuard wc(1);
         ref = run_min_grp_matmul();
     }
-    bool mixed_active_during_downgraded_call = true;
+    bool mixed_active_during_inplace_call = false;
     {
         reset_grp_matmul_caches();
         CustomKernelOverride ck_off(false);
         WeightCacheGuard wc(2);
         downgraded = run_min_grp_matmul();
-        mixed_active_during_downgraded_call
-                = is_grp_auto_mixed_inplace_active();
+        mixed_active_during_inplace_call = is_grp_auto_mixed_inplace_active();
     }
-    EXPECT_FALSE(mixed_active_during_downgraded_call)
-            << "WC=1 must disable mixed-in-place for a CK-off AUTO run";
+    EXPECT_TRUE(mixed_active_during_inplace_call)
+            << "strict-stable CK-off AUTO must retain WC=2 mixed-in-place";
     const double d = max_abs_diff(ref.dst, downgraded.dst);
-    EXPECT_LT(d, 1e-2) << "CK-off WC=2 (downgraded) must match WC=1; "
+    EXPECT_LT(d, 1e-2) << "CK-off strict-stable WC=2 must match WC=1; "
                           "max_abs_diff="
                        << d;
+}
+
+// Default strategy would otherwise select DecodeDynamic for this
+// four-expert decode shape.  With the custom kernel off, WC=2 still
+// reorders the prompt weight into the caller's buffer; decode is
+// retargeted onto the strict-stable split that cross-warm packed.
+TEST(TestGroupMatmulWeightCacheDowngrade,
+        AutoCkOffDefaultStrategyStaysInplace) {
+    SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+    AutoPromptAlgoOverride prompt_on_algo1(1);
+    CustomKernelOverride ck_off(false);
+    WeightCacheGuard wc(2);
+    const auto ran = run_min_grp_matmul();
+    EXPECT_EQ(
+            zendnnl::common::matmul_config_t::instance().get_weight_cache(), 2)
+            << "CK-off AUTO must keep the in-place prompt reorder";
+    EXPECT_TRUE(ran.weights_mutated)
+            << "ALGO 1 prompt must rewrite the caller buffer, not allocate "
+               "a second weight image";
+    EXPECT_TRUE(is_grp_auto_mixed_inplace_active());
 }
 
 // Correctness: AUTO + WC=2 mixed-in-place must produce the SAME result as

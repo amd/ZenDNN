@@ -1375,6 +1375,16 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                     || dtypes.dst == data_type_t::bf16)
             && dtypes.src == data_type_t::s8;
 
+    // Packed s4 weights with the same per-group (or per-token) source scales.
+    // Distinct from W4A8: that path requires a bf16 destination.  GGML Q4_0
+    // keeps nibbles and lands here for an f32 (or non-W4A8 bf16) destination.
+    const bool is_s4_sym_quant_scales = dtypes.wei == data_type_t::s4
+            && !lowoha_param.quant_params.src_zp.buff
+            && (run_src_scale_nelems > 1 || src_scale_collapsed_per_token)
+            && (dtypes.dst == data_type_t::f32
+                    || dtypes.dst == data_type_t::bf16)
+            && dtypes.src == data_type_t::s8;
+
     // W4A8: s4 wei + dynamic-quant s8 src. Used to skip WOQ s4 reorder below.
     const bool is_w4a8 = (kernel == zendnnl::common::matmul_algo_t::aocl_dlp
                                  || kernel
@@ -1418,7 +1428,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
 
     // Sym-quant blocked cache keys include group_size.
     size_t cache_extra_hash = 0;
-    if (is_s8_sym_quant_scales) {
+    if (is_s8_sym_quant_scales || is_s4_sym_quant_scales) {
         cache_extra_hash = std::hash<int64_t> {}(
                 sym_quant_group_size(lowoha_param.quant_params, M, N, K));
     }
@@ -1557,6 +1567,23 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                     lowoha_param.wei_buffer_capacity_bytes,
                     uses_unified_dlp_metadata ? dlp_reorder_md : nullptr);
         } else if (lowoha_param.dtypes.wei == data_type_t::s4
+                && is_s4_sym_quant_scales) {
+            // Packed s4 × s8 per-group.  Same sym-quant LRU and key as s8,
+            // but the reorder reads nibble-packed B and writes the s8×s4
+            // blocked image.  Not the bf16×s4 WOQ reorder below.
+            const int64_t wei_grp
+                    = sym_quant_group_size(lowoha_param.quant_params, M, N, K);
+            dlp_metadata_t symq_meta = {};
+            dlp_quant_op_t symq_b_quant_op = {};
+            symq_b_quant_op.quant_op_kind = DLP_QUANT_OP_QUANTIZE;
+            symq_b_quant_op.group_size = static_cast<int>(wei_grp);
+            symq_meta.b_quant_op = &symq_b_quant_op;
+            blocked_flag = reorderAndCacheWeightsSymQuant<int8_t>(cache_key, B,
+                    reordered_mem, K, N, ldb, 'r', transB, mem_format_b,
+                    aocl_get_reorder_buf_size_s8s4s32os32,
+                    aocl_reorder_s8s4s32os32, &symq_meta, weight_cache_type,
+                    lowoha_param.wei_buffer_capacity_bytes);
+        } else if (lowoha_param.dtypes.wei == data_type_t::s4
                 || lowoha_param.dtypes.wei == data_type_t::u4) {
             blocked_flag = reorderAndCacheWeights<int8_t>(cache_key, B,
                     reordered_mem, K, N, ldb, 'r', transB, mem_format_b,
@@ -1638,10 +1665,12 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                 ldb, mem_format_b, beta, static_cast<float *>(C), ldc,
                 dlp_base_md);
     }
-    // WOQ s4 blocked path (not W4A8).
+    // WOQ s4 blocked path (bf16 activation, not W4A8 and not packed-s4
+    // sym-quant).  GGML Q4_0 is s8 × s4 and must fall through to
+    // aocl_gemm_s8s4s32of32 below.
     else if (dtypes.wei == data_type_t::s4
             && kernel == zendnnl::common::matmul_algo_t::aocl_dlp_blocked
-            && !is_w4a8) {
+            && !is_w4a8 && !is_s4_sym_quant_scales) {
         if (dtypes.dst == data_type_t::bf16) {
             aocl_gemm_bf16s4f32obf16(layout, transA, transB, M, N, K, alpha,
                     static_cast<const int16_t *>(A), lda, mem_format_a,
@@ -1974,6 +2003,38 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                     log_error("Unsupported output data type for s8 source");
                     break;
             }
+        }
+    } else if (dtypes.src == data_type_t::s8 && dtypes.wei == data_type_t::s4
+            && is_s4_sym_quant_scales) {
+        const int8_t *weight_ptr = is_weight_blocked
+                ? static_cast<int8_t *>(reordered_mem)
+                : static_cast<const int8_t *>(B);
+        switch (dtypes.dst) {
+            case data_type_t::f32:
+                apilog_info(
+                        "[AOCL.run_dlp.SYM_GEMM] calling "
+                        "aocl_gemm_s8s4s32of32 M=",
+                        M, " K=", K, " N=", N);
+                aocl_gemm_s8s4s32of32(layout, transA, transB, M, N, K, alpha,
+                        static_cast<const int8_t *>(A), lda, mem_format_a,
+                        weight_ptr, ldb, mem_format_b, beta,
+                        static_cast<float *>(C), ldc, dlp_base_md);
+                break;
+            case data_type_t::bf16:
+                apilog_info(
+                        "[AOCL.run_dlp.SYM_GEMM] calling "
+                        "aocl_gemm_s8s4s32obf16 M=",
+                        M, " K=", K, " N=", N);
+                aocl_gemm_s8s4s32obf16(layout, transA, transB, M, N, K, alpha,
+                        static_cast<const int8_t *>(A), lda, mem_format_a,
+                        weight_ptr, ldb, mem_format_b, beta,
+                        static_cast<int16_t *>(C), ldc, dlp_base_md);
+                break;
+            default:
+                log_error(
+                        "Unsupported output data type for sym_quant s4 "
+                        "weight");
+                break;
         }
     } else if (dtypes.src == data_type_t::f16
             && dtypes.wei == data_type_t::f16) {

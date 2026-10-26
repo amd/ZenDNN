@@ -454,6 +454,41 @@ TEST(CkDispatchRouting, ScalarRouteAcceptsInt8AndW4) {
         mt::CustomKernelInt8Override int8_ck_on(true);
         EXPECT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N,
                 K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+
+        // Per-group weight scales are an ALGO 3 shape, same as a direct
+        // group_matmul call. Per-token source stays paired with them.
+        params.quant_params.wei_scale.dims = {K / 32, N};
+        EXPECT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N,
+                K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+
+        // llama.cpp supplies f32 activations with dynamic quantization. Group
+        // DQ quantizes these to the same s8 representation before ALGO 3.
+        params.dtypes.src = data_type_t::f32;
+        EXPECT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N,
+                K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+        params.dtypes.src = data_type_t::bf16;
+
+        params.quant_params.src_scale.dims = {M, K / 32};
+        EXPECT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N,
+                K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+        params.quant_params.src_scale.dims = {M, 1};
+
+        // Per-group source requires the same group count on the weight.
+        params.dtypes.src = data_type_t::s8;
+        params.dynamic_quant = false;
+        params.quant_params.src_scale.buff = &src_scale;
+        params.quant_params.src_scale.dims = {M, K / 32};
+        EXPECT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N,
+                K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+        params.quant_params.wei_scale.dims = {1, N};
+        EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N,
+                K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+
+        params.dtypes.src = data_type_t::bf16;
+        params.dynamic_quant = true;
+        params.quant_params.src_scale.buff = nullptr;
+        params.quant_params.src_scale.dims = {M, 1};
+        params.quant_params.wei_scale.dims = {1, N};
     }
     {
         mt::CustomKernelInt8Override int8_ck_off(false);
@@ -1766,6 +1801,139 @@ TEST(CkDispatchRouting, ScalarSignedInt8SrcZpFallsBackWithGroupDqOff) {
         EXPECT_FLOAT_EQ(static_cast<float>(dst_route_on[i]),
                 static_cast<float>(dst_route_off[i]))
                 << "signed source-zero-point fallback differs at i=" << i;
+    }
+}
+
+// Group DQ off leaves an f32 activation in place. The prepack must still
+// warm the int8 pack on the prompt call, because decode resolves the same
+// f32 runtime-hoist form onto the custom kernel. A WC=2 prompt reorder that
+// runs without that pack makes the decode read blocked bytes.
+TEST(CkDispatchRouting, F32RuntimeHoistPromptThenDecodeMatchesOutOfPlace) {
+    CK_SKIP_IF_NO_INT8_ISA();
+    ::reset_grp_matmul_caches();
+
+    mt::GroupDqOverride group_dq_off(0);
+    mt::CustomKernelOverride ck_on(true);
+    mt::CustomKernelInt8Override int8_on(true);
+    mt::AlgoEnvGuard algo(0);
+    mt::AutoPromptAlgoOverride prompt_on_algo1(1);
+
+    constexpr int kExperts = 2;
+    constexpr int kPromptM = 128;
+    constexpr int kDecodeM = 1;
+    constexpr int K = 256;
+    constexpr int N = 256;
+
+    std::vector<std::vector<float>> src_prompt(kExperts), src_decode(kExperts);
+    std::vector<std::vector<int8_t>> wei_inplace(kExperts), wei_copy(kExperts);
+    std::vector<std::vector<float>> wei_scale(kExperts);
+    for (int e = 0; e < kExperts; ++e) {
+        src_prompt[e].resize(static_cast<size_t>(kPromptM) * K);
+        src_decode[e].resize(static_cast<size_t>(kDecodeM) * K);
+        wei_inplace[e].resize(static_cast<size_t>(K) * N);
+        wei_scale[e].assign(static_cast<size_t>(N), 0.02f);
+        for (size_t i = 0; i < src_prompt[e].size(); ++i) {
+            src_prompt[e][i] = ((static_cast<int>(i + e) % 9) - 4) * 0.05f;
+        }
+        for (size_t i = 0; i < src_decode[e].size(); ++i) {
+            src_decode[e][i] = ((static_cast<int>(i + e) % 7) - 3) * 0.07f;
+        }
+        for (size_t i = 0; i < wei_inplace[e].size(); ++i) {
+            wei_inplace[e][i]
+                    = static_cast<int8_t>(static_cast<int>((i + e) % 11) - 5);
+        }
+        wei_copy[e] = wei_inplace[e];
+    }
+
+    struct WeightCachePin {
+        int32_t prev;
+        explicit WeightCachePin(int32_t mode)
+            : prev(zendnnl::common::matmul_config_t::instance()
+                              .get_weight_cache()) {
+            zendnnl::common::matmul_config_t::instance().set_weight_cache(mode);
+        }
+        ~WeightCachePin() {
+            zendnnl::common::matmul_config_t::instance().set_weight_cache(prev);
+        }
+    };
+
+    auto run_decode
+            = [&](std::vector<std::vector<int8_t>> &weights,
+                      std::vector<std::vector<bfloat16_t>> &decode_dst) {
+        std::vector<char> layout(kExperts, 'r');
+        std::vector<bool> transA(kExperts, false), transB(kExperts, false);
+        std::vector<bool> is_wc(kExperts, true);
+        std::vector<float> alpha(kExperts, 1.0f), beta(kExperts, 0.0f);
+        std::vector<int> Ns(kExperts, N), Ks(kExperts, K);
+        std::vector<int> lda_p(kExperts, K), ldb(kExperts, N), ldc(kExperts, N);
+        std::vector<const void *> bias(kExperts, nullptr);
+        std::vector<matmul_params> params(kExperts);
+        for (int e = 0; e < kExperts; ++e) {
+            params[e].dtypes.src = data_type_t::f32;
+            params[e].dtypes.wei = data_type_t::s8;
+            params[e].dtypes.dst = data_type_t::bf16;
+            params[e].dtypes.bias = data_type_t::none;
+            params[e].dtypes.compute = data_type_t::s8;
+            params[e].dynamic_quant = true;
+            params[e].mem_format_a = 'n';
+            params[e].mem_format_b = 'n';
+            params[e].num_threads = 4;
+            params[e].quant_params.src_scale.dt = data_type_t::f32;
+            params[e].quant_params.wei_scale.buff = wei_scale[e].data();
+            params[e].quant_params.wei_scale.dt = data_type_t::f32;
+            params[e].quant_params.wei_scale.dims = {1, N};
+        }
+
+        auto invoke = [&](int rows, std::vector<std::vector<float>> &src_bufs,
+                              std::vector<std::vector<bfloat16_t>> &dst_bufs) {
+            for (int e = 0; e < kExperts; ++e) {
+                params[e].quant_params.src_scale.dims = {rows, 1};
+            }
+            std::vector<int> Ms(kExperts, rows);
+            std::vector<const void *> src_ptrs(kExperts), wei_ptrs(kExperts);
+            std::vector<void *> dst_ptrs(kExperts);
+            for (int e = 0; e < kExperts; ++e) {
+                src_ptrs[e] = src_bufs[e].data();
+                wei_ptrs[e] = weights[e].data();
+                dst_ptrs[e] = dst_bufs[e].data();
+            }
+            ASSERT_EQ(group_matmul_direct(layout, transA, transB, Ms, Ns, Ks,
+                              alpha, src_ptrs, lda_p, wei_ptrs, ldb, bias, beta,
+                              dst_ptrs, ldc, is_wc, params,
+                              /*moe_postop=*/nullptr,
+                              /*gated_act=*/nullptr),
+                    status_t::success);
+        };
+
+        std::vector<std::vector<bfloat16_t>> prompt_dst(kExperts);
+        for (int e = 0; e < kExperts; ++e) {
+            prompt_dst[e].assign(
+                    static_cast<size_t>(kPromptM) * N, bfloat16_t(0.0f));
+            decode_dst[e].assign(
+                    static_cast<size_t>(kDecodeM) * N, bfloat16_t(0.0f));
+        }
+        ASSERT_NO_FATAL_FAILURE(invoke(kPromptM, src_prompt, prompt_dst));
+        ASSERT_NO_FATAL_FAILURE(invoke(kDecodeM, src_decode, decode_dst));
+    };
+
+    std::vector<std::vector<bfloat16_t>> inplace_decode(kExperts),
+            copy_decode(kExperts);
+    {
+        WeightCachePin wc(2);
+        ASSERT_NO_FATAL_FAILURE(run_decode(wei_inplace, inplace_decode));
+    }
+    ::reset_grp_matmul_caches();
+    {
+        WeightCachePin wc(1);
+        ASSERT_NO_FATAL_FAILURE(run_decode(wei_copy, copy_decode));
+    }
+    for (int e = 0; e < kExperts; ++e) {
+        ASSERT_EQ(inplace_decode[e].size(), copy_decode[e].size());
+        for (size_t i = 0; i < inplace_decode[e].size(); ++i) {
+            EXPECT_NEAR(static_cast<float>(inplace_decode[e][i]),
+                    static_cast<float>(copy_decode[e][i]), 1e-2f)
+                    << "expert=" << e << " i=" << i;
+        }
     }
 }
 
