@@ -358,15 +358,17 @@ TEST_F(Int8InPlaceWarm, InPlaceBlockedImageIsByteIdenticalToOutOfPlace) {
 // ── (5) in-place capacity is the queried blocked size ───────────────────
 
 #if ZENDNNL_DEPENDS_AOCLDLP
-/// A full-K symmetric group stores one int32 column-sum vector per KC panel.
-/// KC is internal to AOCL-DLP, so the historical framework guess
+/// A full-K symmetric group stores one int32 column-sum vector per KC panel,
+/// and KC is internal to AOCL-DLP, so a declaration derived from K and N
+/// alone, such as one vector plus a cache line,
 ///
 ///     pad = roundup64(N * 4) + 64
 ///
-/// (one vector, plus a cache line) does not cover a K that spans more than
-/// one panel. The declaration the in-place gate accepts is the size
-/// `aocl_get_reorder_buf_size_s8s8s32os32_sym_quant` returns.
-TEST_F(Int8InPlaceWarm, FrameworkPadFormulaCoversAoclRequirement) {
+/// need not cover the image of a K that spans more than one panel. The
+/// in-place gate accepts a declaration only when it covers the size
+/// `aocl_get_reorder_buf_size_s8s8s32os32_sym_quant` returns, rounded up to
+/// 64 bytes.
+TEST_F(Int8InPlaceWarm, InPlaceDeclarationMustCoverTheQueriedSize) {
     struct Shape {
         int k, n;
         const char *what;
@@ -401,17 +403,25 @@ TEST_F(Int8InPlaceWarm, FrameworkPadFormulaCoversAoclRequirement) {
                 << s.what << " K=" << s.k << " N=" << s.n
                 << ": queried blocked size " << reorder_size << " B (raw "
                 << req << ") is not accepted as an in-place declaration";
+        if (reorder_size > plain) {
+            EXPECT_FALSE(zendnnl::lowoha::matmul::wei_inplace_fits(
+                    req, reorder_size, plain, reorder_size - 64u))
+                    << s.what << " K=" << s.k << " N=" << s.n
+                    << ": a declaration one cache line short of "
+                    << reorder_size << " B is accepted";
+        }
 
-        // The old one-vector guess stays short on a wide full-K group, where
-        // the blocked image holds a column-sum vector per KC panel.
-        if (std::strcmp(s.what, "wide") == 0) {
-            const size_t n4_pad
-                    = ((static_cast<size_t>(s.n) * 4u + 63u) / 64u) * 64u + 64u;
-            const size_t n4_declared = plain + n4_pad;
-            EXPECT_LT(n4_declared, reorder_size)
-                    << "wide K=" << s.k << " N=" << s.n
-                    << ": roundup64(N*4)+64 declares " << n4_declared
-                    << " B but AOCL needs " << reorder_size << " B (raw " << req
+        // Whether one vector plus a cache line covers the image depends on
+        // the KC AOCL-DLP picks for this machine; whenever it falls short of
+        // the queried size, the gate refuses it.
+        const size_t one_vector = plain
+                + ((static_cast<size_t>(s.n) * 4u + 63u) / 64u) * 64u + 64u;
+        if (one_vector < reorder_size) {
+            EXPECT_FALSE(zendnnl::lowoha::matmul::wei_inplace_fits(
+                    req, reorder_size, plain, one_vector))
+                    << s.what << " K=" << s.k << " N=" << s.n
+                    << ": roundup64(N*4)+64 declares " << one_vector
+                    << " B and AOCL needs " << reorder_size << " B (raw " << req
                     << ")";
         }
     }

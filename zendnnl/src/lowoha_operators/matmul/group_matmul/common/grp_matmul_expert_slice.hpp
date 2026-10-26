@@ -41,12 +41,14 @@ namespace matmul {
 
 /// Resolves the effective matmul algo ID from the runtime config,
 /// falling back to AOCL DLP blocked (or reference when AOCL is absent)
-/// when the config is unset/invalid.
+/// when the config is unset/invalid.  ALGO 11 selects the native BRGEMM of
+/// matmul_direct only: group matmul resolves it as unset.
 inline matmul_algo_t resolve_kernel() {
     static const matmul_algo_t algo = []() {
         int32_t a = matmul_config_t::instance().get_algo();
         matmul_algo_t kernel;
-        if (a <= 0 || a >= static_cast<int32_t>(matmul_algo_t::algo_count)) {
+        if (a <= 0 || a >= static_cast<int32_t>(matmul_algo_t::algo_count)
+                || a == static_cast<int32_t>(matmul_algo_t::native_brgemm)) {
 #if ZENDNNL_DEPENDS_AOCLDLP
             kernel = matmul_algo_t::aocl_dlp_blocked;
 #else
@@ -64,6 +66,18 @@ inline matmul_algo_t resolve_kernel() {
 #endif
         return kernel;
     }();
+    return algo;
+}
+
+/// The lowoha_algo an op of group matmul selects its kernel with (through
+/// kernel_select): native_brgemm, on the op or from ZENDNNL_MATMUL_ALGO=11,
+/// selects the native BRGEMM of matmul_direct only, so the op takes the
+/// kernel it takes without it.
+inline matmul_algo_t grp_matmul_lowoha_algo(const matmul_params &params) {
+    matmul_algo_t algo = params.lowoha_algo;
+    if (algo == matmul_algo_t::native_brgemm) algo = matmul_algo_t::none;
+    if (algo == matmul_algo_t::none && matmul_config_t::is_native_brgemm_algo())
+        algo = matmul_algo_t::aocl_dlp_blocked;
     return algo;
 }
 

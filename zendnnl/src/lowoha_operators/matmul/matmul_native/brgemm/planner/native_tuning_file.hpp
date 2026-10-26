@@ -1,0 +1,91 @@
+/*******************************************************************************
+ * Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ ******************************************************************************/
+
+#ifndef MATMUL_NATIVE_BRGEMM_PLANNER_NATIVE_TUNING_FILE_HPP
+#define MATMUL_NATIVE_BRGEMM_PLANNER_NATIVE_TUNING_FILE_HPP
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <string_view>
+
+#include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_planner.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_hw.hpp"
+
+namespace zendnnl {
+namespace lowoha {
+namespace matmul {
+namespace native {
+
+// The names the override and the tuning file read.
+
+inline constexpr const char *kNativeTuningFormat
+        = "zendnnl-native-brgemm-tuning";
+/// The tuning-file version this build reads.
+inline constexpr int64_t kNativeTuningVersion = 2;
+
+/// Match keys of override clauses and table entries: the numeric ones
+/// (ranges), the named ones (sets of names), then the flags.
+inline constexpr const char *kNativeMatchKeys[]
+        = {"m", "n", "k", "threads", "pack_nr", "dtype", "src", "dst",
+                "epilogue", "trans_a", "dynamic", "has_bias"};
+inline constexpr int kNativeNumericMatchKeys = 5;
+inline constexpr int kNativeNamedMatchKeys = 4;
+/// The names the named match keys dtype, src, dst and epilogue take.
+inline constexpr const char *kNativeDtypeNames[] = {"bf16", "s8"};
+inline constexpr const char *kNativeSrcNames[] = {"bf16", "f32", "u8", "s8"};
+inline constexpr const char *kNativeDstNames[]
+        = {"f32", "bf16", "f16", "u8", "s8", "s32"};
+inline constexpr const char *kNativeEpilogueNames[]
+        = {"store", "bias", "postops", "gated"};
+
+/// The problem features rules compare, and their comparisons.
+inline constexpr const char *kNativeRuleFeatures[] = {"m", "n", "k", "threads",
+        "pack_nr", "bf16", "dynamic", "trans_a", "has_bias", "epilogue",
+        "dst_bytes", "esz", "a_bytes", "b_bytes", "col_tiles", "m_per_thread",
+        "n_per_thread", "flops_per_thread", "l2", "l3", "l3_threads", "smt",
+        "cores", "a_l3", "b_l3", "slab_l2"};
+inline constexpr const char *kNativeRuleOps[]
+        = {"<", "<=", ">", ">=", "==", "!="};
+
+/// Hardware keys, in the order the hardware block is checked, and the
+/// features the isa key names.
+inline constexpr const char *kNativeHardwareKeys[] = {"vendor", "family",
+        "model", "stepping", "isa", "l1d_kib", "l2_kib", "l3_kib", "l3_cores",
+        "smt", "l3_threads", "cores", "logical_cpus"};
+inline constexpr const char *kNativeIsaNames[]
+        = {"avx512f", "avx512bf16", "avx512vnni"};
+
+/// The clauses of a ZENDNNL_MATMUL_NATIVE_CONFIG value; bad clauses dropped
+/// with one warning each.  nullptr when no clause is left.
+std::unique_ptr<native_config_source_t> make_native_override_source(
+        std::string_view text);
+
+struct native_tuning_sources_t {
+    std::unique_ptr<native_config_source_t> table; ///< nullptr: no entries
+    std::unique_ptr<native_config_source_t> rules; ///< nullptr: no rules
+};
+
+/// Reads and checks a tuning file against hw; never throws.
+native_tuning_sources_t load_native_tuning_file(
+        const std::string &path, const native_hw_t &hw);
+
+} // namespace native
+} // namespace matmul
+} // namespace lowoha
+} // namespace zendnnl
+
+#endif // MATMUL_NATIVE_BRGEMM_PLANNER_NATIVE_TUNING_FILE_HPP

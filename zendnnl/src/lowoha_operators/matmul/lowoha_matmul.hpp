@@ -98,6 +98,16 @@ void matmul_execute(const char layout, const bool transA, const bool transB,
  *       @c quant_params.src_scale.buff / @c quant_params.src_zp.buff) are
  *       thread-local, or left nullptr so the library allocates per-call scratch.
  *
+ * @note ZENDNNL_MATMUL_ALGO=11, or @c lowoha_algo == native_brgemm for the
+ *       call: the native BRGEMM serves the calls it qualifies for over the
+ *       native VNNI weight layout; the others keep their route: the one-op
+ *       group route, else AOCL-DLP at weight cache mode at most 1, never the
+ *       other native kernels.  A weight buffer it rewrote in place (weight
+ *       cache mode 2, ZENDNNL_MATMUL_ALGO=11 only) has it as its only
+ *       reader.  Every call on one weight buffer must take the same route
+ *       (the same API and algorithm selection): the native BRGEMM reads a
+ *       buffer that another route rewrote in place as a raw weight.
+ *
  * @return status_t::success on successful execution, status_t::failure otherwise
  */
 
@@ -200,6 +210,10 @@ ZENDNNL_API status_t matmul_direct(const char layout, const bool transA,
  *                         in its own pass. Deep single-pass Op1→Act→Op2
  *                         chaining is a future optimization.
  *                         nullptr disables (default).
+ *
+ * @note ZENDNNL_MATMUL_ALGO=11 selects the native BRGEMM of matmul_direct
+ *       only: the ops run as without it, and so does an op with a raw
+ *       weight whose @c lowoha_algo is native_brgemm.
  *
  * @return status_t::success if all operations succeed, status_t::failure if any operation fails
  */

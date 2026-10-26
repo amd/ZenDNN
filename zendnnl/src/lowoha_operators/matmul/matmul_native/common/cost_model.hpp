@@ -38,6 +38,15 @@ struct UarchParams {
     /// Logical cores per CCX for M=1 GEMV OpenMP slice scheduling (AMD Zen ≈ 8).
     /// When 1, column slices follow linear tid order.
     int ccx_cores;
+    /// Physical cores sharing one L3; 0 when unknown.  detect_uarch() leaves
+    /// it 0: only the native BRGEMM plan reads it (native_plan_uarch).
+    int l3_domain_cores;
+    /// Whether CPUID reported the L1d, L2 and L3 size; a size it does not
+    /// report keeps the value of the constructor.  Only the native BRGEMM's
+    /// tuning-file matching reads them.
+    bool l1d_detected;
+    bool l2_detected;
+    bool l3_detected;
 
     UarchParams()
         : l1d_bytes(32768)
@@ -49,7 +58,11 @@ struct UarchParams {
         , avx512f(false)
         , avx512bf16(false)
         , avx512vnni(false)
-        , ccx_cores(1) {}
+        , ccx_cores(1)
+        , l3_domain_cores(0)
+        , l1d_detected(true)
+        , l2_detected(true)
+        , l3_detected(true) {}
 };
 
 /// Detect micro-architecture parameters via CPUID (cached after first call).

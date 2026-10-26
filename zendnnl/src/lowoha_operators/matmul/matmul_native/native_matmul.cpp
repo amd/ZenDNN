@@ -15,18 +15,30 @@
  ******************************************************************************/
 
 #include "lowoha_operators/matmul/matmul_native/native_matmul.hpp"
+
+#include <algorithm>
+#include <exception>
+#include <sstream>
+#include <string>
+
 #include "common/data_types.hpp"
 #include "common/zendnnl_global.hpp"
+#include "lowoha_operators/common/omp_thread_control.hpp"
+#include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
+#include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/bf16/bf16_gemv_narrow.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/bf16_brgemm_looper.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/bf16_gemv_direct.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/fp32_brgemm_looper.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/int8_brgemm_looper.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/int8_gemv_direct.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_brgemm_looper.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/gemm_descriptor.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_aocl_unreorder.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_utils.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_weight_cache.hpp"
 #include "lowoha_operators/matmul/matmul_native/gemm/looper/bf16_gemm_looper.hpp"
 #include "lowoha_operators/matmul/matmul_native/gemm/looper/fp32_gemm_looper.hpp"
 
@@ -35,6 +47,7 @@ namespace lowoha {
 namespace matmul {
 namespace native {
 
+using zendnnl::common::dtype_info;
 using zendnnl::common::size_of;
 using namespace zendnnl::error_handling;
 
@@ -264,7 +277,9 @@ bool native_matmul_execute(matmul_algo_t kernel, char layout, bool transA,
             && params.dtypes.wei == data_type_t::bf16);
 
     // ════════════════════════════════════════════════════════════════════
-    // ALGO 11 (Native BRGEMM): BRGEMM-based paths with GEMM fallback.
+    // native_brgemm as dynamic dispatch or the auto tuner selects it:
+    // BRGEMM-based paths with GEMM fallback.  ZENDNNL_MATMUL_ALGO=11 runs
+    // matmul_direct on native_layout_matmul instead.
     //   BF16 + AVX512BF16 → bf16_brgemm_execute
     //   FP32 + AVX512F → brgemm_execute (FP32 BRGEMM)
     //   No AVX512 → gemm_execute (scalar/AVX2 fallback)
@@ -360,6 +375,253 @@ bool native_matmul_execute(matmul_algo_t kernel, char layout, bool transA,
     } else {
         // FP32 GEMM (avx512f or scalar fallback — gemm_execute handles both)
         gemm_execute(desc, uarch, src, weight, dst, bias, params);
+    }
+    return true;
+}
+
+native_layout_query_t native_layout_query_for(
+        const matmul_params &params, int K, int N, int ldb, bool transB) {
+    native_layout_query_t q;
+    q.wei_dt = params.dtypes.wei;
+    q.src_dt = params.dtypes.src;
+    const data_type_t compute = params.dtypes.compute;
+    if (params.dynamic_quant
+            && (q.src_dt == data_type_t::bf16 || q.src_dt == data_type_t::f32)
+            && q.wei_dt == data_type_t::s8
+            && (compute == data_type_t::s8 || compute == data_type_t::u8)) {
+        q.src_dt = compute;
+    }
+    q.K = K;
+    q.N = N;
+    q.ldb = ldb;
+    q.transB = transB;
+    if (has_per_group_wei_scale(params.quant_params, N)) {
+        const int64_t groups = params.quant_params.wei_scale.dims[0];
+        q.wei_group_size = K % groups == 0 ? static_cast<int>(K / groups) : -1;
+    }
+    return q;
+}
+
+namespace {
+
+/// Why the kernel did not serve a call it was given.
+const char *kernel_status_text(status_t st) {
+    switch (st) {
+        case status_t::unimplemented: return "the kernel does not implement it";
+        case status_t::isa_unsupported:
+            return "the CPU lacks an instruction set the kernel needs";
+        default: return "the kernel failed";
+    }
+}
+
+const char *gated_act_name(matmul_gated_act_t act) {
+    switch (act) {
+        case matmul_gated_act_t::silu_and_mul: return "silu_and_mul";
+        case matmul_gated_act_t::gelu_and_mul: return "gelu_and_mul";
+        case matmul_gated_act_t::swiglu_oai_mul: return "swiglu_oai_mul";
+        default: return "none";
+    }
+}
+
+/// Where the weight of a call the native BRGEMM takes comes from.
+enum class native_source_t : uint8_t {
+    none, ///< not for the native BRGEMM: the other routes serve the call
+    raw, ///< a raw weight the layout rule places on the layout
+    /// An AOCL prepack whose raw weight the layout rule places on the layout:
+    /// unreordered, then packed per the weight cache mode.  AOCL still reads
+    /// it until a weight cache mode 2 pack rewrites it in place.
+    aocl_prepacked,
+    in_place, ///< a buffer an earlier native call rewrote in place
+};
+
+/// The bytes at weight a call vouches for as its weight buffer: what it
+/// reads from a bf16 / s8 weight (an AOCL prepack this route unreorders, or
+/// the span of a plain weight), or the capacity it states when larger; 0
+/// when neither is known.
+size_t weight_buffer_bytes(
+        const matmul_params &params, int K, int N, int ldb, bool transB) {
+    size_t reads = 0;
+    const data_type_t wdt = params.dtypes.wei;
+    if ((wdt == data_type_t::bf16 || wdt == data_type_t::s8) && K > 0 && N > 0
+            && ldb > 0 && params.packing.pack_format_b == 0) {
+        if (params.mem_format_b == 'r') {
+            if (is_aocl_prepacked_weight(params)
+                    && aocl_prepack_unreorderable(params))
+                reads = aocl_prepack_bytes(
+                        K, N, ldb, transB, wdt == data_type_t::s8);
+        } else if (params.mem_format_b == 'n') {
+            reads = native_raw_weight_bytes(wdt, K, N, ldb, transB);
+        }
+    }
+    return std::max(reads, params.wei_buffer_capacity_bytes);
+}
+
+/// reason is set when the weight is an in-place image the call cannot read.
+/// owned is weight_buffer_bytes of the call.
+native_source_t classify_source(const matmul_params &params, const void *weight,
+        int K, int N, int ldb, bool transB, int batch_count,
+        bool process_native, size_t owned, int &pack_nr, const char *&reason) {
+    // A native in-place image has this route as its only reader, whatever
+    // algorithm the call selects.
+    if (native_weight_packed_in_place(weight, owned)) {
+        const native_layout_decision_t rule = decide_native_layout(
+                native_layout_query_for(params, K, N, ldb, transB));
+        pack_nr = kNativeLayoutPackNr;
+        if (!rule.native)
+            reason = rule.reason;
+        else if (batch_count != 1)
+            reason = "batched call";
+        return native_source_t::in_place;
+    }
+    bool aocl = false;
+    if (params.mem_format_b == 'r') {
+        if (!process_native || !is_aocl_prepacked_weight(params))
+            return native_source_t::none;
+        aocl = true;
+    } else if (params.mem_format_b != 'n' || !native_brgemm_requested(params)) {
+        return native_source_t::none;
+    }
+
+    const native_layout_decision_t rule = decide_native_layout(
+            native_layout_query_for(params, K, N, ldb, transB));
+    if (!rule.native || batch_count != 1 || params.packing.pack_format_b != 0)
+        return native_source_t::none;
+    pack_nr = rule.pack_nr;
+    if (aocl)
+        return aocl_prepack_unreorderable(params)
+                ? native_source_t::aocl_prepacked
+                : native_source_t::none;
+    // A buffer a custom-kernel pack rewrote in place has its reader on that
+    // route.
+    if (custom_kernel::weight_packed_in_place(weight))
+        return native_source_t::none;
+    return native_source_t::raw;
+}
+
+} // namespace
+
+bool native_layout_matmul(char layout, bool transA, bool transB, int M, int N,
+        int K, float alpha, const void *src, int lda, const void *weight,
+        int ldb, const void *bias, float beta, void *dst, int ldc,
+        bool is_weights_const, int batch_count, int num_threads,
+        matmul_gated_act_t gated_act, matmul_params &params,
+        zendnnl::profile::profiler_t *profiler, status_t &status,
+        const matmul_batch_params_t *batch) {
+    const bool process_native = matmul_config_t::is_native_brgemm_algo();
+    int pack_nr = 0;
+    const char *reason = nullptr;
+    const size_t owned = weight_buffer_bytes(params, K, N, ldb, transB);
+    const native_source_t source = classify_source(params, weight, K, N, ldb,
+            transB, batch_count, process_native, owned, pack_nr, reason);
+    if (source == native_source_t::none) return false;
+    bool in_place = source == native_source_t::in_place;
+    if (reason == nullptr && layout != 'r' && layout != 'R')
+        reason = "column-major call";
+    if (reason == nullptr && params.mem_format_a != 'n')
+        reason = "reordered source";
+    // The one-op group route defines a gated call with beta or post-ops, and
+    // takes only an f32 / bf16 / f16 gated dst.
+    if (reason == nullptr && gated_act != matmul_gated_act_t::none
+            && (beta != 0.0f || !params.postop_.empty()
+                    || (params.dtypes.dst != data_type_t::f32
+                            && params.dtypes.dst != data_type_t::bf16)))
+        reason = "gated call with beta, post-ops or a dst other than f32 / "
+                 "bf16";
+
+    native_weight_ref_t ref;
+    ref.weight = weight;
+    ref.pack_nr = pack_nr;
+    ref.aocl_blocked = source == native_source_t::aocl_prepacked
+            || (in_place && is_aocl_prepacked_weight(params));
+    ref.interleave_split_halves = gated_act == matmul_gated_act_t::silu_and_mul
+            || gated_act == matmul_gated_act_t::gelu_and_mul;
+    ref.weight_cache_mode = is_weights_const
+            ? effective_weight_cache_type(params.weight_cache_type)
+            : 0;
+    // A buffer rewritten in place must have no other reader, which only the
+    // process-wide ALGO 11 guarantees (every call then reaches the image
+    // check of classify_source); a call that selects the native BRGEMM by
+    // itself caches the layout out of place instead.
+    if (ref.weight_cache_mode == 2 && !process_native)
+        ref.weight_cache_mode = 1;
+    ref.capacity_bytes = params.wei_buffer_capacity_bytes;
+
+    if (reason != nullptr) {
+        // A concurrent first call may have rewritten the buffer since it was
+        // classified; then no other route may read it either.
+        if (!in_place) in_place = native_weight_packed_in_place(weight, owned);
+        if (!in_place) {
+            log_info("native BRGEMM: a ", reason, " is not served");
+            return false;
+        }
+        status = status_t::unimplemented;
+    } else {
+        GemmDescriptor desc = make_desc(transA, transB, M, N, K, alpha, beta,
+                lda, ldb, ldc, is_weights_const, num_threads, params);
+        desc.bias = bias;
+        desc.gated_act = gated_act;
+        const thread_guard tg(num_threads, thread_guard::max_threads());
+        // Nothing may throw out of matmul_direct (allocations of the call's
+        // buffers, an executor).
+        try {
+            status = native_brgemm_execute(desc, ref, src, dst, bias, params);
+        } catch (const std::exception &e) {
+            apilog_error("matmul_direct: native BRGEMM: ", e.what());
+            status = status_t::failure;
+        }
+        if ((status == status_t::unimplemented
+                    || status == status_t::isa_unsupported)
+                && !in_place && !native_weight_packed_in_place(weight, owned)) {
+            log_info(
+                    "native BRGEMM does not serve this call; the other "
+                    "routes do");
+            return false;
+        }
+    }
+
+    // The line matmul_direct logs for every other route, with the fields of
+    // this one.
+    std::string line;
+    if (apilog_info_enabled() || profiler != nullptr) {
+        const std::string po_dtypes = post_op_data_types_to_string(params);
+        std::ostringstream ss;
+        ss << "LOWOHA matmul_direct: M=" << M << ", N=" << N << ", K=" << K
+           << ", alpha=" << alpha << ", beta=" << beta << ", lda=" << lda
+           << ", ldb=" << ldb << ", ldc=" << ldc
+           << ", transA=" << (transA ? "true" : "false")
+           << ", transB=" << (transB ? "true" : "false")
+           << ", input_dtype=" << dtype_info(params.dtypes.src)
+           << ", weight_dtype=" << dtype_info(params.dtypes.wei)
+           << ", output_dtype=" << dtype_info(params.dtypes.dst)
+           << ", bias_dtype=" << dtype_info(params.dtypes.bias)
+           << ", bias=" << (bias != nullptr ? "true" : "false")
+           << ", is_weights_const=" << (is_weights_const ? "true" : "false")
+           << ", post_op=[" << post_op_names_to_string(params) << "]"
+           << ", post_op_dtype=[" << (po_dtypes.empty() ? "none" : po_dtypes)
+           << "], Batch_A=" << (batch ? batch->Batch_A : batch_count)
+           << ", Batch_B=" << (batch ? batch->Batch_B : batch_count)
+           << ", plugin_op=" << params.plugin_op
+           << ", dynamic_quant=" << (params.dynamic_quant ? "true" : "false")
+           << ", kernel=native_brgemm, layout=native_nr" << pack_nr
+           << ", weight_cache=";
+        if (in_place)
+            ss << "inplace";
+        else
+            ss << ref.weight_cache_mode;
+        ss << ", gated_act=" << gated_act_name(gated_act);
+        line = ss.str();
+    }
+    if (apilog_info_enabled()) apilog_info(line);
+    if (profiler != nullptr) {
+        profiler->tbp_stop();
+        profilelog_verbose(line, ", weight_address=", weight,
+                ", time=", profiler->tbp_elapsedtime(),
+                profiler->get_res_str());
+    }
+    if (status != status_t::success) {
+        apilog_error("matmul_direct: native BRGEMM did not serve the call (",
+                reason != nullptr ? reason : kernel_status_text(status), ")",
+                in_place ? "; no other route reads a buffer it rewrote" : "");
     }
     return true;
 }

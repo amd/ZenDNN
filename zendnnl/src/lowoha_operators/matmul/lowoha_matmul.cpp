@@ -383,6 +383,22 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
     const int32_t omp_mt = thread_guard::max_threads();
     const int32_t num_threads
             = resolve_num_threads(exec_params.num_threads, omp_mt);
+    // ALGO 11: the native BRGEMM serves the calls it qualifies for; the others
+    // continue below as without it, up to the kernel choice.
+    const bool native_selected = native::native_brgemm_selected(exec_params);
+    const bool native_requested
+            = native_selected && native::native_brgemm_requested(exec_params);
+    if (native_selected) {
+        status_t native_status = status_t::success;
+        if (native::native_layout_matmul(layout, transA, transB, M, N, K, alpha,
+                    src, lda, weight, ldb, bias, beta, dst, ldc,
+                    is_weights_const, batch_count, num_threads,
+                    run_gated_act ? gated_act->act : matmul_gated_act_t::none,
+                    exec_params, is_profile ? &profiler : nullptr,
+                    native_status, &exec_batch_params)) {
+            return native_status;
+        }
+    }
 
     // Unpack GGML before the group route. The route rejects pack_format_b==1,
     // so a still-packed weight can never enter group_matmul_direct. After
@@ -560,9 +576,26 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
             && exec_params.dtypes.src == data_type_t::s8;
     if (w4a8_source_reordered) { exec_params.dynamic_quant = false; }
 
+    // A single call that asked for the native BRGEMM and was declined runs on
+    // AOCL-DLP blocked, never on the other native kernels, and keeps its
+    // weight raw (weight cache mode at most 1): a later call may take the
+    // weight to the native BRGEMM.
+    const bool native_declined = native_requested && batch_count == 1;
+    if (native_declined) {
+        exec_params.weight_cache_type
+                = std::min<int32_t>(exec_params.weight_cache_type, 1);
+    }
     matmul_algo_t kernel = kernel_select(exec_params, exec_batch_params.Batch_A,
             exec_batch_params.Batch_B, batch_count, M, N, K, num_threads, bias,
             is_weights_const, transB);
+    if (native_declined && kernel == matmul_algo_t::native_brgemm) {
+#if ZENDNNL_DEPENDS_AOCLDLP
+        kernel = matmul_algo_t::aocl_dlp_blocked;
+#else
+        kernel = matmul_algo_t::reference;
+#endif
+        exec_params.lowoha_algo = kernel;
+    }
     matmul_algo_t api_log_kernel = kernel;
     static unsigned int auto_version = get_auto_tuner_ver();
 

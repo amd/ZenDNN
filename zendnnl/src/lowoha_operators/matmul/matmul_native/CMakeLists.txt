@@ -16,10 +16,12 @@
 
 # Native Matmul entry point
 set(matmul_native_sources
-  native_matmul.cpp)
+  native_matmul.cpp
+  native_layout_policy.cpp)
 
 set(matmul_native_headers
-  native_matmul.hpp)
+  native_matmul.hpp
+  native_layout_policy.hpp)
 
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
   target_sources(zendnnl_archive

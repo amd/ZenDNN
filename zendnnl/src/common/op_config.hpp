@@ -141,6 +141,15 @@ public:
    */
     int32_t get_algo();
 
+    /** @brief True when the matmul algo is native_brgemm.
+   *
+   * A copy set_algo() keeps, read without the singleton: one relaxed load,
+   * for the route decision every matmul_direct call makes.
+   */
+    static bool is_native_brgemm_algo() {
+        return matmul_algo_native_brgemm.load(std::memory_order_relaxed);
+    }
+
     /** @brief Sets bmm algo.
   *
   * @param algo The BMM algorithm to set.
@@ -301,6 +310,8 @@ private:
     matmul_config_t() = default;
 
     int32_t matmul_algo; /**< Matmul runtime algorithm. */
+    /** matmul_algo == native_brgemm. */
+    static std::atomic<bool> matmul_algo_native_brgemm;
     int32_t bmm_algo; /**< Batched Matmul algorithm. */
     data_type_t
             matmul_accum_type; /**< Accumulation type for reference kernel. */

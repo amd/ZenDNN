@@ -136,8 +136,10 @@ void bf16_brgemm_ukernel(const uint16_t *__restrict A, int lda,
 // spill to L1 in the inner loop but compile and run correctly.
 //
 //   NV=4 (NR=64): clean up to MR=6 (29 ZMM); MR=8 spills (37 ZMM).
-//   NV=2 (NR=32): register-pressure clean through MR≤8; this file
-//                 currently instantiates/selects MR ∈ {1..6}.
+//   NV=2 (NR=32): register-pressure clean through MR≤12 (27 ZMM); this
+//                 file instantiates MR ∈ {1..12}.  select_bf16_brgemm_kernel
+//                 selects MR ∈ {1..6}, select_bf16_brgemm_tall_kernel
+//                 MR ∈ {1..12}.
 //   NV=1 (NR=16): register-pressure clean for practical MR values;
 //                 this file currently instantiates/selects MR ∈ {1..6}.
 //
@@ -159,9 +161,10 @@ INST(4, 4)
 INST(5, 4)
 INST(6, 4)
 INST(8, 4)
-// NR=32 (NV=2): MR ∈ {1..6}
+// NR=32 (NV=2): MR ∈ {1..12}
 INST(1, 2)
 INST(2, 2) INST(3, 2) INST(4, 2) INST(5, 2) INST(6, 2)
+INST(7, 2) INST(8, 2) INST(9, 2) INST(10, 2) INST(11, 2) INST(12, 2)
         // NR=16 (NV=1): MR ∈ {1..6}
         INST(1, 1) INST(2, 1) INST(3, 1) INST(4, 1) INST(5, 1) INST(6, 1)
 #undef INST
@@ -203,6 +206,21 @@ bf16_brgemm_fn_t select_bf16_brgemm_kernel(int MR, int NR) {
             break;
     }
     return nullptr;
+}
+
+ZENDNNL_TARGET("avx512f,avx512bf16,fma")
+bf16_brgemm_fn_t select_bf16_brgemm_tall_kernel(int MR, int NR) {
+    if (NR == 32) {
+        switch (MR) {
+            case 7: return bf16_brgemm_ukernel<7, 2>;
+            case 8: return bf16_brgemm_ukernel<8, 2>;
+            case 9: return bf16_brgemm_ukernel<9, 2>;
+            case 10: return bf16_brgemm_ukernel<10, 2>;
+            case 11: return bf16_brgemm_ukernel<11, 2>;
+            case 12: return bf16_brgemm_ukernel<12, 2>;
+        }
+    }
+    return select_bf16_brgemm_kernel(MR, NR);
 }
 
 // ============================================================================

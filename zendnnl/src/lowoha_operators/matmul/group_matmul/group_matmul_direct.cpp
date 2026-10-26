@@ -1465,6 +1465,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
             int cur_lda = (i == 0) ? lda[i] : ldc[i - 1];
 
             exec_params[i].num_threads = num_threads;
+            exec_params[i].lowoha_algo = grp_matmul_lowoha_algo(exec_params[i]);
             matmul_algo_t kernel = kernel_select(exec_params[i], bp.Batch_A,
                     bp.Batch_B, 1, M[i], N[i], K[i], num_threads, bias[i],
                     is_weights_const[i], transB[i]);

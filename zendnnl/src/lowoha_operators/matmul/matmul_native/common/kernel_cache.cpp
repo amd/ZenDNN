@@ -21,6 +21,7 @@
 #include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/bf16/bf16_gemv_bkc.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/int8_gemv_bkc.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_weight_cache.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -426,6 +427,7 @@ void clear_all_weight_caches() {
     BF16BKCWeightCache::instance().clear();
     INT8KContiguousWeightCache::instance().clear();
     INT8PrepackedWeightCache::instance().clear();
+    clear_native_weight_caches();
     weight_cache_generation().fetch_add(1, std::memory_order_relaxed);
 }
 

@@ -94,6 +94,8 @@ if(ZENDNNL_BUILD_GTEST)
   add_subdirectory(group_embag)
   # Adds reorder/ test sources to the gtests target.
   add_subdirectory(reorder)
+  # Adds matmul_native/ test sources to the gtests target.
+  add_subdirectory(matmul_native)
 
   target_include_directories(gtests
     PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src"

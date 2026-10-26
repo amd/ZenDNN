@@ -18,10 +18,24 @@
 set(matmul_native_common_sources
   cost_model.cpp
   postop.cpp
-  kernel_cache.cpp)
+  kernel_cache.cpp
+  native_pack.cpp
+  native_weight_cache.cpp
+  native_weight_view.cpp
+  native_epilogue.cpp
+  native_aocl_unreorder.cpp
+  native_hw.cpp)
 
 set(matmul_native_common_headers
   gemm_descriptor.hpp
+  native_pack.hpp
+  native_weight_cache.hpp
+  native_weight_view.hpp
+  native_epilogue.hpp
+  native_aocl_unreorder.hpp
+  native_hw.hpp
+  native_weight_ends.hpp
+  native_int8_scheme.hpp
   cost_model.hpp
   postop.hpp
   kernel_cache.hpp

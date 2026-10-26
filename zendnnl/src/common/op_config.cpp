@@ -401,8 +401,13 @@ data_type_t matmul_config_t::get_accum_type() {
     return matmul_accum_type;
 }
 
+std::atomic<bool> matmul_config_t::matmul_algo_native_brgemm {false};
+
 void matmul_config_t::set_algo(int32_t algo) {
     matmul_algo = algo;
+    matmul_algo_native_brgemm.store(
+            algo == static_cast<int32_t>(matmul_algo_t::native_brgemm),
+            std::memory_order_relaxed);
 }
 
 int32_t matmul_config_t::get_algo() {

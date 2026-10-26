@@ -41,6 +41,8 @@ struct GemmDescriptor {
     const void *bias;
     bool is_weights_const;
     int num_threads;
+    /// Read only by the native BRGEMM over the native VNNI layout.
+    matmul_gated_act_t gated_act = matmul_gated_act_t::none;
 
     GemmDescriptor()
         : M(0)

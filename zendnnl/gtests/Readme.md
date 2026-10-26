@@ -425,6 +425,12 @@ Matmul / batch matmul only:
 
 `ZENDNNL_MATMUL_ALGO=4` forces AOCL DLP for every line, even when the file names another `kernel`.
 
+`ZENDNNL_MATMUL_ALGO=11` (or a `native_brgemm` kernel) runs the BF16 / INT8 cases the native BRGEMM qualifies for on
+it, in the native VNNI layout; the other cases run on AOCL-DLP (or the one-op group route), as `matmul_direct` does
+under ALGO 11. In `zendnnl/gtests/matmul_native/`, `NativeLayoutRule*` covers the layout rule and the route,
+`NativeBrgemm*` the native BRGEMM, `NativeConfig*` and `NativeTuning*` its planner and tuning inputs, and
+`NativeWeightLifetime*` its weight lifetime.
+
 ### **Matmul (2D) Input File Format**
 
 `--op matmul` (`--ndims` defaults to `2`). **12** fields per line:

@@ -34,6 +34,12 @@ using bf16_brgemm_fn_t = void (*)(const uint16_t *__restrict A, int lda,
 ZENDNNL_TARGET("avx512f,avx512bf16,fma")
 bf16_brgemm_fn_t select_bf16_brgemm_kernel(int MR, int NR);
 
+// select_bf16_brgemm_kernel plus MR ∈ {7..12} at NR=32.  The loopers that
+// fall back to the generic kernel on a nullptr from select_bf16_brgemm_kernel
+// rely on its kernel set staying as it is.
+ZENDNNL_TARGET("avx512f,avx512bf16,fma")
+bf16_brgemm_fn_t select_bf16_brgemm_tall_kernel(int MR, int NR);
+
 ZENDNNL_TARGET("avx512f,avx512bf16,avx512bw,avx512vl,fma")
 void bf16_brgemm_tail_kernel(const uint16_t *__restrict A, int lda,
         const uint16_t *__restrict B_vnni, int b_stride, float *__restrict C,

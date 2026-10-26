@@ -90,6 +90,9 @@ static UarchParams do_detect() {
         p.l1d_bytes = l1 > 0 ? l1 : 32768;
         p.l2_bytes = l2 > 0 ? l2 : 1048576;
         p.l3_bytes_per_ccd = l3 > 0 ? l3 : 33554432;
+        p.l1d_detected = l1 > 0;
+        p.l2_detected = l2 > 0;
+        p.l3_detected = l3 > 0;
     } else {
         int l1 = read_intel_cache_size(1);
         int l2 = read_intel_cache_size(2);
@@ -97,6 +100,9 @@ static UarchParams do_detect() {
         p.l1d_bytes = l1 > 0 ? l1 : 32768;
         p.l2_bytes = l2 > 0 ? l2 : 1048576;
         p.l3_bytes_per_ccd = l3 > 0 ? l3 : 33554432;
+        p.l1d_detected = l1 > 0;
+        p.l2_detected = l2 > 0;
+        p.l3_detected = l3 > 0;
     }
 
     p.fma_ports = 2;
