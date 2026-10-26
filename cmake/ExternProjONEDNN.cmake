@@ -32,6 +32,8 @@ if (ZENDNNL_DEPENDS_ONEDNN)
     list(APPEND ONEDNN_CMAKE_ARGS "-DCMAKE_VERBOSE_MAKEFILE=OFF")
     list(APPEND ONEDNN_CMAKE_ARGS "-DCMAKE_BUILD_TYPE=Release")
     list(APPEND ONEDNN_CMAKE_ARGS "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>")
+    list(APPEND ONEDNN_CMAKE_ARGS "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}")
+    list(APPEND ONEDNN_CMAKE_ARGS "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}")
     # Not propagating parent CMAKE_C/CXX_FLAGS to oneDNN: oneDNN is a mature standalone
     # library that manages its own compilation flags; avoids flag conflicts with TensorFlow
     # builds (e.g. TensorFlow's -D_FORTIFY_SOURCE=1 vs oneDNN's -D_FORTIFY_SOURCE=2).
