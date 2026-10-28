@@ -44,6 +44,28 @@ namespace sdpa {
 status_t flash_sdpa(const void *query, const void *key, const void *value,
         const void *attn_mask, void *output, const sdpa_params &params);
 
+/**
+ * @brief Flash-style SDPA over a packed variable-length batch.
+ *
+ * Used when @c params.cu_seqlens_q is set. Q / output are
+ * [total_q, num_heads, head_dim] and K / V are
+ * [total_kv, kv_num_heads, head_dim]; each sequence attends only to its own
+ * keys. Supports causal, sliding window and the dynamic-INT8 modes; rejects
+ * attn_mask.
+ *
+ * @param query     Packed query data
+ * @param key       Packed key data
+ * @param value     Packed value data
+ * @param attn_mask Must be nullptr
+ * @param output    Packed output data
+ * @param params    Offsets, strides, dtypes, scale, flags
+ *
+ * @return status_t::success, or the validation / execution failure status
+ */
+status_t flash_sdpa_varlen(const void *query, const void *key,
+        const void *value, const void *attn_mask, void *output,
+        const sdpa_params &params);
+
 } // namespace sdpa
 } // namespace lowoha
 } // namespace zendnnl

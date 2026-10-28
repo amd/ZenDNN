@@ -208,13 +208,16 @@ inline void softmax(float *scores, int64_t seq_len_q, int64_t seq_len_kv) {
  *
  * scores[i, j] = -inf for j > i over a [seq_len_q, seq_len_kv] grid. The lower
  * triangle (j <= i) is left untouched. Matches the flash-SDPA convention:
- * query position i attends to key positions [0..i].
+ * query position i attends to key positions [0..i]. @p q_pos_offset shifts
+ * every query to key position i + q_pos_offset (packed mode aligns queries to
+ * the end of their keys).
  */
-inline void apply_causal_mask(
-        float *attention_scores, int64_t seq_len_q, int64_t seq_len_kv) {
+inline void apply_causal_mask(float *attention_scores, int64_t seq_len_q,
+        int64_t seq_len_kv, int64_t q_pos_offset = 0) {
     constexpr float neg_inf = -std::numeric_limits<float>::infinity();
     for (int64_t i = 0; i < seq_len_q; i++) {
-        for (int64_t j = i + 1; j < seq_len_kv; j++) {
+        const int64_t first_masked = std::max<int64_t>(0, i + q_pos_offset + 1);
+        for (int64_t j = first_masked; j < seq_len_kv; j++) {
             attention_scores[i * seq_len_kv + j] = neg_inf;
         }
     }
@@ -224,19 +227,25 @@ inline void apply_causal_mask(
  * @brief Apply a bidirectional sliding-window band in place.
  *
  * Query i attends to keys j in [i-(W-1), i+(W-1)] (vLLM/Gemma: L = R = W-1).
- * When @p is_causal is also true the right radius is 0.
+ * When @p is_causal is also true the right radius is 0. @p q_pos_offset
+ * shifts every query to key position i + q_pos_offset.
  */
 inline void apply_sliding_window_mask(float *attention_scores,
         int64_t seq_len_q, int64_t seq_len_kv, int64_t window_size,
-        bool is_causal) {
+        bool is_causal, int64_t q_pos_offset = 0) {
     constexpr float neg_inf = -std::numeric_limits<float>::infinity();
     const int64_t left = window_size - 1;
     const int64_t right = is_causal ? 0 : (window_size - 1);
     for (int64_t i = 0; i < seq_len_q; i++) {
+        const int64_t pos = i + q_pos_offset;
         // j_lo is clamped to seq_len_kv: on cross-attention the band can start
         // past the last key, in which case the whole row is masked.
-        const int64_t j_lo = std::min(seq_len_kv, (i > left) ? (i - left) : 0);
-        const int64_t j_hi = std::min(seq_len_kv - 1, i + right);
+        const int64_t j_lo
+                = std::min(seq_len_kv, (pos > left) ? (pos - left) : 0);
+        // Keep j_hi at -1 when the band ends before key 0, so j_hi + 1
+        // starts the right-mask loop at the first valid key.
+        const int64_t j_hi
+                = std::max<int64_t>(-1, std::min(seq_len_kv - 1, pos + right));
         for (int64_t j = 0; j < j_lo; j++) {
             attention_scores[i * seq_len_kv + j] = neg_inf;
         }
@@ -318,6 +327,8 @@ inline void apply_attention_mask(float *attention_scores,
  *                            @p sliding_window_size instead of the full row.
  * @param sliding_window_size Window width W (L = R = W-1); the band is ignored
  *                            when @p sliding_window is false or W <= 0.
+ * @param q_pos_offset  Key position of query row 0 for the causal and window
+ *                      bands (0 = dense convention).
  */
 template <typename qkv_t, typename mask_t>
 inline void compute_sdpa_per_head(const qkv_t *q_new, const qkv_t *k_new,
@@ -325,7 +336,8 @@ inline void compute_sdpa_per_head(const qkv_t *q_new, const qkv_t *k_new,
         int64_t seq_len_q, int64_t seq_len_kv, int64_t head_dim,
         int64_t q_seq_stride, int64_t k_seq_stride, int64_t v_seq_stride,
         int64_t o_seq_stride, float scale, bool is_causal, bool has_mask,
-        bool sliding_window, int64_t sliding_window_size) {
+        bool sliding_window, int64_t sliding_window_size,
+        int64_t q_pos_offset = 0) {
     // FP32 score buffer keeps softmax numerically stable for low-precision QKV.
     std::vector<float> attention_scores(
             static_cast<size_t>(seq_len_q * seq_len_kv), 0.0f);
@@ -335,9 +347,10 @@ inline void compute_sdpa_per_head(const qkv_t *q_new, const qkv_t *k_new,
 
     if (sliding_window && sliding_window_size > 0) {
         apply_sliding_window_mask(attention_scores.data(), seq_len_q,
-                seq_len_kv, sliding_window_size, is_causal);
+                seq_len_kv, sliding_window_size, is_causal, q_pos_offset);
     } else if (is_causal) {
-        apply_causal_mask(attention_scores.data(), seq_len_q, seq_len_kv);
+        apply_causal_mask(
+                attention_scores.data(), seq_len_q, seq_len_kv, q_pos_offset);
     }
     if (has_mask && mask_ptr != nullptr) {
         apply_attention_mask<mask_t>(
@@ -530,6 +543,105 @@ status_t reference_sdpa(const void *query, const void *key, const void *value,
     apilog_error("SDPA ref kernel: unsupported QKV data_type = ",
             static_cast<int>(query_dtype), " (expected f32, bf16, or f16)");
     return status_t::failure;
+}
+
+// Packed variable-length reference: each (sequence, head) slab is the dense
+// per-head computation over that sequence's own rows.
+template <typename qkv_t>
+status_t execute_typed_varlen(const void *query, const void *key,
+        const void *value, void *output, const sdpa_params &params) {
+    const int64_t num_seqs = params.batch;
+    const int64_t num_heads = params.num_heads;
+    const int64_t eff_kv_num_heads = (params.kv_num_heads > 0)
+            ? params.kv_num_heads
+            : params.num_heads;
+    const int64_t repeat_factor = num_heads / eff_kv_num_heads;
+    const int64_t head_dim = params.head_dim;
+    const float scale = (params.scale != 0.0)
+            ? static_cast<float>(params.scale)
+            : 1.0f / std::sqrt(static_cast<float>(head_dim));
+    const int32_t *cu_q = params.cu_seqlens_q;
+    const int32_t *cu_k
+            = (params.cu_seqlens_k != nullptr) ? params.cu_seqlens_k : cu_q;
+
+    const qkv_t *q_data = static_cast<const qkv_t *>(query);
+    const qkv_t *k_data = static_cast<const qkv_t *>(key);
+    const qkv_t *v_data = static_cast<const qkv_t *>(value);
+    qkv_t *out_data = static_cast<qkv_t *>(output);
+
+    const int32_t num_threads = resolve_num_threads(
+            params.num_threads, thread_guard::max_threads());
+
+#pragma omp parallel for collapse(2) schedule(dynamic) num_threads(num_threads)
+    for (int64_t b = 0; b < num_seqs; b++) {
+        for (int64_t h = 0; h < num_heads; h++) {
+            const int64_t q_start = cu_q[b];
+            const int64_t q_len = cu_q[b + 1] - q_start;
+            const int64_t kv_start = cu_k[b];
+            const int64_t kv_len = cu_k[b + 1] - kv_start;
+            if (q_len <= 0) { continue; }
+            const int64_t kv_h = h / repeat_factor;
+            qkv_t *o_bh = out_data + q_start * params.o_stride_s
+                    + h * params.o_stride_h;
+            // No keys means every query row sees an empty set; match the
+            // flash kernel, which writes zeros.
+            if (kv_len <= 0) {
+                for (int64_t i = 0; i < q_len; i++) {
+                    for (int64_t d = 0; d < head_dim; d++) {
+                        o_bh[i * params.o_stride_s + d]
+                                = from_float<qkv_t>(0.f);
+                    }
+                }
+                continue;
+            }
+            compute_sdpa_per_head<qkv_t, float>(q_data
+                            + q_start * params.q_stride_s
+                            + h * params.q_stride_h,
+                    k_data + kv_start * params.k_stride_s
+                            + kv_h * params.k_stride_h,
+                    v_data + kv_start * params.v_stride_s
+                            + kv_h * params.v_stride_h,
+                    o_bh, nullptr, q_len, kv_len, head_dim, params.q_stride_s,
+                    params.k_stride_s, params.v_stride_s, params.o_stride_s,
+                    scale, params.is_causal, /*has_mask=*/false,
+                    params.sliding_window, params.sliding_window_size,
+                    /*q_pos_offset=*/kv_len - q_len);
+        }
+    }
+    return status_t::success;
+}
+
+status_t reference_sdpa_varlen(const void *query, const void *key,
+        const void *value, const void *attn_mask, void *output,
+        const sdpa_params &params) {
+    status_t status = zendnnl::common::op_instrumentation::validate([&]() {
+        return validate_flash_sdpa_varlen_inputs(
+                query, key, value, output, attn_mask, params);
+    });
+    if (status != status_t::success) { return status; }
+
+    if (params.o_stride_d != 1) {
+        apilog_error(
+                "SDPA ref kernel: o_stride_d must be 1 (contiguous head_dim)");
+        return status_t::failure;
+    }
+
+    switch (params.qkv_dt) {
+        case data_type_t::f32:
+            return execute_typed_varlen<float>(
+                    query, key, value, output, params);
+        case data_type_t::bf16:
+            return execute_typed_varlen<bfloat16_t>(
+                    query, key, value, output, params);
+        case data_type_t::f16:
+            return execute_typed_varlen<float16_t>(
+                    query, key, value, output, params);
+        default:
+            apilog_error("SDPA ref kernel: unsupported QKV data_type = ",
+                    static_cast<int>(params.qkv_dt),
+                    " (expected f32, bf16, or f16)");
+            return status_t::failure;
+    }
 }
 
 } //namespace sdpa

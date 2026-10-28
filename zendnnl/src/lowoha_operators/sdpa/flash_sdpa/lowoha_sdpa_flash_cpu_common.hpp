@@ -5,9 +5,10 @@
 # * you may not use this file except in compliance with the License.
 # *******************************************************************************/
 
-// Helpers shared by the FP (lowoha_sdpa_flash_cpu.cpp) and dynamic-INT8
-// (lowoha_sdpa_flash_cpu_int8.cpp) flash-attention translation units.
-// Everything here is a template or `inline`, so both TUs may include it.
+// Helpers shared by the dense FP (lowoha_sdpa_flash_cpu.cpp) and dynamic-INT8
+// (lowoha_sdpa_flash_cpu_int8.cpp) flash-attention translation units and
+// their packed variable-length counterparts (varlen/*.cpp).
+// Everything here is a template or `inline`, so every TU may include it.
 
 #ifndef ZENDNNL_LOWOHA_SDPA_FLASH_CPU_COMMON_HPP
 #define ZENDNNL_LOWOHA_SDPA_FLASH_CPU_COMMON_HPP
@@ -348,6 +349,119 @@ inline void write_scaled_output_row(scalar_t *out_base, int64_t out_stride_d,
     }
 }
 
+template <typename SimdTag, typename T2>
+inline void exp_reduce_sum_fusion_to(
+        const accum_t *a, int size, T2 *out, accum_t &val) {
+    using Ops = simd::SimdOps<SimdTag>;
+    using VecF32 = typename Ops::VecF32;
+    const int L = Ops::kFloatLanes;
+    const VecF32 vmb = Ops::vec_set1(val);
+    VecF32 vsum = Ops::vec_set1(0.f);
+    int i = 0;
+    for (; i + L <= size; i += L) {
+        const VecF32 x = Ops::vec_loadu(a + i);
+        const VecF32 d = Ops::vec_sub(x, vmb);
+        const VecF32 e = Ops::vec_fexp_u20(d);
+        vsum = Ops::vec_add(vsum, e);
+        if constexpr (std::is_same_v<T2, bfloat16_t>) {
+            Ops::vec_bf16_storeu(reinterpret_cast<uint16_t *>(&out[i]), e);
+        } else if constexpr (std::is_same_v<T2, float16_t>) {
+            Ops::vec_f16_storeu(reinterpret_cast<uint16_t *>(&out[i]), e);
+        } else {
+            Ops::vec_storeu(reinterpret_cast<float *>(out + i), e);
+        }
+    }
+    accum_t tmp_sum = Ops::vec_reduce_sum(vsum);
+    for (; i < size; ++i) {
+        const accum_t e = std::exp(a[i] - val);
+        out[i] = float_to_scalar<T2>(e);
+        tmp_sum += e;
+    }
+    val = tmp_sum;
+}
+
+template <typename SimdTag>
+inline void mul_reduce_max_fusion(const accum_t *a, accum_t scale, int size,
+        accum_t *out, accum_t &maxv) {
+    using Ops = simd::SimdOps<SimdTag>;
+    using VecF32 = typename Ops::VecF32;
+    const int L = Ops::kFloatLanes;
+    VecF32 vtmp_max = Ops::vec_set1(-std::numeric_limits<accum_t>::infinity());
+    const VecF32 vs = Ops::vec_set1(scale);
+    int i = 0;
+    for (; i + L <= size; i += L) {
+        const VecF32 x = Ops::vec_loadu(a + i);
+        const VecF32 y = Ops::vec_mul(x, vs);
+        vtmp_max = Ops::vec_max(vtmp_max, y);
+        Ops::vec_storeu(out + i, y);
+    }
+    maxv = Ops::vec_reduce_max(vtmp_max);
+    for (; i < size; ++i) {
+        const accum_t t = a[i] * scale;
+        out[i] = t;
+        maxv = std::max(maxv, t);
+    }
+}
+
+// Returns the pointer the next GEMM should consume as its A operand:
+//   * F32 path: the FP32 softmax tile in `ptr` (no reduced buffer exists).
+//   * BF16 / F16 path: the reduced-precision softmax tile in `ptr2`.
+template <typename scalar_t>
+inline scalar_t *conditional_data_ptr(scalar_t *ptr, scalar_t *ptr2) {
+    SDPA_SA_CHECK(ptr2 == nullptr,
+            "conditional_data_ptr: unexpected reduced-fp qk buf");
+    return ptr;
+}
+
+template <typename scalar_t,
+        typename std::enable_if_t<is_reduced_fp_v<scalar_t>, int> = 0>
+inline scalar_t *conditional_data_ptr(float *ptr, scalar_t *ptr2) {
+    return ptr2;
+}
+
+template <typename SimdTag>
+inline void exp_reduce_sum_fusion_to_u8(
+        const accum_t *a, int size, uint8_t *out, accum_t &val) {
+    using Ops = simd::SimdOps<SimdTag>;
+    using VecF32 = typename Ops::VecF32;
+    const int L = Ops::kFloatLanes;
+    const VecF32 vmb = Ops::vec_set1(val);
+    const VecF32 vu8_scale = Ops::vec_set1(255.0f);
+    VecF32 vsum = Ops::vec_set1(0.0f);
+    int i = 0;
+    for (; i + L <= size; i += L) {
+        const VecF32 x = Ops::vec_loadu(a + i);
+        const VecF32 e = Ops::vec_exp_u20(Ops::vec_sub(x, vmb));
+        vsum = Ops::vec_add(vsum, e);
+        Ops::vec_u8_storeu(out + i, Ops::vec_mul(e, vu8_scale));
+    }
+    accum_t tmp_sum = Ops::vec_reduce_sum(vsum);
+    for (; i < size; ++i) {
+        const accum_t e = std::exp(a[i] - val);
+        const accum_t quantized = std::nearbyint(
+                std::max(accum_t(0), std::min(e * 255.0f, accum_t(255))));
+        out[i] = static_cast<uint8_t>(quantized);
+        tmp_sum += e;
+    }
+    val = tmp_sum;
+}
+
+template <typename SimdTag>
+inline void add_f32_inplace(float *dst, const float *src, int64_t size) {
+    using Ops = simd::SimdOps<SimdTag>;
+    using VecF32 = typename Ops::VecF32;
+    const int L = Ops::kFloatLanes;
+    int64_t i = 0;
+    for (; i + L <= size; i += L) {
+        const VecF32 vd = Ops::vec_loadu(dst + i);
+        const VecF32 vs = Ops::vec_loadu(src + i);
+        Ops::vec_storeu(dst + i, Ops::vec_add(vd, vs));
+    }
+    for (; i < size; ++i) {
+        dst[i] += src[i];
+    }
+}
+
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC pop_options
 #endif
@@ -446,6 +560,54 @@ status_t sdpa_flash_cpu_run_int8(const sdpa_flash_cpu_tensor_view &output,
 
 // Releases this thread's INT8 scratch pool (owned by the INT8 TU).
 void sdpa_flash_cpu_free_int8_scratch();
+
+// Query tile size for packed variable-length calls. Same thresholds as the
+// dense kernel, except a long sequence uses 64 rows where dense uses 256.
+// The sequence count stands in for the batch. Every sequence uses this one
+// size; shorter sequences get fewer tiles and a partial last one.
+inline int64_t varlen_q_split_size(
+        int64_t num_seqs, int64_t max_seqlen_q, bool windowed) {
+    if (num_seqs > 4 && !windowed) { return 512; }
+    if (max_seqlen_q >= 192) { return 64; }
+    return 32;
+}
+
+// One query tile of a packed batch: rows [m, m + rows) of sequence `seq`.
+struct varlen_tile {
+    int32_t seq;
+    int32_t m;
+    int32_t rows;
+};
+
+// Lists only the tiles that exist, so the parallel loop never hands out an
+// empty iteration however uneven the sequence lengths are.
+inline void build_varlen_tiles(std::vector<varlen_tile> &tiles,
+        const int32_t *cu_seqlens_q, int64_t num_seqs, int64_t q_split_size) {
+    tiles.clear();
+    for (int64_t b = 0; b < num_seqs; ++b) {
+        const int64_t len = cu_seqlens_q[b + 1] - cu_seqlens_q[b];
+        for (int64_t m = 0; m < len; m += q_split_size) {
+            tiles.push_back({static_cast<int32_t>(b), static_cast<int32_t>(m),
+                    static_cast<int32_t>(std::min(q_split_size, len - m))});
+        }
+    }
+}
+
+// Entry point for the packed dynamic-INT8 flash path, defined in
+// varlen/lowoha_sdpa_flash_cpu_varlen_int8.cpp.
+status_t sdpa_flash_cpu_varlen_run_int8(
+        const sdpa_flash_cpu_tensor_view &output,
+        const sdpa_flash_cpu_tensor_view &query,
+        const sdpa_flash_cpu_tensor_view &key,
+        const sdpa_flash_cpu_tensor_view &value, const int32_t *cu_seqlens_q,
+        const int32_t *cu_seqlens_k, bool is_causal, bool sliding_window,
+        int64_t sliding_window_size, std::optional<double> scale,
+        data_type_t qkv_dt, bool is_qk_quant, bool is_pv_quant, bool use_avx512,
+        int num_threads);
+
+// Release this thread's packed-path scratch pools (owned by the varlen TUs).
+void sdpa_flash_cpu_free_varlen_scratch();
+void sdpa_flash_cpu_free_varlen_int8_scratch();
 
 } // namespace sdpa
 } // namespace lowoha

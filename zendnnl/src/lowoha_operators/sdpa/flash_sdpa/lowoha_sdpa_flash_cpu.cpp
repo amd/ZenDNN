@@ -88,76 +88,6 @@ inline void *flash_scratch_acquire(size_t bytes) {
 #pragma GCC optimize("no-tree-vectorize")
 #endif
 
-template <typename SimdTag, typename T2>
-inline void exp_reduce_sum_fusion_to(
-        const accum_t *a, int size, T2 *out, accum_t &val) {
-    using Ops = simd::SimdOps<SimdTag>;
-    using VecF32 = typename Ops::VecF32;
-    const int L = Ops::kFloatLanes;
-    const VecF32 vmb = Ops::vec_set1(val);
-    VecF32 vsum = Ops::vec_set1(0.f);
-    int i = 0;
-    for (; i + L <= size; i += L) {
-        const VecF32 x = Ops::vec_loadu(a + i);
-        const VecF32 d = Ops::vec_sub(x, vmb);
-        const VecF32 e = Ops::vec_fexp_u20(d);
-        vsum = Ops::vec_add(vsum, e);
-        if constexpr (std::is_same_v<T2, bfloat16_t>) {
-            Ops::vec_bf16_storeu(reinterpret_cast<uint16_t *>(&out[i]), e);
-        } else if constexpr (std::is_same_v<T2, float16_t>) {
-            Ops::vec_f16_storeu(reinterpret_cast<uint16_t *>(&out[i]), e);
-        } else {
-            Ops::vec_storeu(reinterpret_cast<float *>(out + i), e);
-        }
-    }
-    accum_t tmp_sum = Ops::vec_reduce_sum(vsum);
-    for (; i < size; ++i) {
-        const accum_t e = std::exp(a[i] - val);
-        out[i] = float_to_scalar<T2>(e);
-        tmp_sum += e;
-    }
-    val = tmp_sum;
-}
-
-template <typename SimdTag>
-inline void mul_reduce_max_fusion(const accum_t *a, accum_t scale, int size,
-        accum_t *out, accum_t &maxv) {
-    using Ops = simd::SimdOps<SimdTag>;
-    using VecF32 = typename Ops::VecF32;
-    const int L = Ops::kFloatLanes;
-    VecF32 vtmp_max = Ops::vec_set1(-std::numeric_limits<accum_t>::infinity());
-    const VecF32 vs = Ops::vec_set1(scale);
-    int i = 0;
-    for (; i + L <= size; i += L) {
-        const VecF32 x = Ops::vec_loadu(a + i);
-        const VecF32 y = Ops::vec_mul(x, vs);
-        vtmp_max = Ops::vec_max(vtmp_max, y);
-        Ops::vec_storeu(out + i, y);
-    }
-    maxv = Ops::vec_reduce_max(vtmp_max);
-    for (; i < size; ++i) {
-        const accum_t t = a[i] * scale;
-        out[i] = t;
-        maxv = std::max(maxv, t);
-    }
-}
-
-// Returns the pointer the next GEMM should consume as its A operand:
-//   * F32 path: the FP32 softmax tile in `ptr` (no reduced buffer exists).
-//   * BF16 / F16 path: the reduced-precision softmax tile in `ptr2`.
-template <typename scalar_t>
-inline scalar_t *conditional_data_ptr(scalar_t *ptr, scalar_t *ptr2) {
-    SDPA_SA_CHECK(ptr2 == nullptr,
-            "conditional_data_ptr: unexpected reduced-fp qk buf");
-    return ptr;
-}
-
-template <typename scalar_t,
-        typename std::enable_if_t<is_reduced_fp_v<scalar_t>, int> = 0>
-inline scalar_t *conditional_data_ptr(float *ptr, scalar_t *ptr2) {
-    return ptr2;
-}
-
 // ---------------------------------------------------------------------------
 // Main flash-attention kernel — templated on SimdTag for SIMD dispatch.
 // ---------------------------------------------------------------------------
@@ -513,6 +443,8 @@ void sdpa_flash_cpu_free_scratch() {
     g_flash_scratch.ptr = nullptr;
     g_flash_scratch.cap = 0;
     sdpa_flash_cpu_free_int8_scratch();
+    sdpa_flash_cpu_free_varlen_scratch();
+    sdpa_flash_cpu_free_varlen_int8_scratch();
 }
 
 status_t sdpa_flash_cpu_run_internal(const sdpa_flash_cpu_tensor_view &output,

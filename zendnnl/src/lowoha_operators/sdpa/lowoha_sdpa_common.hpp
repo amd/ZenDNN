@@ -73,6 +73,9 @@ inline const char *kernel_to_string(sdpa_kernel_t kernel) {
  * The flash backend uses the per-tensor BHSD strides to support
  * non-contiguous layouts.  The BMM backend ignores strides and
  * expects pre-packed contiguous [batch*heads, seq, dim] tensors.
+ *
+ * Variable-length batches use the packed layout described at
+ * cu_seqlens_q instead (flash and reference backends only).
  */
 struct sdpa_params {
     // Tensor dimensions [Batch, Heads, Seq, Dim]
@@ -127,6 +130,25 @@ struct sdpa_params {
     // Backend kernel selection (none = default to flash)
     sdpa_kernel_t kernel;
 
+    // Packed variable-length mode, enabled when cu_seqlens_q is non-null.
+    // Sequences are stored back to back: Q / output are
+    // [total_q, num_heads, head_dim] and K / V are
+    // [total_kv, kv_num_heads, head_dim], and sequence b owns query rows
+    // [cu_seqlens_q[b], cu_seqlens_q[b + 1]) and key / value rows
+    // [cu_seqlens_k[b], cu_seqlens_k[b + 1]). Each array holds batch + 1
+    // non-decreasing offsets starting at 0 (vLLM's query_start_loc / ViT
+    // cu_seqlens). cu_seqlens_k == nullptr means the same offsets as
+    // cu_seqlens_q (self-attention). In this mode batch is the number of
+    // sequences, seq_len / kv_seq_len are upper bounds on the per-sequence
+    // query / key lengths (max_seqlen), *_stride_s / *_stride_h are the token
+    // and head strides, and *_stride_b are ignored. For the causal and window
+    // bands, queries are aligned to the end of their keys: query row r of a
+    // sequence sits at key position r + (kv_len - q_len), as in FlashAttention
+    // varlen and vLLM prefill with a cached prefix. attn_mask is not
+    // supported.
+    const int32_t *cu_seqlens_q;
+    const int32_t *cu_seqlens_k;
+
     sdpa_params()
         : batch(1)
         , num_heads(1)
@@ -166,7 +188,9 @@ struct sdpa_params {
         , is_qk_quant(false)
         , is_pv_quant(false)
         , num_threads(0)
-        , kernel(sdpa_kernel_t::none) {}
+        , kernel(sdpa_kernel_t::none)
+        , cu_seqlens_q(nullptr)
+        , cu_seqlens_k(nullptr) {}
 };
 
 /**

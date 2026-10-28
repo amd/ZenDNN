@@ -43,6 +43,20 @@ status_t validate_flash_sdpa_inputs(const void *query, const void *key,
         const void *value, void *output, const void *attn_mask,
         const sdpa_params &params);
 
+/**
+ * @brief Validate packed variable-length SDPA inputs (cu_seqlens_q set).
+ *
+ * Checks shapes, token / head strides, dtypes, and that every offset array
+ * starts at 0, never decreases, and keeps each sequence within seq_len
+ * (queries) or kv_seq_len (keys). Rejects attn_mask.
+ *
+ * @return status_t::success if valid; status_t::unimplemented for features
+ *         packed mode does not support; status_t::failure otherwise
+ */
+status_t validate_flash_sdpa_varlen_inputs(const void *query, const void *key,
+        const void *value, void *output, const void *attn_mask,
+        const sdpa_params &params);
+
 } // namespace sdpa
 } // namespace lowoha
 } // namespace zendnnl

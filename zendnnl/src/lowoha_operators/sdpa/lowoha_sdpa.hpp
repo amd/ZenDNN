@@ -38,11 +38,20 @@ namespace sdpa {
  *   output = softmax(Q * K^T / scale + causal_mask) * V
  *   where causal_mask[i,j] = -inf if j > i, else 0
  *
+ * Variable-length batches: set @c params.cu_seqlens_q (and optionally
+ * @c params.cu_seqlens_k) to pass packed [total_tokens, heads, head_dim]
+ * tensors; see @c sdpa_params for the packed-mode field meanings.
+ *
  * @param query        Query tensor [batch, num_heads, seq_len, head_dim]
+ *                     (packed: [total_q, num_heads, head_dim])
  * @param key          Key tensor [batch, kv_num_heads, kv_seq_len, head_dim]
+ *                     (packed: [total_kv, kv_num_heads, head_dim])
  * @param value        Value tensor [batch, kv_num_heads, kv_seq_len, head_dim]
- * @param attn_mask    Optional attention mask (can be nullptr)
+ *                     (packed: [total_kv, kv_num_heads, head_dim])
+ * @param attn_mask    Optional attention mask (can be nullptr; must be
+ *                     nullptr in packed mode)
  * @param output       Output tensor [batch, num_heads, seq_len, head_dim]
+ *                     (packed: [total_q, num_heads, head_dim])
  * @param params       SDPA parameters
  *
  * @return status_t::success or status_t::failure

@@ -1324,3 +1324,600 @@ TEST_P(TestSdpa, F16_F16_MASK_LAYOUT) {
  *  @brief Triggers SDPA parameterized test suite
  */
 INSTANTIATE_TEST_SUITE_P(Sdpa, TestSdpa, ::testing::ValuesIn(sdpa_test));
+
+// ---------------------------------------------------------------------------
+// Packed variable-length mode (sdpa_params::cu_seqlens_q). Buffers are
+// [total_tokens, heads, head_dim] with the per-sequence offsets alongside,
+// which is what vLLM hands zentorch (query_start_loc / ViT cu_seqlens).
+// ---------------------------------------------------------------------------
+namespace {
+
+struct varlen_setup {
+    std::vector<int32_t> q_lens;
+    std::vector<int32_t>
+            kv_lens; // empty: self-attention, offsets shared with Q
+    int64_t num_heads;
+    int64_t kv_num_heads;
+    int64_t head_dim;
+    int64_t window = 0; // 0: no sliding window
+    bool fused_qkv = false; // Q/K/V as strided views of one projection output
+    bool is_causal = false;
+};
+
+std::vector<int32_t> offsets_from_lengths(const std::vector<int32_t> &lens) {
+    std::vector<int32_t> cu(lens.size() + 1, 0);
+    for (size_t b = 0; b < lens.size(); ++b) {
+        cu[b + 1] = cu[b] + lens[b];
+    }
+    return cu;
+}
+
+template <typename T>
+class varlen_problem {
+public:
+    explicit varlen_problem(const varlen_setup &s) : setup_(s) {
+        self_attention_ = s.kv_lens.empty();
+        cu_q_ = offsets_from_lengths(s.q_lens);
+        cu_k_ = self_attention_ ? cu_q_ : offsets_from_lengths(s.kv_lens);
+        const auto &kv_lens = self_attention_ ? s.q_lens : s.kv_lens;
+        max_q_ = *std::max_element(s.q_lens.begin(), s.q_lens.end());
+        max_kv_ = *std::max_element(kv_lens.begin(), kv_lens.end());
+        total_q_ = cu_q_.back();
+        const int64_t total_kv = cu_k_.back();
+        const int64_t H = s.num_heads, Hkv = s.kv_num_heads, D = s.head_dim;
+
+        std::mt19937 gen(1234);
+        std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+        auto fill = [&](std::vector<T> &buf, int64_t n) {
+            buf.resize(static_cast<size_t>(n));
+            for (auto &x : buf) {
+                x = T(dist(gen));
+            }
+        };
+        if (s.fused_qkv) {
+            const int64_t row = (H + 2 * Hkv) * D;
+            fill(qkv_, total_q_ * row);
+            q_ptr_ = qkv_.data();
+            k_ptr_ = qkv_.data() + H * D;
+            v_ptr_ = qkv_.data() + (H + Hkv) * D;
+            q_stride_s_ = k_stride_s_ = v_stride_s_ = row;
+        } else {
+            fill(q_, total_q_ * H * D);
+            fill(k_, total_kv * Hkv * D);
+            fill(v_, total_kv * Hkv * D);
+            q_ptr_ = q_.data();
+            k_ptr_ = k_.data();
+            v_ptr_ = v_.data();
+            q_stride_s_ = H * D;
+            k_stride_s_ = v_stride_s_ = Hkv * D;
+        }
+    }
+
+    sdpa_params make_params(sdpa_kernel_t kernel) const {
+        const data_type_t dt = std::is_same_v<T, float> ? data_type_t::f32
+                                                        : data_type_t::bf16;
+        sdpa_params p;
+        p.batch = static_cast<int64_t>(setup_.q_lens.size());
+        p.num_heads = setup_.num_heads;
+        p.kv_num_heads = setup_.kv_num_heads;
+        p.seq_len = max_q_;
+        p.kv_seq_len = max_kv_;
+        p.head_dim = setup_.head_dim;
+        p.q_stride_s = q_stride_s_;
+        p.q_stride_h = setup_.head_dim;
+        p.k_stride_s = k_stride_s_;
+        p.k_stride_h = setup_.head_dim;
+        p.v_stride_s = v_stride_s_;
+        p.v_stride_h = setup_.head_dim;
+        p.o_stride_s = setup_.num_heads * setup_.head_dim;
+        p.o_stride_h = setup_.head_dim;
+        p.qkv_dt = dt;
+        p.out_dt = dt;
+        p.scale = 1.0 / std::sqrt(static_cast<double>(setup_.head_dim));
+        p.sliding_window = setup_.window > 0;
+        p.sliding_window_size = setup_.window;
+        p.is_causal = setup_.is_causal;
+        p.cu_seqlens_q = cu_q_.data();
+        p.cu_seqlens_k = self_attention_ ? nullptr : cu_k_.data();
+        p.kernel = kernel;
+        return p;
+    }
+
+    status_t run(sdpa_params p, std::vector<T> &out) const {
+        // NaN, not zero: a row the kernel never writes must fail the compare.
+        // The zero-output cases (no keys, causal rows with no visible key)
+        // pass only when the kernel stores zeros over this fill.
+        out.assign(static_cast<size_t>(
+                           total_q_ * setup_.num_heads * setup_.head_dim),
+                T(std::numeric_limits<float>::quiet_NaN()));
+        return sdpa_direct(q_ptr_, k_ptr_, v_ptr_, nullptr, out.data(), p);
+    }
+
+    int64_t max_q() const { return max_q_; }
+    int64_t max_kv() const { return max_kv_; }
+
+    // Compact f32 copies of the packed inputs. The bf16 flash tests compare
+    // against a reference run on these values: sdpa_abs_bound with
+    // epsilon_bf16 is larger than the output range on the long shapes.
+    void copy_inputs_as_f32(std::vector<float> &q, std::vector<float> &k,
+            std::vector<float> &v) const {
+        const int64_t H = setup_.num_heads;
+        const int64_t Hkv = setup_.kv_num_heads;
+        const int64_t D = setup_.head_dim;
+        const int64_t total_kv = cu_k_.back();
+        q.resize(static_cast<size_t>(total_q_ * H * D));
+        k.resize(static_cast<size_t>(total_kv * Hkv * D));
+        v.resize(static_cast<size_t>(total_kv * Hkv * D));
+        for (int64_t t = 0; t < total_q_; ++t) {
+            for (int64_t h = 0; h < H; ++h) {
+                for (int64_t d = 0; d < D; ++d) {
+                    q[static_cast<size_t>((t * H + h) * D + d)]
+                            = static_cast<float>(
+                                    q_ptr_[t * q_stride_s_ + h * D + d]);
+                }
+            }
+        }
+        for (int64_t t = 0; t < total_kv; ++t) {
+            for (int64_t h = 0; h < Hkv; ++h) {
+                for (int64_t d = 0; d < D; ++d) {
+                    const size_t dst
+                            = static_cast<size_t>((t * Hkv + h) * D + d);
+                    k[dst] = static_cast<float>(
+                            k_ptr_[t * k_stride_s_ + h * D + d]);
+                    v[dst] = static_cast<float>(
+                            v_ptr_[t * v_stride_s_ + h * D + d]);
+                }
+            }
+        }
+    }
+
+    sdpa_params make_contiguous_f32_params() const {
+        sdpa_params p;
+        const int64_t H = setup_.num_heads;
+        const int64_t Hkv = setup_.kv_num_heads;
+        const int64_t D = setup_.head_dim;
+        p.batch = static_cast<int64_t>(setup_.q_lens.size());
+        p.num_heads = H;
+        p.kv_num_heads = Hkv;
+        p.seq_len = max_q_;
+        p.kv_seq_len = max_kv_;
+        p.head_dim = D;
+        p.q_stride_s = H * D;
+        p.q_stride_h = D;
+        p.k_stride_s = Hkv * D;
+        p.k_stride_h = D;
+        p.v_stride_s = Hkv * D;
+        p.v_stride_h = D;
+        p.o_stride_s = H * D;
+        p.o_stride_h = D;
+        p.qkv_dt = data_type_t::f32;
+        p.out_dt = data_type_t::f32;
+        p.scale = 1.0 / std::sqrt(static_cast<double>(D));
+        p.sliding_window = setup_.window > 0;
+        p.sliding_window_size = setup_.window;
+        p.is_causal = setup_.is_causal;
+        p.cu_seqlens_q = cu_q_.data();
+        p.cu_seqlens_k = self_attention_ ? nullptr : cu_k_.data();
+        p.kernel = sdpa_kernel_t::reference;
+        return p;
+    }
+
+private:
+    varlen_setup setup_;
+    bool self_attention_ = true;
+    std::vector<int32_t> cu_q_, cu_k_;
+    int64_t max_q_ = 0, max_kv_ = 0, total_q_ = 0;
+    std::vector<T> qkv_, q_, k_, v_;
+    const T *q_ptr_ = nullptr, *k_ptr_ = nullptr, *v_ptr_ = nullptr;
+    int64_t q_stride_s_ = 0, k_stride_s_ = 0, v_stride_s_ = 0;
+};
+
+template <typename T>
+bool varlen_outputs_close(const std::vector<T> &actual,
+        const std::vector<T> &expected, float abs_bound, float rtol,
+        std::string &mismatch) {
+    for (size_t i = 0; i < actual.size(); ++i) {
+        const float a = static_cast<float>(actual[i]);
+        const float e = static_cast<float>(expected[i]);
+        if (!std::isfinite(a) || !std::isfinite(e)
+                || std::fabs(a - e) > abs_bound + rtol * std::fabs(e)) {
+            mismatch = "element " + std::to_string(i) + ": actual="
+                    + std::to_string(a) + ", expected=" + std::to_string(e);
+            return false;
+        }
+    }
+    return true;
+}
+
+// Same error model as compare_tensor_4D_sdpa: two GEMM reductions (head_dim,
+// then the key length) around a well-conditioned softmax.
+float sdpa_abs_bound(int64_t head_dim, int64_t kv_len, float epsilon) {
+    const float len = static_cast<float>(head_dim + kv_len);
+    return ((20 + std::log2(len) / 4) * len + 15) * epsilon;
+}
+
+template <typename T>
+void run_varlen_flash_vs_reference(
+        const varlen_setup &s, float rtol, float epsilon) {
+    varlen_problem<T> prob(s);
+    std::vector<T> out, out_ref;
+    ASSERT_EQ(prob.run(prob.make_params(sdpa_kernel_t::flash), out),
+            status_t::success);
+    ASSERT_EQ(prob.run(prob.make_params(sdpa_kernel_t::reference), out_ref),
+            status_t::success);
+    std::string mismatch;
+    EXPECT_TRUE(varlen_outputs_close(out, out_ref,
+            sdpa_abs_bound(s.head_dim, prob.max_kv(), epsilon), rtol, mismatch))
+            << mismatch;
+}
+
+// Outputs are a convex combination of V in [-1, 1]. sdpa_abs_bound with
+// epsilon_bf16 is about 10 to 28 on the long shapes, so any finite result
+// passes. 1e-2 still fails an all-zero output or a dropped window, and it
+// leaves room for the bf16 probability tile versus an f32 reference.
+constexpr float varlen_bf16_abs = 1e-2f;
+constexpr float varlen_bf16_rtol = 1e-2f;
+
+bool varlen_bf16_close_to_f32(const std::vector<bfloat16_t> &actual,
+        const std::vector<float> &expected, float abs_bound, float rtol,
+        std::string &mismatch) {
+    if (actual.size() != expected.size()) {
+        mismatch = "size " + std::to_string(actual.size()) + " vs "
+                + std::to_string(expected.size());
+        return false;
+    }
+    size_t worst = 0;
+    float worst_over = 0.f;
+    for (size_t i = 0; i < actual.size(); ++i) {
+        const float a = static_cast<float>(actual[i]);
+        const float e = expected[i];
+        if (!std::isfinite(a) || !std::isfinite(e)) {
+            mismatch = "element " + std::to_string(i) + ": actual="
+                    + std::to_string(a) + ", expected=" + std::to_string(e);
+            return false;
+        }
+        const float allow = abs_bound + rtol * std::fabs(e);
+        const float over = std::fabs(a - e) - allow;
+        if (over > worst_over) {
+            worst_over = over;
+            worst = i;
+        }
+    }
+    if (worst_over > 0.f) {
+        mismatch = "element " + std::to_string(worst) + ": actual="
+                + std::to_string(static_cast<float>(actual[worst]))
+                + ", expected=" + std::to_string(expected[worst]);
+        return false;
+    }
+    return true;
+}
+
+// Run the bf16 flash kernel and compare it to the f32 reference on the same
+// rounded inputs. The bf16 reference is not the oracle: the old bf16 bound
+// could not fail.
+void run_varlen_bf16_flash_vs_f32_reference(const varlen_setup &s) {
+    varlen_problem<bfloat16_t> prob(s);
+    std::vector<bfloat16_t> out;
+    ASSERT_EQ(prob.run(prob.make_params(sdpa_kernel_t::flash), out),
+            status_t::success);
+
+    std::vector<float> q, k, v, out_ref;
+    prob.copy_inputs_as_f32(q, k, v);
+    sdpa_params ref = prob.make_contiguous_f32_params();
+    out_ref.assign(q.size(), std::numeric_limits<float>::quiet_NaN());
+    ASSERT_EQ(sdpa_direct(q.data(), k.data(), v.data(), nullptr, out_ref.data(),
+                      ref),
+            status_t::success);
+    std::string mismatch;
+    EXPECT_TRUE(varlen_bf16_close_to_f32(
+            out, out_ref, varlen_bf16_abs, varlen_bf16_rtol, mismatch))
+            << mismatch;
+}
+
+// INT8 results are compared with the fixed band the dense INT8 tests use.
+void run_varlen_int8_vs_reference(
+        const varlen_setup &s, bool is_qk_quant, bool is_pv_quant) {
+    varlen_problem<bfloat16_t> prob(s);
+    sdpa_params p = prob.make_params(sdpa_kernel_t::flash);
+    p.is_qk_quant = is_qk_quant;
+    p.is_pv_quant = is_pv_quant;
+    std::vector<bfloat16_t> out, out_ref;
+    const status_t status = prob.run(p, out);
+    if (status == status_t::unimplemented
+            || status == status_t::isa_unsupported) {
+        GTEST_SKIP() << "Dynamic INT8 SDPA requires AOCL-DLP and AVX512-VNNI";
+    }
+    ASSERT_EQ(status, status_t::success);
+    ASSERT_EQ(prob.run(prob.make_params(sdpa_kernel_t::reference), out_ref),
+            status_t::success);
+    std::string mismatch;
+    EXPECT_TRUE(varlen_outputs_close(out, out_ref, 8e-2f, 5e-2f, mismatch))
+            << mismatch;
+}
+
+} // namespace
+
+// Ragged lengths with GQA: short sequences end partway through a query tile
+// and a 1-token sequence is a single partial tile.
+TEST(SdpaVarlenTest, F32_RAGGED_GQA) {
+    run_varlen_flash_vs_reference<float>(
+            {{200, 300, 1, 57}, {}, /*num_heads=*/4, /*kv_num_heads=*/2,
+                    /*head_dim=*/64},
+            rtol_f32, epsilon_f32);
+}
+
+// EmbeddingGemma's attention: 3 query heads sharing 1 K/V head, head_dim 256,
+// a 512 window, and Q/K/V read in place from one fused QKV projection output.
+TEST(SdpaVarlenTest, BF16_WINDOW_FUSED_QKV) {
+    run_varlen_bf16_flash_vs_f32_reference(
+            {{1024, 300, 50, 700}, {}, /*num_heads=*/3, /*kv_num_heads=*/1,
+                    /*head_dim=*/256, /*window=*/512, /*fused_qkv=*/true});
+}
+
+// More than four sequences selects 512-row query tiles; lengths straddle the
+// 512-key tile.
+TEST(SdpaVarlenTest, BF16_MANY_SEQUENCES) {
+    run_varlen_bf16_flash_vs_f32_reference({{600, 40, 513, 1, 129, 900, 64}, {},
+            /*num_heads=*/2, /*kv_num_heads=*/2, /*head_dim=*/32});
+}
+
+// Separate key offsets, an empty query sequence, and a sequence with no keys
+// (its output must be zero).
+TEST(SdpaVarlenTest, F32_CROSS_ATTENTION_EMPTY_SEQUENCES) {
+    run_varlen_flash_vs_reference<float>(
+            {{5, 0, 7}, {9, 4, 0}, /*num_heads=*/2, /*kv_num_heads=*/2,
+                    /*head_dim=*/16},
+            rtol_f32, epsilon_f32);
+}
+
+// A causal window can leave initial query rows with no visible key when the
+// query sequence is longer than its K/V sequence. The reference mask must
+// clamp its right edge before indexing the score row.
+TEST(SdpaVarlenTest, F32_CAUSAL_WINDOW_QUERY_LONGER_THAN_KEYS) {
+    varlen_setup s {{10}, {4}, /*num_heads=*/2, /*kv_num_heads=*/2,
+            /*head_dim=*/16, /*window=*/1};
+    s.is_causal = true;
+    run_varlen_flash_vs_reference<float>(s, rtol_f32, epsilon_f32);
+}
+
+// One long request among many empty and very short ones: the tile list holds
+// only real tiles, and empty requests must leave their (absent) rows alone.
+TEST(SdpaVarlenTest, F32_MANY_EMPTY_AND_SHORT_SEQUENCES) {
+    std::vector<int32_t> lens(40, 0);
+    lens[3] = 700;
+    lens[7] = 1;
+    lens[11] = 3;
+    lens[19] = 65;
+    lens[38] = 2;
+    for (bool causal : {false, true}) {
+        varlen_setup s {lens, {}, /*num_heads=*/2, /*kv_num_heads=*/1,
+                /*head_dim=*/32};
+        s.is_causal = causal;
+        run_varlen_flash_vs_reference<float>(s, rtol_f32, epsilon_f32);
+    }
+}
+
+// With equal lengths the packed path picks the dense path's tiles, so on the
+// same memory (dense reads it as a BHSD view of BSHD storage) the outputs
+// must match bit for bit.
+TEST(SdpaVarlenTest, BF16_EQUAL_LENGTHS_MATCH_DENSE) {
+    constexpr int32_t S = 256;
+    for (int64_t window : {int64_t(0), int64_t(129)}) {
+        varlen_problem<bfloat16_t> prob({{S, S, S}, {}, /*num_heads=*/4,
+                /*kv_num_heads=*/2, /*head_dim=*/64, window});
+        std::vector<bfloat16_t> packed_out, dense_out;
+        ASSERT_EQ(prob.run(prob.make_params(sdpa_kernel_t::flash), packed_out),
+                status_t::success);
+
+        sdpa_params dense = prob.make_params(sdpa_kernel_t::flash);
+        dense.cu_seqlens_q = nullptr;
+        dense.cu_seqlens_k = nullptr;
+        dense.q_stride_b = S * dense.q_stride_s;
+        dense.k_stride_b = S * dense.k_stride_s;
+        dense.v_stride_b = S * dense.v_stride_s;
+        dense.o_stride_b = S * dense.o_stride_s;
+        ASSERT_EQ(prob.run(dense, dense_out), status_t::success);
+
+        EXPECT_EQ(0,
+                std::memcmp(packed_out.data(), dense_out.data(),
+                        packed_out.size() * sizeof(bfloat16_t)))
+                << "window=" << window;
+    }
+}
+
+TEST(SdpaVarlenTest, REJECTS_UNSUPPORTED_AND_MALFORMED_INPUTS) {
+    varlen_problem<float> prob(
+            {{8, 5}, {}, /*num_heads=*/2, /*kv_num_heads=*/2, /*head_dim=*/16});
+    std::vector<float> out;
+
+    sdpa_params masked = prob.make_params(sdpa_kernel_t::flash);
+    masked.mask_ndims = 2;
+    EXPECT_EQ(prob.run(masked, out), status_t::unimplemented);
+
+    sdpa_params tight = prob.make_params(sdpa_kernel_t::flash);
+    tight.seq_len = 7;
+    EXPECT_EQ(prob.run(tight, out), status_t::failure);
+
+    // With shared Q/K offsets, a nonzero kv_seq_len must still bound the
+    // effective key lengths.
+    sdpa_params tight_shared_kv = prob.make_params(sdpa_kernel_t::flash);
+    tight_shared_kv.kv_seq_len = 7;
+    EXPECT_EQ(prob.run(tight_shared_kv, out), status_t::failure);
+
+    const std::vector<int32_t> decreasing = {0, 8, 6};
+    sdpa_params bad_order = prob.make_params(sdpa_kernel_t::flash);
+    bad_order.cu_seqlens_q = decreasing.data();
+    EXPECT_EQ(prob.run(bad_order, out), status_t::failure);
+
+    const std::vector<int32_t> shifted = {1, 9, 14};
+    sdpa_params bad_start = prob.make_params(sdpa_kernel_t::flash);
+    bad_start.cu_seqlens_q = shifted.data();
+    EXPECT_EQ(prob.run(bad_start, out), status_t::failure);
+}
+
+// seq_len / kv_seq_len are upper bounds: a loose bound changes nothing.
+TEST(SdpaVarlenTest, F32_LOOSE_LENGTH_BOUND) {
+    varlen_problem<float> prob({{300, 40, 129}, {}, /*num_heads=*/2,
+            /*kv_num_heads=*/1, /*head_dim=*/32});
+    std::vector<float> out, out_loose;
+    ASSERT_EQ(prob.run(prob.make_params(sdpa_kernel_t::flash), out),
+            status_t::success);
+    sdpa_params loose = prob.make_params(sdpa_kernel_t::flash);
+    loose.seq_len = 4096;
+    loose.kv_seq_len = 4096;
+    ASSERT_EQ(prob.run(loose, out_loose), status_t::success);
+    EXPECT_EQ(0,
+            std::memcmp(
+                    out.data(), out_loose.data(), out.size() * sizeof(float)));
+}
+
+TEST(SdpaVarlenTest, BF16_INT8_RAGGED_GQA) {
+    run_varlen_int8_vs_reference({{300, 77, 513, 1}, {}, /*num_heads=*/2,
+                                         /*kv_num_heads=*/1, /*head_dim=*/32},
+            /*is_qk_quant=*/true, /*is_pv_quant=*/true);
+}
+
+TEST(SdpaVarlenTest, BF16_INT8_QK_ONLY_WINDOW) {
+    run_varlen_int8_vs_reference(
+            {{1100, 200}, {}, /*num_heads=*/2, /*kv_num_heads=*/2,
+                    /*head_dim=*/32, /*window=*/257},
+            /*is_qk_quant=*/true, /*is_pv_quant=*/false);
+}
+
+TEST(SdpaVarlenTest, BF16_INT8_PV_ONLY_WINDOW) {
+    run_varlen_int8_vs_reference(
+            {{1100, 200}, {}, /*num_heads=*/2, /*kv_num_heads=*/2,
+                    /*head_dim=*/32, /*window=*/257},
+            /*is_qk_quant=*/false, /*is_pv_quant=*/true);
+}
+
+// Causal prefill over ragged requests; tiles cross the 512-key tile.
+TEST(SdpaVarlenTest, F32_CAUSAL_RAGGED_GQA) {
+    run_varlen_flash_vs_reference<float>(
+            {{200, 300, 1, 57, 600}, {}, /*num_heads=*/4, /*kv_num_heads=*/2,
+                    /*head_dim=*/64, /*window=*/0, /*fused_qkv=*/false,
+                    /*is_causal=*/true},
+            rtol_f32, epsilon_f32);
+}
+
+// Causal plus window (Gemma / Mistral style prefill) from a fused QKV buffer.
+TEST(SdpaVarlenTest, BF16_CAUSAL_WINDOW_FUSED_QKV) {
+    run_varlen_bf16_flash_vs_f32_reference(
+            {{700, 128, 1030}, {}, /*num_heads=*/4, /*kv_num_heads=*/2,
+                    /*head_dim=*/64, /*window=*/257, /*fused_qkv=*/true,
+                    /*is_causal=*/true});
+}
+
+// Prefill chunks after a cached prefix: each request's keys are longer than
+// its queries, so queries sit at the end of the keys and see the whole
+// prefix. The last request has more queries than keys, so its first rows see
+// nothing and must be zero.
+TEST(SdpaVarlenTest, F32_CAUSAL_CACHED_PREFIX) {
+    run_varlen_flash_vs_reference<float>(
+            {{64, 100, 10}, {600, 100, 4}, /*num_heads=*/2,
+                    /*kv_num_heads=*/1, /*head_dim=*/32, /*window=*/0,
+                    /*fused_qkv=*/false, /*is_causal=*/true},
+            rtol_f32, epsilon_f32);
+}
+
+// The window is aligned the same way: a chunk after a long prefix sees only
+// the last W - 1 prefix keys.
+TEST(SdpaVarlenTest, BF16_CAUSAL_WINDOW_CACHED_PREFIX) {
+    run_varlen_bf16_flash_vs_f32_reference(
+            {{64, 37}, {700, 37}, /*num_heads=*/2, /*kv_num_heads=*/2,
+                    /*head_dim=*/32, /*window=*/129, /*fused_qkv=*/false,
+                    /*is_causal=*/true});
+}
+
+// With equal lengths the end-aligned causal band is the dense j <= i band.
+// The packed path trims GEMMs to the band, so compare within tolerance.
+TEST(SdpaVarlenTest, BF16_CAUSAL_EQUAL_LENGTHS_MATCH_DENSE) {
+    constexpr int32_t S = 384;
+    varlen_problem<bfloat16_t> prob({{S, S}, {}, /*num_heads=*/4,
+            /*kv_num_heads=*/2, /*head_dim=*/64, /*window=*/0,
+            /*fused_qkv=*/false, /*is_causal=*/true});
+    std::vector<bfloat16_t> packed_out, dense_out;
+    ASSERT_EQ(prob.run(prob.make_params(sdpa_kernel_t::flash), packed_out),
+            status_t::success);
+
+    sdpa_params dense = prob.make_params(sdpa_kernel_t::flash);
+    dense.cu_seqlens_q = nullptr;
+    dense.cu_seqlens_k = nullptr;
+    dense.q_stride_b = S * dense.q_stride_s;
+    dense.k_stride_b = S * dense.k_stride_s;
+    dense.v_stride_b = S * dense.v_stride_s;
+    dense.o_stride_b = S * dense.o_stride_s;
+    ASSERT_EQ(prob.run(dense, dense_out), status_t::success);
+
+    std::string mismatch;
+    EXPECT_TRUE(varlen_outputs_close(
+            packed_out, dense_out, varlen_bf16_abs, varlen_bf16_rtol, mismatch))
+            << mismatch;
+}
+
+// A prefill chunk after a cached prefix must reproduce the last rows of a
+// causal prefill over the whole sequence; this checks the end alignment
+// independently of the reference kernel.
+TEST(SdpaVarlenTest, F32_CHUNKED_PREFILL_MATCHES_FULL_PREFILL) {
+    constexpr int64_t H = 2, HKV = 1, D = 32;
+    constexpr int32_t total = 300, chunk = 64;
+    std::mt19937 gen(99);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+    std::vector<float> q(total * H * D), k(total * HKV * D), v(total * HKV * D);
+    for (auto *buf : {&q, &k, &v}) {
+        for (auto &x : *buf) {
+            x = dist(gen);
+        }
+    }
+
+    for (int64_t window : {int64_t(0), int64_t(129)}) {
+        auto run = [&](const float *q_rows, int32_t q_len,
+                           std::vector<float> &out) {
+            const std::vector<int32_t> cu_q = {0, q_len};
+            const std::vector<int32_t> cu_k = {0, total};
+            sdpa_params p;
+            p.batch = 1;
+            p.num_heads = H;
+            p.kv_num_heads = HKV;
+            p.seq_len = q_len;
+            p.kv_seq_len = total;
+            p.head_dim = D;
+            p.q_stride_s = H * D;
+            p.q_stride_h = D;
+            p.k_stride_s = p.v_stride_s = HKV * D;
+            p.k_stride_h = p.v_stride_h = D;
+            p.o_stride_s = H * D;
+            p.o_stride_h = D;
+            p.qkv_dt = p.out_dt = data_type_t::f32;
+            p.is_causal = true;
+            p.sliding_window = window > 0;
+            p.sliding_window_size = window;
+            p.cu_seqlens_q = cu_q.data();
+            p.cu_seqlens_k = cu_k.data();
+            p.kernel = sdpa_kernel_t::flash;
+            out.assign(static_cast<size_t>(q_len * H * D),
+                    std::numeric_limits<float>::quiet_NaN());
+            return sdpa_direct(
+                    q_rows, k.data(), v.data(), nullptr, out.data(), p);
+        };
+
+        std::vector<float> full, part;
+        ASSERT_EQ(run(q.data(), total, full), status_t::success);
+        ASSERT_EQ(run(q.data() + (total - chunk) * H * D, chunk, part),
+                status_t::success);
+        const std::vector<float> full_tail(
+                full.end() - chunk * H * D, full.end());
+        std::string mismatch;
+        EXPECT_TRUE(varlen_outputs_close(part, full_tail,
+                sdpa_abs_bound(D, total, epsilon_f32), rtol_f32, mismatch))
+                << "window=" << window << ": " << mismatch;
+    }
+}
+
+TEST(SdpaVarlenTest, BF16_INT8_CAUSAL_CACHED_PREFIX) {
+    run_varlen_int8_vs_reference(
+            {{300, 64, 513}, {300, 500, 513}, /*num_heads=*/2,
+                    /*kv_num_heads=*/1, /*head_dim=*/32, /*window=*/0,
+                    /*fused_qkv=*/false, /*is_causal=*/true},
+            /*is_qk_quant=*/true, /*is_pv_quant=*/true);
+}

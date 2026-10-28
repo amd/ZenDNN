@@ -91,6 +91,10 @@ struct sdpa_params {
   bool is_pv_quant;        // BF16 V / u8 probability INT8 P×V compute (default false)
 
   int32_t num_threads;     // Number of OpenMP threads (0 = auto)
+
+  // Packed variable-length mode (see "Packed variable-length batches")
+  const int32_t *cu_seqlens_q;  // batch + 1 query offsets; nullptr = dense mode
+  const int32_t *cu_seqlens_k;  // batch + 1 key offsets; nullptr = same as cu_seqlens_q
 };
 ```
 
@@ -116,6 +120,8 @@ struct sdpa_params {
 | `is_qk_quant` | `bool` | Quantize BF16 Q/K per token and run Q×K^T in INT8; requires AOCL-DLP and AVX512-VNNI |
 | `is_pv_quant` | `bool` | Quantize BF16 V per channel and the softmax tile to u8, and run probability×V in INT8; requires AOCL-DLP and AVX512-VNNI |
 | `num_threads` | `int32_t` | OpenMP thread count; `0` = auto |
+| `cu_seqlens_q` | `const int32_t *` | Query offsets for packed variable-length batches; `nullptr` (default) = dense BHSD mode |
+| `cu_seqlens_k` | `const int32_t *` | Key/value offsets for packed batches; `nullptr` = same as `cu_seqlens_q` (self-attention) |
 
 #### `seq_len` vs `kv_seq_len`
 
@@ -238,11 +244,43 @@ The band is applied inside the kernel, so no `[S_q, S_kv]` mask tensor has to be
 
 `sliding_window = true` with `sliding_window_size <= 0` is rejected with `status_t::failure`. The BMM backend does not support sliding window.
 
+#### Packed variable-length batches
+
+Setting `cu_seqlens_q` switches `sdpa_direct` to packed mode. Sequences of different lengths are stored back to back instead of being padded to a common length:
+
+| Tensor | Packed shape |
+|--------|--------------|
+| Q, output | `[total_q, num_heads, head_dim]` |
+| K, V | `[total_kv, kv_num_heads, head_dim]` |
+
+Sequence `b` owns query/output rows `[cu_seqlens_q[b], cu_seqlens_q[b + 1])` and key/value rows `[cu_seqlens_k[b], cu_seqlens_k[b + 1])`, and attends only to its own keys. These offsets are the same prefix sums that vLLM passes as `query_start_loc` and vision encoders pass as `cu_seqlens`, so a caller can hand them over unchanged.
+
+In packed mode the existing fields mean:
+
+| Field | Meaning in packed mode |
+|-------|------------------------|
+| `batch` | Number of sequences; each offset array holds `batch + 1` entries |
+| `seq_len` | Upper bound on any sequence's query length (`max_seqlen_q`) |
+| `kv_seq_len` | Upper bound on any sequence's key length (`max_seqlen_k`); `0` = same as `seq_len` |
+| `q/k/v/o_stride_s` | Token stride (row-to-row distance in the packed buffer) |
+| `q/k/v/o_stride_h` | Head stride |
+| `q/k/v/o_stride_d` | Same requirements as dense mode |
+| `q/k/v/o_stride_b` | Ignored |
+
+Because only token and head strides are used, Q, K and V can be strided views of one fused QKV projection output. Tile sizes and scratch follow the longest sequence actually present in the offsets, so a loose `seq_len` bound costs nothing.
+
+Packed mode supports `f32`, `bf16` and `f16`, GQA/MQA, `is_causal`, sliding window and the dynamic-INT8 modes (V per-channel scales are computed over each sequence's own rows). It does not support `attn_mask`, and runs on the flash and reference backends only.
+
+For the causal and window bands, each sequence's queries are aligned to the **end** of its keys: query row `r` sits at key position `r + (kv_len − q_len)`. With equal lengths that is the usual `j <= i`; for an LLM prefill chunk that follows a cached prefix (`kv_len > q_len`), every query sees the whole prefix plus the chunk up to itself. This matches FlashAttention's variable-length API and vLLM's CPU attention. Rows that end up with no visible key (a chunk longer than its keys) produce zeros. Every query tile is processed with one tile size, chosen from the longest sequence and the sequence count. More than four sequences and no window uses 512 rows; any sequence of 192 or more otherwise uses 64, including lengths where the dense kernel uses 256. A shorter sequence gets fewer tiles and a partial last one, and a sequence with no keys produces zeros.
+
+Validation (enabled unless `ZENDNNL_DIAGNOSTICS_ENABLE=0`) checks that each offset array starts at `0`, never decreases, and keeps every sequence within `seq_len` / `kv_seq_len`.
+
 ### Return value
 
 - `status_t::success` — attention computed and written to `output`
 - `status_t::failure` — validation or kernel failure (null pointers, invalid dims/strides, unsupported dtype combination, non-zero dropout, non-contiguous mask last dim)
 - `status_t::isa_unsupported` — FP16 request on a host without **AVX512-FP16** (see [ISA requirement for FP16](#isa-requirement-for-fp16))
+- `status_t::unimplemented` — packed variable-length request with `attn_mask`, or on the BMM backend
 
 ## Execution Flow
 
@@ -306,6 +344,8 @@ cpu_flash_attention_sa / INT8 kernel
   │    if no live KV tile: write zeros
   │    else: output = accumulator / sum          (SIMD scaled store)
 ```
+
+Packed variable-length calls (`cu_seqlens_q` set) take a separate path with the same per-tile steps: `flash_sdpa_varlen()` validates the offsets and finds the longest query and key lengths, then `sdpa_flash_cpu_varlen_run_internal()` (or its dynamic-INT8 counterpart) builds a list of the query tiles that exist — each sequence's full tiles plus its partial last tile — and loops over `tiles × heads`. No iteration is empty however uneven the lengths are, and tiles never span two sequences.
 
 ## Flash Attention Algorithm
 
@@ -717,6 +757,54 @@ int lowoha_sdpa_cross_attention_example() {
     output.data(),
     params
   );
+
+  return (status == status_t::success) ? 0 : -1;
+}
+```
+
+### Example 7: Packed Variable-Length Batch
+
+Three sequences of 200, 300 and 50 tokens with GQA (3 query heads sharing 1 K/V head) and a 512 window, read in place from one fused QKV projection output `[total, H + 2 * H_kv, D]`.
+
+```cpp
+int lowoha_sdpa_varlen_example() {
+  using namespace zendnnl::lowoha::sdpa;
+  using zendnnl::common::bfloat16_t;
+
+  const int64_t H = 3, H_kv = 1, D = 256;
+  const std::vector<int32_t> cu_seqlens = {0, 200, 500, 550};  // query_start_loc
+  const int64_t total = cu_seqlens.back();
+  const int64_t row = (H + 2 * H_kv) * D;  // fused QKV token stride
+
+  std::vector<bfloat16_t> qkv(total * row, bfloat16_t(0.1f));
+  std::vector<bfloat16_t> output(total * H * D);
+
+  sdpa_params params;
+  params.batch        = 3;     // number of sequences
+  params.num_heads    = H;
+  params.kv_num_heads = H_kv;
+  params.seq_len      = 300;   // longest sequence (an upper bound is fine)
+  params.head_dim     = D;
+
+  // Token and head strides; stride_b is unused in packed mode.
+  params.q_stride_s = row;     params.q_stride_h = D;   params.q_stride_d = 1;
+  params.k_stride_s = row;     params.k_stride_h = D;   params.k_stride_d = 1;
+  params.v_stride_s = row;     params.v_stride_h = D;   params.v_stride_d = 1;
+  params.o_stride_s = H * D;   params.o_stride_h = D;   params.o_stride_d = 1;
+
+  params.qkv_dt = data_type_t::bf16;
+  params.out_dt = data_type_t::bf16;
+  params.scale  = 1.0 / std::sqrt(static_cast<double>(D));
+  params.sliding_window      = true;
+  params.sliding_window_size = 512;
+
+  params.cu_seqlens_q = cu_seqlens.data();  // cu_seqlens_k = nullptr: same offsets
+
+  const bfloat16_t *q = qkv.data();
+  const bfloat16_t *k = q + H * D;
+  const bfloat16_t *v = q + (H + H_kv) * D;
+  status_t status = sdpa_direct(q, k, v, /*attn_mask=*/nullptr,
+                                output.data(), params);
 
   return (status == status_t::success) ? 0 : -1;
 }

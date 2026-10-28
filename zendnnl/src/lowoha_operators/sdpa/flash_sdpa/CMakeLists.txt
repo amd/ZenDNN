@@ -61,3 +61,5 @@ list(APPEND lowoha_flash_sdpa_public_headers_list
 create_header_file(${zendnnl_inc_file}
                    ${inc_subdir}
                    "${lowoha_flash_sdpa_public_headers_list}")
+
+add_subdirectory(varlen)

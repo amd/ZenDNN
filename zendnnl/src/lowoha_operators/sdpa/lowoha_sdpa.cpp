@@ -109,9 +109,20 @@ status_t sdpa_direct(const void *query, const void *key, const void *value,
         return status_t::unimplemented;
     }
 
+    const bool is_varlen = params.cu_seqlens_q != nullptr;
+    if (is_varlen && kernel == sdpa_kernel_t::bmm) {
+        log_error(
+                "sdpa_direct: packed variable-length mode is supported only "
+                "by the flash and reference backends");
+        return status_t::unimplemented;
+    }
+
     switch (kernel) {
         case sdpa_kernel_t::flash:
-            st = flash_sdpa(query, key, value, attn_mask, output, params);
+            st = is_varlen
+                    ? flash_sdpa_varlen(
+                              query, key, value, attn_mask, output, params)
+                    : flash_sdpa(query, key, value, attn_mask, output, params);
             break;
         case sdpa_kernel_t::bmm:
             // Enable this when we have complete support for bmm-based SDPA implementation.
@@ -121,7 +132,10 @@ status_t sdpa_direct(const void *query, const void *key, const void *value,
                     "supported yet");
             return status_t::failure;
         case sdpa_kernel_t::reference:
-            st = reference_sdpa(query, key, value, attn_mask, output, params);
+            st = is_varlen ? reference_sdpa_varlen(query, key, value, attn_mask,
+                                     output, params)
+                           : reference_sdpa(query, key, value, attn_mask,
+                                     output, params);
             break;
         default:
             log_error("sdpa_direct: unsupported kernel ",
@@ -141,6 +155,7 @@ status_t sdpa_direct(const void *query, const void *key, const void *value,
                 ? params.kv_num_heads
                 : params.num_heads;
         ss << "LOWOHA sdpa_direct: batch=" << params.batch
+           << ", varlen=" << (is_varlen ? "true" : "false")
            << ", num_heads=" << params.num_heads
            << ", kv_num_heads=" << params.kv_num_heads
            << ", eff_kv_num_heads=" << eff_kv_heads

@@ -69,49 +69,6 @@ namespace {
 #pragma GCC optimize("no-tree-vectorize")
 #endif
 
-template <typename SimdTag>
-inline void exp_reduce_sum_fusion_to_u8(
-        const accum_t *a, int size, uint8_t *out, accum_t &val) {
-    using Ops = simd::SimdOps<SimdTag>;
-    using VecF32 = typename Ops::VecF32;
-    const int L = Ops::kFloatLanes;
-    const VecF32 vmb = Ops::vec_set1(val);
-    const VecF32 vu8_scale = Ops::vec_set1(255.0f);
-    VecF32 vsum = Ops::vec_set1(0.0f);
-    int i = 0;
-    for (; i + L <= size; i += L) {
-        const VecF32 x = Ops::vec_loadu(a + i);
-        const VecF32 e = Ops::vec_exp_u20(Ops::vec_sub(x, vmb));
-        vsum = Ops::vec_add(vsum, e);
-        Ops::vec_u8_storeu(out + i, Ops::vec_mul(e, vu8_scale));
-    }
-    accum_t tmp_sum = Ops::vec_reduce_sum(vsum);
-    for (; i < size; ++i) {
-        const accum_t e = std::exp(a[i] - val);
-        const accum_t quantized = std::nearbyint(
-                std::max(accum_t(0), std::min(e * 255.0f, accum_t(255))));
-        out[i] = static_cast<uint8_t>(quantized);
-        tmp_sum += e;
-    }
-    val = tmp_sum;
-}
-
-template <typename SimdTag>
-inline void add_f32_inplace(float *dst, const float *src, int64_t size) {
-    using Ops = simd::SimdOps<SimdTag>;
-    using VecF32 = typename Ops::VecF32;
-    const int L = Ops::kFloatLanes;
-    int64_t i = 0;
-    for (; i + L <= size; i += L) {
-        const VecF32 vd = Ops::vec_loadu(dst + i);
-        const VecF32 vs = Ops::vec_loadu(src + i);
-        Ops::vec_storeu(dst + i, Ops::vec_add(vd, vs));
-    }
-    for (; i < size; ++i) {
-        dst[i] += src[i];
-    }
-}
-
 // QkInt8 selects an INT8 QK matmul over per-token quantized Q/K; when false
 // QK stays on the BF16 GEMM and the attention factor rides in its alpha.
 // PvInt8 selects a U8 x S8 PV matmul over the per-channel quantized V.

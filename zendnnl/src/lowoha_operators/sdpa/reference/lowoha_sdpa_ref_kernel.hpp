@@ -34,6 +34,14 @@ namespace sdpa {
 status_t reference_sdpa(const void *query, const void *key, const void *value,
         const void *attn_mask, void *output, const sdpa_params &params);
 
+/**
+ * @brief Reference SDPA over a packed variable-length batch
+ *        (@c params.cu_seqlens_q set); ground truth for flash_sdpa_varlen.
+ */
+status_t reference_sdpa_varlen(const void *query, const void *key,
+        const void *value, const void *attn_mask, void *output,
+        const sdpa_params &params);
+
 } // namespace sdpa
 } // namespace lowoha
 } // namespace zendnnl

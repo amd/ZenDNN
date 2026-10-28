@@ -16,7 +16,8 @@ namespace zendnnl {
 namespace lowoha {
 namespace sdpa {
 
-/// Layout [Batch, Head, Seq, Dim] (PyTorch-style BHSD).
+/// Layout [Batch, Head, Seq, Dim] (PyTorch-style BHSD), or a packed
+/// variable-length tensor (see sdpa_flash_cpu_varlen_run_internal).
 /// Q/output use query heads; K/V may use fewer heads for GQA/MQA.
 struct sdpa_flash_cpu_tensor_view {
     const void *data;
@@ -55,6 +56,23 @@ status_t sdpa_flash_cpu_run_internal(const sdpa_flash_cpu_tensor_view &output,
         const sdpa_flash_cpu_mask_view *mask, const double *scale_opt,
         data_type_t qkv_dt, data_type_t mask_dtype, bool is_qk_quant,
         bool is_pv_quant, int num_threads = 0);
+
+/// Packed variable-length flash attention. Each view describes a packed
+/// [total_tokens, heads, head_dim] tensor: size_b is the number of sequences,
+/// size_s the longest sequence, stride_s / stride_h the token and head
+/// strides; stride_b is unused. Sequence b spans rows
+/// [cu_seqlens_q[b], cu_seqlens_q[b + 1]) of query / output and
+/// [cu_seqlens_k[b], cu_seqlens_k[b + 1]) of key / value. Queries are aligned
+/// to the end of their keys for the causal and window bands.
+status_t sdpa_flash_cpu_varlen_run_internal(
+        const sdpa_flash_cpu_tensor_view &output,
+        const sdpa_flash_cpu_tensor_view &query,
+        const sdpa_flash_cpu_tensor_view &key,
+        const sdpa_flash_cpu_tensor_view &value, const int32_t *cu_seqlens_q,
+        const int32_t *cu_seqlens_k, bool is_causal, bool sliding_window,
+        int64_t sliding_window_size, const double *scale_opt,
+        data_type_t qkv_dt, bool is_qk_quant, bool is_pv_quant,
+        int num_threads = 0);
 
 } // namespace sdpa
 } // namespace lowoha
