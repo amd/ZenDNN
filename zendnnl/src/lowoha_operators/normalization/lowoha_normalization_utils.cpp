@@ -166,6 +166,43 @@ status_t validate_normalization_inputs(const void *input, const void *output,
     return status_t::success;
 }
 
+status_t validate_gated_norm_params(const norm_params &params) {
+    const gated_norm_params &gp = params.gated;
+    const bool gated = params.norm_type == norm_type_t::FUSED_GATED_LAYER_NORM;
+    if (!gated) {
+        if (params.src_stride || params.dst_stride || gp.gate || gp.gate_stride
+                || gp.gate_out || gp.gate_out_stride || gp.src_out
+                || gp.src_out_stride || gp.gate_silu) {
+            log_error(
+                    "Normalization: row strides and norm_params::gated are "
+                    "only supported by FUSED_GATED_LAYER_NORM");
+            return status_t::failure;
+        }
+        return status_t::success;
+    }
+    if (!gp.gate) {
+        log_error(
+                "Normalization: FUSED_GATED_LAYER_NORM requires a non-null "
+                "gate");
+        return status_t::failure;
+    }
+    if (gp.gate_dt != data_type_t::f32 && gp.gate_dt != data_type_t::bf16
+            && gp.gate_dt != data_type_t::f16) {
+        log_error("Normalization: Unsupported gate data type (",
+                static_cast<int>(gp.gate_dt), "). Supported: f32, bf16, f16");
+        return status_t::failure;
+    }
+    for (uint64_t s : {params.src_stride, params.dst_stride, gp.gate_stride,
+                 gp.gate_out_stride, gp.src_out_stride}) {
+        if (s != 0 && s < params.norm_size) {
+            log_error("Normalization: row stride ", s,
+                    " is smaller than norm_size ", params.norm_size);
+            return status_t::failure;
+        }
+    }
+    return status_t::success;
+}
+
 std::string norm_type_to_str(norm_type_t type) {
     switch (type) {
         case norm_type_t::LAYER_NORM: return "LayerNorm";
@@ -173,6 +210,7 @@ std::string norm_type_to_str(norm_type_t type) {
         case norm_type_t::RMS_NORM: return "RMSNorm";
         case norm_type_t::FUSED_ADD_RMS_NORM: return "FusedAddRMSNorm";
         case norm_type_t::FUSED_LAYER_NORM_ADD: return "FusedLayerNormAdd";
+        case norm_type_t::FUSED_GATED_LAYER_NORM: return "FusedGatedLayerNorm";
         default: return "Unknown";
     }
 }

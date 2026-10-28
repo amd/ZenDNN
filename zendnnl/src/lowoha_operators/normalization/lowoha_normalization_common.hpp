@@ -72,6 +72,14 @@ inline bool can_use_f16_fma_kernel() {
  *                output, right before the result is stored. residual has the
  *                same shape as the output and element type dst_dt.
  *                Formula: y = gamma * (x - mean) / sqrt(var + eps) + beta + residual
+ *
+ * - FUSED_GATED_LAYER_NORM: LayerNorm gated by a second tensor (the norm-mul
+ *                of HSTU / DLRM v3). The gate and the optional copies of act(gate)
+ *                and x are described by norm_params::gated; rows of every buffer
+ *                may be strided, so y and the copies can be slices of one
+ *                concatenated output (e.g. [act(gate), x, y]).
+ *                Formula: y = act(gate) * (gamma * (x - mean) / sqrt(var + eps) + beta)
+ *                with act = silu or identity.
  */
 enum class norm_type_t : int {
     NONE = -1, ///< No normalization type selected
@@ -79,7 +87,25 @@ enum class norm_type_t : int {
     BATCH_NORM = 1, ///< Batch Normalization
     RMS_NORM = 2, ///< Root Mean Square Normalization
     FUSED_ADD_RMS_NORM = 3, ///< Fused Add and RMS Normalization
-    FUSED_LAYER_NORM_ADD = 4 ///< Layer Normalization followed by residual add
+    FUSED_LAYER_NORM_ADD = 4, ///< Layer Normalization followed by residual add
+    FUSED_GATED_LAYER_NORM = 5 ///< Layer Normalization multiplied by act(gate)
+};
+
+/**
+ * @brief Gate and optional outputs of FUSED_GATED_LAYER_NORM.
+ *
+ * Row strides are in elements; 0 means norm_size (contiguous rows). gate_out
+ * and src_out have element type dst_dt; nullptr skips them.
+ */
+struct gated_norm_params {
+    const void *gate = nullptr; ///< [batch, norm_size] gate rows
+    data_type_t gate_dt = data_type_t::none; ///< f32, bf16 or f16
+    uint64_t gate_stride = 0; ///< Row stride of gate
+    bool gate_silu = false; ///< act = silu (true) or identity (false)
+    void *gate_out = nullptr; ///< Optional copy of act(gate)
+    uint64_t gate_out_stride = 0; ///< Row stride of gate_out
+    void *src_out = nullptr; ///< Optional copy of x
+    uint64_t src_out_stride = 0; ///< Row stride of src_out
 };
 
 /**
@@ -133,6 +159,13 @@ struct norm_params {
     norm_algo_t algorithm; ///< Selected algorithm / backend
 
     int32_t num_threads; ///< Number of threads (0 = auto)
+
+    // --- Row strides (FUSED_GATED_LAYER_NORM only; elements, 0 = norm_size) ---
+    uint64_t src_stride = 0; ///< Row stride of the input
+    uint64_t dst_stride = 0; ///< Row stride of the output
+
+    // --- Gated LayerNorm (FUSED_GATED_LAYER_NORM only) ---
+    gated_norm_params gated;
 
     // Communicates the FMA precision the production kernel used to the reference
     // kernel, so gtest comparisons can bit-match. Set by the dispatch in

@@ -19,6 +19,7 @@
 #include <cmath>
 #include <omp.h>
 #include "avx512_utils.hpp"
+#include "lowoha_operators/matmul/group_matmul/common/group_matmul_act_avx512.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -36,44 +37,15 @@ using avx512::store16_mask;
 using zendnnl::common::data_type_t;
 
 // =============================================================================
-// Layer Norm — single row, processes one [1, norm_size] slice.
-//
-//   mean    = (1/N) * Σ x[i]
-//   var     = (1/N) * Σ x[i]² - mean²          (clamped to ≥ 0)
-//   inv_std = 1 / sqrt(var + eps)
-//   y[i]   = gamma[i] * (x[i] - mean) * inv_std + beta[i]
-//
-// Two passes over the row:
-//
-// Pass 1 — simultaneous sum and sum-of-squares (4×16 = 64 elements/iter):
-//   Register map (12 of 32 ZMM used at peak):
-//     zmm0  - zmm3  : 4 sum accumulators (sum0–sum3)
-//     zmm4  - zmm7  : 4 sum_sq accumulators (sq0–sq3)
-//     zmm8  - zmm11 : 4 data loads (s0–s3, 16 FP32 lanes each)
-//
-//   FP32 path: 4 vmovups(src) + 4 vaddps(sum) + 4 vfmadd231ps(sq) = 12 instr.
-//   FMA-bound (Zen4, 2 FMA ports): 4 fmadd / 2 = 2 cycles/iter (best case).
-//   Cleanup: 1×16 loop + masked tail.
-//
-// Pass 2 — normalize + optional gamma/beta (4×16 = 64 elements/iter):
-//   With scale+shift:  4 load(γ) + 4 vmulps(γ×inv_std) + 4 load(src) +
-//                       4 vsubps(mean) + 4 load(β) + 4 vfmadd(d*g+β) +
-//                       4 store = 28 instructions.
-//   Pre-multiplying gamma[i] * inv_std saves a vmulps per element.
-//   Load-bound: input re-read hits L1 (warm from pass 1).
+// Pass 1 shared by every LayerNorm row kernel: mean and 1 / sqrt(var + eps) of
+// one row, from a simultaneous sum and sum of squares (4x16 = 64 elements per
+// iteration; see layer_norm_row_avx512 for the register map).
 // =============================================================================
 
-static inline void layer_norm_row_avx512(const void *__restrict in_row,
-        void *__restrict out_row, const void *__restrict gamma,
-        const void *__restrict beta, uint64_t norm_size, float inv_n,
-        float epsilon, bool use_scale, bool use_shift, data_type_t src_dt,
-        data_type_t dst_dt, data_type_t gamma_dt, data_type_t beta_dt) {
+static inline void row_mean_inv_std(const void *__restrict in_row,
+        uint64_t norm_size, float inv_n, float epsilon, data_type_t src_dt,
+        float &mean, float &inv_std) {
     const size_t src_sz = elem_size(src_dt);
-    const size_t dst_sz = elem_size(dst_dt);
-    const size_t g_sz = elem_size(gamma_dt);
-    const size_t b_sz = elem_size(beta_dt);
-
-    // ---- Pass 1: simultaneous sum and sum-of-squares ----
     __m512 sum0 = _mm512_setzero_ps(), sum1 = _mm512_setzero_ps();
     __m512 sum2 = _mm512_setzero_ps(), sum3 = _mm512_setzero_ps();
     __m512 sq0 = _mm512_setzero_ps(), sq1 = _mm512_setzero_ps();
@@ -113,22 +85,65 @@ static inline void layer_norm_row_avx512(const void *__restrict in_row,
         sq0 = _mm512_fmadd_ps(s0, s0, sq0);
     }
 
-    // Horizontal reduce
     sum0 = _mm512_add_ps(_mm512_add_ps(sum0, sum1), _mm512_add_ps(sum2, sum3));
     sq0 = _mm512_add_ps(_mm512_add_ps(sq0, sq1), _mm512_add_ps(sq2, sq3));
 
-    float total_sum = _mm512_reduce_add_ps(sum0);
-    float total_sq = _mm512_reduce_add_ps(sq0);
+    const float total_sum = _mm512_reduce_add_ps(sum0);
+    const float total_sq = _mm512_reduce_add_ps(sq0);
 
-    float mean = total_sum * inv_n;
-    float var = std::max(0.0f, total_sq * inv_n - mean * mean);
-    float inv_std = 1.0f / std::sqrt(var + epsilon);
+    mean = total_sum * inv_n;
+    const float var = std::max(0.0f, total_sq * inv_n - mean * mean);
+    inv_std = 1.0f / std::sqrt(var + epsilon);
+}
+
+// =============================================================================
+// Layer Norm — single row, processes one [1, norm_size] slice.
+//
+//   mean    = (1/N) * Σ x[i]
+//   var     = (1/N) * Σ x[i]² - mean²          (clamped to ≥ 0)
+//   inv_std = 1 / sqrt(var + eps)
+//   y[i]   = gamma[i] * (x[i] - mean) * inv_std + beta[i]
+//
+// Two passes over the row:
+//
+// Pass 1 — simultaneous sum and sum-of-squares (4×16 = 64 elements/iter):
+//   Register map (12 of 32 ZMM used at peak):
+//     zmm0  - zmm3  : 4 sum accumulators (sum0–sum3)
+//     zmm4  - zmm7  : 4 sum_sq accumulators (sq0–sq3)
+//     zmm8  - zmm11 : 4 data loads (s0–s3, 16 FP32 lanes each)
+//
+//   FP32 path: 4 vmovups(src) + 4 vaddps(sum) + 4 vfmadd231ps(sq) = 12 instr.
+//   FMA-bound (Zen4, 2 FMA ports): 4 fmadd / 2 = 2 cycles/iter (best case).
+//   Cleanup: 1×16 loop + masked tail.
+//
+// Pass 2 — normalize + optional gamma/beta (4×16 = 64 elements/iter):
+//   With scale+shift:  4 load(γ) + 4 vmulps(γ×inv_std) + 4 load(src) +
+//                       4 vsubps(mean) + 4 load(β) + 4 vfmadd(d*g+β) +
+//                       4 store = 28 instructions.
+//   Pre-multiplying gamma[i] * inv_std saves a vmulps per element.
+//   Load-bound: input re-read hits L1 (warm from pass 1).
+// =============================================================================
+
+static inline void layer_norm_row_avx512(const void *__restrict in_row,
+        void *__restrict out_row, const void *__restrict gamma,
+        const void *__restrict beta, uint64_t norm_size, float inv_n,
+        float epsilon, bool use_scale, bool use_shift, data_type_t src_dt,
+        data_type_t dst_dt, data_type_t gamma_dt, data_type_t beta_dt) {
+    const size_t src_sz = elem_size(src_dt);
+    const size_t dst_sz = elem_size(dst_dt);
+    const size_t g_sz = elem_size(gamma_dt);
+    const size_t b_sz = elem_size(beta_dt);
+
+    // ---- Pass 1: mean and inverse standard deviation ----
+    float mean = 0.f, inv_std = 0.f;
+    row_mean_inv_std(in_row, norm_size, inv_n, epsilon, src_dt, mean, inv_std);
+    const uint64_t vec64 = norm_size & ~63ULL;
+    uint64_t i = 0;
 
     __m512 mean_v = _mm512_set1_ps(mean);
     __m512 inv_std_v = _mm512_set1_ps(inv_std);
 
     // ---- Pass 2: normalize + optional gamma/beta ----
-    i = 0;
     if (use_scale) {
         // y = (x - mean) * (gamma * inv_std) [+ beta]
         for (; i < vec64; i += 64) {
@@ -314,61 +329,16 @@ static inline void fused_layer_norm_add_row_avx512(
     // Residual is in the output domain (dst_dt).
     const size_t r_sz = dst_sz;
 
-    // ---- Pass 1: simultaneous sum and sum-of-squares ----
-    __m512 sum0 = _mm512_setzero_ps(), sum1 = _mm512_setzero_ps();
-    __m512 sum2 = _mm512_setzero_ps(), sum3 = _mm512_setzero_ps();
-    __m512 sq0 = _mm512_setzero_ps(), sq1 = _mm512_setzero_ps();
-    __m512 sq2 = _mm512_setzero_ps(), sq3 = _mm512_setzero_ps();
-
-    uint64_t i = 0;
+    // ---- Pass 1: mean and inverse standard deviation ----
+    float mean = 0.f, inv_std = 0.f;
+    row_mean_inv_std(in_row, norm_size, inv_n, epsilon, src_dt, mean, inv_std);
     const uint64_t vec64 = norm_size & ~63ULL;
-
-    for (; i < vec64; i += 64) {
-        const void *p = static_cast<const char *>(in_row) + i * src_sz;
-        __m512 s0 = load16(p, src_dt);
-        __m512 s1 = load16((const char *)p + 16 * src_sz, src_dt);
-        __m512 s2 = load16((const char *)p + 32 * src_sz, src_dt);
-        __m512 s3 = load16((const char *)p + 48 * src_sz, src_dt);
-
-        sum0 = _mm512_add_ps(sum0, s0);
-        sum1 = _mm512_add_ps(sum1, s1);
-        sum2 = _mm512_add_ps(sum2, s2);
-        sum3 = _mm512_add_ps(sum3, s3);
-
-        sq0 = _mm512_fmadd_ps(s0, s0, sq0);
-        sq1 = _mm512_fmadd_ps(s1, s1, sq1);
-        sq2 = _mm512_fmadd_ps(s2, s2, sq2);
-        sq3 = _mm512_fmadd_ps(s3, s3, sq3);
-    }
-    for (; i + 15 < norm_size; i += 16) {
-        __m512 s0 = load16(
-                static_cast<const char *>(in_row) + i * src_sz, src_dt);
-        sum0 = _mm512_add_ps(sum0, s0);
-        sq0 = _mm512_fmadd_ps(s0, s0, sq0);
-    }
-    if (i < norm_size) {
-        __mmask16 mask = (__mmask16)((1U << (norm_size - i)) - 1);
-        __m512 s0 = load16_mask(
-                static_cast<const char *>(in_row) + i * src_sz, mask, src_dt);
-        sum0 = _mm512_add_ps(sum0, s0);
-        sq0 = _mm512_fmadd_ps(s0, s0, sq0);
-    }
-
-    sum0 = _mm512_add_ps(_mm512_add_ps(sum0, sum1), _mm512_add_ps(sum2, sum3));
-    sq0 = _mm512_add_ps(_mm512_add_ps(sq0, sq1), _mm512_add_ps(sq2, sq3));
-
-    float total_sum = _mm512_reduce_add_ps(sum0);
-    float total_sq = _mm512_reduce_add_ps(sq0);
-
-    float mean = total_sum * inv_n;
-    float var = std::max(0.0f, total_sq * inv_n - mean * mean);
-    float inv_std = 1.0f / std::sqrt(var + epsilon);
+    uint64_t i = 0;
 
     __m512 mean_v = _mm512_set1_ps(mean);
     __m512 inv_std_v = _mm512_set1_ps(inv_std);
 
     // ---- Pass 2: normalize + optional gamma/beta + residual add ----
-    i = 0;
     if (use_scale) {
         for (; i < vec64; i += 64) {
             const void *np = static_cast<const char *>(in_row) + i * src_sz;
@@ -552,14 +522,124 @@ static inline void fused_layer_norm_add_row_avx512(
     }
 }
 
+// =============================================================================
+// Gated Layer Norm — single row (FUSED_GATED_LAYER_NORM).
+//
+//   n[i] = (x[i] - mean) * inv_std [* gamma[i]] [+ beta[i]]
+//   g[i] = act(gate[i])                      act = silu or identity
+//   y[i] = g[i] * n[i]
+//
+// plus the optional copies gate_out[i] = g[i] and src_out[i] = x[i] (both in
+// dst_dt), so y and the copies can be written straight into the slices of a
+// concatenated [act(gate), x, y] output. Pass 1 is the shared statistics pass;
+// pass 2 is one sweep over 16-lane chunks with a masked tail. The silu is the
+// grouped-MatMul activation (group_matmul_act_avx512::silu_avx512): fast exp,
+// relative error about 5e-5, and silu(-inf) = -inf where std::exp gives NaN.
+// =============================================================================
+
+struct gated_row_t {
+    const void *in;
+    void *out;
+    const void *gate;
+    void *gate_out;
+    void *src_out;
+};
+
+template <bool kSilu, bool kFull>
+static inline void gated_chunk_avx512(const gated_row_t &row,
+        const void *__restrict gamma, const void *__restrict beta, uint64_t i,
+        __mmask16 m, __m512 mean_v, __m512 inv_std_v,
+        const norm_params &params) {
+    auto ld = [&](const void *base, data_type_t dt) {
+        const void *p = static_cast<const char *>(base) + i * elem_size(dt);
+        return kFull ? load16(p, dt) : load16_mask(p, m, dt);
+    };
+    auto st = [&](void *base, __m512 v) {
+        void *p = static_cast<char *>(base) + i * elem_size(params.dst_dt);
+        if (kFull)
+            store16(p, v, params.dst_dt);
+        else
+            store16_mask(p, v, m, params.dst_dt);
+    };
+    const __m512 x = ld(row.in, params.src_dt);
+    __m512 n = _mm512_mul_ps(_mm512_sub_ps(x, mean_v), inv_std_v);
+    if (params.use_scale) n = _mm512_mul_ps(n, ld(gamma, params.gamma_dt));
+    if (params.use_shift) n = _mm512_add_ps(n, ld(beta, params.beta_dt));
+    __m512 g = ld(row.gate, params.gated.gate_dt);
+    if constexpr (kSilu)
+        g = zendnnl::lowoha::matmul::group_matmul_act_avx512::silu_avx512(g);
+    st(row.out, _mm512_mul_ps(g, n));
+    if (row.gate_out) st(row.gate_out, g);
+    if (row.src_out) st(row.src_out, x);
+}
+
+template <bool kSilu>
+static inline void gated_layer_norm_row_avx512(const gated_row_t &row,
+        const void *__restrict gamma, const void *__restrict beta, float inv_n,
+        const norm_params &params) {
+    const uint64_t norm_size = params.norm_size;
+    float mean = 0.f, inv_std = 0.f;
+    row_mean_inv_std(row.in, norm_size, inv_n, params.epsilon, params.src_dt,
+            mean, inv_std);
+    const __m512 mean_v = _mm512_set1_ps(mean);
+    const __m512 inv_std_v = _mm512_set1_ps(inv_std);
+    uint64_t i = 0;
+    for (; i + 16 <= norm_size; i += 16)
+        gated_chunk_avx512<kSilu, true>(row, gamma, beta, i, __mmask16(0xFFFF),
+                mean_v, inv_std_v, params);
+    if (i < norm_size)
+        gated_chunk_avx512<kSilu, false>(row, gamma, beta, i,
+                static_cast<__mmask16>((1U << (norm_size - i)) - 1), mean_v,
+                inv_std_v, params);
+}
+
+template <bool kSilu>
+static status_t gated_layer_norm_avx512(const void *input, void *output,
+        const void *gamma, const void *beta, const norm_params &params) {
+    const uint64_t N = params.norm_size;
+    const float inv_n = 1.0f / static_cast<float>(N);
+    const gated_norm_params &gp = params.gated;
+    auto stride = [N](uint64_t s) { return s ? s : N; };
+    const size_t src_row = stride(params.src_stride) * elem_size(params.src_dt);
+    const size_t dst_row = stride(params.dst_stride) * elem_size(params.dst_dt);
+    const size_t gate_row = stride(gp.gate_stride) * elem_size(gp.gate_dt);
+    const size_t gate_out_row
+            = stride(gp.gate_out_stride) * elem_size(params.dst_dt);
+    const size_t src_out_row
+            = stride(gp.src_out_stride) * elem_size(params.dst_dt);
+    const int64_t batch = static_cast<int64_t>(params.batch);
+
+#pragma omp parallel for schedule(static) if (batch > 1)
+    for (int64_t b = 0; b < batch; ++b) {
+        gated_row_t row;
+        row.in = static_cast<const char *>(input) + b * src_row;
+        row.out = static_cast<char *>(output) + b * dst_row;
+        row.gate = static_cast<const char *>(gp.gate) + b * gate_row;
+        row.gate_out = gp.gate_out
+                ? static_cast<char *>(gp.gate_out) + b * gate_out_row
+                : nullptr;
+        row.src_out = gp.src_out
+                ? static_cast<char *>(gp.src_out) + b * src_out_row
+                : nullptr;
+        gated_layer_norm_row_avx512<kSilu>(row, gamma, beta, inv_n, params);
+    }
+    return status_t::success;
+}
+
 // =====================================================================
-// Entry point — dispatches LAYER_NORM and FUSED_LAYER_NORM_ADD over the
-// batch with OpenMP.
+// Entry point — dispatches LAYER_NORM, FUSED_LAYER_NORM_ADD and
+// FUSED_GATED_LAYER_NORM over the batch with OpenMP.
 // =====================================================================
 
 status_t layer_norm_avx512(const void *input, void *output,
         const void *residual, const void *gamma, const void *beta,
         norm_params &params) {
+    if (params.norm_type == norm_type_t::FUSED_GATED_LAYER_NORM) {
+        return params.gated.gate_silu ? gated_layer_norm_avx512<true>(input,
+                                                output, gamma, beta, params)
+                                      : gated_layer_norm_avx512<false>(input,
+                                                output, gamma, beta, params);
+    }
     const float inv_n = 1.0f / static_cast<float>(params.norm_size);
     const data_type_t src_dt = params.src_dt;
     const data_type_t dst_dt = params.dst_dt;

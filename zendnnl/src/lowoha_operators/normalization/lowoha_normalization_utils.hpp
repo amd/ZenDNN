@@ -64,6 +64,18 @@ status_t validate_normalization_inputs(const void *input, const void *output,
         const norm_params &params);
 
 /**
+ * @brief Validate the row strides and the gated-LayerNorm parameters.
+ *
+ * O(1) checks run on every call (not diagnostics-gated): non-zero strides are
+ * only meaningful for FUSED_GATED_LAYER_NORM and must be >= norm_size, every
+ * norm_params::gated field must keep its default on the other types, and the
+ * gated type needs a non-null gate of type f32, bf16 or f16.
+ *
+ * @return status_t::success or status_t::failure
+ */
+status_t validate_gated_norm_params(const norm_params &params);
+
+/**
  * @brief Convert norm_type_t to a string
  *
  * @param type  The normalization type enum value

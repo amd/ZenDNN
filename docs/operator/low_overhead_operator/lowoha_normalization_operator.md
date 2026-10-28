@@ -5,13 +5,13 @@
 
 ## Overview
 
-The **LowOHA Normalization Operator** is a high-performance, low-overhead normalization operator designed for **latency-sensitive inference workloads**. It provides a single `normalization_direct` entry point that dispatches to five normalization variants — LayerNorm, RMSNorm, FusedAddRMSNorm, FusedLayerNormAdd, and BatchNorm — with minimal per-call overhead.
+The **LowOHA Normalization Operator** is a high-performance, low-overhead normalization operator designed for **latency-sensitive inference workloads**. It provides a single `normalization_direct` entry point that dispatches to six normalization variants — LayerNorm, RMSNorm, FusedAddRMSNorm, FusedLayerNormAdd, FusedGatedLayerNorm, and BatchNorm — with minimal per-call overhead.
 
 Unlike the standard operator factory pattern, LowOHA Normalization provides a **function-based interface** optimized for:
 - Minimal execution overhead — no operator / context object lifecycle on the hot path
 - FP32, BF16, and F16 data types for input, output, gamma, and beta (chosen independently)
-- Five normalization variants behind a single API
-- Native AVX-512 and AVX-512-FP16 vectorized kernels for LayerNorm, RMSNorm, FusedAddRMSNorm, and FusedLayerNormAdd
+- Six normalization variants behind a single API
+- Native AVX-512 and AVX-512-FP16 vectorized kernels for LayerNorm, RMSNorm, FusedAddRMSNorm, and FusedLayerNormAdd; an AVX-512 kernel for FusedGatedLayerNorm
 - Build-time switch to force FP32 accumulation for numerical reproducibility
 - Direct control over execution parameters (data types, threads, epsilon)
 
@@ -66,6 +66,27 @@ Where $\mu$ and $\sigma^2$ are computed over the input $x$ exactly as in LayerNo
 
 **Use case:** Transformer/MLP blocks shaped as `AddV2(LayerNorm(F(x)), x)` — a residual skip added to the LayerNorm output. Fuses the trailing residual add into the LayerNorm kernel, saving one elementwise read+write pass.
 
+### FusedGatedLayerNorm
+
+Multiplies the LayerNorm of the input by an activation of a second tensor, the gate, and can also write `act(gate)` and a copy of the input. Every buffer has its own row stride, so the three results can be the slices of one concatenated output.
+
+$$
+y_i = \mathrm{act}(g_i) \cdot \left(\gamma_i \cdot \frac{x_i - \mu}{\sqrt{\sigma^2 + \epsilon}} + \beta_i\right), \qquad \mathrm{act} \in \{\mathrm{silu}, \mathrm{identity}\}
+$$
+
+Math is FP32; the AVX-512 kernel's silu uses a fast exp (relative error about 5e-5; `silu(-inf)` gives `-inf`). f16 buffers need only AVX-512 (F16C conversions), not AVX-512-FP16. The gate and its options are in `norm_params::gated`:
+
+| Field | Meaning |
+|-------|---------|
+| `gate`, `gate_dt`, `gate_stride` | Gate rows `[batch, norm_size]` (`f32` / `bf16` / `f16`) and their row stride |
+| `gate_silu` | `act` = silu (`true`) or identity (`false`) |
+| `gate_out`, `gate_out_stride` | Optional copy of `act(gate)` (`dst_dt`; `nullptr` skips it) |
+| `src_out`, `src_out_stride` | Optional copy of `x` (`dst_dt`; `nullptr` skips it) |
+
+`norm_params::src_stride` and `dst_stride` are the row strides of the input and output. All strides are in elements, and 0 means `norm_size`. The output, `gate_out` and `src_out` must not overlap each other or the gate; the output may be the input itself (same pointer and stride), but must not partially overlap it.
+
+**Use case:** The HSTU output block of DLRM v3 / generative-recommenders, `cat([silu(u), x, silu(u) * LayerNorm(x)])` before the output projection. `u` is read directly from the fused `uvqk` GEMM output (row stride `4 * D`), and the three slices of the `[L, 3D]` result are written in one pass (`gate_out` = column 0, `src_out` = column `D`, `output` = column `2D`, all with stride `3D`).
+
 ### BatchNorm (Inference)
 
 Normalizes per channel using **pre-computed** running statistics from training.
@@ -107,9 +128,10 @@ status_t normalization_direct(
 - `LAYER_NORM` / `RMS_NORM` → AVX-512-FP16 (`__m512h`) when [F16 FMA Mode](#f16-fma-mode) eligibility holds, otherwise the FP32-accumulating AVX-512 kernel.
 - `FUSED_ADD_RMS_NORM` → the FP32-accumulating AVX-512 kernel by default. When the library is built with `-DZENDNNL_FUSED_ADD_RMS_F16=ON`, it uses the AVX-512-FP16 (`__m512h`) kernel under a strict all-f16 gate (see [F16 FMA Mode](#f16-fma-mode)); otherwise it falls through to the FP32-accumulating AVX-512 kernel.
 - `FUSED_LAYER_NORM_ADD` → same path as `LAYER_NORM`: AVX-512-FP16 (`__m512h`) when [F16 FMA Mode](#f16-fma-mode) eligibility holds, otherwise the FP32-accumulating AVX-512 kernel. The residual add is a store-time epilogue (residual dtype `dst_dt`), so the native FP16 path needs no build flag.
+- `FUSED_GATED_LAYER_NORM` → the FP32-accumulating AVX-512 kernel, which shares the LayerNorm statistics pass; silu is the grouped-MatMul AVX-512 activation.
 - `BATCH_NORM` → Reference (scalar) kernel.
 - For non-F16 configurations, any path falls back to the reference kernel when AVX-512 is unavailable.
-- F16 configurations (any actually-used buffer is `f16`) require AVX-512-FP16 up-front; the API returns `status_t::isa_unsupported` and does **not** fall back to the reference kernel.
+- F16 configurations (any actually-used buffer is `f16`) other than `FUSED_GATED_LAYER_NORM` require AVX-512-FP16 up-front; the API returns `status_t::isa_unsupported` and does **not** fall back to the reference kernel.
 
 
 ## Parameters Structure
@@ -121,7 +143,7 @@ The main configuration structure for LowOHA Normalization. The caller must set `
 ```cpp
 struct norm_params {
   // --- Normalization variant ---
-  norm_type_t  norm_type;       // LAYER_NORM / RMS_NORM / FUSED_ADD_RMS_NORM / FUSED_LAYER_NORM_ADD / BATCH_NORM
+  norm_type_t  norm_type;       // LAYER_NORM / RMS_NORM / FUSED_ADD_RMS_NORM / FUSED_LAYER_NORM_ADD / FUSED_GATED_LAYER_NORM / BATCH_NORM
 
   // --- Flattened dimensions (set by caller) ---
   uint64_t     batch;           // Product of all outer (non-normalized) dims
@@ -143,6 +165,11 @@ struct norm_params {
   norm_algo_t  algorithm;       // Backend (default: none = auto)
   int32_t      num_threads;     // 0 = auto
 
+  // --- FUSED_GATED_LAYER_NORM only (elements, 0 = norm_size) ---
+  uint64_t     src_stride;      // Input row stride
+  uint64_t     dst_stride;      // Output row stride
+  gated_norm_params gated;      // Gate, activation and optional copies
+
   // --- Internal dispatch breadcrumb (callers should leave at default) ---
   data_type_t  accum_type;
 };
@@ -157,7 +184,8 @@ enum class norm_type_t : int {
   BATCH_NORM           =  1,
   RMS_NORM             =  2,
   FUSED_ADD_RMS_NORM   =  3,
-  FUSED_LAYER_NORM_ADD =  4
+  FUSED_LAYER_NORM_ADD =  4,
+  FUSED_GATED_LAYER_NORM = 5
 };
 ```
 
@@ -194,19 +222,19 @@ The caller flattens tensor dimensions before calling `normalization_direct`. The
 
 ### Parameter Requirements by Norm Type
 
-| Parameter      | LayerNorm     | RMSNorm      | FusedAddRMSNorm     | FusedLayerNormAdd      | BatchNorm        |
-|----------------|---------------|--------------|---------------------|------------------------|------------------|
-| `norm_type`    | `LAYER_NORM`  | `RMS_NORM`   | `FUSED_ADD_RMS_NORM`| `FUSED_LAYER_NORM_ADD` | `BATCH_NORM`     |
-| `batch`        | required      | required     | required            | required               | required (`N`)   |
-| `norm_size`    | required      | required     | required            | required               | required (`H*W`) |
-| `num_channels` | unused        | unused       | unused              | unused                 | required (`C`)   |
-| `gamma`        | optional      | optional     | optional            | optional               | optional         |
-| `beta`         | optional      | nullptr      | nullptr             | optional               | optional         |
-| `running_mean` | nullptr       | nullptr      | nullptr             | nullptr                | required (FP32)  |
-| `running_var`  | nullptr       | nullptr      | nullptr             | nullptr                | required (FP32)  |
-| `residual`     | nullptr       | nullptr      | required (`src_dt`) | required (`dst_dt`)    | nullptr          |
-| `use_scale`    | true / false  | true / false | true / false        | true / false           | true / false     |
-| `use_shift`    | true / false  | unused       | unused              | true / false           | true / false     |
+| Parameter      | LayerNorm     | RMSNorm      | FusedAddRMSNorm     | FusedLayerNormAdd      | FusedGatedLayerNorm      | BatchNorm        |
+|----------------|---------------|--------------|---------------------|------------------------|--------------------------|------------------|
+| `norm_type`    | `LAYER_NORM`  | `RMS_NORM`   | `FUSED_ADD_RMS_NORM`| `FUSED_LAYER_NORM_ADD` | `FUSED_GATED_LAYER_NORM` | `BATCH_NORM`     |
+| `batch`        | required      | required     | required            | required               | required                 | required (`N`)   |
+| `norm_size`    | required      | required     | required            | required               | required                 | required (`H*W`) |
+| `num_channels` | unused        | unused       | unused              | unused                 | unused                   | required (`C`)   |
+| `gamma`        | optional      | optional     | optional            | optional               | optional                 | optional         |
+| `beta`         | optional      | nullptr      | nullptr             | optional               | optional                 | optional         |
+| `running_mean` | nullptr       | nullptr      | nullptr             | nullptr                | nullptr                  | required (FP32)  |
+| `running_var`  | nullptr       | nullptr      | nullptr             | nullptr                | nullptr                  | required (FP32)  |
+| `residual`     | nullptr       | nullptr      | required (`src_dt`) | required (`dst_dt`)    | nullptr                  | nullptr          |
+| `use_scale`    | true / false  | true / false | true / false        | true / false           | true / false             | true / false     |
+| `use_shift`    | true / false  | unused       | unused              | true / false           | true / false             | true / false     |
 
 ### Backend Selection
 

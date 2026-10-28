@@ -597,6 +597,59 @@ static void fused_layer_norm_add_impl(const void *input, void *output,
     }
 }
 
+// ============================================================================
+// Gated LayerNorm (FUSED_GATED_LAYER_NORM), FP32 accumulation:
+//   n_i = gamma[i] * (x_i - mean) / sqrt(var + eps) + beta[i]
+//   g_i = act(gate_i)            (act = silu or identity)
+//   y_i = g_i * n_i,  gate_out_i = g_i,  src_out_i = x_i  (optional copies)
+// Every buffer has its own row stride (0 = norm_size).
+// ============================================================================
+static void gated_layer_norm_impl(const void *input, void *output,
+        const void *gamma, const void *beta, const norm_params &params,
+        int num_threads) {
+    const uint64_t N = params.norm_size;
+    const gated_norm_params &gp = params.gated;
+    auto stride = [N](uint64_t s) { return s ? s : N; };
+    const uint64_t src_st = stride(params.src_stride);
+    const uint64_t dst_st = stride(params.dst_stride);
+    const uint64_t gate_st = stride(gp.gate_stride);
+    const uint64_t gate_out_st = stride(gp.gate_out_stride);
+    const uint64_t src_out_st = stride(gp.src_out_stride);
+
+#pragma omp parallel for num_threads(num_threads)
+    for (int64_t b = 0; b < static_cast<int64_t>(params.batch); ++b) {
+        const uint64_t row = static_cast<uint64_t>(b);
+        float sum = 0.0f;
+        for (uint64_t i = 0; i < N; ++i)
+            sum += load_scalar(input, params.src_dt, row * src_st + i);
+        const float mean = sum / static_cast<float>(N);
+        float sum_sq_dev = 0.0f;
+        for (uint64_t i = 0; i < N; ++i) {
+            const float d = load_scalar(input, params.src_dt, row * src_st + i)
+                    - mean;
+            sum_sq_dev += d * d;
+        }
+        const float inv_std = 1.0f
+                / std::sqrt(
+                        sum_sq_dev / static_cast<float>(N) + params.epsilon);
+        for (uint64_t i = 0; i < N; ++i) {
+            const float x = load_scalar(input, params.src_dt, row * src_st + i);
+            float n = (x - mean) * inv_std;
+            if (params.use_scale) n *= load_scalar(gamma, params.gamma_dt, i);
+            if (params.use_shift) n += load_scalar(beta, params.beta_dt, i);
+            float g = load_scalar(gp.gate, gp.gate_dt, row * gate_st + i);
+            if (gp.gate_silu) g = g / (1.0f + std::exp(-g));
+            store_scalar(output, params.dst_dt, row * dst_st + i, g * n);
+            if (gp.gate_out)
+                store_scalar(
+                        gp.gate_out, params.dst_dt, row * gate_out_st + i, g);
+            if (gp.src_out)
+                store_scalar(
+                        gp.src_out, params.dst_dt, row * src_out_st + i, x);
+        }
+    }
+}
+
 // ===================================================
 // Reference entry point – dispatches on norm type
 // ===================================================
@@ -648,6 +701,17 @@ status_t normalization_reference_wrapper(const void *input, void *output,
             }
             fused_layer_norm_add_impl(
                     input, output, residual, gamma, beta, params, num_threads);
+            return status_t::success;
+
+        case norm_type_t::FUSED_GATED_LAYER_NORM:
+            if (!params.gated.gate) {
+                log_error(
+                        "Normalization Reference: FUSED_GATED_LAYER_NORM "
+                        "requires a non-null gate");
+                return status_t::failure;
+            }
+            gated_layer_norm_impl(
+                    input, output, gamma, beta, params, num_threads);
             return status_t::success;
 
         default:

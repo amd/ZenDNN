@@ -169,7 +169,9 @@ status_t normalization_kernel_wrapper(const void *input, void *output,
 
     if (has_avx512f
             && (params.norm_type == norm_type_t::LAYER_NORM
-                    || params.norm_type == norm_type_t::FUSED_LAYER_NORM_ADD)) {
+                    || params.norm_type == norm_type_t::FUSED_LAYER_NORM_ADD
+                    || params.norm_type
+                            == norm_type_t::FUSED_GATED_LAYER_NORM)) {
         log_info(
                 "Using AVX512 kernel for ", norm_type_to_str(params.norm_type));
         params.accum_type = data_type_t::f32;
@@ -226,10 +228,14 @@ status_t normalization_direct(const void *input, void *output,
     const bool uses_beta = params.use_shift
             && params.norm_type != norm_type_t::RMS_NORM
             && params.norm_type != norm_type_t::FUSED_ADD_RMS_NORM;
-    [[maybe_unused]] const bool is_f16 = (params.src_dt == data_type_t::f16
-            || params.dst_dt == data_type_t::f16
-            || (uses_gamma && params.gamma_dt == data_type_t::f16)
-            || (uses_beta && params.beta_dt == data_type_t::f16));
+    // FUSED_GATED_LAYER_NORM has no F16-FMA kernel: its f16 buffers go
+    // through the F16C conversions of the FP32 AVX-512 kernel.
+    [[maybe_unused]] const bool is_f16
+            = params.norm_type != norm_type_t::FUSED_GATED_LAYER_NORM
+            && (params.src_dt == data_type_t::f16
+                    || params.dst_dt == data_type_t::f16
+                    || (uses_gamma && params.gamma_dt == data_type_t::f16)
+                    || (uses_beta && params.beta_dt == data_type_t::f16));
     // When ZENDNNL_NATIVE_F32_ACCUM forces the FP32-accumulating kernel, f16
     // storage is handled via F16C convert (_mm512_cvtph_ps), which any AVX-512
     // host has. Only require AVX-512-FP16 when the F16-FMA fast path could
@@ -291,6 +297,10 @@ status_t normalization_direct(const void *input, void *output,
                     "the output buffer");
             return status_t::failure;
         }
+    }
+
+    if (validate_gated_norm_params(params) != status_t::success) {
+        return status_t::failure;
     }
 
     // Validate inputs only when ZENDNNL_DIAGNOSTICS_ENABLE=1. In production this

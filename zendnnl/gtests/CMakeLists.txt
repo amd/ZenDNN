@@ -35,6 +35,8 @@ if(ZENDNNL_BUILD_GTEST)
     test_embag.cpp
     test_embedding.cpp
     test_normalization.cpp
+    test_hstu_attention.cpp
+    test_gated_layer_norm.cpp
     test_sdpa.cpp
     test_sdpa_ck_gemm.cpp
     test_sdpa_ck_int8.cpp

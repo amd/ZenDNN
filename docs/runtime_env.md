@@ -328,6 +328,16 @@ dispatcher.
 
 ---
 
+## HSTU Attention Configuration
+
+| Variable | Description | Default | Valid Values |
+|----------|-------------|---------|--------------|
+| `ZENDNNL_HSTU_ATTENTION_KERNEL` | Kernel of `hstu_attention_direct`, overriding `hstu_attention_params::kernel`. Without it the tiled kernel runs when it supports the call (causal mask, BF16 Q/K/V, AVX512-BF16/BW/VL) and the reference kernel otherwise; forcing `tiled` on an unsupported call returns `status_t::unimplemented`. Cached on first read. | unset (automatic) | `tiled`, `reference`; other values are ignored with a warning (then `hstu_attention_params::kernel` applies) |
+| `ZENDNNL_HSTU_ATTENTION_FAST_SILU` | Opt-in cheaper silu in the Q*K^T epilogue of the tiled kernel: a degree-3 polynomial exp with `vscalefps` and `rcp14` without a Newton step (relative error of silu at most 1.2e-4, against 5e-5 by default; P is rounded to BF16 either way). About 6% faster on DLRM v3 full-attention calls (3–5% on delta-mode and short-sequence calls), with the output error against FP64 unchanged. The default path is bit-identical to running without the variable; the reference kernel ignores it. Cached on first read. | unset (off) | `0`/`false`/`off`/`no`, `1`/`true`/`on`/`yes`; other values are ignored with a warning (off) |
+| `ZENDNNL_HSTU_ATTENTION_VARLEN` | Variable-length attention, overriding `hstu_attention_params::is_varlen`. `0` pads every sequence to `max_seq_len` and runs the kernel on the uniform layout, as without variable-length support: the output is unchanged, the cost is the padded rows and the copies (for comparisons). Full mode only; delta mode stays variable-length with a warning. Cached on first read. | unset (`is_varlen`, default `true`) | `0`/`false`/`off`/`no`, `1`/`true`/`on`/`yes`; other values are ignored with a warning (then `is_varlen` applies) |
+
+---
+
 ## Logging Configuration
 
 Log levels control the verbosity of messages for different modules.
