@@ -23,40 +23,40 @@ namespace lowoha {
 namespace embag {
 
 // Template instantiations
-template void embag_avx2_kernel<float, int64_t, int64_t, float>(const float *,
-        const float *, const int64_t *, const int64_t *, float *, int64_t,
-        int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool);
+template status_t embag_avx2_kernel<float, int64_t, int64_t, float>(
+        const float *, const float *, const int64_t *, const int64_t *, float *,
+        int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool);
 
-template void embag_avx2_kernel<float, int32_t, int32_t, float>(const float *,
-        const float *, const int32_t *, const int32_t *, float *, int64_t,
-        int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool);
+template status_t embag_avx2_kernel<float, int32_t, int32_t, float>(
+        const float *, const float *, const int32_t *, const int32_t *, float *,
+        int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool);
 
-template void embag_avx2_kernel<float, int64_t, int64_t, uint16_t>(
+template status_t embag_avx2_kernel<float, int64_t, int64_t, uint16_t>(
         const float *, const float *, const int64_t *, const int64_t *,
         uint16_t *, int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t,
         int64_t, bool);
 
-template void embag_avx2_kernel<float, int32_t, int32_t, uint16_t>(
+template status_t embag_avx2_kernel<float, int32_t, int32_t, uint16_t>(
         const float *, const float *, const int32_t *, const int32_t *,
         uint16_t *, int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t,
         int64_t, bool);
 
-template void embag_avx2_kernel<uint16_t, int64_t, int64_t, uint16_t>(
+template status_t embag_avx2_kernel<uint16_t, int64_t, int64_t, uint16_t>(
         const uint16_t *, const float *, const int64_t *, const int64_t *,
         uint16_t *, int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t,
         int64_t, bool);
 
-template void embag_avx2_kernel<uint16_t, int32_t, int32_t, uint16_t>(
+template status_t embag_avx2_kernel<uint16_t, int32_t, int32_t, uint16_t>(
         const uint16_t *, const float *, const int32_t *, const int32_t *,
         uint16_t *, int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t,
         int64_t, bool);
 
-template void embag_avx2_kernel<uint16_t, int64_t, int64_t, float>(
+template status_t embag_avx2_kernel<uint16_t, int64_t, int64_t, float>(
         const uint16_t *, const float *, const int64_t *, const int64_t *,
         float *, int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t,
         int64_t, bool);
 
-template void embag_avx2_kernel<uint16_t, int32_t, int32_t, float>(
+template status_t embag_avx2_kernel<uint16_t, int32_t, int32_t, float>(
         const uint16_t *, const float *, const int32_t *, const int32_t *,
         float *, int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t,
         int64_t, bool);

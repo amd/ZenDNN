@@ -17,9 +17,12 @@
 #ifndef _LOWOHA_EMBAG_COMMON_HPP
 #define _LOWOHA_EMBAG_COMMON_HPP
 
+#include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 #include "common/op_config.hpp"
 #include "common/zendnnl_global.hpp"
@@ -305,6 +308,43 @@ inline bool can_use_f16_fma_kernel() {
 #else
     return false;
 #endif
+}
+
+/**
+ * @brief Whether this CPU can run the native AVX-512 kernels
+ *
+ * The kernels are compiled with avx512bw and avx512vl as well. Every CPU
+ * with AVX-512F and AVX512-BF16 also has BW and VL, so those two are not
+ * checked separately.
+ */
+inline bool can_use_avx512_embag_kernel() {
+    const auto &platform = zendnnl::common::zendnnl_platform_info();
+    return platform.get_avx512f_status() && platform.get_avx512_bf16_status();
+}
+
+/**
+ * @brief Whether this CPU can run embag_avx2_kernel
+ *
+ * Covers FP32 and BF16 tables and outputs. The kernel is compiled for avx2
+ * and fma. FMA3 is implied by AVX2, so the AVX2 status is the runtime gate.
+ */
+inline bool can_use_avx2_embag_kernel() {
+    return zendnnl::common::zendnnl_platform_info().get_avx2_status();
+}
+
+/**
+ * @brief Whether ZENDNNL_EMBAG_ISA=avx2 asks for the AVX2 kernel
+ *
+ * Lets the path that CPUs without AVX-512 take run on AVX-512 hosts for
+ * testing. Read on every call.
+ */
+inline bool embag_isa_env_requests_avx2() {
+    const char *env = std::getenv("ZENDNNL_EMBAG_ISA");
+    if (env == nullptr) { return false; }
+    std::string isa(env);
+    std::transform(isa.begin(), isa.end(), isa.begin(),
+            [](unsigned char c) { return std::tolower(c); });
+    return isa == "avx2";
 }
 
 /**

@@ -108,6 +108,7 @@ This table outlines the supported configurations across data types, indices/offs
 **Notes:**
 - **Quantized tables (INT8/INT4):** Per-row `scale` and `zero_point` are appended to each table row. `INT4` packs two 4-bit values per byte. The scale/ZP element type is selected by `set_fp16_scale_bias(true|false)`.
 - **FP16 tables/output:** Require AVX512-FP16. On unsupported hardware the operator returns `status_t::isa_unsupported`.
+- **CPUs without AVX-512F and AVX512-BF16:** FP32 and BF16 tables run on an AVX2 kernel (requires AVX2), and INT8/INT4 tables return `status_t::isa_unsupported` unless the reference kernel is forced.
 
 ## Examples
 

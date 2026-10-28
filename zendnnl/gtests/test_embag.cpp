@@ -431,6 +431,12 @@ TEST_P(TestEmbag, INT8_F32) {
             offsets_tensor, weights_tensor, output_tensor, algo, padding_index,
             include_last_offset, is_weights, fp16_scale_bias, kernel,
             use_LOWOHA);
+    if (no_int8_int4_kernel(status)) {
+        free(table_tensor.get_raw_handle_unsafe());
+        table_tensor.reset();
+        GTEST_SKIP() << "INT8/INT4 not supported: requires AVX-512F and "
+                        "AVX512-BF16";
+    }
     status_t ref_status = embag_kernel_test(table_tensor, indices_tensor,
             offsets_tensor, weights_tensor, output_tensor_ref, algo,
             padding_index, include_last_offset, is_weights, fp16_scale_bias,
@@ -476,6 +482,12 @@ TEST_P(TestEmbag, INT8_BF16) {
             offsets_tensor, weights_tensor, output_tensor, algo, padding_index,
             include_last_offset, is_weights, fp16_scale_bias, kernel,
             use_LOWOHA);
+    if (no_int8_int4_kernel(status)) {
+        free(table_tensor.get_raw_handle_unsafe());
+        table_tensor.reset();
+        GTEST_SKIP() << "INT8/INT4 not supported: requires AVX-512F and "
+                        "AVX512-BF16";
+    }
     status_t ref_status = embag_kernel_test(table_tensor, indices_tensor,
             offsets_tensor, weights_tensor, output_tensor_ref, algo,
             padding_index, include_last_offset, is_weights, fp16_scale_bias,
@@ -569,6 +581,12 @@ TEST_P(TestEmbag, S4_F32) {
             offsets_tensor, weights_tensor, output_tensor, algo, padding_index,
             include_last_offset, is_weights, fp16_scale_bias, kernel,
             use_LOWOHA);
+    if (no_int8_int4_kernel(status)) {
+        free(table_tensor.get_raw_handle_unsafe());
+        table_tensor.reset();
+        GTEST_SKIP() << "INT8/INT4 not supported: requires AVX-512F and "
+                        "AVX512-BF16";
+    }
     status_t ref_status = embag_kernel_test(table_tensor, indices_tensor,
             offsets_tensor, weights_tensor, output_tensor_ref, algo,
             padding_index, include_last_offset, is_weights, fp16_scale_bias,
@@ -614,6 +632,12 @@ TEST_P(TestEmbag, S4_BF16) {
             offsets_tensor, weights_tensor, output_tensor, algo, padding_index,
             include_last_offset, is_weights, fp16_scale_bias, kernel,
             use_LOWOHA);
+    if (no_int8_int4_kernel(status)) {
+        free(table_tensor.get_raw_handle_unsafe());
+        table_tensor.reset();
+        GTEST_SKIP() << "INT8/INT4 not supported: requires AVX-512F and "
+                        "AVX512-BF16";
+    }
     status_t ref_status = embag_kernel_test(table_tensor, indices_tensor,
             offsets_tensor, weights_tensor, output_tensor_ref, algo,
             padding_index, include_last_offset, is_weights, fp16_scale_bias,
@@ -707,6 +731,12 @@ TEST_P(TestEmbag, U4_F32) {
             offsets_tensor, weights_tensor, output_tensor, algo, padding_index,
             include_last_offset, is_weights, fp16_scale_bias, kernel,
             use_LOWOHA);
+    if (no_int8_int4_kernel(status)) {
+        free(table_tensor.get_raw_handle_unsafe());
+        table_tensor.reset();
+        GTEST_SKIP() << "INT8/INT4 not supported: requires AVX-512F and "
+                        "AVX512-BF16";
+    }
     status_t ref_status = embag_kernel_test(table_tensor, indices_tensor,
             offsets_tensor, weights_tensor, output_tensor_ref, algo,
             padding_index, include_last_offset, is_weights, fp16_scale_bias,
@@ -752,6 +782,12 @@ TEST_P(TestEmbag, U4_BF16) {
             offsets_tensor, weights_tensor, output_tensor, algo, padding_index,
             include_last_offset, is_weights, fp16_scale_bias, kernel,
             use_LOWOHA);
+    if (no_int8_int4_kernel(status)) {
+        free(table_tensor.get_raw_handle_unsafe());
+        table_tensor.reset();
+        GTEST_SKIP() << "INT8/INT4 not supported: requires AVX-512F and "
+                        "AVX512-BF16";
+    }
     status_t ref_status = embag_kernel_test(table_tensor, indices_tensor,
             offsets_tensor, weights_tensor, output_tensor_ref, algo,
             padding_index, include_last_offset, is_weights, fp16_scale_bias,
@@ -896,3 +932,216 @@ TEST(EmbagFbgemm, PaddedSumSkipsPaddingRow) {
  */
 INSTANTIATE_TEST_SUITE_P(
         EmbeddingBag, TestEmbag, ::testing::ValuesIn(embag_test));
+
+namespace {
+
+// Sets ZENDNNL_EMBAG_ISA for its lifetime. Not thread-safe: setenv/getenv
+// are racy across threads. Fine for the gtests binary since tests run
+// serially within the process.
+class scoped_embag_isa {
+public:
+    explicit scoped_embag_isa(const char *value) {
+        if (const char *prev = std::getenv(kEnvName)) {
+            prev_value_ = prev;
+            had_prev_ = true;
+        }
+        setenv(kEnvName, value, /*overwrite=*/1);
+    }
+    ~scoped_embag_isa() {
+        if (had_prev_) {
+            setenv(kEnvName, prev_value_.c_str(), /*overwrite=*/1);
+        } else {
+            unsetenv(kEnvName);
+        }
+    }
+    scoped_embag_isa(const scoped_embag_isa &) = delete;
+    scoped_embag_isa &operator=(const scoped_embag_isa &) = delete;
+
+private:
+    static constexpr const char *kEnvName = "ZENDNNL_EMBAG_ISA";
+    std::string prev_value_;
+    bool had_prev_ = false;
+};
+
+bool can_run_avx2_embag_kernel() {
+    const platform_info_t &platform = zendnnl_platform_info();
+    return platform.get_avx2_status();
+}
+
+} // namespace
+
+/** @fn TEST
+ *  @brief With ZENDNNL_EMBAG_ISA=avx2 the LOWOHA path runs the AVX2 kernel
+ *         that CPUs without AVX-512 use. Compare it with the reference kernel
+ *         for every type it covers.
+ */
+TEST(EmbagIsa, Avx2KernelMatchesReference) {
+    if (!can_run_avx2_embag_kernel()) { GTEST_SKIP() << "Requires AVX2."; }
+    // 37 columns: four full 8-wide blocks plus a tail.
+    constexpr uint64_t num_embeddings = 100, embedding_dim = 37;
+    constexpr uint64_t num_bags = 8, num_indices = 40;
+    tensor_factory_t factory;
+    const data_type_t dtypes[] = {data_type_t::f32, data_type_t::bf16};
+    const auto dtype_name = [](data_type_t dtype) {
+        return dtype == data_type_t::f32 ? "f32" : "bf16";
+    };
+    // embag_algo_t::none is the embedding lookup.
+    const struct {
+        embag_algo_t algo;
+        const char *name;
+    } algos[] = {{embag_algo_t::sum, "sum"}, {embag_algo_t::mean, "mean"},
+            {embag_algo_t::max, "max"}, {embag_algo_t::none, "lookup"}};
+
+    for (data_type_t table_dtype : dtypes) {
+        for (data_type_t output_dtype : dtypes) {
+            for (const auto &algo_case : algos) {
+                const embag_algo_t algo = algo_case.algo;
+                const bool lookup = (algo == embag_algo_t::none);
+                const uint64_t rows = lookup ? num_indices : num_bags;
+                auto table = factory.uniform_dist_tensor(
+                        {num_embeddings, embedding_dim}, table_dtype, 2.0f);
+                auto indices = factory.random_indices_tensor(
+                        {num_indices}, num_embeddings, data_type_t::s64);
+                auto offsets = factory.random_offsets_tensor({num_bags},
+                        num_indices, data_type_t::s64,
+                        /*include_last_offset_=*/false);
+                tensor_t weights;
+                auto output = factory.zero_tensor(
+                        {rows, embedding_dim}, output_dtype);
+                auto output_ref = factory.zero_tensor(
+                        {rows, embedding_dim}, output_dtype);
+
+                const auto run = [&](tensor_t &out, embag_kernel_t kernel) {
+                    return lookup ? embedding_kernel_test(table, indices,
+                                            weights, out, /*padding_index=*/-1,
+                                            /*is_weights=*/false,
+                                            /*fp16_scale_bias=*/true, kernel,
+                                            /*use_LOWOHA=*/true)
+                                  : embag_kernel_test(table, indices, offsets,
+                                            weights, out, algo,
+                                            /*padding_index=*/-1,
+                                            /*include_last_offset=*/false,
+                                            /*is_weights=*/false,
+                                            /*fp16_scale_bias=*/true, kernel,
+                                            /*use_LOWOHA=*/true);
+                };
+                status_t status;
+                {
+                    scoped_embag_isa isa("avx2");
+                    status = run(output, embag_kernel_t::native);
+                }
+                const status_t ref_status
+                        = run(output_ref, embag_kernel_t::reference);
+
+                bool is_test_successful = (status == status_t::success
+                        && ref_status == status_t::success);
+                if (is_test_successful) {
+                    compare_tensor_2D(output, output_ref, rows, embedding_dim,
+                            output_dtype == data_type_t::f32 ? EMBAG_F32_TOL
+                                                             : EMBAG_BF16_TOL,
+                            is_test_successful);
+                }
+                EXPECT_TRUE(is_test_successful)
+                        << dtype_name(table_dtype) << " table, "
+                        << dtype_name(output_dtype) << " output, "
+                        << algo_case.name;
+            }
+        }
+    }
+}
+
+/** @fn TEST
+ *  @brief A wide embedding with fewer bags than threads gives the AVX2 kernel
+ *         workers with no row. Only the workers with a bag may allocate
+ *         accumulator scratch, and the result must still be right.
+ */
+TEST(EmbagIsa, Avx2SparseBatchWideEmbedding) {
+    if (!can_run_avx2_embag_kernel()) { GTEST_SKIP() << "Requires AVX2."; }
+    scoped_embag_isa isa("avx2");
+
+    // 65536 columns is 8192 accumulator registers (256 KiB) per worker.
+    // The width is not a multiple of 8 so the tail block is covered too.
+    constexpr uint64_t rows = 8, dim = 65536 + 3, num_indices = 3;
+    constexpr int32_t many_threads = 48;
+    std::vector<float> table(rows * dim);
+    for (uint64_t r = 0; r < rows; ++r) {
+        for (uint64_t c = 0; c < dim; ++c) {
+            table[r * dim + c] = static_cast<float>(r + 1)
+                    + static_cast<float>(c % 7) * 0.25f;
+        }
+    }
+    const std::vector<int64_t> indices = {1, 4, 6};
+    const std::vector<int64_t> offsets = {0};
+
+    embag_params_t params;
+    params.dtypes.table = data_type_t::f32;
+    params.dtypes.output = data_type_t::f32;
+    params.algo = embag_algo_t::sum;
+    params.num_embeddings = rows;
+    params.embedding_dim = dim;
+    params.num_indices = num_indices;
+    params.num_bags = 1;
+    params.dst_stride = dim;
+    params.kernel = embag_kernel_t::native;
+    params.num_threads = many_threads;
+
+    std::vector<float> out(dim, -1.0f);
+    ASSERT_EQ(embedding_bag_direct(table.data(), indices.data(), offsets.data(),
+                      nullptr, out.data(), params),
+            status_t::success);
+    for (uint64_t c = 0; c < dim; ++c) {
+        float expected = 0.0f;
+        for (int64_t idx : indices) {
+            expected += table[idx * dim + c];
+        }
+        ASSERT_NEAR(out[c], expected, 1e-4f) << "column " << c;
+    }
+}
+
+/** @fn TEST
+ *  @brief When the AVX-512 kernels may not run, types the AVX2 kernel does
+ *         not cover return status_t::isa_unsupported instead of executing
+ *         AVX-512 code, and group_embedding_bag_direct fails before running
+ *         any of its tables.
+ */
+TEST(EmbagIsa, NoKernelReturnsIsaUnsupportedBeforeRunning) {
+    if (!can_run_avx2_embag_kernel()) { GTEST_SKIP() << "Requires AVX2."; }
+    scoped_embag_isa isa("avx2");
+
+    constexpr uint64_t rows = 16, dim = 8, num_indices = 4;
+    std::vector<float> f32_table(rows * dim, 1.0f);
+    // INT8 rows carry their FP32 scale and bias after the data. No kernel
+    // runs in this test, so the contents do not matter.
+    std::vector<int8_t> s8_table(rows * (dim + 2 * sizeof(float)), 1);
+    std::vector<int64_t> indices = {0, 1, 2, 3};
+    std::vector<int64_t> offsets = {0};
+    std::vector<float> f32_out(dim, -1.0f);
+    std::vector<float> s8_out(dim, -1.0f);
+
+    embag_params_t f32_params;
+    f32_params.dtypes.table = data_type_t::f32;
+    f32_params.dtypes.output = data_type_t::f32;
+    f32_params.algo = embag_algo_t::sum;
+    f32_params.num_embeddings = rows;
+    f32_params.embedding_dim = dim;
+    f32_params.num_indices = num_indices;
+    f32_params.num_bags = 1;
+    f32_params.dst_stride = dim;
+    f32_params.kernel = embag_kernel_t::native;
+    embag_params_t s8_params = f32_params;
+    s8_params.dtypes.table = data_type_t::s8;
+    s8_params.fp16_scale_bias = false;
+
+    EXPECT_EQ(embedding_bag_direct(s8_table.data(), indices.data(),
+                      offsets.data(), nullptr, s8_out.data(), s8_params),
+            status_t::isa_unsupported);
+
+    EXPECT_EQ(group_embedding_bag_direct({f32_table.data(), s8_table.data()},
+                      {indices.data(), indices.data()},
+                      {offsets.data(), offsets.data()}, {nullptr, nullptr},
+                      {f32_out.data(), s8_out.data()}, {f32_params, s8_params}),
+            status_t::isa_unsupported);
+    // The FP32 table has a kernel but must not have run.
+    EXPECT_TRUE(std::all_of(f32_out.begin(), f32_out.end(),
+            [](float v) { return v == -1.0f; }));
+}

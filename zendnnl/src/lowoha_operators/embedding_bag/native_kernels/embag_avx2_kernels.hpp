@@ -28,7 +28,9 @@ using namespace zendnnl::common;
 // embag_avx2_kernels.cpp.
 template <typename InType, typename IndexType, typename OffsetType,
         typename OutType>
-void embag_avx2_kernel(const InType *input, const float *weights,
+// Returns status_t::failure when a worker could not allocate its accumulator
+// scratch; the output is then incomplete.
+status_t embag_avx2_kernel(const InType *input, const float *weights,
         const IndexType *indices, const OffsetType *offsets, OutType *dst,
         int64_t width, int64_t indsz, int64_t offsz, int64_t padidx,
         bool is_weights, embag_algo_t algo, int64_t dst_stride,

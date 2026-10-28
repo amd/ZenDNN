@@ -35,10 +35,11 @@
 namespace zendnnl {
 namespace ops {
 
-// Prefetch helper for input rows (same as AVX512 version)
+// Prefetch helper for input rows. Named apart from the AVX-512 header's
+// maybe_prefetch_input, which has the same signature but a different body.
 template <typename T>
-inline void maybe_prefetch_input(
-        const T *input, int32_t idx, int64_t width, int32_t padidx) {
+inline void avx2_maybe_prefetch_input(
+        const T *input, int64_t idx, int64_t width, int64_t padidx) {
 #if ENABLE_PREFETCH
     if (idx != padidx) {
         _mm_prefetch(reinterpret_cast<const char *>(&input[idx * width]),
@@ -47,9 +48,9 @@ inline void maybe_prefetch_input(
 #endif
 }
 
-// Prefetch helper for weights (same as AVX512 version)
-inline void maybe_prefetch_weight(
-        const float *weights, int32_t i, int32_t end) {
+// Prefetch helper for weights (see avx2_maybe_prefetch_input)
+inline void avx2_maybe_prefetch_weight(
+        const float *weights, int64_t i, int64_t end) {
 #if ENABLE_PREFETCH
     const float *pf_wt_ptr = (i < end) ? &weights[i] : &weights[end - 1];
     _mm_prefetch(reinterpret_cast<const char *>(pf_wt_ptr), _MM_HINT_T0);
@@ -107,8 +108,11 @@ inline void maybe_prefetch_weight(
 
 */
 
+// The BF16 helpers below are AVX2 only: this kernel runs on CPUs without
+// AVX-512 (e.g. AMD Zen 3), where any AVX-512 encoding faults.
+
 // Helper function for BF16 to FP32 conversion
-ZENDNNL_TARGET("avx2,avx512vl")
+ZENDNNL_TARGET("avx2")
 inline __m256 bf16_to_fp32_avx2(const uint16_t *bf16_data) {
     // Load 8 BF16 values (16-bit each)
     __m128i bf16_vec
@@ -121,16 +125,33 @@ inline __m256 bf16_to_fp32_avx2(const uint16_t *bf16_data) {
     return _mm256_castsi256_ps(fp32_int);
 }
 
-// Helper function for FP32 to BF16 conversion
-ZENDNNL_TARGET("avx2,avx512vl")
+// Helper function for FP32 to BF16 conversion. Rounds to nearest even and
+// turns NaNs into quiet NaNs, like _mm512_cvtneps_pbh in the AVX-512 kernel,
+// but keeps subnormals instead of flushing them to zero.
+ZENDNNL_TARGET("avx2")
 inline void fp32_to_bf16_avx2(__m256 fp32_vec, uint16_t *bf16_data) {
-    // Convert to int32, then extract upper 16 bits
-    __m256i fp32_int = _mm256_castps_si256(fp32_vec);
-    __m256i bf16_32 = _mm256_srli_epi32(fp32_int, 16);
+    const __m256i fp32_int = _mm256_castps_si256(fp32_vec);
+    // x + 0x7FFF + ((x >> 16) & 1), keeping the upper 16 bits
+    const __m256i lsb = _mm256_and_si256(
+            _mm256_srli_epi32(fp32_int, 16), _mm256_set1_epi32(1));
+    const __m256i bias = _mm256_add_epi32(lsb, _mm256_set1_epi32(0x7FFF));
+    __m256i bf16_32 = _mm256_srli_epi32(_mm256_add_epi32(fp32_int, bias), 16);
 
-    // Pack to 16-bit and store
-    __m128i bf16_vec = _mm256_cvtepi32_epi16(bf16_32);
-    _mm_storeu_si128(reinterpret_cast<__m128i *>(bf16_data), bf16_vec);
+    // The rounding add can carry a NaN payload into the exponent or the sign,
+    // so NaNs keep their upper bits with the quiet bit set instead.
+    const __m256i is_nan = _mm256_castps_si256(
+            _mm256_cmp_ps(fp32_vec, fp32_vec, _CMP_UNORD_Q));
+    const __m256i quiet_nan = _mm256_or_si256(
+            _mm256_srli_epi32(fp32_int, 16), _mm256_set1_epi32(0x0040));
+    bf16_32 = _mm256_blendv_epi8(bf16_32, quiet_nan, is_nan);
+
+    // Every 32-bit lane now holds at most 0xFFFF, so the unsigned-saturating
+    // pack is exact. It packs within 128-bit lanes; qwords 0 and 2 hold the
+    // eight results in order.
+    const __m256i packed = _mm256_packus_epi32(bf16_32, bf16_32);
+    const __m256i ordered = _mm256_permute4x64_epi64(packed, 0x08);
+    _mm_storeu_si128(reinterpret_cast<__m128i *>(bf16_data),
+            _mm256_castsi256_si128(ordered));
 }
 
 template <typename InType, typename IndexType, typename OffsetType,
@@ -157,161 +178,169 @@ void embag_avx2_kernel(
     const int tail = width % simd_width;
     constexpr int prefetch_distance = 8;
     bool is_embedding = (offsets == nullptr) ? true : false;
-    int outer_loop = is_embedding ? indsz : offsz;
+    int64_t outer_loop = is_embedding ? indsz : offsz;
 
-#pragma omp parallel for
-    for (int oi = 0; oi < outer_loop; ++oi) {
-        int64_t start = is_embedding ? oi : offsets[oi];
-        int64_t end = is_embedding
-                ? oi + 1
-                : (include_last_offset
-                                  ? offsets[oi + 1]
-                                  : (oi < offsz - 1 ? offsets[oi + 1] : indsz));
-        int64_t dst_offset = oi * dst_stride;
-        bool first_valid_index = true;
-        float wt_sum = 0.0f;
+    // Accumulator registers for SIMD blocks, allocated once per thread
+    const int acc_size = full_blocks + (tail > 0 ? 1 : 0);
 
-        // Accumulator registers for SIMD blocks
-        int acc_size = full_blocks + (tail > 0 ? 1 : 0);
+#pragma omp parallel
+    {
         __m256 *acc = (__m256 *)_mm_malloc(sizeof(__m256) * acc_size, 32);
 
-        for (int i = 0; i < acc_size; ++i) {
-            acc[i] = _mm256_setzero_ps();
-        }
+#pragma omp for
+        for (int64_t oi = 0; oi < outer_loop; ++oi) {
+            int64_t start = is_embedding ? oi : offsets[oi];
+            int64_t end = is_embedding
+                    ? oi + 1
+                    : (include_last_offset ? offsets[oi + 1]
+                                           : (oi < offsz - 1 ? offsets[oi + 1]
+                                                             : indsz));
+            int64_t dst_offset = oi * dst_stride;
+            bool first_valid_index = true;
+            float wt_sum = 0.0f;
 
-        for (int i = start; i < end; ++i) {
-            int32_t pf_i = i + prefetch_distance;
-            int32_t pf_idx = (pf_i < end) ? indices[pf_i] : padidx;
-            maybe_prefetch_input(input, pf_idx, width, padidx);
-            if (is_weights) { maybe_prefetch_weight(weights, pf_i, end); }
-
-            int32_t idx = indices[i];
-            if (idx == padidx) { continue; }
-
-            float wt = is_weights ? weights[i] : 1.0f;
-            if (algo != embag_algo_t::max) { wt_sum += wt; }
-            int64_t input_offset = idx * width;
-            __m256 wt_vec = _mm256_set1_ps(wt);
-
-            // Process full SIMD blocks
-            for (int b = 0; b < full_blocks; ++b) {
-                __m256 in_vec;
-                if constexpr (std::is_same_v<InType, float>) {
-                    in_vec = _mm256_loadu_ps(
-                            &input[input_offset + b * simd_width]);
-                } else {
-                    // BF16 to FP32 conversion for AVX2
-                    in_vec = bf16_to_fp32_avx2(
-                            reinterpret_cast<const uint16_t *>(
-                                    &input[input_offset + b * simd_width]));
-                }
-
-                if (is_embedding) {
-                    acc[b] = in_vec;
-                } else {
-                    if (algo == embag_algo_t::max) {
-                        if (first_valid_index) {
-                            acc[b] = in_vec;
-                        } else {
-                            acc[b] = _mm256_max_ps(acc[b], in_vec);
-                        }
-                    } else {
-                        acc[b] = _mm256_fmadd_ps(in_vec, wt_vec, acc[b]);
-                    }
-                }
+            for (int i = 0; i < acc_size; ++i) {
+                acc[i] = _mm256_setzero_ps();
             }
 
-            // Process tail elements
-            if (tail > 0) {
-                float tail_acc[simd_width] = {0};
-                float tail_input[simd_width] = {0};
-
-                // Load tail elements
-                for (int t = 0; t < tail && t < simd_width; ++t) {
-                    if constexpr (std::is_same_v<InType, float>) {
-                        tail_input[t] = input[input_offset
-                                + full_blocks * simd_width + t];
-                    } else {
-                        // Manual BF16 to FP32 conversion
-                        uint16_t bf16_val = reinterpret_cast<const uint16_t *>(
-                                &input[input_offset + full_blocks * simd_width
-                                        + t])[0];
-                        uint32_t fp32_val = static_cast<uint32_t>(bf16_val)
-                                << 16;
-                        std::memcpy(&tail_input[t], &fp32_val, sizeof(float));
-                    }
+            for (int64_t i = start; i < end; ++i) {
+                int64_t pf_i = i + prefetch_distance;
+                int64_t pf_idx = (pf_i < end) ? indices[pf_i] : padidx;
+                avx2_maybe_prefetch_input(input, pf_idx, width, padidx);
+                if (is_weights) {
+                    avx2_maybe_prefetch_weight(weights, pf_i, end);
                 }
 
-                if (is_embedding) {
-                    // Load back to accumulator
-                    acc[full_blocks] = _mm256_loadu_ps(tail_input);
-                } else {
-                    // Extract current accumulator values
-                    _mm256_storeu_ps(tail_acc, acc[full_blocks]);
+                int64_t idx = indices[i];
+                if (idx == padidx) { continue; }
 
-                    for (int t = 0; t < tail; ++t) {
+                float wt = is_weights ? weights[i] : 1.0f;
+                if (algo != embag_algo_t::max) { wt_sum += wt; }
+                int64_t input_offset = idx * width;
+                __m256 wt_vec = _mm256_set1_ps(wt);
+
+                // Process full SIMD blocks
+                for (int b = 0; b < full_blocks; ++b) {
+                    __m256 in_vec;
+                    if constexpr (std::is_same_v<InType, float>) {
+                        in_vec = _mm256_loadu_ps(
+                                &input[input_offset + b * simd_width]);
+                    } else {
+                        // BF16 to FP32 conversion for AVX2
+                        in_vec = bf16_to_fp32_avx2(
+                                reinterpret_cast<const uint16_t *>(
+                                        &input[input_offset + b * simd_width]));
+                    }
+
+                    if (is_embedding) {
+                        acc[b] = in_vec;
+                    } else {
                         if (algo == embag_algo_t::max) {
                             if (first_valid_index) {
-                                tail_acc[t] = tail_input[t];
+                                acc[b] = in_vec;
                             } else {
-                                tail_acc[t]
-                                        = std::max(tail_acc[t], tail_input[t]);
+                                acc[b] = _mm256_max_ps(acc[b], in_vec);
                             }
                         } else {
-                            tail_acc[t] += wt * tail_input[t];
+                            acc[b] = _mm256_fmadd_ps(in_vec, wt_vec, acc[b]);
+                        }
+                    }
+                }
+
+                // Process tail elements
+                if (tail > 0) {
+                    float tail_acc[simd_width] = {0};
+                    float tail_input[simd_width] = {0};
+
+                    // Load tail elements
+                    for (int t = 0; t < tail && t < simd_width; ++t) {
+                        if constexpr (std::is_same_v<InType, float>) {
+                            tail_input[t] = input[input_offset
+                                    + full_blocks * simd_width + t];
+                        } else {
+                            // Manual BF16 to FP32 conversion
+                            uint16_t bf16_val
+                                    = reinterpret_cast<const uint16_t *>(
+                                            &input[input_offset
+                                                    + full_blocks * simd_width
+                                                    + t])[0];
+                            uint32_t fp32_val = static_cast<uint32_t>(bf16_val)
+                                    << 16;
+                            std::memcpy(
+                                    &tail_input[t], &fp32_val, sizeof(float));
                         }
                     }
 
-                    // Load back to accumulator
-                    acc[full_blocks] = _mm256_loadu_ps(tail_acc);
+                    if (is_embedding) {
+                        // Load back to accumulator
+                        acc[full_blocks] = _mm256_loadu_ps(tail_input);
+                    } else {
+                        // Extract current accumulator values
+                        _mm256_storeu_ps(tail_acc, acc[full_blocks]);
+
+                        for (int t = 0; t < tail; ++t) {
+                            if (algo == embag_algo_t::max) {
+                                if (first_valid_index) {
+                                    tail_acc[t] = tail_input[t];
+                                } else {
+                                    tail_acc[t] = std::max(
+                                            tail_acc[t], tail_input[t]);
+                                }
+                            } else {
+                                tail_acc[t] += wt * tail_input[t];
+                            }
+                        }
+
+                        // Load back to accumulator
+                        acc[full_blocks] = _mm256_loadu_ps(tail_acc);
+                    }
+                }
+                first_valid_index = false;
+            }
+
+            if (!is_embedding) {
+                // Normalize for mean reduction
+                if (algo == embag_algo_t::mean && wt_sum > 0.0f) {
+                    __m256 div_vec = _mm256_set1_ps(1.0f / wt_sum);
+                    for (int b = 0; b < full_blocks; ++b) {
+                        acc[b] = _mm256_mul_ps(acc[b], div_vec);
+                    }
+                    if (tail > 0) {
+                        acc[full_blocks]
+                                = _mm256_mul_ps(acc[full_blocks], div_vec);
+                    }
                 }
             }
-            first_valid_index = false;
-        }
 
-        if (!is_embedding) {
-            // Normalize for mean reduction
-            if (algo == embag_algo_t::mean && wt_sum > 0.0f) {
-                __m256 div_vec = _mm256_set1_ps(1.0f / wt_sum);
-                for (int b = 0; b < full_blocks; ++b) {
-                    acc[b] = _mm256_mul_ps(acc[b], div_vec);
-                }
-                if (tail > 0) {
-                    acc[full_blocks] = _mm256_mul_ps(acc[full_blocks], div_vec);
+            // Store full block elements
+            for (int b = 0; b < full_blocks; ++b) {
+                if constexpr (std::is_same_v<OutType, float>) {
+                    _mm256_storeu_ps(&dst[dst_offset + b * simd_width], acc[b]);
+                } else {
+                    // FP32 to BF16 conversion for AVX2
+                    fp32_to_bf16_avx2(acc[b],
+                            reinterpret_cast<uint16_t *>(
+                                    &dst[dst_offset + b * simd_width]));
                 }
             }
-        }
 
-        // Store full block elements
-        for (int b = 0; b < full_blocks; ++b) {
-            if constexpr (std::is_same_v<OutType, float>) {
-                _mm256_storeu_ps(&dst[dst_offset + b * simd_width], acc[b]);
-            } else {
-                // FP32 to BF16 conversion for AVX2
-                fp32_to_bf16_avx2(acc[b],
-                        reinterpret_cast<uint16_t *>(
-                                &dst[dst_offset + b * simd_width]));
+            // Store tail elements
+            if (tail > 0) {
+                if constexpr (std::is_same_v<OutType, float>) {
+                    float tail_result[simd_width];
+                    _mm256_storeu_ps(tail_result, acc[full_blocks]);
+                    std::memcpy(&dst[dst_offset + full_blocks * simd_width],
+                            tail_result, tail * sizeof(float));
+                } else {
+                    uint16_t tail_result_bf16[simd_width];
+                    fp32_to_bf16_avx2(acc[full_blocks], tail_result_bf16);
+                    std::memcpy(&dst[dst_offset + full_blocks * simd_width],
+                            tail_result_bf16, tail * sizeof(uint16_t));
+                }
             }
         }
-
-        // Store tail elements
-        if (tail > 0) {
-            if constexpr (std::is_same_v<OutType, float>) {
-                float tail_result[simd_width];
-                _mm256_storeu_ps(tail_result, acc[full_blocks]);
-                std::memcpy(&dst[dst_offset + full_blocks * simd_width],
-                        tail_result, tail * sizeof(float));
-            } else {
-                uint16_t tail_result_bf16[simd_width];
-                fp32_to_bf16_avx2(acc[full_blocks], tail_result_bf16);
-                std::memcpy(&dst[dst_offset + full_blocks * simd_width],
-                        tail_result_bf16, tail * sizeof(uint16_t));
-            }
-        }
-
-        // Free allocated memory
         _mm_free(acc);
-    }
+    } // end omp parallel
 }
 
 } //namespace ops

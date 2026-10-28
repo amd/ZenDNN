@@ -391,6 +391,12 @@ TEST_P(TestEmbedding, INT8_F32) {
     status_t status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor, padding_index, is_weights,
             fp16_scale_bias, kernel, use_LOWOHA);
+    if (no_int8_int4_kernel(status)) {
+        free(table_tensor.get_raw_handle_unsafe());
+        table_tensor.reset();
+        GTEST_SKIP() << "INT8/INT4 not supported: requires AVX-512F and "
+                        "AVX512-BF16";
+    }
     status_t ref_status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor_ref, padding_index, is_weights,
             fp16_scale_bias, embag_kernel_t::reference, use_LOWOHA);
@@ -432,6 +438,12 @@ TEST_P(TestEmbedding, INT8_BF16) {
     status_t status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor, padding_index, is_weights,
             fp16_scale_bias, kernel, use_LOWOHA);
+    if (no_int8_int4_kernel(status)) {
+        free(table_tensor.get_raw_handle_unsafe());
+        table_tensor.reset();
+        GTEST_SKIP() << "INT8/INT4 not supported: requires AVX-512F and "
+                        "AVX512-BF16";
+    }
     status_t ref_status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor_ref, padding_index, is_weights,
             fp16_scale_bias, embag_kernel_t::reference, use_LOWOHA);
@@ -517,6 +529,12 @@ TEST_P(TestEmbedding, S4_F32) {
     status_t status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor, padding_index, is_weights,
             fp16_scale_bias, kernel, use_LOWOHA);
+    if (no_int8_int4_kernel(status)) {
+        free(table_tensor.get_raw_handle_unsafe());
+        table_tensor.reset();
+        GTEST_SKIP() << "INT8/INT4 not supported: requires AVX-512F and "
+                        "AVX512-BF16";
+    }
     status_t ref_status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor_ref, padding_index, is_weights,
             fp16_scale_bias, embag_kernel_t::reference, use_LOWOHA);
@@ -558,6 +576,12 @@ TEST_P(TestEmbedding, S4_BF16) {
     status_t status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor, padding_index, is_weights,
             fp16_scale_bias, kernel, use_LOWOHA);
+    if (no_int8_int4_kernel(status)) {
+        free(table_tensor.get_raw_handle_unsafe());
+        table_tensor.reset();
+        GTEST_SKIP() << "INT8/INT4 not supported: requires AVX-512F and "
+                        "AVX512-BF16";
+    }
     status_t ref_status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor_ref, padding_index, is_weights,
             fp16_scale_bias, embag_kernel_t::reference, use_LOWOHA);
@@ -643,6 +667,12 @@ TEST_P(TestEmbedding, U4_F32) {
     status_t status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor, padding_index, is_weights,
             fp16_scale_bias, kernel, use_LOWOHA);
+    if (no_int8_int4_kernel(status)) {
+        free(table_tensor.get_raw_handle_unsafe());
+        table_tensor.reset();
+        GTEST_SKIP() << "INT8/INT4 not supported: requires AVX-512F and "
+                        "AVX512-BF16";
+    }
     status_t ref_status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor_ref, padding_index, is_weights,
             fp16_scale_bias, embag_kernel_t::reference, use_LOWOHA);
@@ -684,6 +714,12 @@ TEST_P(TestEmbedding, U4_BF16) {
     status_t status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor, padding_index, is_weights,
             fp16_scale_bias, kernel, use_LOWOHA);
+    if (no_int8_int4_kernel(status)) {
+        free(table_tensor.get_raw_handle_unsafe());
+        table_tensor.reset();
+        GTEST_SKIP() << "INT8/INT4 not supported: requires AVX-512F and "
+                        "AVX512-BF16";
+    }
     status_t ref_status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor_ref, padding_index, is_weights,
             fp16_scale_bias, embag_kernel_t::reference, use_LOWOHA);

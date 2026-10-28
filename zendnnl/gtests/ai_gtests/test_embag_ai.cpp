@@ -277,6 +277,19 @@ protected:
         return EmbagTestUtils::get_relative_tolerance(output_dtype);
     }
 
+    // Whether status is the expected isa_unsupported of an INT8 or INT4 table.
+    // They have no AVX2 kernel, so the cases FBGEMM does not take have none
+    // when the native AVX-512 kernels may not run: the CPU lacks
+    // AVX-512F or AVX512-BF16, or ZENDNNL_EMBAG_ISA=avx2.
+    static bool no_int8_int4_kernel(data_type_t table_dtype, status_t status) {
+        const bool int8_int4 = table_dtype == data_type_t::s8
+                || table_dtype == data_type_t::s4
+                || table_dtype == data_type_t::u4;
+        return int8_int4 && status == status_t::isa_unsupported
+                && (!can_use_avx512_embag_kernel()
+                        || embag_isa_env_requests_avx2());
+    }
+
     // -----------------------------------------------------------------------------
     // run_accuracy_test
     //
@@ -306,6 +319,10 @@ protected:
         status_t test_status = run_embag_test(tensors.table, tensors.indices,
                 tensors.offsets, tensors.output, params);
         AITestUtils::debug_print("[AI_EMBAG_DEBUG] ZenDNNL kernel finished.");
+        if (no_int8_int4_kernel(table_dtype, test_status)) {
+            GTEST_SKIP() << "INT8/INT4 not supported: requires AVX-512F "
+                            "and AVX512-BF16";
+        }
 
         if (kernel_supported) {
             EXPECT_EQ(test_status, status_t::success)
@@ -382,6 +399,10 @@ protected:
 
         status_t test_status = run_embag_test(tensors.table, tensors.indices,
                 tensors.offsets, tensors.output, params);
+        if (no_int8_int4_kernel(table_dtype, test_status)) {
+            GTEST_SKIP() << "INT8/INT4 not supported: requires AVX-512F "
+                            "and AVX512-BF16";
+        }
 
         if (params.expect_success) {
             EXPECT_EQ(test_status, status_t::success)
@@ -419,6 +440,10 @@ protected:
 
         status_t test_status = run_embag_test(tensors.table, tensors.indices,
                 tensors.offsets, tensors.output, params);
+        if (no_int8_int4_kernel(table_dtype, test_status)) {
+            GTEST_SKIP() << "INT8/INT4 not supported: requires AVX-512F "
+                            "and AVX512-BF16";
+        }
 
         if (params.expect_success) {
             EXPECT_EQ(test_status, status_t::success)
@@ -537,6 +562,13 @@ protected:
 
         AITestUtils::debug_print(
                 "[AI_EMBAG_DEBUG] group_embedding_bag_direct finished.");
+
+        // group_embedding_bag_direct fails the whole call when any table has
+        // no kernel, so one INT8/INT4 table is enough to skip the group.
+        if (no_int8_int4_kernel(table_dtype, status)) {
+            GTEST_SKIP() << "INT8/INT4 not supported: requires AVX-512F "
+                            "and AVX512-BF16";
+        }
 
         if (params.expect_success) {
             EXPECT_EQ(status, status_t::success)

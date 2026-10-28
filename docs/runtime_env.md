@@ -306,6 +306,13 @@ The auto-tuner automatically selects the best-performing algorithm for matrix mu
 | `ZENDNNL_EMBAG_THREAD_ALGO` | Selects the Embedding Bag threading algorithm to use | `1` (table_threaded) | `0` (dynamic_dispatch), `1` (table_threaded), `2` (batch_threaded), `3` (ccd_threaded), `4` (hybrid_threaded), `5` or `auto` (auto_tuner). The integer maps directly to the `eb_thread_algo_t` enum; `dynamic_dispatch` and `auto_tuner` both fall back to `table_threaded` at execution time.
 ---
 
+## Embedding Bag ISA Selection
+
+| Variable | Description | Default | Valid Values |
+|----------|-------------|---------|--------------|
+| `ZENDNNL_EMBAG_ISA` | Makes the LowOHA Embedding Bag run the AVX2 kernel instead of the native AVX-512 kernels on CPUs that support both, to test the path that CPUs without AVX-512 (e.g. AMD Zen 2 and Zen 3) take. Operations the AVX2 kernel does not cover (FP16, INT8 and INT4 tables) then return `status_t::isa_unsupported` unless they run on the reference kernel, which this variable does not affect. An unsigned INT4 table (`u4`) also runs on FBGEMM when the build has it (`-DZENDNNL_DEPENDS_FBGEMM=ON`) and the operation is a sum with FP16 scale/bias; FBGEMM does not take signed INT8 or INT4 tables. FP16 tables and outputs never do: they are rejected with `status_t::isa_unsupported` on a CPU without AVX512-FP16 before a backend is selected, and FBGEMM has no FP16 kernel. Read on every call. | unset (selected by CPU) | `avx2`
+---
+
 ## Group MatMul Deep-K Blocking
 
 | Variable | Description | Default | Valid Values |

@@ -367,17 +367,28 @@ status_t embag_impl_t::kernel_factory() {
 
         //get forced kernel if any
         if (forced_kernel.empty()) {
+            // The AVX-512 kernels are compiled for AVX-512F, BW, VL, and
+            // AVX512-BF16. BW and VL are implied by AVX-512F together with
+            // AVX512-BF16, so only those two are checked. The AVX2 kernels
+            // are compiled for avx2 and fma; FMA3 is implied by AVX2.
+            const bool avx512_kernels = platform_info.get_avx512f_status()
+                    && platform_info.get_avx512_bf16_status();
+            const bool avx2_kernels = platform_info.get_avx2_status();
 
             if (table_dtype == data_type_t::f32) {
-                if (platform_info.get_avx512f_status()) {
+                if (avx512_kernels) {
                     kernel = std::shared_ptr<embag_f32_avx512_kernel_t>(
                             get_embag_f32_avx512_kernel());
-                } else {
+                } else if (avx2_kernels) {
                     kernel = std::shared_ptr<embag_f32_avx2_kernel_t>(
                             get_embag_f32_avx2_kernel());
+                } else {
+                    apilog_error("<", obj_name,
+                            "> FP32 kernel requires AVX2 support.");
+                    return status_t::isa_unsupported;
                 }
             } else if (table_dtype == data_type_t::bf16) {
-                if (platform_info.get_avx512f_status()) {
+                if (avx512_kernels) {
 //TODO:To implement BF16 kernel for gcc<12
 #if __GNUC__ >= 12
                     kernel = std::shared_ptr<embag_bf16_avx512_kernel_t>(
@@ -386,9 +397,13 @@ status_t embag_impl_t::kernel_factory() {
                     kernel = std::shared_ptr<embag_bf16_avx2_kernel_t>(
                             get_embag_bf16_avx2_kernel());
 #endif
-                } else {
+                } else if (avx2_kernels) {
                     kernel = std::shared_ptr<embag_bf16_avx2_kernel_t>(
                             get_embag_bf16_avx2_kernel());
+                } else {
+                    apilog_error("<", obj_name,
+                            "> BF16 kernel requires AVX2 support.");
+                    return status_t::isa_unsupported;
                 }
             } else if (table_dtype == data_type_t::f16) {
                 if (platform_info.get_avx512_f16_status()) {
@@ -402,9 +417,14 @@ status_t embag_impl_t::kernel_factory() {
             } else if (table_dtype == data_type_t::s8
                     || table_dtype == data_type_t::s4
                     || table_dtype == data_type_t::u4) {
-                if (platform_info.get_avx512f_status()) {
+                if (avx512_kernels) {
                     kernel = std::shared_ptr<embag_int8_int4_avx512_kernel_t>(
                             get_embag_int8_int4_avx512_kernel());
+                } else {
+                    apilog_error("<", obj_name,
+                            "> INT8/INT4 kernel requires AVX-512F and "
+                            "AVX512-BF16 support.");
+                    return status_t::isa_unsupported;
                 }
             } else {
                 apilog_error("<", obj_name, "> kernel unimplemented.");

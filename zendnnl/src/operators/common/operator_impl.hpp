@@ -338,7 +338,11 @@ status_t operator_impl_t<OP_CONTEXT_T>::execute() {
     std::string execution_info = std::string();
     try {
         /* kernel factory assigns a kernel */
-        if (kernel_factory() != status_t::success) {
+        status_t factory_status = kernel_factory();
+        if (factory_status == status_t::isa_unsupported) {
+            return status_t::isa_unsupported;
+        }
+        if (factory_status != status_t::success) {
             apilog_error("<", obj_name, "> failed to generate kernel");
             return status_t::failure;
         }

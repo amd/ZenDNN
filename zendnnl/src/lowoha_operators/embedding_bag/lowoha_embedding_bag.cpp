@@ -77,13 +77,16 @@ status_t embedding_bag_direct(const void *table, const void *indices,
             return status_t::failure;
         }
 
+        const embag_backend_t backend
+                = select_embag_backend(params, embag_avx512_allowed());
+
         const int32_t omp_mt = thread_guard::max_threads();
         num_threads = resolve_num_threads(num_threads, omp_mt);
         thread_guard tg(num_threads, omp_mt);
 
         // Dispatch to the appropriate kernel
         status = dispatch_avx512_kernel(
-                table, indices, offsets, weights, dst, params);
+                table, indices, offsets, weights, dst, params, backend);
     }
 
     if (is_profile) { profiler.tbp_stop(); }
@@ -153,11 +156,15 @@ status_t group_embedding_bag_direct(const std::vector<const void *> &tables,
         return status_t::failure;
     }
 
-    // Resolve each table before the ISA preflight. The scalar reference
-    // kernel does not use AVX512-FP16 (embedding_bag_direct already skips
-    // this gate for it). FBGEMM and native F16 do.
+    // Resolve each table and pick its kernel before running any of them, so
+    // a table that no kernel this CPU can run covers fails the call before
+    // other tables write their output. The scalar reference kernel does not
+    // use AVX512-FP16 (embedding_bag_direct already skips this gate for it).
+    // FBGEMM and native F16 do.
     std::vector<embag_params_t> mutable_params = params;
+    std::vector<embag_backend_t> backends(num_tables);
     const bool has_f16_isa = zendnnl_platform_info().get_avx512_f16_status();
+    const bool avx512_allowed = embag_avx512_allowed();
     for (int i = 0; i < num_tables; ++i) {
         kernel_select(mutable_params[i]);
         const bool is_f16 = (mutable_params[i].dtypes.table == data_type_t::f16
@@ -170,6 +177,15 @@ status_t group_embedding_bag_direct(const std::vector<const void *> &tables,
                     "on this platform (requires AVX512-FP16). Failing table "
                     "index = ",
                     i);
+            return status_t::isa_unsupported;
+        }
+        backends[i] = select_embag_backend(mutable_params[i], avx512_allowed);
+        if (backends[i] == embag_backend_t::unsupported) {
+            log_error("group_embedding_bag_direct: no kernel for ",
+                    dtype_to_string(mutable_params[i].dtypes.table),
+                    " table with ",
+                    dtype_to_string(mutable_params[i].dtypes.output),
+                    " output on this platform. Failing table index = ", i);
             return status_t::isa_unsupported;
         }
     }
@@ -220,7 +236,8 @@ status_t group_embedding_bag_direct(const std::vector<const void *> &tables,
                         dispatch_avx512_kernel(tables[threadOffset],
                                 indices[threadOffset], offsets[threadOffset],
                                 weights[threadOffset], dsts[threadOffset],
-                                mutable_params[threadOffset]));
+                                mutable_params[threadOffset],
+                                backends[threadOffset]));
             }
         }
     } else if (num_tables < eb_thread_qty
@@ -240,7 +257,8 @@ status_t group_embedding_bag_direct(const std::vector<const void *> &tables,
                     dispatch_avx512_kernel(tables[threadOffset],
                             indices[threadOffset], offsets[threadOffset],
                             weights[threadOffset], dsts[threadOffset],
-                            mutable_params[threadOffset]));
+                            mutable_params[threadOffset],
+                            backends[threadOffset]));
         }
     } else if (thread_algo == eb_thread_algo_t::table_threaded) {
         // Thread-per-table parallelism
@@ -259,7 +277,8 @@ status_t group_embedding_bag_direct(const std::vector<const void *> &tables,
                         dispatch_avx512_kernel(tables[threadOffset],
                                 indices[threadOffset], offsets[threadOffset],
                                 weights[threadOffset], dsts[threadOffset],
-                                mutable_params[threadOffset]));
+                                mutable_params[threadOffset],
+                                backends[threadOffset]));
             }
         }
     }
@@ -269,7 +288,8 @@ status_t group_embedding_bag_direct(const std::vector<const void *> &tables,
         for (int32_t i = 0; i < num_tables; i++) {
             record_first_failure(group_status,
                     dispatch_avx512_kernel(tables[i], indices[i], offsets[i],
-                            weights[i], dsts[i], mutable_params[i]));
+                            weights[i], dsts[i], mutable_params[i],
+                            backends[i]));
         }
     }
 

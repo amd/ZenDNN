@@ -795,6 +795,18 @@ status_t embedding_kernel_test(tensor_t &table_tensor, tensor_t &indices_tensor,
         int64_t padding_index, bool is_weights, bool fp16_scale_bias,
         embag_kernel_t kernel, bool use_LOWOHA = false);
 
+/** @fn no_int8_int4_kernel
+ *  @brief Whether @p status is the expected isa_unsupported of an INT8 or
+ *         INT4 table. They have no AVX2 kernel, so the cases FBGEMM does not
+ *         take have none when the native AVX-512 kernels may not run: the CPU
+ *         lacks AVX-512F or AVX512-BF16, or ZENDNNL_EMBAG_ISA=avx2.
+ */
+inline bool no_int8_int4_kernel(status_t status) {
+    return status == status_t::isa_unsupported
+            && (!can_use_avx512_embag_kernel()
+                    || embag_isa_env_requests_avx2());
+}
+
 /**
  * @brief Repack separate int8 weights and fp32 scales into GGML Q8_0 blocked format.
  *

@@ -11,7 +11,7 @@ Unlike the standard EmbeddingBag operator which uses the operator factory patter
 - Minimal execution overhead — no operator / context object lifecycle on the hot path
 - FP32, BF16, FP16, INT8, and INT4 (S4 / U4 packed) embedding tables
 - Sum, mean, and max aggregation, plus a pure-lookup mode
-- Native AVX-512 and AVX-512-FP16 kernels with optional FBGEMM dispatch
+- Native AVX-512 and AVX-512-FP16 kernels with optional FBGEMM dispatch, and an AVX2 kernel for FP32 and BF16 on CPUs without AVX-512
 - Quantized INT8 / INT4 embeddings with per-row scale + zero-point (FP16 or FP32)
 - Group batching of multiple embedding-bag operations in a single call
 - Direct control over execution parameters (data types, threads, padding index)
@@ -136,7 +136,7 @@ All vectors must have the same length; element `i` describes the `i`-th embeddin
 |--------------------------------|-------------|
 | `status_t::success`            | Operation completed successfully |
 | `status_t::failure`            | Validation or runtime error (check logs for details) |
-| `status_t::isa_unsupported`    | An F16 buffer was requested but the host lacks AVX-512-FP16 |
+| `status_t::isa_unsupported`    | No kernel the host can run covers the request: FP16 without AVX-512-FP16, or INT8 / INT4 outside FBGEMM without AVX-512F and AVX512-BF16. `group_embedding_bag_direct` checks every operation before running any of them |
 
 
 ## Parameters Structure
@@ -203,6 +203,7 @@ enum class embag_algo_t {
 **Notes:**
 - **Quantized tables (INT8 / INT4):** Per-row `scale` and `zero_point` are stored appended after the row bytes. For INT4 (s4 / u4), two 4-bit values are packed per byte. The scale/ZP element type is controlled by `fp16_scale_bias`.
 - **FP16 tables/output:** Require AVX-512-FP16. On unsupported hardware the API returns `status_t::isa_unsupported`.
+- **CPUs without AVX-512F and AVX512-BF16:** FP32 and BF16 tables and outputs run on an AVX2 kernel (requires AVX2), and INT8 / INT4 tables return `status_t::isa_unsupported` unless the FBGEMM kernel handles them. CPUs with both extensions use the native kernels.
 
 ### Indices and Offsets
 
@@ -226,7 +227,7 @@ enum class embag_kernel_t {
 };
 ```
 
-Leave `params.kernel = embag_kernel_t::none` for auto-selection (`fbgemm` for FP32/BF16, native AVX-512 for FP16/INT4/INT8). Override at runtime with the environment variable `ZENDNNL_EMBAG_ALGO`. The FBGEMM kernel is compiled in only when ZenDNN is built with `-DZENDNNL_DEPENDS_FBGEMM=ON` (off by default); in other builds, `fbgemm` requests run the native kernel.
+Leave `params.kernel = embag_kernel_t::none` for auto-selection (`fbgemm` for FP32/BF16, native AVX-512 for FP16/INT4/INT8). Override at runtime with the environment variable `ZENDNNL_EMBAG_ALGO`. The FBGEMM kernel is compiled in only when ZenDNN is built with `-DZENDNNL_DEPENDS_FBGEMM=ON` (off by default); in other builds, `fbgemm` requests run the native kernel. On CPUs without AVX-512F and AVX512-BF16, the native kernel is the AVX2 one for FP32/BF16; `ZENDNNL_EMBAG_ISA=avx2` selects it on AVX-512 hosts as well, for testing.
 
 
 ## Usage Examples
