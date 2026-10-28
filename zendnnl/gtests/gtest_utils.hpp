@@ -763,9 +763,9 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
  *        for the reference kernel, `fbgemm` to request FBGEMM). `fbgemm` does
  *        not pin FBGEMM: `dispatch_avx512_kernel()` falls back to native when
  *        FBGEMM is not built or `can_use_fbgemm()` rejects the case (non-sum
- *        algo, s8/s4 table, or fp32 scale/bias). Passing `fbgemm` therefore
- *        does not guarantee FBGEMM coverage. Ignored when @p use_LOWOHA is
- *        false (operator API path).
+ *        algo, s8/s4 table, fp32 scale/bias, or a padding index). Passing
+ *        `fbgemm` therefore does not guarantee FBGEMM coverage. Ignored when
+ *        @p use_LOWOHA is false (operator API path).
  *
  * @return status_t Success or failure status
  */
@@ -784,9 +784,9 @@ status_t embag_kernel_test(tensor_t &table_tensor, tensor_t &indices_tensor,
  *        for the reference kernel, `fbgemm` to request FBGEMM). `fbgemm` does
  *        not pin FBGEMM: `dispatch_avx512_kernel()` falls back to native when
  *        FBGEMM is not built or `can_use_fbgemm()` rejects the case (non-sum
- *        algo, s8/s4 table, or fp32 scale/bias). Passing `fbgemm` therefore
- *        does not guarantee FBGEMM coverage. Ignored when @p use_LOWOHA is
- *        false (operator API path).
+ *        algo, s8/s4 table, fp32 scale/bias, or a padding index). Passing
+ *        `fbgemm` therefore does not guarantee FBGEMM coverage. Ignored when
+ *        @p use_LOWOHA is false (operator API path).
  *
  * @return status_t Success or failure status
  */

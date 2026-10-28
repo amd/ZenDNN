@@ -35,6 +35,22 @@ using namespace zendnnl::lowoha::matmul;
 // Scale/bias size constant for quantized embeddings
 constexpr int SCALE_BIAS_SIZE = 8;
 
+// FBGEMM's EmbeddingSpMDM kernels return false, without writing the rest of
+// their chunk, when an index is outside [0, num_embeddings) or the offsets do
+// not consume exactly the chunk's index count. The chunk then throws this,
+// and zendnnl_parallel_for rethrows it on the calling thread.
+struct fbgemm_rejected_input_t {};
+
+// Runs chunk over [0, n) with zendnnl_parallel_for. Returns false if FBGEMM
+// rejected the input of any chunk.
+template <typename F>
+static bool fbgemm_parallel_for(int64_t n, const F &chunk) {
+    try {
+        zendnnl_parallel_for(0, n, 1, chunk);
+    } catch (const fbgemm_rejected_input_t &) { return false; }
+    return true;
+}
+
 /**
  * @brief Helper template to invoke FBGEMM embedding kernel
  *
@@ -56,10 +72,14 @@ constexpr int SCALE_BIAS_SIZE = 8;
  * @param bit_rate Bit rate for quantized types (4 for int4, 8 for int8)
  * @param is_bf16_in Whether input is bf16 (for non-quantized types)
  * @param is_bf16_out Whether output is bf16
+ *
+ * @return status_t::failure if FBGEMM rejects the indices or offsets of any
+ *         chunk, in which case the output is incomplete; status_t::success
+ *         otherwise.
  */
 template <bool IsQuantized, typename InType, typename IndexType,
         typename OffsetType, typename OutType>
-static void invoke_fbgemm_kernel(const void *table, const void *indices,
+static status_t invoke_fbgemm_kernel(const void *table, const void *indices,
         const void *offsets, const float *weights, void *dst,
         const embag_params_t &params, int bit_rate, bool is_bf16_in,
         bool is_bf16_out) {
@@ -91,6 +111,7 @@ static void invoke_fbgemm_kernel(const void *table, const void *indices,
 
     const IndexType *indices_ptr = static_cast<const IndexType *>(indices);
     OutType *dst_ptr = static_cast<OutType *>(dst);
+    bool accepted = true;
 
     if constexpr (IsQuantized) {
         // Generate FBGEMM NBit kernel for quantized types (int4/int8)
@@ -101,14 +122,14 @@ static void invoke_fbgemm_kernel(const void *table, const void *indices,
                 scale_bias_last, is_bf16_out);
 
         const uint8_t *table_ptr = static_cast<const uint8_t *>(table);
-        zendnnl_parallel_for(0, batch_size, 1, [&](int start_idx, int end_idx) {
+        const auto run_chunk = [&](int start_idx, int end_idx) {
             // index_size must be THIS chunk's index count, not the global total: the
             // indices/offsets pointers below are advanced to fbgemm_offsets[start_idx],
             // so passing the full indices_size makes FBGEMM's prefetch look-ahead clamp
             // read past the end of the indices buffer for any chunk with start_idx > 0.
             const int64_t chunk_index_size = static_cast<int64_t>(
                     fbgemm_offsets[end_idx] - fbgemm_offsets[start_idx]);
-            kernel(
+            const bool ok = kernel(
                     /*output_size=*/end_idx - start_idx,
                     /*index_size=*/chunk_index_size,
                     /*data_size=*/num_rows,
@@ -118,7 +139,9 @@ static void invoke_fbgemm_kernel(const void *table, const void *indices,
                     /*weights=*/
                     weights ? &weights[fbgemm_offsets[start_idx]] : nullptr,
                     /*out=*/&dst_ptr[start_idx * output_stride]);
-        });
+            if (!ok) { throw fbgemm_rejected_input_t {}; }
+        };
+        accepted = fbgemm_parallel_for(batch_size, run_chunk);
     } else {
         // Generate FBGEMM kernel for non-quantized types (fp32/bf16)
         auto kernel = fbgemm::GenerateEmbeddingSpMDMWithStrides<InType,
@@ -130,12 +153,12 @@ static void invoke_fbgemm_kernel(const void *table, const void *indices,
                 is_bf16_out, is_bf16_in);
 
         const InType *table_ptr = static_cast<const InType *>(table);
-        zendnnl_parallel_for(0, batch_size, 1, [&](int start_idx, int end_idx) {
+        const auto run_chunk = [&](int start_idx, int end_idx) {
             // See the quantized branch: pass this chunk's index count, not the global
             // total, or FBGEMM's prefetch reads past the indices buffer (start_idx > 0).
             const int64_t chunk_index_size = static_cast<int64_t>(
                     fbgemm_offsets[end_idx] - fbgemm_offsets[start_idx]);
-            kernel(
+            const bool ok = kernel(
                     /*output_size=*/end_idx - start_idx,
                     /*index_size=*/chunk_index_size,
                     /*data_size=*/num_rows,
@@ -145,10 +168,21 @@ static void invoke_fbgemm_kernel(const void *table, const void *indices,
                     /*weights=*/
                     weights ? &weights[fbgemm_offsets[start_idx]] : nullptr,
                     /*out=*/&dst_ptr[start_idx * output_stride]);
-        });
+            if (!ok) { throw fbgemm_rejected_input_t {}; }
+        };
+        accepted = fbgemm_parallel_for(batch_size, run_chunk);
     }
 
     if (params.include_last_offset == 0) { delete[] fbgemm_offsets; }
+
+    if (!accepted) {
+        log_error(
+                "embedding_bag_direct: FBGEMM rejected the input (an index "
+                "outside [0, num_embeddings) or offsets that do not match "
+                "num_indices); the output is incomplete");
+        return status_t::failure;
+    }
+    return status_t::success;
 }
 
 static inline bool can_use_fbgemm(const embag_params_t &params) {
@@ -161,10 +195,12 @@ static inline bool can_use_fbgemm(const embag_params_t &params) {
         return false;
     }
 #endif
+    // FBGEMM's EmbeddingSpMDM kernels take no padding index, so sums with
+    // one must run on the native kernels, which skip it.
     return (params.algo == embag_algo_t::sum
             && params.dtypes.table != data_type_t::s8
             && params.dtypes.table != data_type_t::s4
-            && params.fp16_scale_bias == true);
+            && params.fp16_scale_bias == true && params.padding_idx < 0);
 }
 #endif
 } // namespace embag

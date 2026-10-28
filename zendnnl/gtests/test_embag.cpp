@@ -817,6 +817,80 @@ TEST_P(TestEmbag, U4_F16) {
     EXPECT_TRUE(is_test_successful);
 }
 
+#if ZENDNNL_DEPENDS_FBGEMM
+/** @fn TEST
+ *  @brief FBGEMM rejects an index outside [0, num_embeddings) and stops
+ *         before writing the rest of its output, so the LOWOHA call must
+ *         return status_t::failure. The same call with valid indices
+ *         succeeds.
+ */
+TEST(EmbagFbgemm, RejectedIndexReturnsFailure) {
+    constexpr uint64_t rows = 16, dim = 8, bags = 2;
+    std::vector<float> table(rows * dim, 1.0f);
+    std::vector<int64_t> indices = {0, 1, 2, 3};
+    std::vector<int64_t> offsets = {0, 2};
+    std::vector<float> out(bags * dim, 0.0f);
+
+    embag_params_t params;
+    params.dtypes.table = data_type_t::f32;
+    params.dtypes.output = data_type_t::f32;
+    params.algo = embag_algo_t::sum;
+    params.num_embeddings = rows;
+    params.embedding_dim = dim;
+    params.num_indices = indices.size();
+    params.num_bags = bags;
+    params.dst_stride = dim;
+    params.kernel = embag_kernel_t::fbgemm;
+
+    ASSERT_EQ(embedding_bag_direct(table.data(), indices.data(), offsets.data(),
+                      nullptr, out.data(), params),
+            status_t::success);
+    // Each bag sums two rows of ones.
+    EXPECT_TRUE(std::all_of(
+            out.begin(), out.end(), [](float v) { return v == 2.0f; }));
+
+    indices[3] = static_cast<int64_t>(rows);
+    EXPECT_EQ(embedding_bag_direct(table.data(), indices.data(), offsets.data(),
+                      nullptr, out.data(), params),
+            status_t::failure);
+}
+
+/** @fn TEST
+ *  @brief FBGEMM has no padding index, so a sum with padding_idx set must
+ *         skip the padding row even when FBGEMM is requested.
+ */
+TEST(EmbagFbgemm, PaddedSumSkipsPaddingRow) {
+    constexpr uint64_t rows = 4, dim = 16, bags = 1;
+    // Row r holds r + 1.
+    std::vector<float> table(rows * dim);
+    for (uint64_t r = 0; r < rows; ++r) {
+        std::fill_n(table.begin() + r * dim, dim, static_cast<float>(r + 1));
+    }
+    std::vector<int64_t> indices = {0, 1, 2};
+    std::vector<int64_t> offsets = {0};
+    std::vector<float> out(bags * dim, 0.0f);
+
+    embag_params_t params;
+    params.dtypes.table = data_type_t::f32;
+    params.dtypes.output = data_type_t::f32;
+    params.algo = embag_algo_t::sum;
+    params.num_embeddings = rows;
+    params.embedding_dim = dim;
+    params.num_indices = indices.size();
+    params.num_bags = bags;
+    params.padding_idx = 0;
+    params.dst_stride = dim;
+    params.kernel = embag_kernel_t::fbgemm;
+
+    ASSERT_EQ(embedding_bag_direct(table.data(), indices.data(), offsets.data(),
+                      nullptr, out.data(), params),
+            status_t::success);
+    // Rows 1 and 2 hold 2 and 3; adding padding row 0 would give 6.
+    EXPECT_TRUE(std::all_of(
+            out.begin(), out.end(), [](float v) { return v == 5.0f; }));
+}
+#endif
+
 /** @fn INSTANTIATE_TEST_SUITE_P
  *  @brief Triggers Embag parameterized test suite
  */

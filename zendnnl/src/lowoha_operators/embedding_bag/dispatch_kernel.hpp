@@ -512,8 +512,9 @@ static status_t embag_native_kernel(const void *table, const void *indices,
  * Dispatches to the appropriate FBGEMM kernel instantiation based on
  * indices, offsets, table, and output data types.
  *
- * @return status_t::success when a kernel runs, or status_t::unimplemented
- *         when the table/output or indices/offsets combination is unsupported.
+ * @return The kernel's status (status_t::failure when FBGEMM rejects the
+ *         indices or offsets), or status_t::unimplemented when the
+ *         table/output or indices/offsets combination is unsupported.
  */
 static status_t embag_fbgemm_kernel(const void *table, const void *indices,
         const void *offsets, const float *weights, void *dst,
@@ -527,41 +528,41 @@ static status_t embag_fbgemm_kernel(const void *table, const void *indices,
             && params.dtypes.offsets == data_type_t::s64) {
         if (table_dtype == data_type_t::f32
                 && output_dtype == data_type_t::f32) {
-            invoke_fbgemm_kernel<false, float, int64_t, int64_t, float>(table,
-                    indices, offsets, weights, dst, params,
+            return invoke_fbgemm_kernel<false, float, int64_t, int64_t, float>(
+                    table, indices, offsets, weights, dst, params,
                     /*bit_rate=*/0, /*is_bf16_in=*/false,
                     /*is_bf16_out=*/false);
         } else if (table_dtype == data_type_t::bf16
                 && output_dtype == data_type_t::bf16) {
-            invoke_fbgemm_kernel<false, uint16_t, int64_t, int64_t, uint16_t>(
-                    table, indices, offsets, weights, dst, params,
+            return invoke_fbgemm_kernel<false, uint16_t, int64_t, int64_t,
+                    uint16_t>(table, indices, offsets, weights, dst, params,
                     /*bit_rate=*/0, /*is_bf16_in=*/true, /*is_bf16_out=*/true);
         } else if (table_dtype == data_type_t::bf16
                 && output_dtype == data_type_t::f32) {
-            invoke_fbgemm_kernel<false, uint16_t, int64_t, int64_t, float>(
-                    table, indices, offsets, weights, dst, params,
+            return invoke_fbgemm_kernel<false, uint16_t, int64_t, int64_t,
+                    float>(table, indices, offsets, weights, dst, params,
                     /*bit_rate=*/0, /*is_bf16_in=*/true, /*is_bf16_out=*/false);
         } else if (table_dtype == data_type_t::f32
                 && output_dtype == data_type_t::bf16) {
-            invoke_fbgemm_kernel<false, float, int64_t, int64_t, uint16_t>(
-                    table, indices, offsets, weights, dst, params,
+            return invoke_fbgemm_kernel<false, float, int64_t, int64_t,
+                    uint16_t>(table, indices, offsets, weights, dst, params,
                     /*bit_rate=*/0, /*is_bf16_in=*/false, /*is_bf16_out=*/true);
         } else if (table_dtype == data_type_t::f16
                 && output_dtype == data_type_t::f16) {
-            invoke_fbgemm_kernel<false, uint16_t, int64_t, int64_t, uint16_t>(
-                    table, indices, offsets, weights, dst, params,
+            return invoke_fbgemm_kernel<false, uint16_t, int64_t, int64_t,
+                    uint16_t>(table, indices, offsets, weights, dst, params,
                     /*bit_rate=*/0, /*is_bf16_in=*/false,
                     /*is_bf16_out=*/false);
         } else if (table_dtype == data_type_t::f16
                 && output_dtype == data_type_t::f32) {
-            invoke_fbgemm_kernel<false, uint16_t, int64_t, int64_t, float>(
-                    table, indices, offsets, weights, dst, params,
+            return invoke_fbgemm_kernel<false, uint16_t, int64_t, int64_t,
+                    float>(table, indices, offsets, weights, dst, params,
                     /*bit_rate=*/0, /*is_bf16_in=*/false,
                     /*is_bf16_out=*/false);
         } else if (table_dtype == data_type_t::f32
                 && output_dtype == data_type_t::f16) {
-            invoke_fbgemm_kernel<false, float, int64_t, int64_t, uint16_t>(
-                    table, indices, offsets, weights, dst, params,
+            return invoke_fbgemm_kernel<false, float, int64_t, int64_t,
+                    uint16_t>(table, indices, offsets, weights, dst, params,
                     /*bit_rate=*/0, /*is_bf16_in=*/false,
                     /*is_bf16_out=*/false);
         }
@@ -569,19 +570,19 @@ static status_t embag_fbgemm_kernel(const void *table, const void *indices,
         // s4 and s8 are handled by the native kernel.
         else if (table_dtype == data_type_t::u4
                 && output_dtype == data_type_t::f32) {
-            invoke_fbgemm_kernel<true, uint8_t, int64_t, int64_t, float>(table,
-                    indices, offsets, weights, dst, params,
+            return invoke_fbgemm_kernel<true, uint8_t, int64_t, int64_t, float>(
+                    table, indices, offsets, weights, dst, params,
                     /*bit_rate=*/4, /*is_bf16_in=*/false,
                     /*is_bf16_out=*/false);
         } else if (table_dtype == data_type_t::u4
                 && output_dtype == data_type_t::bf16) {
-            invoke_fbgemm_kernel<true, uint8_t, int64_t, int64_t, uint16_t>(
-                    table, indices, offsets, weights, dst, params,
+            return invoke_fbgemm_kernel<true, uint8_t, int64_t, int64_t,
+                    uint16_t>(table, indices, offsets, weights, dst, params,
                     /*bit_rate=*/4, /*is_bf16_in=*/false, /*is_bf16_out=*/true);
         } else if (table_dtype == data_type_t::u4
                 && output_dtype == data_type_t::f16) {
-            invoke_fbgemm_kernel<true, uint8_t, int64_t, int64_t, uint16_t>(
-                    table, indices, offsets, weights, dst, params,
+            return invoke_fbgemm_kernel<true, uint8_t, int64_t, int64_t,
+                    uint16_t>(table, indices, offsets, weights, dst, params,
                     /*bit_rate=*/4, /*is_bf16_in=*/false,
                     /*is_bf16_out=*/false);
         } else {
@@ -594,58 +595,58 @@ static status_t embag_fbgemm_kernel(const void *table, const void *indices,
             && params.dtypes.offsets == data_type_t::s32) {
         if (table_dtype == data_type_t::f32
                 && output_dtype == data_type_t::f32) {
-            invoke_fbgemm_kernel<false, float, int32_t, int32_t, float>(table,
-                    indices, offsets, weights, dst, params,
+            return invoke_fbgemm_kernel<false, float, int32_t, int32_t, float>(
+                    table, indices, offsets, weights, dst, params,
                     /*bit_rate=*/0, /*is_bf16_in=*/false,
                     /*is_bf16_out=*/false);
         } else if (table_dtype == data_type_t::bf16
                 && output_dtype == data_type_t::bf16) {
-            invoke_fbgemm_kernel<false, uint16_t, int32_t, int32_t, uint16_t>(
-                    table, indices, offsets, weights, dst, params,
+            return invoke_fbgemm_kernel<false, uint16_t, int32_t, int32_t,
+                    uint16_t>(table, indices, offsets, weights, dst, params,
                     /*bit_rate=*/0, /*is_bf16_in=*/true, /*is_bf16_out=*/true);
         } else if (table_dtype == data_type_t::bf16
                 && output_dtype == data_type_t::f32) {
-            invoke_fbgemm_kernel<false, uint16_t, int32_t, int32_t, float>(
-                    table, indices, offsets, weights, dst, params,
+            return invoke_fbgemm_kernel<false, uint16_t, int32_t, int32_t,
+                    float>(table, indices, offsets, weights, dst, params,
                     /*bit_rate=*/0, /*is_bf16_in=*/true, /*is_bf16_out=*/false);
         } else if (table_dtype == data_type_t::f32
                 && output_dtype == data_type_t::bf16) {
-            invoke_fbgemm_kernel<false, float, int32_t, int32_t, uint16_t>(
-                    table, indices, offsets, weights, dst, params,
+            return invoke_fbgemm_kernel<false, float, int32_t, int32_t,
+                    uint16_t>(table, indices, offsets, weights, dst, params,
                     /*bit_rate=*/0, /*is_bf16_in=*/false, /*is_bf16_out=*/true);
         } else if (table_dtype == data_type_t::f16
                 && output_dtype == data_type_t::f16) {
-            invoke_fbgemm_kernel<false, uint16_t, int32_t, int32_t, uint16_t>(
-                    table, indices, offsets, weights, dst, params,
+            return invoke_fbgemm_kernel<false, uint16_t, int32_t, int32_t,
+                    uint16_t>(table, indices, offsets, weights, dst, params,
                     /*bit_rate=*/0, /*is_bf16_in=*/false,
                     /*is_bf16_out=*/false);
         } else if (table_dtype == data_type_t::f16
                 && output_dtype == data_type_t::f32) {
-            invoke_fbgemm_kernel<false, uint16_t, int32_t, int32_t, float>(
-                    table, indices, offsets, weights, dst, params,
+            return invoke_fbgemm_kernel<false, uint16_t, int32_t, int32_t,
+                    float>(table, indices, offsets, weights, dst, params,
                     /*bit_rate=*/0, /*is_bf16_in=*/false,
                     /*is_bf16_out=*/false);
         } else if (table_dtype == data_type_t::f32
                 && output_dtype == data_type_t::f16) {
-            invoke_fbgemm_kernel<false, float, int32_t, int32_t, uint16_t>(
-                    table, indices, offsets, weights, dst, params,
+            return invoke_fbgemm_kernel<false, float, int32_t, int32_t,
+                    uint16_t>(table, indices, offsets, weights, dst, params,
                     /*bit_rate=*/0, /*is_bf16_in=*/false,
                     /*is_bf16_out=*/false);
         } else if (table_dtype == data_type_t::u4
                 && output_dtype == data_type_t::f32) {
-            invoke_fbgemm_kernel<true, uint8_t, int32_t, int32_t, float>(table,
-                    indices, offsets, weights, dst, params,
+            return invoke_fbgemm_kernel<true, uint8_t, int32_t, int32_t, float>(
+                    table, indices, offsets, weights, dst, params,
                     /*bit_rate=*/4, /*is_bf16_in=*/false,
                     /*is_bf16_out=*/false);
         } else if (table_dtype == data_type_t::u4
                 && output_dtype == data_type_t::bf16) {
-            invoke_fbgemm_kernel<true, uint8_t, int32_t, int32_t, uint16_t>(
-                    table, indices, offsets, weights, dst, params,
+            return invoke_fbgemm_kernel<true, uint8_t, int32_t, int32_t,
+                    uint16_t>(table, indices, offsets, weights, dst, params,
                     /*bit_rate=*/4, /*is_bf16_in=*/false, /*is_bf16_out=*/true);
         } else if (table_dtype == data_type_t::u4
                 && output_dtype == data_type_t::f16) {
-            invoke_fbgemm_kernel<true, uint8_t, int32_t, int32_t, uint16_t>(
-                    table, indices, offsets, weights, dst, params,
+            return invoke_fbgemm_kernel<true, uint8_t, int32_t, int32_t,
+                    uint16_t>(table, indices, offsets, weights, dst, params,
                     /*bit_rate=*/4, /*is_bf16_in=*/false,
                     /*is_bf16_out=*/false);
         } else {
@@ -660,7 +661,6 @@ static status_t embag_fbgemm_kernel(const void *table, const void *indices,
                 "for FBGEMM backend");
         return status_t::unimplemented;
     }
-    return status_t::success;
 }
 #endif
 
@@ -709,9 +709,9 @@ static status_t dispatch_avx512_kernel(const void *table, const void *indices,
 
     // Everything that reaches this point runs the native kernel, including an
     // fbgemm request that can_use_fbgemm() rejected (non-sum algo, s8/s4 table,
-    // fp32 scale/bias) or that this build has no FBGEMM for. Record the backend
-    // that actually runs so the apilog line and the caller's params agree with
-    // it instead of still reporting fbgemm.
+    // fp32 scale/bias, padding index) or that this build has no FBGEMM for.
+    // Record the backend that actually runs so the apilog line and the
+    // caller's params agree with it instead of still reporting fbgemm.
     params.kernel = embag_kernel_t::native;
 
     log_info("Using ZenDNN kernel");

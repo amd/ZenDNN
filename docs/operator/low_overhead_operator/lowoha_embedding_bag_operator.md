@@ -206,12 +206,12 @@ enum class embag_algo_t {
 
 ### Indices and Offsets
 
-- **Indices** (`s32` or `s64`): A flat array of length `num_indices`. Each value must be in `[0, num_embeddings)` (or equal to `padding_idx` to be skipped).
+- **Indices** (`s32` or `s64`): A flat array of length `num_indices`. Each value must be in `[0, num_embeddings)` (or equal to `padding_idx` to be skipped). The FBGEMM kernel checks this and returns `status_t::failure` when an index is out of range; the native kernels do not check.
 - **Offsets** (`s32` or `s64`): Bag boundaries. By default the array has length `num_bags`, with bag `b` covering indices `[offsets[b], offsets[b+1])` and the last bag implicitly ending at `num_indices`. Set `include_last_offset = true` for the PyTorch-style layout where `offsets` has length `num_bags + 1` and the final offset equals `num_indices` explicitly.
 
 ### Padding Index
 
-Set `params.padding_idx` to a non-negative value to skip any index equal to that value — it is excluded from the aggregation **and** from the mean denominator. This is the standard way to handle variable-length sequences (a common convention is to pad with index `0`).
+Set `params.padding_idx` to a non-negative value to skip any index equal to that value — it is excluded from the aggregation **and** from the mean denominator. This is the standard way to handle variable-length sequences (a common convention is to pad with index `0`). FBGEMM has no padding index, so sums with a padding index run on the native kernels even when `fbgemm` is selected.
 
 ### Kernel Selection
 
