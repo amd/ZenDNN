@@ -571,8 +571,9 @@ void inputFileParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
                                 "'. Supported: aocl_dlp_blocked, "
                                 "onednn_blocked, libxsmm_blocked, aocl_dlp, "
                                 "onednn, libxsmm, "
-                                "batched_sgemm, auto, dynamic_dispatch, "
-                                "reference. Using '",
+                                "batched_sgemm, auto, auto_tuner, "
+                                "dynamic_dispatch, native_gemm, "
+                                "native_brgemm, reference, none. Using '",
                                 kernel_name, "' instead.");
                         cfg.kernel_name = kernel_name;
                     }
@@ -989,8 +990,9 @@ void inputModelFileParser(std::ifstream &infile,
                     commonlog_warning("Unknown kernel name '", cfg.kernel_name,
                             "'. Supported: aocl_dlp_blocked, onednn_blocked, "
                             "libxsmm_blocked, aocl_dlp, onednn, libxsmm, "
-                            "batched_sgemm, auto, dynamic_dispatch, reference. "
-                            "Using '",
+                            "batched_sgemm, auto, auto_tuner, "
+                            "dynamic_dispatch, native_gemm, native_brgemm, "
+                            "reference, none. Using '",
                             kernel_name, "' instead.");
                     cfg.kernel_name = kernel_name;
                 }
@@ -1066,8 +1068,9 @@ void inputCommandLineParser(std::vector<MatmulConfig> &configs,
                 commonlog_warning("Unknown kernel name '", cfg.kernel_name,
                         "'. Supported: aocl_dlp_blocked, onednn_blocked, "
                         "libxsmm_blocked, aocl_dlp, onednn, libxsmm, "
-                        "batched_sgemm, auto, dynamic_dispatch, reference. "
-                        "Using '",
+                        "batched_sgemm, auto, auto_tuner, "
+                        "dynamic_dispatch, native_gemm, native_brgemm, "
+                        "reference, none. Using '",
                         kernel_name, "' instead.");
                 cfg.kernel_name = kernel_name;
             }

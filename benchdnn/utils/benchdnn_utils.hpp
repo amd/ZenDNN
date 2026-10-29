@@ -266,8 +266,9 @@ std::string postOpsToStr(post_op_type_t post_op);
  * @brief Converts a string representation of a matmul algorithm to its corresponding enum value.
  *
  * This function maps a string such as "aocl_dlp", "onednn", "libxsmm", "batched_sgemm",
- * "auto", "dynamic_dispatch", or "reference" to the corresponding matmul_algo_t enum value.
- * Returns matmul_algo_t::none if the string is not recognized.
+ * "auto" (or "auto_tuner"), "dynamic_dispatch", "native_gemm", "native_brgemm",
+ * or "reference" to the corresponding matmul_algo_t enum value.
+ * Returns matmul_algo_t::none if the string is unrecognized or "none".
  *
  * @param str String representation of the matmul algorithm (e.g., "aocl_dlp", "onednn").
  * @return matmul_algo_t Corresponding enum value, or matmul_algo_t::none if unknown.
@@ -288,12 +289,19 @@ std::string algoToStr(matmul_algo_t algo);
 /** @brief List of valid kernel names accepted for matmul benchmarking.
  *
  * Supported names: aocl_dlp_blocked, onednn_blocked, libxsmm_blocked, aocl_dlp,
- * onednn, libxsmm, batched_sgemm, auto, dynamic_dispatch, reference.
+ * onednn, libxsmm, batched_sgemm, auto, auto_tuner, dynamic_dispatch,
+ * native_gemm, native_brgemm, reference, none.
+ *
+ * `native_gemm`, `native_brgemm` and the `auto_tuner` spelling of `auto` are
+ * real `matmul_algo_t` values. A name missing from this list is replaced by an
+ * AOCL-DLP default, so those kernels could never be requested. `none` is kept
+ * so the library's own selection (including `ZENDNNL_MATMUL_ALGO`) still applies.
  * Used when validating user-specified kernel names.
  */
 inline const std::vector<std::string> VALID_KERNEL_NAMES = {"aocl_dlp_blocked",
         "onednn_blocked", "libxsmm_blocked", "aocl_dlp", "onednn", "libxsmm",
-        "batched_sgemm", "auto", "dynamic_dispatch", "reference"};
+        "batched_sgemm", "auto", "auto_tuner", "dynamic_dispatch",
+        "native_gemm", "native_brgemm", "reference", "none"};
 
 /**
  * @brief Validates that the given kernel name is supported for matmul.

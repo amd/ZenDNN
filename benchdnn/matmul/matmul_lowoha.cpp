@@ -212,6 +212,15 @@ void set_lowoha_matmul_params(matmul_params &params, int &lda, int &ldb,
     matmul_dtypes.compute = data_type_t::none;
     params.dtypes = matmul_dtypes;
 
+    // Route --kernel_name to the library. matmul_params::lowoha_algo is
+    // default-constructed to matmul_algo_t::none, so without this assignment
+    // the requested kernel is ignored. While it stays none, kernel_select()
+    // uses libxsmm for batch_count > 1 when ZENDNNL_BMM_ALGO is unset, and
+    // aocl_dlp_blocked for non-batched matmul when ZENDNNL_MATMUL_ALGO is
+    // unset. An unrecognized name, and "none", map back to none so that
+    // library selection still applies.
+    params.lowoha_algo = strToAlgo(cfg.kernel_name);
+
     // Check if this is INT8 quantization
     bool is_int8 = (input_tensor.get_data_type() == data_type_t::u8
                            || input_tensor.get_data_type() == data_type_t::s8)
