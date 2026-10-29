@@ -154,17 +154,14 @@ struct matmul_data_types {
 |----------|-------------|-----------|-------------|-------|
 | F32 | F32 | F32 | F32 | Standard floating-point |
 | BF16 | BF16 | F32/BF16 | F32/BF16 | Mixed-precision BFloat16 |
-| F16 | F16 | F32/F16 | F16/F32 | Half-precision (requires AVX512-FP16) |
-| BF16 | S4 | F32/BF16 | F32/BF16 | Weight-Only Quantization (WOQ), symmetric (`dynamic_quant=false`) |
-| BF16 | S4 | F32/BF16 | BF16 | Dynamic W4A8 (`dynamic_quant=true`) — see [W4A8](#w4a8-symmetric-w4--a8) |
-| S8 | S4 | F32/BF16 | BF16 | Static W4A8 (pre-quantized s8 src, `dynamic_quant=false`) — see [W4A8](#w4a8-symmetric-w4--a8) |
-| BF16 | U4 | F32/BF16 | F32/BF16 | Weight-Only Quantization (WOQ), asymmetric |
-| U8 | S8 | F32/BF16/S8/U8/S32 | F32/BF16/S8/U8/S32 | INT8 Quantization |
-| S8 | S8 | F32/BF16/S8/U8/S32 | F32/BF16/S8/U8/S32 | INT8 Quantization |
-| BF16 | S8 | F32/BF16/S8/U8/S32 | F32/BF16/S8/U8/S32 | INT8 Quantization |
-| F32 | S8 | F32/BF16/S8/U8/S32 | F32/BF16/S8/U8/S32 | INT8 Quantization |
+| F16 | F16 | F32/F16 | F16/F32 | Half-precision (requires AVX512-FP16). No scales or zero-points. |
+| BF16 | S4/U4 | F32/BF16 | F32/BF16 | Weight-only (`dynamic_quant=false`). Source stays BF16. S4 is symmetric (no zero-point). U4 is asymmetric (weight zero-point required, S8 or BF16). |
+| BF16/S8 | S4 | F32/BF16 | BF16 | W4A8 (`compute=s8`, no zero-points). BF16 source requires `dynamic_quant=true`. S8 source requires `dynamic_quant=false` and a source scale. Destination is BF16. See [W4A8](#w4a8-symmetric-w4--a8). |
+| S8 | S4 | F32/BF16 | F32 | GGML Q4_0. Packed symmetric S4 with an S8 source. Source scale is per-token or per-group. No zero-point. |
+| U8/S8 | S8 | F32/BF16/S8/U8/S32 | F32/BF16/S8/U8/S32/F16 | INT8. U8 source scale is per-tensor only. An S8 per-token or per-group source scale writes F32 or BF16 only. S32, S8, U8, and F16 outputs need a per-tensor source scale. |
+| BF16/F32 | S8 | F32/BF16/S8/U8 | F32/BF16/S8/U8 | INT8. No S32 or F16 output. A per-token source scale writes F32 or BF16 only. |
 
-> **Note:** F16 MatMul is only supported via the **OneDNN backend**. On platforms without AVX512-FP16, F16 operations return `status_t::isa_unsupported`.
+> **Note:** F16 MatMul requires AVX512-FP16. Without that ISA, F16 operations return `status_t::isa_unsupported`. F32, BF16, and F16 matmul have no scales and no zero-points.
 
 ### `matmul_post_op`
 
@@ -265,15 +262,35 @@ struct matmul_quantization_params_t {
 | Per-channel | `{1, N}` | One scale per output channel (column) |
 | Per-group   | `{G, N}` | G groups along K dimension (G = K/group_size) |
 
-> **Note:** When both source and weight use per-group scales, the number of groups (G) must match between them.
+> **Note:** When both source and weight use per-group scales, the number of groups (G) must match. `group_size = K / G`. Per-tensor shapes may also be `{}`. Per-channel weight scales may also be `{N}`.
+
+**INT8 source × weight scale pairs:**
+
+Scales are F32 or BF16. A zero-point, when present, is per-tensor: source and weight zero-points are S32, S8, or U8; the destination zero-point is S8, U8, or S32. Destination scale and destination zero-point are per-tensor. A zero-point is not combined with a per-token or per-group scale.
+
+| Source | Source scale | Weight scale | Zero-point | Output |
+|--------|--------------|--------------|------------|--------|
+| U8 or S8 | per-tensor | per-tensor | none, or per-tensor source and/or weight | U8, S8, S32, F32, BF16, F16 |
+| U8 or S8 | per-tensor | per-channel | none, or per-tensor source and/or weight | U8, S8, S32, F32, BF16, F16 |
+| S8 | per-token | per-channel | none | F32, BF16 |
+| S8 | per-token | per-group | none | F32, BF16 |
+| S8 | per-group | per-group (same G) | none | F32, BF16 |
+| S8, M = 1 | per-token (one element) | per-group | none | F32, BF16 |
+| BF16 or F32 | per-tensor | per-tensor | none, or per-tensor source | BF16 source: F32, BF16, S8, U8. F32 source: F32, BF16, S8, U8 |
+| BF16 or F32 | per-tensor | per-channel | none, or per-tensor source | same as the row above |
+| BF16 or F32 | per-token | per-channel | none | F32, BF16 |
+
+A per-group BF16 or F32 source is quantized to S8 first, then uses the S8 per-group row. A per-token source is not paired with a per-tensor weight. A per-group source is not paired with a per-channel or per-tensor weight.
 
 **WOQ Quantization Granularity for weights:**
 
-| Granularity | Scale Dims | Zero-Point Dims | Description |
-|-------------|------------|-----------------|-------------|
-| Per-tensor | `{1}` or `{1, 1}` | `{1}` or `{1, 1}` | Single scale/zp for entire weight matrix |
-| Per-channel | `{1, N}` | `{1, N}` | One scale/zp per output channel |
-| Per-group | `{G, N}` | `{G, N}` | G groups along K dimension (G = K/group_size) |
+The source is plain BF16. It has no scale and no zero-point. Weight scales are F32 or BF16. S4 has no zero-point. U4 requires a zero-point, S8 or BF16. The U4 zero-point granularity is chosen separately from the scale. `group_size` follows the scale: `K` for per-tensor and per-channel, `K / G` for per-group. A per-group size other than `K` is even.
+
+| Weight scale | U4 zero-point |
+|--------------|---------------|
+| per-tensor | per-tensor, per-channel, or per-group |
+| per-channel | per-tensor, per-channel, or per-group |
+| per-group | per-tensor, per-channel, or per-group (same G when both are per-group) |
 
 > **Note:** WOQ requires `is_weights_const = true` for weight reordering and caching.
 
@@ -299,7 +316,7 @@ Two entry contracts:
 > **Notes:**
 > - **Backend:** AOCL-DLP only (`aocl_dlp` / `aocl_dlp_blocked`).
 > - **Shape constraints:** `src_scale` dims `{M, 1}` or `{M, G}` (`G` matching `wei_scale.dims[0]`); `wei_scale` dims `{G, N}` with `N` matching the matmul `N`; `K` divisible by `G`; `K / G` (group size) a multiple of 4. Compact `{M, 1}` scales are broadcast to `{M, G}` in the AOCL path before GEMM.
-> - **vs WOQ:** WOQ is bf16×s4 with `dynamic_quant = false` (`aocl_gemm_bf16s4f32obf16`). W4A8 uses the sym_quant blocked weight layout (not the WOQ bf16s4 prepack layout).
+> - **vs WOQ:** WOQ is bf16×s4 with `dynamic_quant = false`. W4A8 uses the symmetric grouped blocked weight layout, not the weight-only s4 layout.
 
 **Supported Data Types for Scales and Zero Points by Backend:**
 
@@ -671,7 +688,7 @@ int lowoha_int8_matmul_example() {
 
 ### Example 5: F16 (Half-Precision) MatMul
 
-This example demonstrates F16 MatMul where all tensors (source, weights, destination) use half-precision floating point. F16 MatMul is only supported via the OneDNN backend and requires AVX512-FP16.
+This example demonstrates F16 MatMul where all tensors (source, weights, destination) use half-precision floating point. F16 requires AVX512-FP16.
 
 ```cpp
 int lowoha_matmul_f16_example() {
@@ -704,7 +721,7 @@ int lowoha_matmul_f16_example() {
   batch_params.Batch_A = 1;
   batch_params.Batch_B = 1;
 
-  // Execute F16 matmul (automatically routed to OneDNN backend)
+  // Execute F16 matmul
   status_t status = matmul_direct(
     'r', false, false,
     M, N, K,
@@ -727,7 +744,7 @@ int lowoha_matmul_f16_example() {
 **Key Points for F16:**
 
 - **ISA Requirement**: F16 requires AVX512-FP16 (CPUID leaf 7, subleaf 0, EDX bit 23). Available on Zen 5 / Sapphire Rapids and later.
-- **Backend**: F16 is only supported via OneDNN backend. Kernel selection automatically routes to `onednn_blocked`.
+- **Backend**: AOCL-DLP and OneDNN.
 
 ## Reorder Quantization (Source Quantization via Reorder)
 
@@ -1080,11 +1097,11 @@ int lowoha_w4a8_static_matmul_example() {
 
 **Key points for W4A8:**
 
-- **Not WOQ**: `dynamic_quant = false` with **bf16×s4** selects WOQ (`aocl_gemm_bf16s4f32obf16`), not W4A8.
+- **Not WOQ**: `dynamic_quant = false` with **bf16×s4** selects weight-only quantization, not W4A8.
 - **Static vs dynamic**: pre-quantized **s8×s4** requires `dynamic_quant = false` and a populated `src_scale.buff`. Dynamic **bf16×s4** requires `dynamic_quant = true`. Mixing s8 src with `dynamic_quant = true` is rejected.
 - **Source scales**: logical dims `{M, 1}` or `{M, G}` (or `{1, 1}` when `M == 1`); dtype **f32** or **bf16**. `{M, 1}` is broadcast to `{M, G}` before the sym_quant GEMM.
 - **Weight scales**: `wei_scale` dims `{G, N}`; dtype **f32** or **bf16**.
-- **Weight prepack**: The public `weight_prepack_*` s4 path targets **WOQ** blocked layout (`bf16s4f32of32`); W4A8 uses a **sym_quant s8** blocked layout after s4→s8 widen — use runtime reorder in `matmul_direct` unless a dedicated W4A8 prepack is added.
+- **Weight prepack**: WOQ s4/u4 uses the weight-only blocked layout. Native W4A8 (`s4` weights, source `s8`) uses a separate blocked layout. Widening s4 to s8 before the GEMM uses the symmetric grouped s8 layout.
 - **Runnable examples**: `run_lowoha_matmul_w4a8_test` (dynamic) and `run_lowoha_matmul_w4a8_static_test` (static) in `examples/lowoha_matmul_example.cpp`.
 
 ## Weight Caching and Reordering

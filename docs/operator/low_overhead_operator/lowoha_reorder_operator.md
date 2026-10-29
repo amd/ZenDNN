@@ -455,7 +455,7 @@ custom-kernel (CK) VNNI** layout:
 | `prepack.algo` | Supported | Notes |
 |----------------|-----------|-------|
 | `matmul_algo_t::aocl_dlp_blocked` | ✅ Yes | f32 / bf16 / f16 / s8 (+ s8 sym-quant variant) / s4 / u4 |
-| `matmul_algo_t::moe_custom_kernel` | ✅ Yes | bf16 (VDPBF16PS) / s8 (DQ-INT8 VPDPBUSD). Packs into the caller `dst`; consumed by `group_matmul` with `mem_format_b='r'` (see *Custom-Kernel (group_matmul) Prepack*). |
+| `matmul_algo_t::moe_custom_kernel` | ✅ Yes | bf16 (VDPBF16PS) / f16 (AVX-512-FP16 slab) / s8 (DQ-INT8 VPDPBUSD). Packs into the caller `dst`; consumed by `group_matmul` with `mem_format_b='r'` (see *Custom-Kernel (group_matmul) Prepack*). |
 | `matmul_algo_t::libxsmm_blocked`  | ❌ No  | Layout would mis-match if the matmul-side partitioner falls back to AOCL DLP — silent wrong results. |
 | `matmul_algo_t::onednn_blocked`   | ❌ No  | OneDNN's blocked layout depends on (M, K, N, dtypes, post-ops, ISA) — the prepack can't reproduce the matmul-time layout. |
 | Anything else                     | ❌ No  | Non-blocked variants consume raw weights; no prepack needed. |
@@ -506,17 +506,18 @@ struct prepack_params_t {
 };
 ```
 
-### Supported `wei_dtype` Routing
+### Supported prepack combinations
 
-| `wei_dtype` | `src_dtype`        | AOCL DLP reorder kernel used         |
-|-------------|--------------------|---------------------------------------|
-| `f32`       | any                | `aocl_reorder_f32f32f32of32`         |
-| `bf16`      | any                | `aocl_reorder_bf16bf16f32of32`       |
-| `f16`       | any                | `aocl_reorder_f16f16f16of16` (DLP only) |
-| `s4` / `u4` | any                | `aocl_reorder_bf16s4f32of32` (4-bit wei, bf16 act) |
-| `s8`        | `s8` / `bf16` / `f32` | `aocl_reorder_s8s8s32os32`        |
-| `s8`        | `u8`               | `aocl_reorder_u8s8s32os32` **+ appended column-sum buffer** (see below) |
-| `s8` + `sym_group_size > 0` (with `src_dtype = bf16`) | — | `aocl_reorder_s8s8s32os32_sym_quant` (DLP only) |
+`weight_prepack_size` and `reorder_direct` use these combinations when `prepack.algo` is `matmul_algo_t::aocl_dlp_blocked`. `sym_group_size > 0` selects the symmetric grouped s8 pack. s4, u4, and that symmetric grouped pack cannot be unpacked.
+
+| Weight dtype | Source dtype | Granularity |
+|--------------|--------------|-------------|
+| f32, bf16, or f16 | any | none |
+| s4 | s8 | W4A8. Group size is `sym_group_size`, or all of K when that field is 0 |
+| s4 or u4 | other than s4 with an s8 source | Weight-only. Weight scale is per-tensor, per-channel, or per-group. The u4 zero-point has its own granularity |
+| s8 | s8 or bf16, and `sym_group_size > 0` | Source per-token or per-group. Weight per-channel or per-group. Group size is `sym_group_size` |
+| s8 | u8 | Source per-tensor. Weight per-tensor or per-channel. The column-sum buffer is appended |
+| s8 | s8, bf16, or f32 | Plain INT8, not the symmetric grouped row |
 
 ### Appended Column-Sum Buffer (static-INT8, `wei_dtype = s8` + `src_dtype = u8`)
 
@@ -753,7 +754,7 @@ In addition to the AOCL DLP blocked layout, the prepack path can produce the **g
 | `prepack_params_t` field | Custom-kernel meaning |
 |---|---|
 | `algo` | `matmul_algo_t::moe_custom_kernel` selects the CK VNNI pack-into-`dst` |
-| `wei_dtype` | `bf16` → VDPBF16PS K-pair pack; `s8` → DQ-INT8 VPDPBUSD K-quad pack (+ per-column int32 compensation row) |
+| `wei_dtype` | `bf16` → VDPBF16PS K-pair pack; `f16` → AVX-512-FP16 plain slab; `s8` → DQ-INT8 VPDPBUSD K-quad pack (+ per-column int32 compensation row) |
 | `pack_nr` | CK pack width; `0` = auto (`plan_pack_nr(K, N)`, prefers 32 else 64), else `32`/`64` |
 | `interleave_split_halves` | `true` re-interleaves canonical `[gate_cols \| up_cols]` weight into `[g0,u0,g1,u1,...]` for fused silu/gelu (requires even N) |
 | `K`, `N`, `ldb`, `transposed` | same meaning as the AOCL path |
@@ -775,19 +776,19 @@ The mode is selected by setting `reorder_params_t::is_unreorder = true` on the s
 
 Only `matmul_algo_t::aocl_dlp_blocked` is invertible, and only for the dtypes AOCL exposes an unreorder API for:
 
-| `prepack.wei_dtype` | AOCL unreorder kernel |
-|---------------------|-----------------------|
-| `f32`  | `aocl_unreorder_f32f32f32of32_reference` |
-| `bf16` | `aocl_unreorder_bf16bf16f32of32` (needs AVX512-BF16) |
-| `f16`  | `aocl_unreorder_f16f16f16of16` when AVX512-FP16 is present, otherwise `aocl_unreorder_f16f16f16of16_reference` |
-| `s8` (`src_dtype` s8/bf16/f32) | `aocl_unreorder_s8s8s32os32_reference` |
-| `s8` (`src_dtype` u8) | `aocl_unreorder_u8s8s32os32_reference` |
+| `prepack.wei_dtype` | `src_dtype` | Unpack |
+|---------------------|-------------|--------|
+| `f32` | any | yes |
+| `bf16` | any | yes (needs AVX512-BF16) |
+| `f16` | any | yes (AVX512-FP16, otherwise the reference unpack) |
+| `s8` | s8, bf16, or f32 | yes |
+| `s8` | u8 | yes. The column-sum tail is ignored |
 
 Everything else is rejected — `weight_unreorder_size` returns `0` and `reorder_direct` returns `status_t::unimplemented`:
 
-- `matmul_algo_t::moe_custom_kernel` / `onednn_blocked` / `libxsmm_blocked` (no AOCL unreorder API)
-- `wei_dtype` `s4` / `u4` (the 4-bit packs have no unreorder API)
-- `sym_group_size > 0` (AOCL has `aocl_reorder_s8s8s32os32_sym_quant` and `aocl_gemm_*_sym_quant`, but no `aocl_unreorder_*_sym_quant`)
+- `matmul_algo_t::moe_custom_kernel` / `onednn_blocked` / `libxsmm_blocked`
+- `wei_dtype` `s4` / `u4`
+- `sym_group_size > 0` (the symmetric grouped pack has no unpack)
 
 `prepack.consider_m_hint` defaults to true and, for bf16 and s8 with `src_dtype` s8 or u8, forwards `ZENDNNL_DLP_M_HINT` and `num_threads` as `nt_hint` on both the pack and the unreorder. AOCL derives the panel width from those hints, so the unpack must see the same values the pack used. False omits them and only matches a buffer packed with the hint off. f32, f16, and mixed s8 do not attach hints.
 
