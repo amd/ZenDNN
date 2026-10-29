@@ -3824,6 +3824,9 @@ static float matmul_comparison_abs_bound(uint64_t k, float epsilon, float alpha,
     // f32 partials. The reference reduces all of K in integer first, then
     // scales once. Cancellation across panels leaves an absolute residual
     // per panel that a (k * eps) ULP model of the final value does not cover.
+    // compare_tensor_2D_matrix multiplies this whole bound — the (k * eps)
+    // term and this panel residual — by the product of |binary_mul| operands.
+    // That factor varies per element, so it stays out of kSymQuantPanelAbs.
     constexpr float kSymQuantPanelK = 2048.f;
     constexpr float kSymQuantPanelAbs = 1.5e-3f;
     const float n_sym_quant_panels
@@ -3851,10 +3854,41 @@ static float matmul_comparison_abs_bound(uint64_t k, float epsilon, float alpha,
             + n_sym_quant_panels * kSymQuantPanelAbs;
 }
 
+struct mul_operand_t {
+    const tensor_t *tensor;
+    bool bcast_row;
+    bool bcast_col;
+};
+
+static std::vector<mul_operand_t> make_mul_operands(
+        const std::vector<post_op_type_t> *po_types,
+        const std::vector<tensor_t> *binary_tensors) {
+    std::vector<mul_operand_t> operands;
+    if (po_types == nullptr || binary_tensors == nullptr) { return operands; }
+
+    operands.reserve(binary_tensors->size());
+    size_t binary_index = 0;
+    for (const post_op_type_t po : *po_types) {
+        if (!is_binary_postop(po)) { continue; }
+        if (binary_index >= binary_tensors->size()) { break; }
+
+        const tensor_t &tensor = (*binary_tensors)[binary_index++];
+        if (po != post_op_type_t::binary_mul) { continue; }
+
+        const auto dims = tensor.get_size();
+        if (dims.size() < 2) { continue; }
+        operands.push_back({&tensor, dims[dims.size() - 2] == 1,
+                dims[dims.size() - 1] == 1});
+    }
+    return operands;
+}
+
 void compare_tensor_2D_matrix(tensor_t &output_tensor,
         tensor_t &output_tensor_ref, uint64_t m, uint64_t n, uint64_t k,
         const float rtol, const float epsilon, bool &is_comparison_successful,
-        bool enable_f32_relaxation, float alpha, bool is_quant, float beta) {
+        bool enable_f32_relaxation, float alpha, bool is_quant, float beta,
+        const std::vector<post_op_type_t> *po_types,
+        const std::vector<tensor_t> *binary_tensors) {
 #if ENABLE_F32_RELAXATION
     enable_f32_relaxation = true;
 #endif
@@ -3872,6 +3906,7 @@ void compare_tensor_2D_matrix(tensor_t &output_tensor,
     constexpr float F32_EPS_SLACK = 9e-4f;
 
     const bool is_f32 = output_tensor.get_data_type() == data_type_t::f32;
+    const auto mul_operands = make_mul_operands(po_types, binary_tensors);
 
     log_verbose("abs_bound: ", abs_bound);
 
@@ -3893,21 +3928,34 @@ void compare_tensor_2D_matrix(tensor_t &output_tensor,
             float actual_val = output_tensor.at({i, j});
             float ref_val = output_tensor_ref.at({i, j});
             float abs_err = fabs(ref_val - actual_val);
+            // Product of |binary_mul| operands at (i, j). It scales the whole
+            // abs_bound; binary_add does not. Floor at 1 so a factor below 1
+            // does not tighten the pre-post-op budget.
+            float amplification = 1.0f;
+            for (const mul_operand_t &operand : mul_operands) {
+                amplification *= std::fabs(
+                        operand.tensor->at({operand.bcast_row ? 0 : i,
+                                operand.bcast_col ? 0 : j}));
+            }
+            if (!mul_operands.empty()) {
+                amplification = std::max(amplification, 1.0f);
+            }
+            const float scaled_bound = abs_bound * amplification;
 
             float allowed_err;
             if (enable_f32_relaxation && is_f32) {
                 if (fabs(ref_val) < ZERO_REF_THRESH) {
                     // Zero-reference F32 path
-                    allowed_err = std::max(abs_bound, ABS_ZERO_TOL_F32)
+                    allowed_err = std::max(scaled_bound, ABS_ZERO_TOL_F32)
                             + F32_EPS_SLACK;
                 } else {
                     // Normal F32 path with small slack
-                    allowed_err
-                            = abs_bound + rtol * fabs(ref_val) + F32_EPS_SLACK;
+                    allowed_err = scaled_bound + rtol * fabs(ref_val)
+                            + F32_EPS_SLACK;
                 }
             } else {
                 // Default path
-                allowed_err = abs_bound + rtol * fabs(ref_val);
+                allowed_err = scaled_bound + rtol * fabs(ref_val);
             }
 
             if (abs_err > allowed_err) {
@@ -3915,7 +3963,8 @@ void compare_tensor_2D_matrix(tensor_t &output_tensor,
                         i, ",", j, "): ", ref_val);
                 log_verbose("abs_error: ", abs_err,
                         " , allowed_err: ", allowed_err,
-                        " , abs_bound: ", abs_bound);
+                        " , abs_bound: ", abs_bound,
+                        " , scaled_bound: ", scaled_bound);
                 is_comparison_successful = false;
             }
         }

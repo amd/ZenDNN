@@ -869,6 +869,8 @@ void compare_tensor_2D(tensor_t &output_tensor, tensor_t &output_tensor_ref,
  *  This function compares two 2D tensors representing matrix matmul element by element
  *  and checks if they are within a specified bound or not.
  *  Bound is based on error-propagation thoery.
+ *  Pass nullptr for po_types or binary_tensors to leave the bound unscaled.
+ *  binary_tensors must follow the order of the binary post-ops in po_types.
  *  @return void
  *
  * */
@@ -876,7 +878,9 @@ void compare_tensor_2D_matrix(tensor_t &output_tensor,
         tensor_t &output_tensor_ref, uint64_t m, uint64_t n, uint64_t k,
         const float rtol, const float epsilon, bool &flag,
         bool enable_f32_relaxation = false, float alpha = 1.0f,
-        bool is_quant = false, float beta = 0.0f);
+        bool is_quant = false, float beta = 0.0f,
+        const std::vector<post_op_type_t> *po_types = nullptr,
+        const std::vector<tensor_t> *binary_tensors = nullptr);
 
 /** @fn compare_tensor_3D_matrix
  *  @brief Function to compare two matrix result after batch-matrix matmul

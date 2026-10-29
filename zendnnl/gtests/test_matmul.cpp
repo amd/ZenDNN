@@ -2216,7 +2216,8 @@ TEST_P(TestMatmul, INT8_SYM_QUANT_PER_TOKEN_BF16) {
     bool ok = (status == status_t::success && ref_status == status_t::success);
     if (ok) {
         compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, sym_k,
-                rtol_bf16, epsilon_bf16, ok, false, 1.0f, true);
+                rtol_bf16, epsilon_bf16, ok, false, 1.0f, true, 0.0f, &po_types,
+                &binary_tensors);
     }
     EXPECT_TRUE(ok);
 }
@@ -2277,7 +2278,8 @@ TEST_P(TestMatmul, INT8_SYM_QUANT_PER_TOKEN_F32) {
     bool ok = (status == status_t::success && ref_status == status_t::success);
     if (ok) {
         compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, sym_k,
-                rtol_f32, epsilon_f32, ok, false, 1.0f, true);
+                rtol_f32, epsilon_f32, ok, false, 1.0f, true, 0.0f, &po_types,
+                &binary_tensors);
     }
     EXPECT_TRUE(ok);
 }

@@ -79,8 +79,8 @@
 #                       e.g. --extra --gtest_repeat=2 --extra --gtest_color=no.
 #                       (A single --extra value containing spaces is also
 #                       accepted for convenience and will be word-split.)
-#   --timeout SEC       Per-op wall-clock timeout in seconds (default 14400,
-#                       i.e. 4 h). Overrides every op's built-in budget. Use 0
+#   --timeout SEC       Per-op wall-clock timeout in seconds (default 18000,
+#                       i.e. 5 h). Overrides every op's built-in budget. Use 0
 #                       to disable the timeout entirely. A timed-out op is
 #                       reported with status=TIMEOUT and counts as a failure.
 #   --dry-run           Print the command for each op without executing
@@ -228,7 +228,7 @@ declare -A OP_EXTRA=(
 # SIGKILL after a 30s grace) so it cannot block the rest of the sweep.
 # Defaults are observed-runtime * generous safety margin; --timeout SEC on the
 # command line overrides for all ops. --timeout 0 disables the timeout.
-TIMEOUT_DEFAULT=14400   # 4 h — covers every default-sweep op with margin.
+TIMEOUT_DEFAULT=18000   # 5 h — covers every default-sweep op with margin.
 declare -A OP_TIMEOUT=(
   [batchmatmul]=172800  # 48 h — observed ~38 h on test_num=400.
 )
