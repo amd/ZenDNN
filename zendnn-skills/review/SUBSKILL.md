@@ -22,7 +22,8 @@ for a pull-request URL it runs the GitHub review.
 - `<operator>.md`: one operator's own checks, named after its directory under
   `zendnnl/src/lowoha_operators/`, or after the family when operators share
   one file. Today: [group_matmul](group_matmul.md), [matmul](matmul.md),
-  [reorder](reorder.md), and [attention](attention.md) for `sdpa/` and
-  `hstu_attention/`.
+  [reorder](reorder.md), [embedding_bag](embedding_bag.md),
+  [normalization](normalization.md), and [attention](attention.md) for `sdpa/`
+  and `hstu_attention/`.
 - [operator-file-guide](operator-file-guide.md): how to write or extend an
   operator file, and where each check belongs.
