@@ -21,8 +21,9 @@ Every review opens, in this order:
    [windows](../windows/SUBSKILL.md). Default Linux.
 3. The operator file in `review/` when one exists. It is named after the
    operator's directory under `zendnnl/src/lowoha_operators/`, for example
-   [group_matmul.md](../group_matmul.md) for `matmul/group_matmul/` and
-   [matmul.md](../matmul.md) for the rest of `matmul/`. Operators that share
+   [group_matmul.md](../group_matmul.md) for `matmul/group_matmul/`,
+   [matmul.md](../matmul.md) for the rest of `matmul/`, and
+   [reorder.md](../reorder.md) for `reorder/`. Operators that share
    checks share one file: [attention.md](../attention.md) covers `sdpa/` and
    `hstu_attention/`. A change that touches several operators opens each of
    their files.

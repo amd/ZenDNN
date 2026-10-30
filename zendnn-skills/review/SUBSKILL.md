@@ -21,5 +21,6 @@ for a pull-request URL it runs the GitHub review.
   checks.
 - `<operator>.md`: one operator's own checks, named after its directory under
   `zendnnl/src/lowoha_operators/`, or after the family when operators share
-  one file. Today: [group_matmul](group_matmul.md), [matmul](matmul.md), and
-  [attention](attention.md) for `sdpa/` and `hstu_attention/`.
+  one file. Today: [group_matmul](group_matmul.md), [matmul](matmul.md),
+  [reorder](reorder.md), and [attention](attention.md) for `sdpa/` and
+  `hstu_attention/`.
