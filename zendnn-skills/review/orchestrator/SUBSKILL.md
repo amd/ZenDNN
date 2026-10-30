@@ -26,7 +26,8 @@ Every review opens, in this order:
    [reorder.md](../reorder.md) for `reorder/`. Operators that share
    checks share one file: [attention.md](../attention.md) covers `sdpa/` and
    `hstu_attention/`. A change that touches several operators opens each of
-   their files.
+   their files. When an operator file says to also apply another operator
+   file, open that one too.
 
 Then pick the path:
 

@@ -24,3 +24,5 @@ for a pull-request URL it runs the GitHub review.
   one file. Today: [group_matmul](group_matmul.md), [matmul](matmul.md),
   [reorder](reorder.md), and [attention](attention.md) for `sdpa/` and
   `hstu_attention/`.
+- [operator-file-guide](operator-file-guide.md): how to write or extend an
+  operator file, and where each check belongs.
