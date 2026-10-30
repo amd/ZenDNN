@@ -2,8 +2,8 @@
 
 Guidance for AI coding agents working in the **ZenDNN** repository. This file
 captures always-useful context about the repo and its architecture, and points
-to specialized agent skills for detailed, step-by-step workflows. Read this
-first; follow a skill when your task matches one below.
+to the agent skills for detailed, step-by-step workflows. Read this first; for
+any task the skills cover, start with the master skill described below.
 
 ## What this repo is
 
@@ -48,7 +48,7 @@ ZenDNN
 |- docs/            : architecture, build, and logging documentation.
 |- scripts/         : supporting shell scripts.
 |- tools/, fwk/     : additional tooling.
-|- .claude/skills/  : agent skills (see below).
+|- zendnn-skills/   : agent skills (see below).
 ```
 
 ## Build system
@@ -72,8 +72,9 @@ ZenDNN
   forwards them to downstream consumers, so a consumer does not have to resolve
   ZenDNN's dependencies itself.
 
-For the detailed and authoritative build workflow, **use the `build-zendnn`
-skill** rather than reconstructing commands by hand.
+For the detailed and authoritative build workflow, **use the master skill**
+(`zendnn-skills/SKILL.md`), which routes to its `build-zendnn` sub-skill,
+rather than reconstructing commands by hand.
 
 ## Consumers / plugins
 
@@ -89,47 +90,35 @@ than standalone:
   the source of truth for zentf internals.
 - **zentorch — PyTorch Plugin** (`ZenDNN_PyTorch_Plugin`): integrates ZenDNN
   into PyTorch. zentorch vendors this ZenDNN repo as a `third_party/ZenDNN`
-  submodule and builds the ZenDNN backend via the `build-zendnn` skill (the
-  single source of truth for the ZenDNN backend build steps).
+  checkout and builds the ZenDNN backend via the `build-zendnn` sub-skill (the
+  single source of truth for the ZenDNN backend build steps), reached through
+  `zendnn-skills/SKILL.md`.
 - **Direct vLLM (CPU) integration**: vLLM's CPU extension can compile **upstream
   oneDNN** (`uxlfoundation/oneDNN`, whose `main` carries the opt-in zen64 ZenDNN
   backend) and link the standalone ZenDNN native library directly (no zentorch).
   This path is enabled only when both the oneDNN source dir
   (`FETCHCONTENT_SOURCE_DIR_ONEDNN`) and the ZenDNN dir (`ZENDNN_DIR`) are
   provided at build time. The vLLM-side wiring is not yet upstream, so it is
-  carried as a patch bundled with the `build-vllm-onednn-zendnn` skill. See that
-  skill.
+  carried as a patch bundled with the `build-vllm-onednn-zendnn` sub-skill,
+  reached through `zendnn-skills/SKILL.md`.
 
 ## Agent skills
 
-Specialized, step-by-step workflows live under `.claude/skills/`. When a task
-matches one of these, **follow the skill** — it is the authoritative,
-stop-on-failure procedure. Do not duplicate or paraphrase its commands here.
+All agent skills live in `zendnn-skills/`, the only skill folder in this
+repository. Do not add skills under `.claude/`, `.cursor/`, `.agents/` or any
+other tool-specific folder.
 
-- **`build-zendnn`** — `.claude/skills/build-zendnn/SKILL.md`
-  Build the standalone ZenDNN native library (`zendnnl`) from a chosen git ref
-  with the alternate backends OFF (no oneDNN, LibXSMM, parlooper, FBGEMM),
-  keeping AOCL DLP. Produces the `build/install/zendnnl` install tree (exported as
-  `ZENDBUILDPATH`) that downstream consumers (zentorch, vLLM) point at. This is
-  the single source of truth for the ZenDNN backend build. Inputs: ZenDNN git
-  ref (branch/tag/PR; default `main`) and ZenDNN dir (default this repo).
-
-- **`build-vllm-onednn-zendnn`** — `.claude/skills/build-vllm-onednn-zendnn/SKILL.md`
-  Build vLLM (CPU) end-to-end with the upstream oneDNN + ZenDNN (zen64) backend
-  via direct integration (no zentorch). Orchestrates the `build-zendnn` skill for
-  the native lib, upstream oneDNN source prep, a conda build env, the vLLM wheel
-  build, and two-tier (build-time + runtime) verification. Inputs: repo root,
-  vLLM repo/ref, ZenDNN ref, oneDNN dir, and build method.
-
-Each skill ships its flowchart as a standalone `.mmd` file next to its
-`SKILL.md` — `build-zendnn/build-zendnn-flow.mmd` and
-`build-vllm-onednn-zendnn/build-vllm-onednn-zendnn-flow.mmd`. Those diagrams are
-the end-to-end decision flow, with `build-zendnn` as the reusable Stage 1
-sub-flow of the vLLM build.
+For building, testing, benchmarking, configuring, integrating or reviewing
+ZenDNN, **start with the master skill, `zendnn-skills/SKILL.md`**. It matches
+the request to a sub-skill, collects the inputs, runs multi-step requests in
+order and reports the result. Each sub-skill is a `SUBSKILL.md` listed in the
+master and is opened only through it. When a sub-skill covers the task,
+**follow it** — it is the authoritative, stop-on-failure procedure. Do not
+duplicate or paraphrase its commands here.
 
 ### Working principle for skills
 
-Both build skills enforce a strict **stop-on-failure policy**: if any command
+The build sub-skills enforce a strict **stop-on-failure policy**: if any command
 fails, stop and report the failing step, the exact command, and the first real
 error line — do not auto-retry, auto-fix, or continue on your own. Honor that
 policy when executing these workflows.

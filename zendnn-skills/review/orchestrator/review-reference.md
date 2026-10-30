@@ -1,7 +1,8 @@
-# ZenDNN Detailed Review Checklist
+# ZenDNN pull-request validation reference
 
-Read this checklist before reviewing code. Apply every relevant section and
-record anything that could not be validated.
+Read this before validating a pull request. The code-review checks are in
+[common](../common/SUBSKILL.md). This file covers how much to build, test, and
+benchmark, and how to compare a pull request against its merge base.
 
 ## User-requested validation exclusions
 
@@ -14,106 +15,6 @@ An execution exclusion does not remove the corresponding code-review duty.
 Continue inspecting implementation correctness, existing test quality, and
 whether the PR needs additional tests. Never describe excluded validation as
 passed.
-
-## Functional correctness
-
-- Public API behavior matches code and documentation.
-- Every new branch is reachable under the claimed configuration.
-- Every fallback is correct and preserves semantics.
-- Empty groups, zero-M experts, sparse experts, leading inactive experts,
-  single expert, many experts, and capacity limits are handled.
-- Mixed per-expert M/N/K values do not get collapsed into fictitious shapes.
-- Active expert count is not confused with padded slot count.
-- Row-major/column-major, transposition, alpha/beta, bias, and post-ops are
-  preserved.
-- Tight and padded `lda`, `ldb`, and `ldc` use element units correctly.
-- BF16, F16, F32, S8/U8, S4/U4, symmetric/asymmetric, per-token,
-  per-channel, and per-group paths use the correct element sizes and metadata.
-- Fused activation changes output width and pointer arithmetic consistently.
-- Environment overrides honor documented precedence, including invalid input.
-- Release behavior does not rely only on debug assertions.
-
-## Numerical correctness
-
-- Reduction order changes have an independent reference or justified tolerance.
-- Tests cannot pass with all-zero, stale, partially written, or repeated-block
-  output.
-- Test data avoids cancellation that makes the oracle ineffective.
-- Tolerances reflect dtype and accumulation error; do not use a broad tolerance
-  that exceeds expected output magnitude.
-- Every distinct destination epilogue is covered.
-- Nonzero tile offsets and boundary/tail tiles are validated.
-- Negative-path tests prove the optimized path did not run.
-- A capture hook verifies intended path reachability when silent fallback could
-  make a test pass.
-
-## Memory and lifetime
-
-- Every allocation has one clear owner and matched deallocator.
-- `malloc/free`, aligned alloc/free, and `new/delete` families are paired.
-- Aliased pointers never outlive their backing vectors, arenas, or stack scope.
-- Warmup and timed benchmark calls do not retain pointers to setup temporaries.
-- Early returns and failed preparation release all owned buffers.
-- Context reset clears every newly added state field.
-- Thread-local vectors are not ownership leaks when destroyed at thread exit,
-  but retained high-water memory is still audited and bounded where needed.
-- Scratch sizes use checked arithmetic and cannot overflow.
-- Stack arrays use named maximum constants, not fragile magic sizes.
-- Cache ownership and mutable-weight behavior are correct.
-- ASan/Valgrind inputs actually reach the changed lifetime branch; report ISA
-  or instrumentation limitations.
-
-## Concurrency and OpenMP
-
-- Requested OpenMP team size is not assumed to be the actual team size.
-- Reduced teams do not skip experts, rows, columns, or activation work.
-- Every thread reaches barriers under uniform conditions.
-- Atomic memory order is sufficient.
-- Test capture hooks do not create production cache-line contention.
-- Fixed thread roles cannot leave one pool as the unstealable long pole.
-- Planner mappings remain valid under nested OpenMP and thread limits.
-- Thread ID grouping is not assumed to equal physical CCD/L3 grouping unless
-  affinity/topology is detected or enforced.
-- Partial CCDs receive capacity-weighted work.
-- Sorting and tie-breaking are deterministic and preserve intended balance.
-- No data races occur in shared scratch, output tiles, caches, or telemetry.
-
-## Planner and integer arithmetic
-
-- Producer and consumer use the same floor/ceil semantics.
-- Alignment is applied to the effective backend/kernel NR.
-- Both sides of an imbalance bound are enforced.
-- Per-expert constraints stay per-expert where inputs can differ.
-- Inactive slots do not influence active-work planning.
-- Products such as `K*N*bytes`, thread thresholds, and ceil division use
-  checked 64-bit arithmetic.
-- No signed overflow occurs before a later clamp.
-- Capacity overflow has a correct and acceptably parallel fallback.
-- A performance heuristic must not silently become a correctness condition.
-
-## Performance and overhead
-
-Audit hot paths for:
-
-- per-call and per-tile heap allocations
-- vectors that could be reused or stack-bound safely
-- repeated environment parsing
-- atomics/logging/capture loads in every tile
-- scalar dtype conversion where vector conversion exists
-- duplicate full-output scratch and copies
-- unnecessary barriers or nested parallel regions
-- serial fallback replacing a previously parallel supported path
-- cache/CCD assumptions unsupported by deployment affinity
-- work estimates that ignore N, K, dtype, or post-op cost
-- benchmark claims measured only in a constrained runtime configuration
-
-Require before/after evidence when:
-
-- a production default changes
-- AUTO routing changes
-- a supported path becomes serial
-- a new numerical kernel becomes automatic
-- topology/affinity is part of the performance premise
 
 ## Risk-based validation depth
 
@@ -326,29 +227,3 @@ Do not impose a fixed time budget. Stop expanding only when added tests no
 longer address a plausible risk introduced by the diff. Do not run broad,
 expensive suites for a minor change solely to appear thorough.
 
-## Tests and validation quality
-
-- Selection-only tests do not substitute for execution tests.
-- Branch-tag-only tests do not substitute for output parity.
-- Every bug fix has a regression test that fails on the old code.
-- Cached environment getters have deterministic overrides or process-isolated
-  tests.
-- RAII test guards restore prior state, including nested use where relevant.
-- ISA-skipped tests do not hide a wrong expected branch on capable hardware.
-- Test inputs reach the intended branch and assert that they did.
-- Sanitizer tests exercise the changed dtype/configuration.
-- Canary padding detects out-of-bounds or omitted writes.
-- Heterogeneous and inactive-expert cases are included where the API permits
-  them.
-- Default/auto behavior is tested separately from forced override behavior.
-
-## Code quality and documentation
-
-- No unused variables, stale constants, unreachable tags, dead branches, or
-  superseded comments remain.
-- Names describe what predicates actually check.
-- Inline comments explain durable invariants, not historical narration.
-- Public docs, source docs, tests, PR body, and telemetry agree.
-- Environment domains/defaults/invalid-value behavior are documented.
-- PR checkboxes do not claim coverage that the code or tests contradict.
-- Formatting, licenses, and repository conventions pass.

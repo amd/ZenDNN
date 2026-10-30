@@ -1,6 +1,6 @@
 ---
 name: build-zendnn
-description: Build the standalone ZenDNN native library (zendnnl) from source with the alternate compute backends OFF (no oneDNN, libxsmm, parlooper, fbgemm), keeping AOCL DLP, which is the GEMM backend zendnnl links against. Use when asked to build ZenDNN alone, produce the zendnnl install tree for zentorch/vLLM, or set up the "zendnn-only" backend. This is the single source of truth for ZenDNN backend build steps — the zentorch repo invokes this skill via its third_party/ZenDNN submodule.
+description: Build the standalone ZenDNN native library (zendnnl) from source with the alternate compute backends OFF (no oneDNN, libxsmm, parlooper, fbgemm), keeping AOCL DLP, which is the GEMM backend zendnnl links against. Use when asked to build ZenDNN alone, produce the zendnnl install tree for zentorch/vLLM, or set up the "zendnn-only" backend. This is the single source of truth for ZenDNN backend build steps — the zentorch repo reaches it through the zendnn-skills master skill in its third_party/ZenDNN checkout.
 version: 1.2.0
 ---
 

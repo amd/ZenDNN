@@ -1,15 +1,47 @@
 ---
-name: zendnn-pr-review
-description: Performs evidence-backed, end-to-end reviews of AMD ZenDNN pull requests, posts only actionable GitHub comments, validates builds and affected behavior, audits memory and performance, handles rereviews without duplication, and documents design changes with Mermaid flow diagrams. Use only when explicitly referenced with a ZenDNN PR URL.
+name: review-orchestrator
+description: >-
+  Runs every ZenDNN review. Opens the common checks, then the Linux or Windows
+  platform file, then the operator file when one exists. For a ZenDNN pull
+  request URL it also performs the evidence-backed, end-to-end pull-request
+  review: isolated worktree, proportionate local validation, Mermaid flow
+  diagrams, rereviews without duplication, and only actionable GitHub
+  comments with a posted review decision.
 disable-model-invocation: true
 ---
 
-# ZenDNN Pull Request Review
+# Review orchestrator
 
-Use this skill when the user says:
+## Which files open
+
+Every review opens, in this order:
+
+1. [common](../common/SUBSKILL.md): the checks every review runs.
+2. The platform file: [linux](../linux/SUBSKILL.md) or
+   [windows](../windows/SUBSKILL.md). Default Linux.
+3. The operator file in `review/` when one exists. It is named after the
+   operator's directory under `zendnnl/src/lowoha_operators/`, for example
+   [group_matmul.md](../group_matmul.md) for `matmul/group_matmul/`. A change
+   that touches several operators opens each of their files.
+
+Then pick the path:
+
+- **Local operator change** (no pull-request URL): apply those files to the
+  change in the working tree and report the findings in chat. Stop there. Do
+  not create a worktree, run the pull-request validation, draw diagrams, or
+  post anything to GitHub.
+- **Pull-request URL**: follow ZenDNN pull request review below, which uses
+  the same files.
+
+## ZenDNN pull request review
+
+Everything from here to the end of this file is the pull-request path. A
+local operator review does not use it.
+
+Use this path when the user says:
 
 ```text
-Use @skills/ZenDNN/skills/pr_review/zendnn-pr-review-skill.md on <PR_URL>
+Use @zendnn-skills/SKILL.md to review <PR_URL>
 ```
 
 The requested deliverable is a completed GitHub review, not merely a local
@@ -28,7 +60,7 @@ continue every other applicable review and validation step. Do not broaden one
 exclusion into related categories. For example:
 
 ```text
-Use @skills/ZenDNN/skills/pr_review/zendnn-pr-review-skill.md on <PR_URL>.
+Use @zendnn-skills/SKILL.md to review <PR_URL>.
 Don't do BenchDNN and regression tests.
 ```
 
@@ -219,18 +251,20 @@ Give each reviewer:
 Wait for every reviewer. Reconcile duplicates and independently validate
 high-severity claims before posting.
 
-## Phase 5: Apply the detailed ZenDNN checklist
+## Phase 5: Apply the review checks
 
-Before reviewing code, read
-[zendnn-pr-review-reference.md](zendnn-pr-review-reference.md). Apply every
-relevant item across functionality, numerics, memory, concurrency, planner
-math, performance, tests, code quality, and documentation. Record any item
-that cannot be validated rather than silently treating it as passed.
+Before reviewing code, read [common](../common/SUBSKILL.md) and the platform
+file for the PR ([linux](../linux/SUBSKILL.md) or
+[windows](../windows/SUBSKILL.md)), plus the operator file in `review/` when
+one exists. Apply every relevant item across functionality, numerics, memory,
+concurrency, planner math, performance, tests, code quality, and
+documentation. Record any item that cannot be validated rather than silently
+treating it as passed.
 
 ## Phase 6: Validation strategy
 
 Read the risk-tier, functionality-matrix, and BenchDNN sections in
-[zendnn-pr-review-reference.md](zendnn-pr-review-reference.md), then classify
+[review-reference.md](review-reference.md), then classify
 the PR before running expensive work:
 
 Validation is enabled by default. Apply the risk tier to every activity except
@@ -304,49 +338,13 @@ them.
 
 ## Phase 7: Comment policy
 
-### Severity
+Use the severity scale, finding contents, and template in
+[common](../common/SUBSKILL.md). Each inline comment carries every item listed
+there.
 
-- **P0**: security issue, data corruption, crash, use-after-free, deadlock, or
-  broad catastrophic behavior.
-- **P1**: merge blocker: wrong output, skipped work, material default-path
-  regression, untested automatic numerical path, or unsupported public
-  behavior.
-- **P2**: required correction with narrower impact: misleading contract,
-  significant avoidable overhead, ineffective test, telemetry error, or
-  configuration bug.
-- **P3**: small but necessary correctness/documentation cleanup. Use sparingly.
+In addition to the cases in common, do not comment when:
 
-### Inline comment requirements
-
-Every comment must contain:
-
-1. Severity
-2. Concrete triggering input/configuration
-3. Actual behavior
-4. Expected behavior
-5. User-visible correctness/performance/maintenance impact
-6. Requested code or test change
-7. Evidence: code path, calculation, test failure, sanitizer output, or
-   benchmark
-
-Template:
-
-```text
-[P1] <concise defect statement>
-
-With <specific shape/configuration>, <producer> computes/chooses <X>, but
-<consumer> uses <Y>. This causes <concrete impact>. Please <required change>
-and add <specific regression test>.
-```
-
-Do not comment when:
-
-- the change is correct and needs no action
-- only wording/style preference is involved
 - a current thread already reports it
-- the scenario is impossible under validated API contracts
-- performance concern has no hot-path or reachable evidence
-- the requested change is optional
 
 Before posting an inline comment, confirm the line belongs to the current PR
 diff. If not, include it in the review summary or reply to the nearest existing

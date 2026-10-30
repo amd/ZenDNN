@@ -56,7 +56,7 @@ terminal — no retry loops.
 The full flowchart lives in
 **[`build-vllm-onednn-zendnn-flow.mmd`](build-vllm-onednn-zendnn-flow.mmd)** next
 to this file. Stage 1 delegates to the `build-zendnn` skill, whose own sub-flow
-is in `build-zendnn/build-zendnn-flow.mmd`.
+is in `../build-zendnn/build-zendnn-flow.mmd`.
 
 In brief: Stage 0 confirm inputs → Stage 0b apply the bundled patch (with a
 `git apply --check` version guard) → Stage 1 build ZenDNN via `build-zendnn` →
@@ -187,8 +187,9 @@ optional clean benchmark.
    > ```
 
 2. **Stage 1 — ZenDNN native lib.** **Invoke the existing `build-zendnn`
-   skill** — it is the single source of truth for the ZenDNN build. Do **not**
-   duplicate its cmake commands here. It produces:
+   skill** (`../build-zendnn/SUBSKILL.md`) — it is the single source of truth
+   for the ZenDNN build. Do **not** duplicate its cmake commands here. It
+   produces:
    ```
    ZENDBUILDPATH = <ZenDNN>/build/install/zendnnl
    ```
