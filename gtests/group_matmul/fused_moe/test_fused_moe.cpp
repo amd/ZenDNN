@@ -203,7 +203,7 @@ static std::vector<FusedMoETestParam> make_fused_moe_params() {
     // num_ops > 16 coverage for the internal-alloc + custom-kernel path
     // (GPT-OSS-class decode workload ? `dim=128, h=128`).  Earlier test
     // sweeps capped num_ops at 16; this band exercises the
-    // ManyExperts/Multi-round dispatch that was previously uncovered.
+    // FixedTeamRounds/Multi-round dispatch that was previously uncovered.
     // Three activation modes:
     //   1 = silu_and_mul (concatenated [gate|up])
     //   3 = swiglu_oai_mul (interleaved [g0,u0,g1,u1,...])
@@ -2245,7 +2245,7 @@ protected:
         // pin ALGO 1 for deterministic baseline.  Lets developers force
         // ALGO 2 (M-tile) etc. via `export ZENDNNL_GRP_MATMUL_ALGO=2`
         // when investigating algo-specific behaviour.  Note: any non-null
-        // wei_scale auto-rejects ALGO 3 (`check_n_tile_extra`), so an
+        // wei_scale auto-rejects ALGO 3 (`n_tile_supported`), so an
         // ALGO 3 export silently falls back to ALGO 1 on these tests.
         if (const char *env_algo = std::getenv("ZENDNNL_GRP_MATMUL_ALGO");
                 !env_algo || env_algo[0] == '\0') {
@@ -2847,7 +2847,7 @@ TEST(TestFusedMoEQuantDynINT8AllAlgos, GroupDynamicQuantBothPasses) {
     }
 }
 
-// ALGO 5's fused pipeline (`try_expert_parallel_pipeline`) must agree with the
+// ALGO 5's fused pipeline (`try_fused_expert_parallel`) must agree with the
 // legacy two-pass over the SAME buffers.  Both legs below run the identical
 // fused-MoE call under a global ALGO 5 pin; the only difference is
 // `ZENDNNL_GRP_MATMUL_ALGO5_VERTICAL_FUSION`, so this needs no independent
@@ -2868,7 +2868,7 @@ TEST(TestFusedMoEQuantDynINT8AllAlgos, GroupDynamicQuantBothPasses) {
 // MoE decode shape, and the slot a representative-slot dtype probe would have
 // read) plus a decode-shaped `M=1` expert alongside larger ones.
 //
-// Each leg asserts from the captured gemm_mode that the intended executor
+// Each leg asserts from the captured execution_path that the intended executor
 // actually ran, because a silent decline is the failure mode this pipeline is
 // built around and would otherwise make both legs trivially equal.
 TEST(TestFusedMoEExpertParallelPipeline, FusedMatchesTwoPass) {
@@ -3031,7 +3031,7 @@ TEST(TestFusedMoEExpertParallelPipeline, FusedMatchesTwoPass) {
                         }
                     }
 
-                    GemmModeCaptureGuard mode_guard;
+                    ExecutionPathCaptureGuard mode_guard;
                     ASSERT_EQ(group_matmul_direct(gv_op1.layout, gv_op1.transA,
                                       gv_op1.transB, gv_op1.Ms, gv_op1.Ns,
                                       gv_op1.Ks, gv_op1.alpha, srcs, gv_op1.lda,
@@ -3041,8 +3041,9 @@ TEST(TestFusedMoEExpertParallelPipeline, FusedMatchesTwoPass) {
                             status_t::success)
                             << "vf=" << vf;
                     const char *mode
-                            = test_api::s_last_group_matmul_direct_gemm_mode
-                                      .load(std::memory_order_relaxed);
+                            = test_api::
+                                      s_last_group_matmul_direct_execution_path
+                                              .load(std::memory_order_relaxed);
                     ASSERT_NE(mode, nullptr) << "vf=" << vf;
                     mode_out = mode;
                 };
@@ -3227,9 +3228,9 @@ TEST(TestFusedMoEQuantDynINT8AllAlgos, GroupDqVsRuntimeHoistParity) {
 // Route parity for the `ZENDNNL_GRP_MATMUL_DECDYN_CK_INT8_FUSED` knob.
 //
 // The knob defaults to ON, which makes a `use_custom` DQ-INT8 FUSED call
-// eligible for DecodeDynamic where it could previously only reach Rounds.
+// eligible for CcdExpertWaves where it could previously only reach Rounds.
 // The two executors partition the same work differently — Rounds barriers
-// between rounds of N-tiles, DecodeDynamic maps whole experts onto CCDs —
+// between rounds of N-tiles, CcdExpertWaves maps whole experts onto CCDs —
 // so this pins the caller-visible contract that the route is a scheduling
 // choice and not a numerical one.  Both strategies are FORCED here (2 and
 // 3) rather than left to AUTO: at four experts the AUTO adoption gate
@@ -3247,7 +3248,7 @@ TEST(TestFusedMoEQuantDynINT8AllAlgos, DecodeDynamicVsRoundsRouteParity) {
     }
 
     // max_M = 32 = kDecodeMaxM keeps the call decode-class, which is a
-    // precondition for the DecodeDynamic branch.
+    // precondition for the CcdExpertWaves branch.
     constexpr int dim = 32, H = 32, M = 32, num_ops = 4;
     constexpr int N_gate_up = 2 * dim, K_in = H, K_down = dim;
     constexpr bool is_bf16 = true;
@@ -3336,21 +3337,21 @@ TEST(TestFusedMoEQuantDynINT8AllAlgos, DecodeDynamicVsRoundsRouteParity) {
         ASSERT_EQ(run_fused(d2_rounds.ptrs(is_bf16)), status_t::success)
                 << "fused DQ-INT8 under forced Rounds";
         const auto &snap = test_api::s_last_phase_b_snapshot;
-        ASSERT_TRUE(snap.valid) << "flat_n_tile was not reached under "
+        ASSERT_TRUE(snap.valid) << "n_tile_execute was not reached under "
                                    "strategy=2; the call left ALGO 3.";
         EXPECT_NE(static_cast<int>(snap.strategy),
-                static_cast<int>(GroupNTileStrategy::DecodeDynamic))
-                << "strategy=2 must pin the call OFF DecodeDynamic.";
+                static_cast<int>(GroupNTileStrategy::CcdExpertWaves))
+                << "strategy=2 must pin the call OFF CcdExpertWaves.";
     }
-    // Route B: forced DecodeDynamic (what the default knob now admits).
+    // Route B: forced CcdExpertWaves (what the default knob now admits).
     {
         NTileStrategyOverride decdyn(3);
         PhaseBCaptureGuard capture;
         reset_grp_matmul_caches();
         ASSERT_EQ(run_fused(d2_decdyn.ptrs(is_bf16)), status_t::success)
-                << "fused DQ-INT8 under forced DecodeDynamic";
+                << "fused DQ-INT8 under forced CcdExpertWaves";
         const auto &snap = test_api::s_last_phase_b_snapshot;
-        ASSERT_TRUE(snap.valid) << "flat_n_tile was not reached under "
+        ASSERT_TRUE(snap.valid) << "n_tile_execute was not reached under "
                                    "strategy=3; the call left ALGO 3.";
         // Strategy 3 is a REQUEST, not a bypass: the route still has to
         // clear the per-op EPC rule (`active_ops >= EPC_MULT * num_ccds`,
@@ -3361,8 +3362,8 @@ TEST(TestFusedMoEQuantDynINT8AllAlgos, DecodeDynamicVsRoundsRouteParity) {
         // parity check where the route is reachable instead of silently
         // comparing Rounds against itself.
         if (static_cast<int>(snap.strategy)
-                != static_cast<int>(GroupNTileStrategy::DecodeDynamic)) {
-            GTEST_SKIP() << "DecodeDynamic not reachable here (strategy="
+                != static_cast<int>(GroupNTileStrategy::CcdExpertWaves)) {
+            GTEST_SKIP() << "CcdExpertWaves not reachable here (strategy="
                          << static_cast<int>(snap.strategy)
                          << "); needs active_ops >= EPC_MULT * num_ccds.  "
                             "Re-run with ZENDNNL_GRP_MATMUL_DECDYN_EPC_MULT=1 "
@@ -3979,7 +3980,7 @@ TEST(TestFusedMoEPreQuantSrc, RejectsUnusableOp2DownScaleMetadata) {
 // call and pair the new packed columns with the FIRST weight's converted
 // and permuted scales — a silent wrong answer, with status still success.
 //
-// Only `silu_and_mul` / `gelu_and_mul` reach the memo at all: `flat_n_tile`
+// Only `silu_and_mul` / `gelu_and_mul` reach the memo at all: `n_tile_execute`
 // clears `ck_scales_raw` exactly when the split-halves interleave
 // permutation is required, and the non-interleaved f32 case returns a
 // zero-copy alias of the caller's buffer that is deliberately never cached.
@@ -4051,7 +4052,7 @@ TEST(TestFusedMoEPreQuantSrc, SharedScaleWorkspaceTracksWeightIdentity) {
         return worst;
     };
 
-    // The memo lives on the flat_n_tile route.
+    // The memo lives on the n_tile_execute route.
     AlgoEnvGuard algo_guard(3);
 
     // Oracle: weights B with B's own scale tensors, nothing shared.
@@ -4164,16 +4165,16 @@ TEST(TestFusedMoEPreQuantSrc, BothPassesVsTwoCallReference) {
         {
             reset_grp_matmul_caches();
             AlgoEnvGuard algo_guard(algo);
-            GemmModeCaptureGuard capture;
+            ExecutionPathCaptureGuard capture;
             ASSERT_EQ(h.run_fused(/*prequant=*/true, out_fused),
                     status_t::success)
                     << "algo=" << algo << " fused";
             if (on_algo3) {
                 const char *m
-                        = test_api::s_last_group_matmul_direct_gemm_mode.load(
-                                std::memory_order_relaxed);
+                        = test_api::s_last_group_matmul_direct_execution_path
+                                  .load(std::memory_order_relaxed);
                 const std::string mode = m != nullptr ? m : "";
-                EXPECT_NE(mode.find("flat_n_tile"), std::string::npos)
+                EXPECT_EQ(executed_algo_from_execution_path(mode.c_str()), 3)
                         << "algo=" << algo << " mode=" << mode;
             }
         }
@@ -4964,11 +4965,12 @@ TEST(TestFusedMoEInt8AutoPrompt, MatchesAoclAndRunsThePromptTile) {
                 {
                     reset_grp_matmul_caches();
                     AlgoEnvGuard auto_algo(0);
-                    GemmModeCaptureGuard capture;
+                    ExecutionPathCaptureGuard capture;
                     ASSERT_EQ(h.run_fused(prequant, out), status_t::success);
                     const char *m
-                            = test_api::s_last_group_matmul_direct_gemm_mode
-                                      .load(std::memory_order_relaxed);
+                            = test_api::
+                                      s_last_group_matmul_direct_execution_path
+                                              .load(std::memory_order_relaxed);
                     mode = m != nullptr ? m : "";
                 }
                 if (asym) {
@@ -5032,7 +5034,7 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulFusedMoEQuant, TestFusedMoEQuantDynINT8,
 // just that the eligibility gate accepted the shape — protects
 // against silent regressions where the executor's internal planner
 // later bails out (e.g. due to a tuning change in
-// `plan_m_tile_single_tier_assignment` or a stricter scratch budget).
+// `make_m_tile_single_tier_plan` or a stricter scratch budget).
 // FORCED mode (vert_env=1) sets the executor's internal planner to
 // "engage regardless of the wide-N / multi-tier branches", so the
 // only legitimate fallthrough on bf16-eligible shapes is a scratch-
@@ -5297,7 +5299,7 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulFusedMoEVerticalBF16,
 // This fixture closes the gap by explicitly testing all four combos on
 // one representative shape (Mixtral-class E=4 M=128 dim=64 H=64) with
 // silu activation — sufficient because all four combos go through the
-// SAME `try_flat_m_tile_pipeline_bf16` entry point, so the shape sweep
+// SAME `try_fused_m_tile` entry point, so the shape sweep
 // is already covered by [17] and the only new variable is the alloc
 // pair.
 //
@@ -5452,7 +5454,7 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulFusedMoEVerticalBF16AllocMatrix,
 // [17.c] TestFusedMoEVerticalWOQ - WOQ-INT4 (s4/u4) vertical fusion at M-tile
 //      granularity (BF16-scratch phase 1, weight-side INT4).  Same per-thread
 //      slice pipeline as `TestFusedMoEVerticalBF16` above — the eligibility
-//      gate's regime-B branch (see `try_flat_m_tile_pipeline_bf16` doc-block)
+//      gate's regime-B branch (see `try_fused_m_tile` doc-block)
 //      accepts `{src=bf16, wei∈{s4,u4}, dst=bf16, dynamic_quant=false,
 //      wei_scale.buff!=nullptr, is_weights_const[*]=true}` and the executor
 //      reuses the bf16 scratch path because weight dequantization happens
@@ -5682,7 +5684,7 @@ TEST_P(TestFusedMoEVerticalWOQ, Correctness) {
 
     auto fused = make_fused_moe_op2(E, H, wei2_p, no_bias);
     // Op2 weight-side scale + zp carried through `fused.down_*`.  The
-    // dispatcher's `setup_op2_dispatch_scratch` will copy these into
+    // dispatcher's `prepare_op2_dispatch` will copy these into
     // `params_w2[i].quant_params.{wei_scale,wei_zp}` so the eligibility
     // gate's regime-B check on Op2's params sees the scale buffer.
     fused.down_scale.resize(E);
@@ -5835,7 +5837,7 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulFusedMoEVerticalWOQ,
 // [17.d] TestFusedMoEVerticalDQINT8 - DQ-INT8 vertical-fusion correctness.
 //
 // Per-token symmetric dynamic-INT8 routed through the unified vertical-fusion
-// executor (`flat_m_tile_pipeline_bf16`, regime kRegDQINT8).  The pipeline
+// executor (`try_fused_m_tile_core`, regime kRegDQINT8).  The pipeline
 // shape is identical to BF16 / WOQ; the per-stage differences are entirely
 // contained in (a) the pre-OMP per-expert bf16→s8 source hoist and (b)
 // the per-thread Stage 2b re-quant of the post-activation tile.  This
@@ -5843,7 +5845,7 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulFusedMoEVerticalWOQ,
 //
 //   * The capture tag is `kVerticalFusionDQINT8` — the executor committed
 //     to the DQ-INT8 path through its eligibility wrapper (and did NOT
-//     fall through to BF16 / WOQ tags or any legacy `flat_m_tile`
+//     fall through to BF16 / WOQ tags or any legacy `m_tile_execute`
 //     branch).
 //   * Numerical bit-equivalence-modulo-tolerance against the legacy
 //     two-call reference path (Op1 dynamic-INT8 + activation, then Op2
@@ -6088,7 +6090,7 @@ TEST_P(TestFusedMoEVerticalDQINT8, Correctness) {
 
     auto fused = make_fused_moe_op2(E, H, wei2_p, no_bias);
     // Op2 weight-side scale + zp carried through `fused.down_*`.  The
-    // dispatcher's `setup_op2_dispatch_scratch` copies these into
+    // dispatcher's `prepare_op2_dispatch` copies these into
     // `params_w2[i].quant_params.{wei_scale,wei_zp}` so the eligibility
     // gate's regime-C check on Op2's params sees the scale buffer.
     fused.down_scale.resize(E);
@@ -6414,8 +6416,8 @@ TEST(FusedMoEVerticalFusionEnv, RespectsEnvKnob) {
 //
 // After every fallthrough call the `m_tile_path` capture tag must
 // NOT be `kVerticalFusionBF16`.  ALGO 2 forced so the legacy
-// `flat_m_tile` populates the tag with one of its four branch
-// values (kRoundBased / kMultiTier / kWideNFallback / kPhase2Single)
+// `m_tile_execute` populates the tag with one of its four branch
+// values (kRoundBased / kMultiTier / kShallowMFallback / kPhase2Single)
 // — any of those is acceptable.  Functional correctness is also
 // verified against the same `run_legacy_2call_ref` so the
 // fallthrough path didn't silently lose precision.
@@ -6510,7 +6512,7 @@ TEST_P(TestFusedMoEVerticalBF16Fallthrough, EligibilityFails) {
         // refuses dynamic-quant on bf16-on-bf16-on-bf16 today, but the
         // legacy path's behaviour isn't what we're testing — we're
         // testing the fork's negative path).  Skip the gate inside
-        // `flat_m_tile_pipeline_bf16` is exactly the contract we want
+        // `try_fused_m_tile_core` is exactly the contract we want
         // to verify here.
         for (auto &pp : params)
             pp.dynamic_quant = true;
@@ -6575,7 +6577,7 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulFusedMoEVerticalBF16Fallthrough,
 // ===============================================================================
 // [18.b] TestFusedMoEVerticalBF16Bailouts — bail-out paths NOT covered
 // by `EligibilityFails` above.  The eligibility gate has five additional
-// bail conditions inside `flat_m_tile_pipeline_bf16`:
+// bail conditions inside `try_fused_m_tile_core`:
 //   1. `active_ops > num_threads` (line 1504) — bails BEFORE plan, BEFORE
 //      tag store, cleanly returns false.
 //   2. `multi-tier would engage` (line 1578) — bails BEFORE plan,
@@ -6594,7 +6596,7 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulFusedMoEVerticalBF16Fallthrough,
 // E=8 / M=4 shape) and is exercised indirectly by the multi-tier
 // branch tests in test_algos.cpp where ALGO 2 is forced; the
 // vertical-fusion gate is structurally a literal copy of the
-// `flat_m_tile` multi-tier gate, so if multi-tier engages there it
+// `m_tile_execute` multi-tier gate, so if multi-tier engages there it
 // will also bail here on the same shape.
 //
 // Each test asserts:
@@ -6793,8 +6795,8 @@ TEST(TestFusedMoEVerticalBF16Bailouts, ScratchUnboundedEngages) {
 // Bail 3: wide-N memory-bound fallback would engage.  Light uniform
 // frames (M=2 > 1) with a large pinned thread team make
 // `total_need * 2 <= num_threads` true in
-// `plan_m_tile_single_tier_assignment` (see `executors/m_tile/m_tile_planner.hpp`),
-// so `plan.wide_n_fallback` fires and the vertical executor bails at
+// `make_m_tile_single_tier_plan` (see `executors/m_tile/m_tile_planner.hpp`),
+// so `plan.shallow_m_fallback` fires and the vertical executor bails at
 // the wide-N gate in `executors/m_tile/group_matmul_m_tile.cpp` BEFORE the OMP
 // region.  num_threads=64 is pinned (resolve_num_threads honours
 // non-zero requests uncapped) so the gate is host-independent:
@@ -6953,7 +6955,7 @@ TEST(TestFusedMoEVerticalBF16Bailouts, MultiTierWouldEngage) {
 //
 // Both cases must NOT produce `kVerticalFusionWOQ` (or `kVerticalFusion
 // BF16` — neither tag is acceptable on a WOQ-ineligible shape).  ALGO
-// 2 stays forced so the legacy `flat_m_tile` populates the tag with
+// 2 stays forced so the legacy `m_tile_execute` populates the tag with
 // one of its branch values; any of those is acceptable.
 // ===============================================================================
 
@@ -7547,7 +7549,7 @@ TEST(TestFusedMoEScratchMemory, ValidatorRejectsOp2InternalAsymmetricLda) {
 // The dispatcher's relaxed-size validator accepts any vector sized
 // `>= num_ops = M.size() = active`, so all five sizing patterns above
 // are admissible by contract.  But ONLY the asymmetric pattern
-// triggers the `setup_op2_dispatch_scratch::num_ops = params.size()`
+// triggers the `prepare_op2_dispatch::num_ops = params.size()`
 // regression — because only here does `params.size() > M.size()`.
 //
 // Coverage matrix:
@@ -7645,7 +7647,7 @@ TEST_P(TestFusedMoECompactAsymmetric, ProductionLayoutBF16) {
 
     // Match the user's repro env: PREPACK off and vertical fusion off
     // — isolate the legacy two-pass path so the regression's
-    // setup_op2_dispatch_scratch loop is the only suspect.
+    // prepare_op2_dispatch loop is the only suspect.
     EnvVarGuard prepack_off("ZENDNNL_GRP_MATMUL_PREPACK", "0");
     MoEVerticalFusionOverride vf_off(-1);
     reset_grp_matmul_caches();
@@ -7745,7 +7747,7 @@ TEST_P(TestFusedMoECompactAsymmetric, ProductionLayoutBF16) {
     fill_moe_tensors(active, is_bf16, &src_test, nullptr, nullptr);
 
     // Test call: Compact-asymmetric layout, op1_internal + op2_internal.
-    // Under the regression, setup_op2_dispatch_scratch derived num_ops
+    // Under the regression, prepare_op2_dispatch derived num_ops
     // from params.size()=total and OOB-read op1_dst[active..total) and
     // src[active..total).  Under the fix, num_ops is driven by M.size()
     // = active and the loop stays in-bounds.

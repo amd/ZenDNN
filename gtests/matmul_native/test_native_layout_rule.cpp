@@ -499,9 +499,9 @@ class NativeLayoutRuleRoute : public ::testing::Test {
 protected:
     void SetUp() override {
         reset_grp_matmul_caches();
-        // resolve_kernel() latches the algorithm it first sees for the whole
+        // resolve_matmul_backend() latches the algorithm it first sees for the whole
         // process: let it see the process setting, not a test's.
-        (void)mm::resolve_kernel();
+        (void)mm::resolve_matmul_backend();
         config_.cfg.set_algo(kAlgoNone);
         config_.cfg.set_weight_cache(2);
     }
@@ -1295,7 +1295,7 @@ TEST_F(NativeLayoutRuleRoute, GgmlPackedWeightIsDeclined) {
 // dense call on it is not taken by the native BRGEMM, which keeps nothing
 // for it and leaves the image as it is.
 TEST_F(NativeLayoutRuleRoute, CustomKernelImageIsNotTaken) {
-    if (!ck::dispatch_supported()) GTEST_SKIP() << "needs AVX512-BF16";
+    if (!ck::bf16_isa_supported()) GTEST_SKIP() << "needs AVX512-BF16";
     constexpr int kExperts = 4, M = 8, N = 256, K = 256;
     std::vector<std::vector<bfloat16_t>> wei, src;
     std::vector<std::vector<bfloat16_t>> out(
@@ -1406,8 +1406,8 @@ TEST_F(NativeLayoutRuleRoute, BatchedCallTakesItsOtherRoute) {
 }
 
 TEST_F(NativeLayoutRuleRoute, DefaultRouteEngagesCustomKernel) {
-    if (!ck::dispatch_supported()) GTEST_SKIP() << "needs AVX512-BF16";
-    if (mm::resolve_kernel() != matmul_algo_t::aocl_dlp_blocked)
+    if (!ck::bf16_isa_supported()) GTEST_SKIP() << "needs AVX512-BF16";
+    if (mm::resolve_matmul_backend() != matmul_algo_t::aocl_dlp_blocked)
         GTEST_SKIP() << "the process-wide algorithm is not the default";
     config_.cfg.set_algo(kAlgoAocl);
     config_.cfg.set_custom_kernel_route(true);
@@ -1423,15 +1423,16 @@ TEST_F(NativeLayoutRuleRoute, DefaultRouteEngagesCustomKernel) {
     p.num_threads = 8;
     p.weight_cache_type = 1;
     std::vector<bfloat16_t> dst(static_cast<size_t>(c.M) * c.N);
-    EXPECT_TRUE(mm::custom_kernel_routable('r', c.M, c.N, c.K, p.num_threads, 1,
-            false, true, 1.0f, 0.0f, nullptr, c.ldb, true, p));
+    EXPECT_TRUE(
+            mm::single_matmul_group_routable('r', c.M, c.N, c.K, p.num_threads,
+                    1, false, true, 1.0f, 0.0f, nullptr, c.ldb, true, p));
     std::string mode;
     {
-        mt::GemmModeCaptureGuard capture;
+        mt::ExecutionPathCaptureGuard capture;
         const status_t st = routed_call(c.M, c.N, c.K, c.src.data(), c.K,
                 c.wei.data(), c.ldb, true, dst.data(), c.N, p);
         const char *captured
-                = mm::test_api::s_last_group_matmul_direct_gemm_mode.load(
+                = mm::test_api::s_last_group_matmul_direct_execution_path.load(
                         std::memory_order_relaxed);
         omp_set_dynamic(old_dynamic);
         ASSERT_EQ(st, status_t::success);

@@ -331,7 +331,7 @@ private:
     /// mutates the weight buffer IN PLACE while every other consumer (CK
     /// decode pack, AOCL per-tile decode) stays OUT-OF-PLACE, pre-warmed
     /// from the raw weights by cross-warm before the mutation.  Set once by
-    /// `group_matmul_run_parallel_dispatch` when the eligibility gate holds
+    /// `group_matmul_execute` when the eligibility gate holds
     /// (AUTO + WC2 + PREPACK + CROSS_WARM + the custom-kernel decode pack +
     /// unlimited LRU capacity — AOCL per-tile does NOT substitute for the CK
     /// pack, its keys embed the N split); read by

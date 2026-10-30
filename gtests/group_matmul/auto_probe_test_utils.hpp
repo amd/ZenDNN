@@ -19,7 +19,7 @@
 ///        `single_expert/test_single_expert_policy.cpp`:
 ///   * `AutoProbeShape` / `build_auto_probe` and the
 ///     `apply_{w4a8_auto,shape_rules}_probe` rewrites — minimal
-///     `(layout, M, N, K, params)` tuples for `select_grp_matmul_algo`.
+///     `(layout, M, N, K, params)` tuples for `group_matmul_algo_select`.
 ///   * `Int8AlgoCustomParam` / `build_int8_dq_inputs` — DQ-INT8 symmetric
 ///     per-expert input tensors for `group_matmul_kernel_test`.
 
@@ -56,7 +56,7 @@ inline void build_int8_dq_inputs(tensor_factory_t &tf,
         // exercise the reorder's native bf16 scale output, which the CK
         // microkernel must materialise to f32 before consuming (reading a
         // bf16 scale buffer as f32 would silently corrupt every output —
-        // see the f32-scale-view materialisation in flat_n_tile).
+        // see the f32-scale-view materialisation in n_tile_execute).
         data_type_t scale_dt = data_type_t::f32) {
     src_tensors.assign(p.num_ops, tensor_t {});
     wei_tensors.assign(p.num_ops, tensor_t {});

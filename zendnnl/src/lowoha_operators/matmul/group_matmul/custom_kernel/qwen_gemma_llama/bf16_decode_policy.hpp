@@ -19,20 +19,20 @@ namespace lowoha {
 namespace matmul {
 namespace custom_kernel {
 
-enum class QwenBf16DecodeRoute : uint8_t {
+enum class Bf16DecodeRoute : uint8_t {
     none = 0,
     qwen35_w2_resume,
 };
 
 /// Apply Qwen BF16 decode microkernels after the normal ALGO 3 context is
 /// fully prepared. Unknown shapes return without changing one byte of context.
-QwenBf16DecodeRoute apply_qwen_bf16_decode_policy(CallContext &ctx,
+Bf16DecodeRoute apply_bf16_decode_policy(CallContext &ctx,
         grp_matmul_gated_act_t act, const std::vector<int> &M,
         const std::vector<int> &N, const std::vector<int> &K);
 
 /// Execute the isolated tile scheduler selected above. Returns false without
 /// touching dst when route is none.
-bool dispatch_qwen_bf16_decode_tile(QwenBf16DecodeRoute route,
+bool dispatch_bf16_decode_specialization(Bf16DecodeRoute route,
         const CallContext &ctx, int expert_idx, int M, int K, int n_tile,
         int col_start, const void *src, int lda, void *dst, int ldc);
 

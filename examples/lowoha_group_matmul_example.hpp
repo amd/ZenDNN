@@ -130,7 +130,7 @@ int group_matmul_fused_moe_internal_alloc_example();
  *   - Fused pipeline: Op1 (gate+up) → silu_and_mul → Op2 (down_proj).
  *   - Internal alloc (library owns Op1 and Op2 dst buffers).
  *   - MoE weighted-reduce postop (topk=8).
- *   - ALGO 1 (sequential_experts) via auto-select or env pin.
+ *   - ALGO 1 (sequential_execute) via auto-select or env pin.
  */
 int group_matmul_moe_w4a8_example();
 

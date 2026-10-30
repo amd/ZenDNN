@@ -68,7 +68,7 @@ inline bool matmul_custom_kernel_quant_supported(int M, int N, int K,
         if (qp.wei_zp.buff != nullptr) return false;
         if (!params.dynamic_quant && qp.src_scale.buff == nullptr) return false;
 
-        // Same pairs check_n_tile_extra serves: per-token `{M,1}` or
+        // Same pairs n_tile_supported serves: per-token `{M,1}` or
         // per-group `{M,G}` source, with a per-channel `{N}`/`{1,N}` or
         // per-group `{G,N}` weight scale. A per-group source requires the
         // matching per-group weight scale. Grouped ALGO 3 runs these on
@@ -95,7 +95,7 @@ inline bool matmul_custom_kernel_quant_supported(int M, int N, int K,
         return true;
     }
 
-    if (custom_kernel::is_s4_variant(variant)) {
+    if (custom_kernel::is_w4a8_variant(variant)) {
         if (!is_w4a8_config(params) || (K % custom_kernel::kS4Octet) != 0) {
             return false;
         }
@@ -155,7 +155,7 @@ inline bool custom_kernel_cross_phase_weight_candidate(
     // non-constant current call is harmless; those paths do not consume the
     // AOCL in-place permission in the first place.
     const bool bf16_route = params.dtypes.wei == data_type_t::bf16
-            && custom_kernel::dispatch_supported();
+            && custom_kernel::bf16_isa_supported();
     const bool int8_route = params.dtypes.wei == data_type_t::s8
             && get_grp_matmul_custom_kernel_int8()
             && custom_kernel::avx512vnni_available();
@@ -174,7 +174,7 @@ inline bool custom_kernel_cross_phase_weight_candidate(
 ///
 /// The grouped dispatcher owns prompt/decode selection and cache-mode-2
 /// cross-warming once this boundary accepts the call.
-inline bool custom_kernel_routable(char layout, int M, int N, int K,
+inline bool single_matmul_group_routable(char layout, int M, int N, int K,
         int num_threads, int batch_count, bool transA, bool transB, float alpha,
         float beta, const void *bias, int ldb, bool is_weights_const,
         const matmul_params &params) {
@@ -186,8 +186,9 @@ inline bool custom_kernel_routable(char layout, int M, int N, int K,
     // oneDNN/libxsmm/reference selections remain excluded. A per-operation
     // algorithm, when present, is stronger than the process-wide setting.
     const matmul_algo_t effective_kernel
-            = params.lowoha_algo != matmul_algo_t::none ? params.lowoha_algo
-                                                        : resolve_kernel();
+            = params.lowoha_algo != matmul_algo_t::none
+            ? params.lowoha_algo
+            : resolve_matmul_backend();
     if (effective_kernel != matmul_algo_t::aocl_dlp_blocked) return false;
 
     const bool aocl_prepacked = is_aocl_prepacked_weight(params);
@@ -234,7 +235,7 @@ inline bool custom_kernel_routable(char layout, int M, int N, int K,
     const bool bf16_variant
             = variant == custom_kernel::KernelVariant::kBF16_BF16_BF16;
     const bool int_variant = custom_kernel::is_int8_variant(variant);
-    const bool s4_variant = custom_kernel::is_s4_variant(variant);
+    const bool s4_variant = custom_kernel::is_w4a8_variant(variant);
     const bool f16_variant = custom_kernel::is_f16_variant(variant);
     // The single-expert CK policy routes a covered layer (below decode's
     // N-tile count too for a dtype FORCE_CK lists): Rule 0.46 runs each
@@ -259,7 +260,7 @@ inline bool custom_kernel_routable(char layout, int M, int N, int K,
                     && params.dtypes.src == data_type_t::u8
                     && int8_ck_postops_supported(params, M, N)))
         return false;
-    if (bf16_variant && !custom_kernel::dispatch_supported()) return false;
+    if (bf16_variant && !custom_kernel::bf16_isa_supported()) return false;
     if ((int_variant || s4_variant) && !custom_kernel::avx512vnni_available()) {
         return false;
     }
@@ -286,7 +287,7 @@ inline bool custom_kernel_routable(char layout, int M, int N, int K,
     const std::vector<int> grouped_n {N};
     const std::vector<int> grouped_k {K};
     const std::vector<matmul_params> grouped_params {params};
-    const int selected = select_grp_matmul_algo(grouped_layout, grouped_m,
+    const int selected = group_matmul_algo_select(grouped_layout, grouped_m,
             grouped_n, grouped_k, grouped_params, num_threads);
     // Below decode's N-tile count, only Rule 0.46's ALGO 3 routes; anything
     // else keeps the standard MatMul path it took before.

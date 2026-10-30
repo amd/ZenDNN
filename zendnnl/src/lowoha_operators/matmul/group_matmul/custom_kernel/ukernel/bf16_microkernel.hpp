@@ -17,11 +17,11 @@
 /// BF16 custom microkernel — per-tile (M × NR) GEMM with optional
 /// gated-activation epilogue applied directly in accumulator registers.
 ///
-/// Engaged through a single call site: `flat_n_tile` (ALGO 3) in
+/// Engaged through a single call site: `n_tile_execute` (ALGO 3) in
 /// group_matmul_n_tile.cpp.  That path serves both plain group_matmul
-/// (ActKind::none) and the fused-MoE entry (which routes Op1 +
+/// (ActivationKind::none) and the fused-MoE entry (which routes Op1 +
 /// swiglu_oai_mul and Op2 + none through the parallel dispatcher,
-/// landing in flat_n_tile when ALGO 3 is selected).  The microkernel
+/// landing in n_tile_execute when ALGO 3 is selected).  The microkernel
 /// honours the caller's ldc so the same code covers both the wide
 /// (ldc = 2I) and tight (ldc = I) destination layouts without a
 /// second implementation.
@@ -71,7 +71,7 @@ namespace custom_kernel {
 /// the activation, and stores 16 BF16 cols of activated output.
 ///
 ///   * `none` — non-fused path; store full NR BF16 cols.  Used by
-///     the non-fused flat_n_tile path and Op2 of the fused-MoE flow.
+///     the non-fused n_tile_execute path and Op2 of the fused-MoE flow.
 ///   * `swiglu_oai_mul` — swiglu_oai (clamp + α-swish + (1+u)).
 ///     Caller's framework weight is already interleaved at the API
 ///     boundary; the kernel reads it directly.
@@ -91,7 +91,7 @@ namespace custom_kernel {
 ///     well below the BF16 dst's ~7.8e-3 ulp, so the
 ///     `mt::tol_act(/*is_bf16=*/true)` band ({rel=0.15, abs=0.02})
 ///     accepts both with margin to spare.
-enum class ActKind {
+enum class ActivationKind {
     none, ///< Store full NR BF16 cols.
     swiglu_oai_mul, ///< Apply swiglu_oai in registers, store NR/2 BF16 cols.
     silu_and_mul, ///< Apply silu_and_mul in registers, store NR/2 BF16 cols.
@@ -126,21 +126,21 @@ enum class BiasKind {
 /// difference is whether the final store narrows back to BF16 (manual
 /// RNE conversion via `fp32_to_bf16x16_rne`) or stores the FP32 lanes
 /// straight via `_mm512_storeu_ps`.  Resolved at `prepare_for_call()`
-/// time from the `KernelVariant` and threaded through `select_ukernel`
-/// so each (MR, NV, Act, DstDt) pair has its own ukernel instantiation.
+/// time from the `KernelVariant` and threaded through `select_bf16_ukernel`
+/// so each (MR, NV, Act, OutputType) pair has its own ukernel instantiation.
 ///
 /// Constraint: any gated `Act` (`swiglu_oai_mul`, `silu_and_mul`,
-/// `gelu_and_mul`) is only valid with `DstDt::kBf16` — the in-register
+/// `gelu_and_mul`) is only valid with `OutputType::kBf16` — the in-register
 /// pair-store helpers (`swiglu_oai_store_pair`, `silu_and_mul_store_pair`,
 /// `gelu_and_mul_store_pair`) write the half-width BF16 output, and the
-/// downstream consumers (Op2 in fused MoE) read BF16.  `select_ukernel`
+/// downstream consumers (Op2 in fused MoE) read BF16.  `select_bf16_ukernel`
 /// returns `nullptr` for any (gated_act, kF32) tuple so the dispatcher's
-/// `fill_kfn_table` refuses the call cleanly.
+/// `fill_kernel_table` refuses the call cleanly.
 /// `kF16` is consumed only by the FP16 microkernel family
 /// (`f16_microkernel.{hpp,cpp}`). BF16/FP16 selectors explicitly reject it;
 /// only the INT8 selector instantiates a U8 store. Kept in this shared enum so
-/// all three families thread store-dtype through one `DstDt` axis.
-enum class DstDt {
+/// all three families thread store-dtype through one `OutputType` axis.
+enum class OutputType {
     kBf16,
     kF32,
     kF16,
@@ -151,7 +151,7 @@ enum class DstDt {
 /// Cached after first call.  When false the dispatcher must fall back.
 bool avx512bf16_available();
 
-/// Function-pointer type for one (MR, NV, Act, DstDt) microkernel
+/// Function-pointer type for one (MR, NV, Act, OutputType) microkernel
 /// specialization.  Whichever of `Cout` / `Cout_tight` is unused is
 /// passed nullptr / 0 — see the dispatcher for argument routing.
 /// `bias` may be BF16, FP32, or F16 (see `BiasKind`); `bias_kind` tells
@@ -160,18 +160,18 @@ bool avx512bf16_available();
 /// bias is applied.
 ///
 /// `Cout` / `Cout_tight` are typed `void *` because the destination
-/// element width depends on the kernel's `DstDt` template parameter
+/// element width depends on the kernel's `OutputType` template parameter
 /// (BF16 = 2 bytes, FP32 = 4 bytes).  The dispatcher passes the same
 /// caller-owned buffer cast to `void *`; the kernel reinterprets it
 /// as `DstT *` internally.  `ldc` / `ldc_tight` stay in element units
 /// (not bytes) — the kernel knows the element width via `DstT`.
-using ukernel_fn_t = void (*)(const bfloat16_t *A, int lda,
+using bf16_ukernel_fn_t = void (*)(const bfloat16_t *A, int lda,
         const bfloat16_t *Bpacked, const void *bias, BiasKind bias_kind,
         void *Cout, int ldc, void *Cout_tight, int ldc_tight, int K);
 
 /// Upper bound on `max_mr_for_nv(NV)` across all supported NV values.
 /// Used to size the per-MR function-pointer table in `CallContext`
-/// (`kfn_table[kMaxMR + 1]`; slot 0 is unused).  Keeping it as a
+/// (`kernel_table[kMaxMR + 1]`; slot 0 is unused).  Keeping it as a
 /// single constant makes the table sizing independent of future
 /// additions (larger MR for int8, or another NV value).  Current
 /// upper bound is 12, from the DQ-INT8 S8/NV=2 scalar kernel; the
@@ -186,22 +186,23 @@ inline int max_mr_for_nv(int NV) {
     return NV == 4 ? 6 : 8;
 }
 
-/// MR bound of a single-expert BF16 prompt call at NV=2; `select_ukernel`
+/// MR bound of a single-expert BF16 prompt call at NV=2; `select_bf16_ukernel`
 /// instantiates MR 9..12 for NV=2 for it.
 inline constexpr int kMaxMrNv2Prompt = 12;
 
 /// Runtime selector — returns the function pointer for the requested
-/// (MR ∈ 1..max_mr_for_nv(NV), NV ∈ {2, 4}, Act, DstDt) tuple, or
+/// (MR ∈ 1..max_mr_for_nv(NV), NV ∈ {2, 4}, Act, OutputType) tuple, or
 /// nullptr if the combination is not instantiated.
 ///
-/// (swiglu_oai_mul, DstDt::kF32) is intentionally NOT instantiated
-/// (returns nullptr) — see the `DstDt` doc-block above.
-ukernel_fn_t select_ukernel(int MR, int NV, ActKind act, DstDt dst_dt);
+/// (swiglu_oai_mul, OutputType::kF32) is intentionally NOT instantiated
+/// (returns nullptr) — see the `OutputType` doc-block above.
+bf16_ukernel_fn_t select_bf16_ukernel(
+        int MR, int NV, ActivationKind act, OutputType dst_dt);
 
 /// Act=none FP32-dst kernel that starts from the partial sums already in
 /// `Cout` instead of zero (a K-blocked tile's chunks after the first).
 /// NV=2, MR 4..kMaxMrNv2Prompt; nullptr otherwise.  `bias` must be null.
-ukernel_fn_t select_ukernel_accumulate_f32(int MR, int NV);
+bf16_ukernel_fn_t select_ukernel_accumulate_f32(int MR, int NV);
 
 } // namespace custom_kernel
 } // namespace matmul

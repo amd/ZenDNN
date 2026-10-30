@@ -158,7 +158,8 @@ static inline __m512 load_bias_f32_s4(
 // Templated microkernel — MR ∈ 1..max_mr_for_nv_s4(NV), NV ∈ {2, 4},
 // Act ∈ {none, swiglu_oai_mul, silu_and_mul, gelu_and_mul}.  `noinline`
 // keeps each specialization reachable through a function pointer.
-template <int MR, int NV, ActKind Act, S4SourceKind Source, S4OutputKind Output>
+template <int MR, int NV, ActivationKind Act, S4SourceKind Source,
+        S4OutputKind Output>
 ZENDNNL_TARGET_NOINLINE("avx512f,avx512vnni,avx512bw,avx512vl,avx512dq,fma")
 static void ukernel_impl_s4(const uint8_t *__restrict A, int lda,
         const int8_t *__restrict Bpacked, const void *__restrict src_scale,
@@ -168,9 +169,9 @@ static void ukernel_impl_s4(const uint8_t *__restrict A, int lda,
         int ldc_tight, int K, int group_size, int wei_scale_grp_stride) {
 
     static_assert(NV == 2 || NV == 4, "NV must be 2 or 4");
-    static_assert(Act == ActKind::none || (NV % 2 == 0),
+    static_assert(Act == ActivationKind::none || (NV % 2 == 0),
             "gated-activation epilogue requires even NV");
-    static_assert(Act == ActKind::none || Output == S4OutputKind::kBf16,
+    static_assert(Act == ActivationKind::none || Output == S4OutputKind::kBf16,
             "gated S4 epilogues store BF16");
 
     static const bool s_log = zendnnl::error_handling::apilog_info_enabled();
@@ -184,10 +185,10 @@ static void ukernel_impl_s4(const uint8_t *__restrict A, int lda,
                     "VPDPBUSD",
                     " MR=", MR, " NV=", NV, " NR=", NV * 16, " K=", K,
                     " group_size=", group_size, " G=", K / group_size, " act=",
-                    (Act == ActKind::swiglu_oai_mul ? "swiglu_oai_mul"
-                                    : Act == ActKind::silu_and_mul
+                    (Act == ActivationKind::swiglu_oai_mul ? "swiglu_oai_mul"
+                                    : Act == ActivationKind::silu_and_mul
                                     ? "silu_and_mul"
-                                    : Act == ActKind::gelu_and_mul
+                                    : Act == ActivationKind::gelu_and_mul
                                     ? "gelu_and_mul"
                                     : "none"));
         }
@@ -325,8 +326,9 @@ static void ukernel_impl_s4(const uint8_t *__restrict A, int lda,
         bias_f32 = bias_slab;
     }
 
-    if constexpr (Act == ActKind::swiglu_oai_mul || Act == ActKind::silu_and_mul
-            || Act == ActKind::gelu_and_mul) {
+    if constexpr (Act == ActivationKind::swiglu_oai_mul
+            || Act == ActivationKind::silu_and_mul
+            || Act == ActivationKind::gelu_and_mul) {
         bfloat16_t *__restrict Cout_tight
                 = static_cast<bfloat16_t *>(Cout_tight_void);
         constexpr int n_pairs = NV / 2;
@@ -345,9 +347,9 @@ static void ukernel_impl_s4(const uint8_t *__restrict A, int lda,
                 }
                 bfloat16_t *dst = Cout_tight
                         + static_cast<size_t>(m) * ldc_tight + p * 16;
-                if constexpr (Act == ActKind::swiglu_oai_mul) {
+                if constexpr (Act == ActivationKind::swiglu_oai_mul) {
                     swiglu_oai_store_pair_s4(lo, hi, dst);
-                } else if constexpr (Act == ActKind::silu_and_mul) {
+                } else if constexpr (Act == ActivationKind::silu_and_mul) {
                     silu_and_mul_store_pair_s4(lo, hi, dst);
                 } else {
                     gelu_and_mul_store_pair_s4(lo, hi, dst);
@@ -355,7 +357,7 @@ static void ukernel_impl_s4(const uint8_t *__restrict A, int lda,
             }
         }
     } else {
-        static_assert(Act == ActKind::none,
+        static_assert(Act == ActivationKind::none,
                 "s4 ukernel supports {none, swiglu, silu, gelu}");
         using output_t = typename std::conditional<Output == S4OutputKind::kF32,
                 float, bfloat16_t>::type;
@@ -386,8 +388,8 @@ static void ukernel_impl_s4(const uint8_t *__restrict A, int lda,
 // Grouped MatMul retains every S8/BF16 activation specialization. Routed MoE
 // adds the U8/BF16 set plus U8/F32 for act=none; gated F32 is never emitted.
 
-template <ActKind Act, S4SourceKind Source, S4OutputKind Output>
-static s4_ukernel_fn_t select_s4_nv2(int MR) {
+template <ActivationKind Act, S4SourceKind Source, S4OutputKind Output>
+static w4a8_ukernel_fn_t select_s4_nv2(int MR) {
     switch (MR) {
         case 1: return ukernel_impl_s4<1, 2, Act, Source, Output>;
         case 2: return ukernel_impl_s4<2, 2, Act, Source, Output>;
@@ -399,8 +401,8 @@ static s4_ukernel_fn_t select_s4_nv2(int MR) {
     }
 }
 
-template <ActKind Act, S4SourceKind Source, S4OutputKind Output>
-static s4_ukernel_fn_t select_s4_nv4(int MR) {
+template <ActivationKind Act, S4SourceKind Source, S4OutputKind Output>
+static w4a8_ukernel_fn_t select_s4_nv4(int MR) {
     switch (MR) {
         case 1: return ukernel_impl_s4<1, 4, Act, Source, Output>;
         case 2: return ukernel_impl_s4<2, 4, Act, Source, Output>;
@@ -410,44 +412,50 @@ static s4_ukernel_fn_t select_s4_nv4(int MR) {
 }
 
 template <S4SourceKind Source, S4OutputKind Output>
-static s4_ukernel_fn_t select_s4_for_mode(int MR, int NV, ActKind act) {
+static w4a8_ukernel_fn_t select_s4_for_mode(
+        int MR, int NV, ActivationKind act) {
     if (NV != 2 && NV != 4) { return nullptr; }
     if (MR < 1 || MR > max_mr_for_nv_s4(NV)) { return nullptr; }
     if constexpr (Output == S4OutputKind::kF32) {
-        if (act != ActKind::none) { return nullptr; }
-        return NV == 2 ? select_s4_nv2<ActKind::none, Source, Output>(MR)
-                       : select_s4_nv4<ActKind::none, Source, Output>(MR);
+        if (act != ActivationKind::none) { return nullptr; }
+        return NV == 2
+                ? select_s4_nv2<ActivationKind::none, Source, Output>(MR)
+                : select_s4_nv4<ActivationKind::none, Source, Output>(MR);
     } else if (NV == 2) {
         switch (act) {
-            case ActKind::none:
-                return select_s4_nv2<ActKind::none, Source, Output>(MR);
-            case ActKind::swiglu_oai_mul:
-                return select_s4_nv2<ActKind::swiglu_oai_mul, Source, Output>(
-                        MR);
-            case ActKind::silu_and_mul:
-                return select_s4_nv2<ActKind::silu_and_mul, Source, Output>(MR);
-            case ActKind::gelu_and_mul:
-                return select_s4_nv2<ActKind::gelu_and_mul, Source, Output>(MR);
+            case ActivationKind::none:
+                return select_s4_nv2<ActivationKind::none, Source, Output>(MR);
+            case ActivationKind::swiglu_oai_mul:
+                return select_s4_nv2<ActivationKind::swiglu_oai_mul, Source,
+                        Output>(MR);
+            case ActivationKind::silu_and_mul:
+                return select_s4_nv2<ActivationKind::silu_and_mul, Source,
+                        Output>(MR);
+            case ActivationKind::gelu_and_mul:
+                return select_s4_nv2<ActivationKind::gelu_and_mul, Source,
+                        Output>(MR);
             default: return nullptr;
         }
     } else {
         switch (act) {
-            case ActKind::none:
-                return select_s4_nv4<ActKind::none, Source, Output>(MR);
-            case ActKind::swiglu_oai_mul:
-                return select_s4_nv4<ActKind::swiglu_oai_mul, Source, Output>(
-                        MR);
-            case ActKind::silu_and_mul:
-                return select_s4_nv4<ActKind::silu_and_mul, Source, Output>(MR);
-            case ActKind::gelu_and_mul:
-                return select_s4_nv4<ActKind::gelu_and_mul, Source, Output>(MR);
+            case ActivationKind::none:
+                return select_s4_nv4<ActivationKind::none, Source, Output>(MR);
+            case ActivationKind::swiglu_oai_mul:
+                return select_s4_nv4<ActivationKind::swiglu_oai_mul, Source,
+                        Output>(MR);
+            case ActivationKind::silu_and_mul:
+                return select_s4_nv4<ActivationKind::silu_and_mul, Source,
+                        Output>(MR);
+            case ActivationKind::gelu_and_mul:
+                return select_s4_nv4<ActivationKind::gelu_and_mul, Source,
+                        Output>(MR);
             default: return nullptr;
         }
     }
 }
 
-s4_ukernel_fn_t select_s4_ukernel(
-        int MR, int NV, ActKind act, S4SourceKind source, S4OutputKind output) {
+w4a8_ukernel_fn_t select_w4a8_ukernel(int MR, int NV, ActivationKind act,
+        S4SourceKind source, S4OutputKind output) {
     if (source == S4SourceKind::kS8 && output == S4OutputKind::kBf16) {
         return select_s4_for_mode<S4SourceKind::kS8, S4OutputKind::kBf16>(
                 MR, NV, act);

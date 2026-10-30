@@ -82,11 +82,11 @@ namespace lowoha {
 namespace matmul {
 namespace prompt_tile {
 
-enum class Family : int { kBf16, kInt8, kW4a8, kF16 };
+enum class kernel_type_t : int { kBf16, kInt8, kW4a8, kF16 };
 inline constexpr int kNumFamilies = 4;
 
 /// What the planner needs to know about a family's CK microkernel.
-struct FamilyFacts {
+struct kernel_traits_t {
     const char *name;
     int a_bytes; ///< Per A element (INT8 and W4A8 read the hoisted s8 / u8 A).
     int wei_bits; ///< Per packed weight element.
@@ -99,14 +99,14 @@ struct FamilyFacts {
     bool kblock; ///< The CK may K-block; the executor stands down if so.
 };
 
-inline constexpr FamilyFacts kFamilies[kNumFamilies] = {
+inline constexpr kernel_traits_t kFamilies[kNumFamilies] = {
         {"bf16", 2, 16, 4, 8, true},
         {"int8", 1, 8, 1, 0, false},
         {"w4a8", 1, 4, 1, 0, false},
         {"f16", 2, 16, 1, 0, false},
 };
 
-constexpr const FamilyFacts &facts(Family f) {
+constexpr const kernel_traits_t &facts(kernel_type_t f) {
     return kFamilies[static_cast<int>(f)];
 }
 
@@ -192,14 +192,14 @@ constexpr Tunables defaults() {
 /// A family's default for a `Scope::kShape` knob where it differs from
 /// `KnobDef::def`.
 struct FamilyDefault {
-    Family fam;
+    kernel_type_t fam;
     Knob knob;
     int value;
 };
 
 /// W4A8's skewed MoE prompts balance better on more, smaller tiles.
 inline constexpr FamilyDefault kFamilyDefaults[] = {
-        {Family::kW4a8, kMinTiles, 32},
+        {kernel_type_t::kW4a8, kMinTiles, 32},
 };
 
 constexpr bool family_defaults_are_shape_knobs() {
@@ -212,7 +212,7 @@ constexpr bool family_defaults_are_shape_knobs() {
 static_assert(family_defaults_are_shape_knobs(),
         "family defaults must be in-range shape knobs");
 
-constexpr Tunables defaults(Family f) {
+constexpr Tunables defaults(kernel_type_t f) {
     Tunables t = defaults();
     for (const FamilyDefault &d : kFamilyDefaults)
         if (d.fam == f) t[d.knob] = d.value;
@@ -221,7 +221,7 @@ constexpr Tunables defaults(Family f) {
 
 /// What profile entries match on.
 struct ShapeKey {
-    Family fam = Family::kBf16;
+    kernel_type_t fam = kernel_type_t::kBf16;
     int64_t K = 0; ///< K and N of the first active expert.
     int64_t N = 0;
     int64_t M = 0; ///< Active rows, summed.
@@ -273,7 +273,7 @@ Resolved resolve(const ShapeKey &key);
 /// Value of a `Scope::kGlobal` knob.
 int global_value(Knob k);
 
-inline bool enabled(Family f) {
+inline bool enabled(kernel_type_t f) {
     return ((global_value(kEnable) >> static_cast<int>(f)) & 1) != 0;
 }
 

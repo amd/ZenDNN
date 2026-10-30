@@ -38,10 +38,10 @@ custom_kernel::KernelVariant grp_matmul_ck_weight_variant(data_type_t src,
     const bool bf16 = v == KernelVariant::kBF16_BF16_BF16
             || v == KernelVariant::kBF16_BF16_F32;
     const bool int8 = custom_kernel::is_int8_variant(v);
-    const bool s4 = custom_kernel::is_s4_variant(v);
+    const bool s4 = custom_kernel::is_w4a8_variant(v);
     const bool f16 = custom_kernel::is_f16_variant(v);
     if (bf16) {
-        if (!custom_kernel::dispatch_supported()) return kNone;
+        if (!custom_kernel::bf16_isa_supported()) return kNone;
     } else if (int8) {
         if (!get_grp_matmul_custom_kernel_int8()
                 || !custom_kernel::avx512vnni_available())

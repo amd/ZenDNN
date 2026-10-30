@@ -18,7 +18,7 @@ unreorder/pack cache, and generic dispatch remain outside this directory.
 ## Invariants
 
 - The policy runs only after normal Algo 3 preparation succeeds.
-- Unknown shapes return `QwenBf16DecodeRoute::none` without changing
+- Unknown shapes return `Bf16DecodeRoute::none` without changing
   established kernel selection or scheduling.
 - Shape selection and `max_mr` behavior match the pre-move implementation;
   this directory rename is organization-only.

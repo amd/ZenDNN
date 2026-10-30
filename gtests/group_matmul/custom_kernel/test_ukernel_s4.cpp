@@ -16,7 +16,7 @@
 
 /// CK ukernel module — W4A8 (s4) sibling of `test_ukernel_int8.cpp`.
 ///
-/// Drives `select_s4_ukernel` against an EXACT scalar reference, so a
+/// Drives `select_w4a8_ukernel` against an EXACT scalar reference, so a
 /// failure here is the kernel's arithmetic, not an integration or
 /// tolerance artefact:
 ///
@@ -157,7 +157,7 @@ TEST_P(CkUkernelS4None, MatchesScalarReference) {
 
     const int G = K / group_size;
     for (int MR = 1; MR <= max_mr; ++MR) {
-        auto fn = ck::select_s4_ukernel(MR, NV, ck::ActKind::none);
+        auto fn = ck::select_w4a8_ukernel(MR, NV, ck::ActivationKind::none);
         ASSERT_NE(fn, nullptr) << "MR=" << MR << " NV=" << NV;
 
         std::vector<uint8_t> A(static_cast<size_t>(MR) * K);
@@ -236,8 +236,9 @@ TEST_P(CkUkernelS4Gated, MatchesCanonicalReference) {
     const int NV = pack_nr / 16;
     const int N = pack_nr * 2;
     const int half = N / 2, ldb = K, G = K / group_size;
-    const ck::ActKind act = (act_sel == 0) ? ck::ActKind::silu_and_mul
-                                           : ck::ActKind::gelu_and_mul;
+    const ck::ActivationKind act = (act_sel == 0)
+            ? ck::ActivationKind::silu_and_mul
+            : ck::ActivationKind::gelu_and_mul;
 
     const std::vector<int8_t> wsrc = build_packed(K, N, ldb, true);
     Slab slab(ck::packed_weight_size_s4(K, N, pack_nr, group_size));
@@ -249,7 +250,7 @@ TEST_P(CkUkernelS4Gated, MatchesCanonicalReference) {
 
     const int max_mr = ck::max_mr_for_nv_s4(NV);
     for (int MR = 1; MR <= max_mr; ++MR) {
-        auto fn = ck::select_s4_ukernel(MR, NV, act);
+        auto fn = ck::select_w4a8_ukernel(MR, NV, act);
         ASSERT_NE(fn, nullptr);
 
         std::vector<uint8_t> A(static_cast<size_t>(MR) * K);
@@ -286,7 +287,7 @@ TEST_P(CkUkernelS4Gated, MatchesCanonicalReference) {
                         = ref_dot(m, i, K, group_size, /*bf16_scales=*/false);
                 const double up = ref_dot(
                         m, half + i, K, group_size, /*bf16_scales=*/false);
-                const double ref = (act == ck::ActKind::silu_and_mul)
+                const double ref = (act == ck::ActivationKind::silu_and_mul)
                         ? silu(static_cast<float>(gate)) * up
                         : gelu_erf(static_cast<float>(gate)) * up;
                 const double got = static_cast<float>(
@@ -338,11 +339,14 @@ TEST(CkUkernelS4, RoutedU8ModeMatchesS8AndStoresF32) {
             }
         }
 
-        const auto s8_fn = ck::select_s4_ukernel(MR, NV, ck::ActKind::none);
-        const auto u8_fn = ck::select_s4_ukernel(MR, NV, ck::ActKind::none,
-                ck::S4SourceKind::kU8Zp128, ck::S4OutputKind::kBf16);
-        const auto f32_fn = ck::select_s4_ukernel(MR, NV, ck::ActKind::none,
-                ck::S4SourceKind::kU8Zp128, ck::S4OutputKind::kF32);
+        const auto s8_fn
+                = ck::select_w4a8_ukernel(MR, NV, ck::ActivationKind::none);
+        const auto u8_fn
+                = ck::select_w4a8_ukernel(MR, NV, ck::ActivationKind::none,
+                        ck::S4SourceKind::kU8Zp128, ck::S4OutputKind::kBf16);
+        const auto f32_fn
+                = ck::select_w4a8_ukernel(MR, NV, ck::ActivationKind::none,
+                        ck::S4SourceKind::kU8Zp128, ck::S4OutputKind::kF32);
         ASSERT_NE(s8_fn, nullptr);
         ASSERT_NE(u8_fn, nullptr);
         ASSERT_NE(f32_fn, nullptr);
@@ -351,7 +355,7 @@ TEST(CkUkernelS4, RoutedU8ModeMatchesS8AndStoresF32) {
         std::vector<bfloat16_t> from_u8(static_cast<size_t>(MR) * N);
         std::vector<float> from_u8_f32(static_cast<size_t>(MR) * N);
         const auto invoke
-                = [&](ck::s4_ukernel_fn_t fn, const uint8_t *a, void *out) {
+                = [&](ck::w4a8_ukernel_fn_t fn, const uint8_t *a, void *out) {
             fn(a, K, static_cast<const int8_t *>(slab.p), src_scales.data(),
                     scales.data(), ck::ScaleKind::kF32, nullptr,
                     ck::BiasKind::none, out, N, nullptr, 0, K, group_size, N);
@@ -374,7 +378,7 @@ TEST(CkUkernelS4, RoutedU8ModeMatchesS8AndStoresF32) {
             }
     }
 
-    EXPECT_EQ(ck::select_s4_ukernel(1, NV, ck::ActKind::silu_and_mul,
+    EXPECT_EQ(ck::select_w4a8_ukernel(1, NV, ck::ActivationKind::silu_and_mul,
                       ck::S4SourceKind::kU8Zp128, ck::S4OutputKind::kF32),
             nullptr);
 }
@@ -386,15 +390,18 @@ TEST(CkUkernelS4, SelectorRefusesOutOfRange) {
         const int max_mr = ck::max_mr_for_nv_s4(NV);
         EXPECT_LE(max_mr, ck::kMaxMR);
         for (int mr = 1; mr <= max_mr; ++mr) {
-            EXPECT_NE(ck::select_s4_ukernel(mr, NV, ck::ActKind::none), nullptr)
+            EXPECT_NE(ck::select_w4a8_ukernel(mr, NV, ck::ActivationKind::none),
+                    nullptr)
                     << "NV=" << NV << " MR=" << mr;
         }
-        EXPECT_EQ(ck::select_s4_ukernel(max_mr + 1, NV, ck::ActKind::none),
+        EXPECT_EQ(ck::select_w4a8_ukernel(
+                          max_mr + 1, NV, ck::ActivationKind::none),
                 nullptr)
                 << "NV=" << NV << " must refuse MR>" << max_mr;
-        EXPECT_EQ(ck::select_s4_ukernel(0, NV, ck::ActKind::none), nullptr);
+        EXPECT_EQ(ck::select_w4a8_ukernel(0, NV, ck::ActivationKind::none),
+                nullptr);
     }
     // NV outside {2, 4} has no instantiation.
-    EXPECT_EQ(ck::select_s4_ukernel(1, 3, ck::ActKind::none), nullptr);
-    EXPECT_EQ(ck::select_s4_ukernel(1, 1, ck::ActKind::none), nullptr);
+    EXPECT_EQ(ck::select_w4a8_ukernel(1, 3, ck::ActivationKind::none), nullptr);
+    EXPECT_EQ(ck::select_w4a8_ukernel(1, 1, ck::ActivationKind::none), nullptr);
 }

@@ -28,7 +28,7 @@
 /// same `custom_kernel::dispatch_tile` on a row / column sub-range (INT8
 /// and W4A8 on the hoisted s8 / u8 A and its per-row scales), and the
 /// planner keeps every M-block in the microkernel regime a full-M call
-/// uses (see `FamilyFacts::min_mr`).  Weights stay in the CK's shared
+/// uses (see `kernel_traits_t::min_mr`).  Weights stay in the CK's shared
 /// pack; no new copies.  Knobs: `prompt_tile_tunables.hpp`.
 
 #ifndef ZENDNNL_GROUP_MATMUL_PROMPT_TILE_EXECUTOR_HPP
@@ -47,7 +47,7 @@ using zendnnl::common::data_type_t;
 
 /// An INT8 or W4A8 expert's hoisted A and CK scale views, as the round
 /// executor hands them to `dispatch_tile`.
-struct QuantRow {
+struct QuantizedInputView {
     const void *src = nullptr; ///< s8 / u8 A.
     int lda = 0;
     const void *src_scale = nullptr; ///< Per row, read per `kctx.scale_kind`.
@@ -55,7 +55,7 @@ struct QuantRow {
     const void *wei_scale = nullptr; ///< Whole; the CK slices it by column.
 };
 
-/// Borrowed views of `flat_n_tile`'s per-expert arguments.
+/// Borrowed views of `n_tile_execute`'s per-expert arguments.
 struct CallView {
     const std::vector<int> &M;
     const std::vector<int> &N;
@@ -66,7 +66,7 @@ struct CallView {
     const std::vector<void *> &dst;
     const std::vector<int> &ldc;
     /// One per expert for INT8 and W4A8, else null.
-    const QuantRow *quant = nullptr;
+    const QuantizedInputView *quant = nullptr;
 };
 
 /// True when the call should run on the prompt tile executor: CK engaged
@@ -77,24 +77,26 @@ struct CallView {
 /// with one active expert stays on the round executor unless
 /// `single_expert_prompt`: a call of exactly one expert (a dense layer) whose
 /// prompt the single-expert CK policy covers (`grp_matmul_single_expert_ck`).
-bool should_run(const custom_kernel::CallContext &kctx, bool use_custom,
-        bool rounds_strategy, bool prompt_phase, const std::vector<int> &M,
-        const std::vector<int> &N, bool single_expert_prompt);
+bool should_execute_prompt_tile(const custom_kernel::CallContext &kctx,
+        bool use_custom, bool rounds_strategy, bool prompt_phase,
+        const std::vector<int> &M, const std::vector<int> &N,
+        bool single_expert_prompt);
 
 /// Run every tile of the call on an OMP region of `num_threads`, first
 /// setting `kctx.prompt_kc` to the planned K chunk.  `log_plan` emits one
 /// `[GRP_MATMUL.PLAN.PTILE]` apilog line.
-void execute(custom_kernel::CallContext &kctx, const CallView &call,
+void prompt_tile_execute(custom_kernel::CallContext &kctx, const CallView &call,
         int num_threads, bool log_plan);
 
-/// `gemm_mode` literal for a prompt-tile call (keeps the `flat_n_tile`
+/// `execution_path` literal for a prompt-tile call (keeps the `n_tile_execute`
 /// prefix, so it maps to exec_algo=3).
-const char *gemm_mode_label(bool fused_epilogue, grp_matmul_gated_act_t act);
+const char *execution_path_label(
+        bool fused_epilogue, grp_matmul_gated_act_t act);
 
 struct Plan;
 
 namespace test_api {
-/// Plans `call` as `execute` does, without running it (the planner
+/// Plans `call` as `prompt_tile_execute` does, without running it (the planner
 /// micro-benchmark times this).  The plan lives in the calling thread's
 /// scratch until its next call.
 const Plan &plan_only(const custom_kernel::CallContext &kctx,

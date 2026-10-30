@@ -159,7 +159,7 @@ inline void quantize_row_u8(uint8_t *ZENDNNL_NTILE_FLAT_PARALLEL_RESTRICT Aq,
 // use the same packed-weight compensation row (128 * sum(weight)).
 // ---------------------------------------------------------------------------
 template <int BLOCK_M, int BLOCK_N, bool SignedA = false>
-struct tiny_gemm_gate_up {
+struct int8_gate_up_ukernel_t {
     ZENDNNL_INLINE_TARGET(ZENDNNL_NTILE_FLAT_PARALLEL_TARGET_ISA)
     static inline void apply(
             const uint8_t *ZENDNNL_NTILE_FLAT_PARALLEL_RESTRICT A,
@@ -213,7 +213,7 @@ struct tiny_gemm_gate_up {
             if constexpr (col == 0) {
                 int32_t a_word;
                 std::memcpy(&a_word,
-                        A + static_cast<int64_t>(row) * lda + k * vnni_step,
+                        A + static_cast<int64_t>(row) * lda + k * kVnniStep,
                         sizeof(a_word));
                 va = _mm512_set1_epi32(a_word);
                 if constexpr (SignedA) {
@@ -301,7 +301,7 @@ struct tiny_gemm_gate_up {
 // keep a pre-weighted value in flight.
 // ---------------------------------------------------------------------------
 template <int BLOCK_M, int BLOCK_N>
-struct tiny_gemm_down {
+struct int8_down_ukernel_t {
     ZENDNNL_INLINE_TARGET(ZENDNNL_NTILE_FLAT_PARALLEL_TARGET_ISA)
     static inline void apply(
             const uint8_t *ZENDNNL_NTILE_FLAT_PARALLEL_RESTRICT A,
@@ -344,7 +344,7 @@ struct tiny_gemm_down {
             if constexpr (col == 0) {
                 int32_t a_word;
                 std::memcpy(&a_word,
-                        A + static_cast<int64_t>(row) * lda + k * vnni_step,
+                        A + static_cast<int64_t>(row) * lda + k * kVnniStep,
                         sizeof(a_word));
                 va = _mm512_set1_epi32(a_word);
             }
@@ -417,7 +417,7 @@ inline void tinygemm_gate_up(
         const int64_t mb_start = mb * max_kernel_rows;
         const int64_t mb_size = std::min(max_kernel_rows, M - mb_start);
 #define ZENDNNL_NTILE_FLAT_PARALLEL_GATE_UP(MS) \
-    tiny_gemm_gate_up<MS, 32, SignedA>::apply(A + mb_start * lda, B0, B1, \
+    int8_gate_up_ukernel_t<MS, 32, SignedA>::apply(A + mb_start * lda, B0, B1, \
             C + mb_start * ldc, As + mb_start, Bs0, Bs1, Bcomp0, Bcomp1, K, \
             lda, ldb, ldc)
         switch (mb_size) {
@@ -443,8 +443,8 @@ inline void tinygemm_down(const uint8_t *ZENDNNL_NTILE_FLAT_PARALLEL_RESTRICT A,
         const int64_t mb_start = mb * max_kernel_rows;
         const int64_t mb_size = std::min(max_kernel_rows, M - mb_start);
 #define ZENDNNL_NTILE_FLAT_PARALLEL_DOWN(MS) \
-    tiny_gemm_down<MS, 32>::apply(A + mb_start * lda, B, C + mb_start * ldc, \
-            As + mb_start, Bs, Bcomp, K, lda, ldb, ldc)
+    int8_down_ukernel_t<MS, 32>::apply(A + mb_start * lda, B, \
+            C + mb_start * ldc, As + mb_start, Bs, Bcomp, K, lda, ldb, ldc)
         switch (mb_size) {
             case 1: ZENDNNL_NTILE_FLAT_PARALLEL_DOWN(1); break;
             case 2: ZENDNNL_NTILE_FLAT_PARALLEL_DOWN(2); break;

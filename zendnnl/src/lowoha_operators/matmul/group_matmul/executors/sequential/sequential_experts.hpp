@@ -14,7 +14,7 @@
  * limitations under the License.
  *******************************************************************************/
 
-/// ALGO 1 (`sequential_experts`): runs the experts one after another, each
+/// ALGO 1 (`sequential_execute`): runs the experts one after another, each
 /// on the full team.  The fallback of every other ALGO's safety clamps.
 
 #ifndef ZENDNNL_GROUP_MATMUL_SEQUENTIAL_EXPERTS_HPP
@@ -29,7 +29,7 @@ namespace lowoha {
 namespace matmul {
 namespace detail {
 
-void sequential_experts(const std::vector<char> &layout,
+void sequential_execute(const std::vector<char> &layout,
         const std::vector<bool> &transA, const std::vector<bool> &transB,
         const std::vector<int> &M, const std::vector<int> &N,
         const std::vector<int> &K, const std::vector<float> &alpha,
@@ -40,7 +40,7 @@ void sequential_experts(const std::vector<char> &layout,
         const std::vector<bool> &is_weights_const,
         std::vector<matmul_params> &params, int num_threads,
         grp_matmul_gated_act_t fused_act, data_type_t act_dtype,
-        const char **gemm_mode_out);
+        const char **execution_path_out);
 
 } // namespace detail
 } // namespace matmul

@@ -55,18 +55,18 @@ namespace ntile_flat_parallel {
 
 using zendnnl::error_handling::status_t;
 
-// block_n = 32 is the width the epilogues are written for: two 16-lane f32
+// kBlockN = 32 is the width the epilogues are written for: two 16-lane f32
 // vectors combine into one 32-lane bf16 store, and the compensation / scale
 // loads are two full zmm each.
-constexpr int64_t block_n = 32;
-constexpr int64_t vnni_step = 4;
+constexpr int64_t kBlockN = 32;
+constexpr int64_t kVnniStep = 4;
 
 /// vpdpbusd accumulates an unsigned activation (at most 255) times a signed
 /// weight (magnitude at most 128) into int32. This aligned ceiling keeps the
 /// raw accumulator from overflowing before compensation is subtracted.
 constexpr int64_t max_gemm_reduction
-        = (std::numeric_limits<int32_t>::max() / (255 * 128) / block_n)
-        * block_n;
+        = (std::numeric_limits<int32_t>::max() / (255 * 128) / kBlockN)
+        * kBlockN;
 
 /// Amortized packed bytes per logical output channel: the channel's `K`
 /// quants plus its int32 compensation. Physical storage is block-major, so
@@ -82,7 +82,7 @@ bool isa_supported();
  * @brief Pack `[num_experts, out_channels, in_channels]` int8 weights into
  *        the executor's block-VNNI layout.
  *
- * For each block of @c block_n output channels the layout is
+ * For each block of @c kBlockN output channels the layout is
  *
  *     [K/4][32][4] int8 quants        (32 * K bytes)
  *     [32]         int32 compensation (128 bytes)

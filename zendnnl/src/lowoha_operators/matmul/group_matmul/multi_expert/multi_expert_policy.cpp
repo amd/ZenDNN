@@ -58,19 +58,19 @@ bool grp_matmul_auto_algo3_quant_expert(const matmul_params &p, int K, int N) {
     const auto &ss = q.src_scale.dims;
     if (ss.size() == 2 && ss[1] > 1) { return false; }
     const auto &ws = q.wei_scale.dims;
-    prompt_tile::Family fam;
+    prompt_tile::kernel_type_t fam;
     unsigned dt = 0;
     if (custom_kernel::is_int8_variant(v)) {
         if (ws.size() == 2 && ws[0] > 1) { return false; }
-        fam = prompt_tile::Family::kInt8;
+        fam = prompt_tile::kernel_type_t::kInt8;
         dt = kSingleExpertInt8;
-    } else if (custom_kernel::is_s4_variant(v)) {
+    } else if (custom_kernel::is_w4a8_variant(v)) {
         if (ws.size() == 2 && ws[0] > 0
                 && (K % ws[0] != 0
                         || (K / ws[0]) % custom_kernel::kS4Octet != 0)) {
             return false;
         }
-        fam = prompt_tile::Family::kW4a8;
+        fam = prompt_tile::kernel_type_t::kW4a8;
         dt = kSingleExpertW4a8;
     } else {
         return false;

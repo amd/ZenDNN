@@ -280,9 +280,9 @@ void gated_act_ref(const float *pre, int M, int N, mm::matmul_gated_act_t act,
 
 algo_pin_t::algo_pin_t(matmul_algo_t algo)
     : prev_(matmul_config_t::instance().get_algo()) {
-    // resolve_kernel() latches the algo it first sees for the whole process;
+    // resolve_matmul_backend() latches the algo it first sees for the whole process;
     // it must latch the process setting, not the pinned one.
-    (void)mm::resolve_kernel();
+    (void)mm::resolve_matmul_backend();
     matmul_config_t::instance().set_algo(static_cast<int32_t>(algo));
 }
 
@@ -307,7 +307,7 @@ ck_route_pin_t::ck_route_pin_t() : impl_(new impl_t) {}
 ck_route_pin_t::~ck_route_pin_t() = default;
 
 bool default_route_reachable() {
-    return mm::resolve_kernel() == matmul_algo_t::aocl_dlp_blocked;
+    return mm::resolve_matmul_backend() == matmul_algo_t::aocl_dlp_blocked;
 }
 
 size_t native_layouts(const void *weight) {
@@ -319,18 +319,21 @@ bool native_selected(const mm::matmul_params &p) {
 }
 
 ck_engagement_t::ck_engagement_t() {
-    mm::test_api::s_last_group_matmul_direct_gemm_mode.store(
+    mm::test_api::s_last_group_matmul_direct_execution_path.store(
             nullptr, std::memory_order_relaxed);
-    mm::test_api::s_capture_gemm_mode.store(true, std::memory_order_release);
+    mm::test_api::s_capture_execution_path.store(
+            true, std::memory_order_release);
 }
 
 ck_engagement_t::~ck_engagement_t() {
-    mm::test_api::s_capture_gemm_mode.store(false, std::memory_order_release);
+    mm::test_api::s_capture_execution_path.store(
+            false, std::memory_order_release);
 }
 
 bool ck_engagement_t::engaged() const {
-    const char *mode = mm::test_api::s_last_group_matmul_direct_gemm_mode.load(
-            std::memory_order_relaxed);
+    const char *mode
+            = mm::test_api::s_last_group_matmul_direct_execution_path.load(
+                    std::memory_order_relaxed);
     return mode != nullptr && std::strstr(mode, "custom") != nullptr;
 }
 

@@ -414,7 +414,7 @@ void clear_aocl_symquant_weight_cache_under_lock() {
 //
 // The refusal is counted, not thrown: `run_dlp` returns void and sits inside
 // OMP regions.  The group-matmul layer snapshots the counter around a call and
-// raises an `error_` gemm_mode sentinel when it moved, which
+// raises an `error_` execution_path sentinel when it moved, which
 // `group_matmul_direct` turns into `status_t::failure` -- so the caller never
 // consumes a dst derived from a buffer we could not reorder.
 namespace {

@@ -419,7 +419,7 @@ should know which one is actually governed:
 
 - **Custom-kernel pack arena** — process-wide singleton that
   intentionally ignores the LRU eviction path
-  (`pack.cpp::clear_custom_kernel_pack_cache` is the only entry
+  (`pack.cpp::clear_custom_kernel_pack_cache_bf16` is the only entry
   that frees entries; regular operation never evicts).
   `ZENDNNL_LRU_CACHE_CAPACITY` does NOT govern this cache.
   Populated entries are held for process lifetime regardless of

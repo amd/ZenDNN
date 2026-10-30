@@ -45,7 +45,7 @@ namespace matmul {
 /// `fused_act != none` applies a gated activation over `dst[i]` after that
 /// expert's GEMM, inside the same loop iteration, so it stays on the thread
 /// that owns the rows and in the cache level the GEMM just left them.
-void parallel_per_expert(const std::vector<char> &layout,
+void expert_parallel_execute(const std::vector<char> &layout,
         const std::vector<bool> &transA, const std::vector<bool> &transB,
         const std::vector<int> &M, const std::vector<int> &N,
         const std::vector<int> &K, const std::vector<float> &alpha,
@@ -65,7 +65,7 @@ void parallel_per_expert(const std::vector<char> &layout,
 ///
 /// All members are references into the caller's vectors — an argument bundle
 /// with the lifetime of the call, not a value type to store.
-struct pipeline_half_t {
+struct FusedProjection {
     const std::vector<bool> &transA;
     const std::vector<int> &N;
     const std::vector<int> &K;
@@ -79,7 +79,7 @@ struct pipeline_half_t {
     std::vector<matmul_params> &params;
 };
 
-/// Outcome of `try_expert_parallel_pipeline`.
+/// Outcome of `try_fused_expert_parallel`.
 ///
 /// Three states, not two, because "did not complete" is NOT one situation.
 /// A decline happens before anything is written and the two-pass can serve the
@@ -89,7 +89,7 @@ struct pipeline_half_t {
 ///   * `reorder_quantization_wrapper` takes `params` by NON-const reference and
 ///     rebinds it as a side effect — `dtypes.src` becomes the quantized dtype
 ///     and `src_scale.buff` / `src_zp.buff` are repointed into the worker's
-///     `thread_local` pooled storage.  `pipeline_half_t::params` is itself a
+///     `thread_local` pooled storage.  `FusedProjection::params` is itself a
 ///     reference into the caller's vector, so those edits are visible after we
 ///     return.  A two-pass rerun would then read `dtypes.src == s8` against the
 ///     caller's ORIGINAL float source and reinterpret it, while the scale
@@ -109,7 +109,7 @@ enum class expert_parallel_result {
 };
 
 /// ALGO 5 — fused per-expert MoE FFN pipeline: W13 -> gated act -> W2 in ONE
-/// OMP region, replacing two `parallel_per_expert` passes.
+/// OMP region, replacing two `expert_parallel_execute` passes.
 ///
 /// Each expert's three stages are a chain private to that expert, so the
 /// fork/join between the two passes separated work that was never dependent.
@@ -200,12 +200,12 @@ enum class expert_parallel_result {
 /// drops the barrier that ordered every W13 read ahead of every W2 write.
 /// `group_matmul_fused_moe.cpp` screens it with
 /// `fused_moe_src_op2dst_hazard()` before calling.
-expert_parallel_result try_expert_parallel_pipeline(
+expert_parallel_result try_fused_expert_parallel(
         const std::vector<char> &layout, const std::vector<bool> &transB,
         const std::vector<int> &M, const std::vector<const void *> &src,
         const std::vector<int> &lda, const std::vector<bool> &is_weights_const,
         grp_matmul_gated_act_t fused_act, data_type_t act_dtype,
-        int num_threads, const pipeline_half_t &w13, const pipeline_half_t &w2);
+        int num_threads, const FusedProjection &w13, const FusedProjection &w2);
 
 } // namespace matmul
 } // namespace lowoha

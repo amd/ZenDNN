@@ -18,9 +18,9 @@
 /// @brief What the dispatcher decides about one grouped call before it picks
 ///        an ALGO.
 ///
-/// `group_matmul_run_parallel_dispatch` fills one `grp_matmul_call_route` per
-/// call and hands it to the selector (`select_grp_matmul_algo`), the N-tile
-/// executor (`flat_n_tile`) and prepack (`PrepackParams::route`), so each
+/// `group_matmul_execute` fills one `grp_matmul_call_route` per
+/// call and hands it to the selector (`group_matmul_algo_select`), the N-tile
+/// executor (`n_tile_execute`) and prepack (`PrepackRequest::route`), so each
 /// reads the same verdict instead of recomputing it.  A new per-call verdict
 /// is a field here plus the code that reads it, not another parameter on
 /// every layer in between.  Each consumer still classifies the call itself

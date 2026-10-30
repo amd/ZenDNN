@@ -56,7 +56,7 @@ namespace ntile_flat_parallel {
 
 namespace {
 
-// Pack one block of block_n output channels into the VNNI-ready layout:
+// Pack one block of kBlockN output channels into the VNNI-ready layout:
 //
 //   [K/4][32][4] int8 quants
 //   [32]         int32 compensation
@@ -66,23 +66,23 @@ namespace {
 // unsigned.
 inline void pack_weight_block(int8_t *ZENDNNL_NTILE_FLAT_PARALLEL_RESTRICT dst,
         const int8_t *ZENDNNL_NTILE_FLAT_PARALLEL_RESTRICT src, int64_t K) {
-    const int64_t K4 = K / vnni_step;
+    const int64_t K4 = K / kVnniStep;
 
     // k-major so the stores walk the destination linearly; the 32 source rows
     // stay resident as 32 cache lines.
     for (int64_t k4 = 0; k4 < K4; ++k4) {
         int8_t *ZENDNNL_NTILE_FLAT_PARALLEL_RESTRICT d
-                = dst + k4 * block_n * vnni_step;
-        for (int64_t n = 0; n < block_n; ++n) {
+                = dst + k4 * kBlockN * kVnniStep;
+        for (int64_t n = 0; n < kBlockN; ++n) {
             uint32_t v;
-            std::memcpy(&v, src + n * K + k4 * vnni_step, sizeof(uint32_t));
-            std::memcpy(d + n * vnni_step, &v, sizeof(v));
+            std::memcpy(&v, src + n * K + k4 * kVnniStep, sizeof(uint32_t));
+            std::memcpy(d + n * kVnniStep, &v, sizeof(v));
         }
     }
 
     // compensation: accumulate 128 * w over k with vpdpbusd against a constant
     // 0x80 unsigned operand, mirroring the runtime bias exactly.
-    constexpr int cols = block_n / 16;
+    constexpr int cols = kBlockN / 16;
     alignas(64) __m512i vcomp[cols];
     for (int col = 0; col < cols; ++col) {
         vcomp[col] = _mm512_setzero_si512();
@@ -92,13 +92,13 @@ inline void pack_weight_block(int8_t *ZENDNNL_NTILE_FLAT_PARALLEL_RESTRICT dst,
         for (int col = 0; col < cols; ++col) {
             const __m512i vb
                     = _mm512_loadu_si512(reinterpret_cast<const void *>(
-                            dst + k4 * block_n * vnni_step + col * 64));
+                            dst + k4 * kBlockN * kVnniStep + col * 64));
             vcomp[col] = _mm512_dpbusd_epi32(vcomp[col], off, vb);
         }
     }
     for (int col = 0; col < cols; ++col) {
         _mm512_storeu_si512(
-                reinterpret_cast<void *>(dst + block_n * K + col * 64),
+                reinterpret_cast<void *>(dst + kBlockN * K + col * 64),
                 vcomp[col]);
     }
 }
@@ -159,12 +159,12 @@ status_t pack_weights(const int8_t *src, int8_t *dst, int64_t num_experts,
     if (num_experts <= 0 || out_channels <= 0 || in_channels <= 0) {
         return status_t::op_bad_io;
     }
-    if (out_channels % block_n != 0 || in_channels % vnni_step != 0
+    if (out_channels % kBlockN != 0 || in_channels % kVnniStep != 0
             || in_channels > max_gemm_reduction) {
         return status_t::memory_bad_size;
     }
 
-    const int64_t blocks_per_expert = out_channels / block_n;
+    const int64_t blocks_per_expert = out_channels / kBlockN;
     const int64_t oc_stride = packed_bytes_per_oc(in_channels);
     size_t total_blocks = 0;
     size_t packed_expert_bytes = 0;
@@ -192,9 +192,9 @@ status_t pack_weights(const int8_t *src, int8_t *dst, int64_t num_experts,
 #if ZENDNNL_NTILE_FLAT_PARALLEL_KERNELS_COMPILED
     const int64_t total = static_cast<int64_t>(total_blocks);
     const size_t packed_block_bytes
-            = static_cast<size_t>(block_n) * static_cast<size_t>(oc_stride);
+            = static_cast<size_t>(kBlockN) * static_cast<size_t>(oc_stride);
     const size_t raw_block_bytes
-            = static_cast<size_t>(block_n) * static_cast<size_t>(in_channels);
+            = static_cast<size_t>(kBlockN) * static_cast<size_t>(in_channels);
     const int nth = num_threads > 0
             ? std::min(num_threads, omp_get_max_threads())
             : omp_get_max_threads();

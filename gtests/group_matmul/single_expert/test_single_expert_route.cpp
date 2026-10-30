@@ -75,8 +75,8 @@ TEST(CkDispatchRouting, ScalarRouteOnlyForceCkLiftsNGate) {
     float wei_scale = 1.0f;
 
     const auto routable = [&](int M, const matmul_params &p) {
-        return zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
-                kThreads, 1, false, true, 1.0f, 0.0f, nullptr, K, true, p);
+        return zendnnl::lowoha::matmul::single_matmul_group_routable('r', M, N,
+                K, kThreads, 1, false, true, 1.0f, 0.0f, nullptr, K, true, p);
     };
     const auto make = [&](data_type_t wei) {
         matmul_params p;
@@ -101,7 +101,7 @@ TEST(CkDispatchRouting, ScalarRouteOnlyForceCkLiftsNGate) {
             {data_type_t::bf16, data_type_t::s8, data_type_t::s4}) {
         if (wei == data_type_t::bf16
                 && !zendnnl::lowoha::matmul::custom_kernel::
-                           dispatch_supported())
+                           bf16_isa_supported())
             continue;
         SCOPED_TRACE(static_cast<int>(wei));
         for (const int M : {1, 512}) {
@@ -277,9 +277,11 @@ void run_narrow_quant_phase_switch(bool w4, int weight_cache, int prompt_knob,
             ASSERT_EQ(run(rows[i], weight_ref, expected[i]), status_t::success);
             std::vector<float> scale;
             if (!wide_n) {
-                ASSERT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable(
-                        'r', rows[i], N, K, kThreads, 1, false, true, 1.0f,
-                        0.0f, nullptr, K, true, make_params(rows[i], scale)))
+                ASSERT_FALSE(
+                        zendnnl::lowoha::matmul::single_matmul_group_routable(
+                                'r', rows[i], N, K, kThreads, 1, false, true,
+                                1.0f, 0.0f, nullptr, K, true,
+                                make_params(rows[i], scale)))
                         << "policy off: the N gate keeps DLP";
             }
         }
@@ -311,11 +313,12 @@ void run_narrow_quant_phase_switch(bool w4, int weight_cache, int prompt_knob,
         const long served0 = pt::test_api::s_calls_served.load();
         std::string mode;
         {
-            mt::GemmModeCaptureGuard capture;
+            mt::ExecutionPathCaptureGuard capture;
             ASSERT_EQ(run(M, weight, dst), status_t::success);
-            const char *m = zendnnl::lowoha::matmul::test_api::
-                                    s_last_group_matmul_direct_gemm_mode.load(
-                                            std::memory_order_relaxed);
+            const char *m
+                    = zendnnl::lowoha::matmul::test_api::
+                              s_last_group_matmul_direct_execution_path.load(
+                                      std::memory_order_relaxed);
             mode = m != nullptr ? m : "";
         }
         if (M <= zendnnl::lowoha::matmul::kDecodeMaxM) {
@@ -404,8 +407,8 @@ void check_single_expert_env_w4a8_only() {
             p.quant_params.wei_scale.buff = &wei_scale;
             p.quant_params.wei_scale.dt = data_type_t::f32;
             p.quant_params.wei_scale.dims = {w4 ? K / 64 : 1, N};
-            EXPECT_EQ(mm::custom_kernel_routable('r', M, N, K, 32, 1, false,
-                              true, 1.0f, 0.0f, nullptr, K, true, p),
+            EXPECT_EQ(mm::single_matmul_group_routable('r', M, N, K, 32, 1,
+                              false, true, 1.0f, 0.0f, nullptr, K, true, p),
                     w4)
                     << (w4 ? "W4A8" : "DQ-INT8") << " M=" << M;
         }

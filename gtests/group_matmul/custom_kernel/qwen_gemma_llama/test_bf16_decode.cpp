@@ -48,11 +48,11 @@ bool qwen_has_threads(int needed) {
 
 status_t run_prepare_with_qwen_policy(const ck_test::PrepCallCase &c,
         ck_test::PrepCallStorage &storage, ck::CallContext &kctx,
-        ck::QwenBf16DecodeRoute *route = nullptr) {
+        ck::Bf16DecodeRoute *route = nullptr) {
     const status_t status = ck_test::run_prepare(c, storage, kctx);
-    ck::QwenBf16DecodeRoute selected = ck::QwenBf16DecodeRoute::none;
+    ck::Bf16DecodeRoute selected = ck::Bf16DecodeRoute::none;
     if (status == status_t::success) {
-        selected = ck::apply_qwen_bf16_decode_policy(
+        selected = ck::apply_bf16_decode_policy(
                 kctx, c.act, {c.M}, {c.N}, {c.K});
     }
     if (route != nullptr) *route = selected;
@@ -116,15 +116,16 @@ TEST(QwenBf16DecodePolicy, KeepsPromptOnEstablishedKernel) {
     c.K = 4096;
     ck_test::PrepCallStorage storage;
     ck::CallContext kctx;
-    ck::QwenBf16DecodeRoute route = ck::QwenBf16DecodeRoute::none;
+    ck::Bf16DecodeRoute route = ck::Bf16DecodeRoute::none;
     ASSERT_EQ(run_prepare_with_qwen_policy(c, storage, kctx, &route),
             status_t::success);
     // The single-expert BF16 prompt kernel, not a Qwen decode one.
-    EXPECT_EQ(route, ck::QwenBf16DecodeRoute::none);
+    EXPECT_EQ(route, ck::Bf16DecodeRoute::none);
     ASSERT_EQ(kctx.NV, 2);
     EXPECT_EQ(kctx.max_mr, ck::kMaxMrNv2Prompt);
-    EXPECT_EQ(kctx.kfn_table[ck::kMaxMrNv2Prompt],
-            ck::select_ukernel(ck::kMaxMrNv2Prompt, 2, ck::ActKind::none,
+    EXPECT_EQ(kctx.kernel_table[ck::kMaxMrNv2Prompt],
+            ck::select_bf16_ukernel(ck::kMaxMrNv2Prompt, 2,
+                    ck::ActivationKind::none,
                     ck::dst_dt_for_variant(kctx.variant)));
     EXPECT_FALSE(kctx.kblock_auto);
 }
@@ -153,10 +154,10 @@ TEST(QwenBf16DecodePolicy, SelectsIsolatedDownProjectionScheduler) {
     c.K = 12288;
     ck_test::PrepCallStorage storage;
     ck::CallContext kctx;
-    ck::QwenBf16DecodeRoute route;
+    ck::Bf16DecodeRoute route;
     ASSERT_EQ(run_prepare_with_qwen_policy(c, storage, kctx, &route),
             status_t::success);
-    EXPECT_EQ(route, ck::QwenBf16DecodeRoute::qwen35_w2_resume);
+    EXPECT_EQ(route, ck::Bf16DecodeRoute::qwen35_w2_resume);
     EXPECT_EQ(kctx.max_mr, ck::max_mr_for_nv(kctx.NV));
     EXPECT_TRUE(kctx.kblock_auto);
 }
@@ -170,10 +171,10 @@ TEST(QwenBf16DecodePolicy, KeepsSmallDownProjectionOnEstablishedKernel) {
     c.K = 12288;
     ck_test::PrepCallStorage storage;
     ck::CallContext kctx;
-    ck::QwenBf16DecodeRoute route;
+    ck::Bf16DecodeRoute route;
     ASSERT_EQ(run_prepare_with_qwen_policy(c, storage, kctx, &route),
             status_t::success);
-    EXPECT_EQ(route, ck::QwenBf16DecodeRoute::none);
+    EXPECT_EQ(route, ck::Bf16DecodeRoute::none);
     EXPECT_TRUE(kctx.kblock_auto);
 }
 
@@ -208,7 +209,7 @@ TEST(QwenBf16DecodePolicy, UsesFixedKKernelForQwen36BS8) {
             run_prepare_with_qwen_policy(c, storage, kctx), status_t::success);
     EXPECT_EQ(kctx.max_mr, 12);
     EXPECT_TRUE(kctx.kblock_auto);
-    EXPECT_EQ(kctx.kfn_table[8],
+    EXPECT_EQ(kctx.kernel_table[8],
             ck::decode_specialized::select_plain_bf16_fixed_k(8, 2048));
 }
 
@@ -224,7 +225,7 @@ TEST(QwenBf16DecodePolicy, UsesFixedKKernelForQwen36Router) {
     ASSERT_EQ(
             run_prepare_with_qwen_policy(c, storage, kctx), status_t::success);
     EXPECT_TRUE(kctx.kblock_auto);
-    EXPECT_EQ(kctx.kfn_table[8],
+    EXPECT_EQ(kctx.kernel_table[8],
             ck::decode_specialized::select_plain_bf16_fixed_k(8, 2048));
 }
 
@@ -241,9 +242,9 @@ TEST(QwenBf16DecodePolicy, KeepsGptOssOnEstablishedKernel) {
             run_prepare_with_qwen_policy(c, storage, kctx), status_t::success);
     EXPECT_EQ(kctx.max_mr, ck::max_mr_for_nv(kctx.NV));
     EXPECT_TRUE(kctx.kblock_auto);
-    EXPECT_EQ(kctx.kfn_table[8],
-            ck::select_ukernel(
-                    8, kctx.NV, ck::ActKind::none, ck::DstDt::kBf16));
+    EXPECT_EQ(kctx.kernel_table[8],
+            ck::select_bf16_ukernel(8, kctx.NV, ck::ActivationKind::none,
+                    ck::OutputType::kBf16));
 }
 
 TEST(QwenBf16DecodeE2E, DownProjectionUsesSidecar) {

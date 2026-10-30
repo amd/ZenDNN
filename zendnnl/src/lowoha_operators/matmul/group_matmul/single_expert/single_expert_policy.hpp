@@ -411,7 +411,7 @@ bool grp_matmul_single_dense_call(const std::vector<int> &M,
 /// cannot see.  Rule 0.46 needs them, or it could pick ALGO 3 for a call the
 /// CK then refuses, which would run N-tile rounds on AOCL tiles.  `tight` is
 /// whether a gated output is in the halved-width layout the CK writes.
-inline bool ck_serves_single_expert_epilogue(float alpha, float beta,
+inline bool single_expert_ck_epilogue_supported(float alpha, float beta,
         const void *bias, bool tight, grp_matmul_gated_act_t act,
         data_type_t act_dtype) {
     if (alpha != 1.0f || beta != 0.0f) return false;

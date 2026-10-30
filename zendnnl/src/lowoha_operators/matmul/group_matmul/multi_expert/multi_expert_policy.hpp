@@ -100,18 +100,18 @@ inline bool grp_matmul_auto_algo3_call(const std::vector<int> &M,
             != grp_matmul_algo3_family::none;
 }
 
-// ── DecodeDynamic generic decision-tree knobs ────────────────────────
+// ── CcdExpertWaves generic decision-tree knobs ────────────────────────
 //
-// These take effect whenever DecodeDynamic is eligible for selection,
+// These take effect whenever CcdExpertWaves is eligible for selection,
 // i.e. under BOTH:
-//   * `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=3` (forced DecodeDynamic, the
+//   * `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=3` (forced CcdExpertWaves, the
 //     production default), and
 //   * `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=0` (smart AUTO), where the
-//     planner may route decode-class shapes to DecodeDynamic.
-// Under `=2` (Rounds) and `=1` (DecodeD) the flow is untouched and these
+//     planner may route decode-class shapes to CcdExpertWaves.
+// Under `=2` (Rounds) and `=1` (StaticExpertTeams) the flow is untouched and these
 // getters are never consulted.
 //
-// The route DecodeDynamic-vs-Rounds is decided PER OP from two signals
+// The route CcdExpertWaves-vs-Rounds is decided PER OP from two signals
 // available in `topo` — the active expert count, the machine CCD count,
 // and this op's per-expert weight bytes vs a CCD's L3.  No layer/model
 // identity is used:
@@ -125,19 +125,19 @@ inline bool grp_matmul_auto_algo3_call(const std::vector<int> &M,
 //     assigns whole experts to CCDs, so its load balance is governed by
 //     how evenly `active_ops` divides `num_ccds`.  At low epc a single
 //     extra expert overloads one CCD (the imbalance is ~ceil(epc)/epc),
-//     so DecodeDynamic only pays off once epc is large enough that this
+//     so CcdExpertWaves only pays off once epc is large enough that this
 //     rounding imbalance is small — EPC_MULT (default 4).  epc grows with
 //     batch size, so this is the decode-throughput-sensitive branch.
 //   * per-expert weight vs CCD L3: the Rounds path batches experts to
 //     fit their weights in aggregate L3, so when a single expert's
 //     weight already exceeds a CCD's L3 it serialises down to ~1 expert
-//     per round; DecodeDynamic instead streams experts concurrently, one
+//     per round; CcdExpertWaves instead streams experts concurrently, one
 //     per CCD.  WEI_L3_MULT (default 2, i.e. >= 2 CCD-L3 worth) selects
 //     that regime.
 // Both thresholds are env-overridable for tuning to other shapes.
 
 // ZENDNNL_GRP_MATMUL_DECDYN_EPC_MULT — cached, default 4.
-//   DecodeDynamic when active_ops >= this * num_ccds (experts-per-CCD).
+//   CcdExpertWaves when active_ops >= this * num_ccds (experts-per-CCD).
 inline int get_grp_decdyn_epc_mult() {
     static constexpr int kDefault = 4;
     static const int v = []() {
@@ -150,7 +150,7 @@ inline int get_grp_decdyn_epc_mult() {
 }
 
 // ZENDNNL_GRP_MATMUL_DECDYN_WEI_L3_MULT — cached, default 2.
-//   DecodeDynamic when wei_per_expert >= this * kL3PerCcdBytes (32 MB),
+//   CcdExpertWaves when wei_per_expert >= this * kL3PerCcdBytes (32 MB),
 //   i.e. the per-expert weight is large enough that Rounds' L3-batching
 //   serialises.  0 disables this branch (epc rule only).
 inline int get_grp_decdyn_wei_l3_mult() {
@@ -165,7 +165,7 @@ inline int get_grp_decdyn_wei_l3_mult() {
 }
 
 // ZENDNNL_GRP_MATMUL_DECDYN_CK_INT8_FUSED — cached, default 1 (ON).
-//   Whether a `use_custom` DQ-INT8 FUSED call may engage DecodeDynamic,
+//   Whether a `use_custom` DQ-INT8 FUSED call may engage CcdExpertWaves,
 //   moving int8 fused-MoE Op1 (gate+up) off the barriered Rounds executor.
 //   Set 0 to restore the old unconditional exclusion if a shape regresses;
 //   `dyn_single_pool_safe` in plan_group_n_tile says why it is redundant.
@@ -181,7 +181,7 @@ inline bool get_grp_decdyn_ck_int8_fused() {
 
 // ZENDNNL_GRP_MATMUL_N_TILE_CCD_FILL = { 0, 1 } — cached, default 1 (ON).
 //   Kill switch for the multi-expert CCD-fill N-tile sizer
-//   (`ccd_fill_min_n_tile`), used only by the DecodeDynamic executor: it
+//   (`ccd_fill_min_n_tile`), used only by the CcdExpertWaves executor: it
 //   shrinks the tile for experts whose fixed tile yields fewer tiles than
 //   the CCD has lanes, leaving wider-N experts on `phase_cap`.  Set to 0 to
 //   restore the legacy fixed decode tile.  Non-numeric input → default 1.
@@ -195,7 +195,7 @@ inline bool get_grp_n_tile_ccd_fill() {
     return v;
 }
 
-// DecodeDynamic's expert-count gate in `plan_group_n_tile`.
+// CcdExpertWaves's expert-count gate in `plan_group_n_tile`.
 // MULTI-EXPERT ONLY.  `execute_decode_dynamic` assigns whole experts
 // to individual CCDs, so a lone expert would run on ONE CCD and idle
 // the rest of the team.  `huge_weight` alone is clearable by a single
@@ -203,15 +203,15 @@ inline bool get_grp_n_tile_ccd_fill() {
 // weight size and bypass `se_adaptive_min_n_tile`, its proper sizer.
 // ACTIVE count, not `topo.num_ops`: the latter is the padded slot
 // count, so a 128-slot call with one firing expert would read as
-// multi-expert, clear `huge_weight`, and enter DecodeDynamic with a
+// multi-expert, clear `huge_weight`, and enter CcdExpertWaves with a
 // single CCD working — precisely the case this clause excludes.
 inline bool grp_matmul_decode_dynamic_multi_expert(int active_ops) {
     return active_ops > 1;
 }
 
 /// True when a CK-off AUTO call may reorder the prompt weight in place.
-/// DecodeDynamic and forced DecodeD build different per-tile keys than
-/// `aocl_stable_n_thr`. `flat_n_tile` retargets those plans onto the
+/// CcdExpertWaves and forced StaticExpertTeams build different per-tile keys than
+/// `aocl_stable_n_thr`. `n_tile_execute` retargets those plans onto the
 /// strict-stable split once mixed in-place is active and the custom kernel
 /// was not the warmed decode layout, so the prompt reorder still writes the
 /// caller's buffer for both a single expert and a multi-expert pool.

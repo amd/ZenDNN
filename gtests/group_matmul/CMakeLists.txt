@@ -38,7 +38,7 @@ target_sources(gtests
     ${CMAKE_CURRENT_SOURCE_DIR}/executors/n_tile/prompt_tile/test_prompt_tile.cpp
     # Custom-kernel direct-surface tests — see gtests/group_matmul/
     # custom_kernel/ck_test_helpers.hpp for scope (unit-level on
-    # `dispatch_supported`, `resolve_variant`, `prepare_for_call`,
+    # `bf16_isa_supported`, `resolve_variant`, `prepare_for_call`,
     # `plan_pack_nr`, end-to-end correctness for both BF16 and FP32
     # dst, feature-integration on resolved CallContext fields, and
     # CK -> DLP fallback chain).

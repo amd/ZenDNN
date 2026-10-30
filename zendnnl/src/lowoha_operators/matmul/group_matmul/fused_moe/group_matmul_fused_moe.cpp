@@ -24,46 +24,50 @@
 ///   1. Detects per-side internal-alloc state (Op1 dst / Op2 dst).
 ///   2. Validates inputs via `validate_fused_moe_inputs()`.
 ///   3. Picks the Op1 arena layout (wide vs tight) via
-///      `pick_fused_moe_want_tight()`.
+///      `should_use_tight_intermediate()`.
 ///   4. Sets up the Op1 arena + per-expert pointers via
-///      `setup_op1_arena_and_layout()`.
+///      `prepare_op1_output()`.
 ///   5. Populates the Op2 dispatch scratch via
-///      `setup_op2_dispatch_scratch()`.
+///      `prepare_op2_dispatch()`.
 ///   6. Tries vertical-fusion FIRST (M-tile pipeline; the executor
 ///      accepts ONE of three regimes on both halves: BF16
 ///      end-to-end, WOQ-INT4 s4/u4 weights, OR DQ-INT8 per-token-
-///      symmetric on s8 weights) via `try_flat_m_tile_pipeline_bf16()`
+///      symmetric on s8 weights) via `try_fused_m_tile()`
 ///      from `group_matmul_m_tile.hpp`.  If that engages, both Op1
 ///      and Op2 have been computed by the pipeline executor and the
-///      profiler `gemm_mode` reflects one of `vertical_fusion_bf16`,
+///      profiler `execution_path` reflects one of `vertical_fusion_bf16`,
 ///      `vertical_fusion_woq`, or `vertical_fusion_dqint8` depending
 ///      on the weight dtype + dynamic-quant flag.
-///   7. Otherwise runs the legacy two-pass via
-///      `run_fused_moe_legacy_two_pass()`: Op1+act through
-///      `group_matmul_run_parallel_dispatch` (which internally picks
-///      generic ALGO {1,2,3,5,6} / flat_n_tile / flat_m_tile / etc.), then Op2
-///      through the same dispatcher with `act=none`.
-///   8. Runs an optional MoE weighted-reduce post-op (Stage 4).
-///   9. Composes the gemm_mode string for profiler / apilog.
+///   7. For a resolved ALGO 5 call, tries the expert-parallel fused pipeline
+///      via `try_fused_expert_parallel()`.  A clean decline leaves outputs
+///      untouched; a failure after writes is terminal and must not fall
+///      through.
+///   8. Otherwise runs the generic two-pass via
+///      `fused_moe_two_pass_execute()`: Op1+act through
+///      `group_matmul_execute` (which internally picks
+///      generic ALGO {1,2,3,5,6} / n_tile_execute / m_tile_execute / etc.),
+///      then Op2 through the same dispatcher with `act=none`.
+///   9. Runs an optional MoE weighted-reduce post-op (Stage 4).
+///  10. Composes the execution_path string for profiler / apilog.
 ///
 /// All backend-specific code lives in the per-ALGO translation units:
-///   * `group_matmul_m_tile.cpp`  — `flat_m_tile`.
-///   * `vertical_fusion_pipeline.cpp` — `flat_m_tile_pipeline_bf16`,
-///                                   `try_flat_m_tile_pipeline_bf16`.
-///   * `group_matmul_n_tile.cpp`  — `flat_n_tile`.
-///   * `group_matmul_dispatch.cpp`— `group_matmul_run_parallel_dispatch`
+///   * `group_matmul_m_tile.cpp`  — `m_tile_execute`.
+///   * `vertical_fusion_pipeline.cpp` — `try_fused_m_tile_core`,
+///                                   `try_fused_m_tile`.
+///   * `group_matmul_n_tile.cpp`  — `n_tile_execute`.
+///   * `group_matmul_dispatch.cpp`— `group_matmul_execute`
 ///                                   (generic ALGO routing).
 /// This file owns only the fused-MoE-specific glue: validation, arena
 /// management, Op2-dispatch-scratch population, and the dispatch fork.
 ///
 /// Adaptive arena layout (internal-alloc mode only):
-///   * `pick_fused_moe_want_tight()` decides per call whether to
+///   * `should_use_tight_intermediate()` decides per call whether to
 ///     allocate a tight [M, I] arena or the classic wide [M, 2I].
 ///   * Tight is requested when (a) `op1_internal` is true,
 ///     (b) `act` admits a fused per-thread epilogue
-///     (`a3_can_fuse_act(act, CUSTOM_KERNEL)`),
+///     (`n_tile_can_fuse_activation(act, CUSTOM_KERNEL)`),
 ///     (c) `env_algo ∈ {0, 3}`, (d) the env override allows it,
-///     AND (e) `select_grp_matmul_algo()` agrees to route to ALGO 3.
+///     AND (e) `group_matmul_algo_select()` agrees to route to ALGO 3.
 ///   * When tight is selected the Op1 arena holds `sum_i M[i]·I[i]·
 ///     dst_elem` bytes (half of the wide case) and `op1_ldc[i] = I[i]`.
 ///     Op2 then reads the activated output at tight stride — halves
@@ -98,16 +102,16 @@
 #include "../common/detect_internal_alloc.hpp"
 #include "../common/group_matmul_parallel_common.hpp"
 #include "../custom_kernel/pack.hpp"
-#include "../executors/m_tile/group_matmul_m_tile.hpp" // check_m_tile_safe + M-tile env knobs
+#include "../executors/m_tile/group_matmul_m_tile.hpp" // m_tile_supported + M-tile env knobs
 #include "../executors/n_tile/group_matmul_n_tile.hpp"
 #include "../group_matmul_direct.hpp"
-#include "../multi_expert/expert_parallel/group_matmul_expert_parallel.hpp" // try_expert_parallel_pipeline
+#include "../multi_expert/expert_parallel/group_matmul_expert_parallel.hpp" // try_fused_expert_parallel
 #include "../multi_expert/expert_parallel/group_matmul_expert_parallel_policy.hpp" // ALGO 5 fusion knob
 #include "../multi_expert/ntile_flat_parallel/ntile_flat_parallel.hpp"
 #include "../prepack/prepack.hpp"
-#include "../single_expert/single_expert_policy.hpp" // ck_serves_single_expert_epilogue
+#include "../single_expert/single_expert_policy.hpp" // single_expert_ck_epilogue_supported
 #include "lowoha_operators/common/operator_instrumentation.hpp"
-#include "lowoha_operators/matmul/group_matmul/fused_moe/vertical_fusion_pipeline.hpp" // try_flat_m_tile_pipeline_bf16
+#include "lowoha_operators/matmul/group_matmul/fused_moe/vertical_fusion_pipeline.hpp" // try_fused_m_tile
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/matmul/quantization/reorder_quantization.hpp"
@@ -130,19 +134,19 @@ namespace {
 /// defined state — either a caller-prepacked custom-kernel VNNI weight it could
 /// not route to the custom kernel (no compute ran) or a per-thread scratch
 /// allocation failure that left some dst columns undefined.  Both arrive
-/// through `gemm_mode`, so both fused-MoE passes must turn them into a hard
+/// through `execution_path`, so both fused-MoE passes must turn them into a hard
 /// failure rather than treating the destination as a result.  Matches by
 /// `error_` prefix so a sentinel added in an executor fails closed here without
 /// a matching edit.  Mirrors the plain-route conversion in
 /// `group_matmul_direct`.
-inline bool gemm_mode_abort_sentinel(const char *gemm_mode) {
-    return gemm_mode_is_error(gemm_mode);
+inline bool execution_path_is_fatal(const char *execution_path) {
+    return execution_path_is_error(execution_path);
 }
 
-/// Log the abort-class `gemm_mode` reported by one fused-MoE pass, naming the
+/// Log the abort-class `execution_path` reported by one fused-MoE pass, naming the
 /// pass so the two GEMMs are distinguishable in a caller's log.
-inline void log_abort_sentinel(const char *pass, const char *gemm_mode) {
-    if (std::strcmp(gemm_mode, kGrpMatmulErrPrepackedNoCk) == 0) {
+inline void log_abort_sentinel(const char *pass, const char *execution_path) {
+    if (std::strcmp(execution_path, kGrpMatmulErrPrepackedNoCk) == 0) {
         log_error("group_matmul_fused_moe: fused_moe ", pass,
                 " received a pre-reordered weight (mem_format_b='r') that "
                 "only the custom kernel can consume, and the resolved ALGO is "
@@ -150,17 +154,17 @@ inline void log_abort_sentinel(const char *pass, const char *gemm_mode) {
                 "has no safe fallback.");
         return;
     }
-    if (std::strcmp(gemm_mode, kGrpNTileErrUndefinedDst) == 0) {
+    if (std::strcmp(execution_path, kGrpNTileErrUndefinedDst) == 0) {
         log_error("group_matmul_fused_moe: fused_moe ", pass,
                 " left part of its destination undefined (scratch allocation "
                 "failure or a violated fused-epilogue layout invariant); see "
-                "the [flat_n_tile] error above for the specific reason. "
+                "the [n_tile_execute] error above for the specific reason. "
                 "Failing the call.");
         return;
     }
     log_error("group_matmul_fused_moe: fused_moe ", pass,
-            " could not produce a defined destination (gemm_mode=", gemm_mode,
-            ").");
+            " could not produce a defined destination (execution_path=",
+            execution_path, ").");
 }
 
 // Per-thread persistent Op1 arena used by fused-MoE internal-alloc.
@@ -171,10 +175,10 @@ inline void log_abort_sentinel(const char *pass, const char *gemm_mode) {
 // previous expert's footprint ended).  Freed by the destructor on
 // thread exit; freed + reallocated when a call needs more than the
 // current capacity.
-struct FusedMoEArena {
+struct FusedMoEIntermediateArena {
     void *buf = nullptr;
     size_t cap = 0;
-    ~FusedMoEArena() { zendnnl_aligned_free(buf); }
+    ~FusedMoEIntermediateArena() { zendnnl_aligned_free(buf); }
 };
 
 // Per-thread persistent Op2 setup scratch.  Holds the working arrays
@@ -186,7 +190,7 @@ struct FusedMoEArena {
 // underlying allocation — so after the first call all per-call
 // traffic is O(num_ops) field writes, no allocator traffic on the
 // steady state.
-struct FusedMoEScratch {
+struct FusedMoEDispatchScratch {
     std::vector<int> K_down;
     std::vector<float> alpha_down;
     std::vector<float> beta_down;
@@ -218,12 +222,12 @@ struct FusedMoEScratch {
 // which is cheap (zeroed POD-ish state).  Side benefit: the executor
 // keeps using local references (`arena`, `scratch`) and reads the
 // same way as before — no per-call cost.
-inline FusedMoEArena &get_thread_local_arena() {
-    static thread_local FusedMoEArena arena;
+inline FusedMoEIntermediateArena &get_thread_local_arena() {
+    static thread_local FusedMoEIntermediateArena arena;
     return arena;
 }
-inline FusedMoEScratch &get_thread_local_scratch() {
-    static thread_local FusedMoEScratch scratch;
+inline FusedMoEDispatchScratch &get_thread_local_scratch() {
+    static thread_local FusedMoEDispatchScratch scratch;
     return scratch;
 }
 
@@ -248,13 +252,13 @@ inline FusedMoEScratch &get_thread_local_scratch() {
 // Cheap when nothing has been allocated (the arena ptr is null, the
 // vectors are empty), so it is safe to call unconditionally on every
 // worker.
-inline void reset_thread_local_fused_moe_state() {
-    FusedMoEArena &arena = get_thread_local_arena();
+inline void clear_fused_moe_thread_state() {
+    FusedMoEIntermediateArena &arena = get_thread_local_arena();
     zendnnl_aligned_free(arena.buf);
     arena.buf = nullptr;
     arena.cap = 0;
 
-    FusedMoEScratch &s = get_thread_local_scratch();
+    FusedMoEDispatchScratch &s = get_thread_local_scratch();
     // Deterministic dealloc: swap with empty temporary → temporary's
     // dtor frees the old buffer at end of statement.  See doc-block
     // above for why `shrink_to_fit()` is NOT used here.
@@ -291,38 +295,38 @@ inline void reset_thread_local_fused_moe_state() {
 //      Caller-allocated Op1 paths supply their own dst[] with caller-
 //      chosen ldc; the tight arena layout is library-private.
 //
-//   2. `a3_can_fuse_act(act, CUSTOM_KERNEL)` — the activation admits
+//   2. `n_tile_can_fuse_activation(act, CUSTOM_KERNEL)` — the activation admits
 //      ALGO 3's per-thread fused epilogue (in-register store_pair for
 //      CK, or the standard backend's OOP swiglu writer when CK is
 //      off).  Today: `swiglu_oai_mul` (both backends) and
 //      `silu_and_mul` / `gelu_and_mul` (CK only — the standard
 //      backend's wide-arena helper is swiglu-only).
 //
-//   3. `env_algo ∈ {0, 3}` — tight requires Op1 to run in flat_n_tile;
+//   3. `env_algo ∈ {0, 3}` — tight requires Op1 to run in n_tile_execute;
 //      a caller forcing ALGO 1/2/5/6 explicitly asked for a non-N-tile
 //      strategy and silently flipping them violates intent.
 //
 //   4. Env override `ZENDNNL_GRP_MATMUL_FUSED_MOE_TIGHT`: unset (auto)
 //      and force-tight request tight, force-wide (=0) rejects.
 //
-//   5. `select_grp_matmul_algo()` actually would return 3 for this
+//   5. `group_matmul_algo_select()` actually would return 3 for this
 //      (shapes, params, num_threads).  Without this, auto-select
 //      could pick ALGO 1 (small N, non-N-tile-viable) on the tight
 //      arena and overrun it.
 //
 // Today the auto policy is "tight whenever safe" — tight halves Op2's
-// Op1-src DRAM traffic and flat_n_tile's planner adapts to any num_ops.
+// Op1-src DRAM traffic and n_tile_execute's planner adapts to any num_ops.
 // If a future shape regresses, plug a `num_ops`-keyed threshold here.
 // `resolved_algo` is the ALREADY-resolved (and safety-clamped) ALGO for
-// this call — `select_grp_matmul_algo(...)`'s output — passed in by the
+// this call — `group_matmul_algo_select(...)`'s output — passed in by the
 // caller so it is computed exactly once per fused-MoE call and shared
 // with the vertical-fusion gate (avoids a second O(num_ops) selection
 // pass and a duplicate `[GRP_MATMUL.ALGO WARN]` on clamped shapes).
-inline bool pick_fused_moe_want_tight(bool op1_internal,
+inline bool should_use_tight_intermediate(bool op1_internal,
         grp_matmul_gated_act_t act, bool custom_kernel_en, int env_algo,
         int resolved_algo) {
     if (!op1_internal) return false;
-    if (!a3_can_fuse_act(act, custom_kernel_en)) return false;
+    if (!n_tile_can_fuse_activation(act, custom_kernel_en)) return false;
     if (env_algo != 0 && env_algo != 3) return false;
     if (get_grp_matmul_fused_moe_tight() == 0) return false;
     return resolved_algo == 3;
@@ -332,7 +336,7 @@ inline bool pick_fused_moe_want_tight(bool op1_internal,
 // ordering can serve.  Two-pass drains src into the Op1 arena before Pass 2
 // writes anything.  Vertical fusion instead hands each thread one M-slice
 // and runs Op1-read -> act -> Op2-write inside it with no intervening
-// barrier (`flat_m_tile_pipeline_bf16`), and rows are owned by different
+// barrier (`try_fused_m_tile_core`), and rows are owned by different
 // threads.  So the ONLY safe overlap is exact in-place reuse, where row r
 // writes precisely onto row r's own bytes: same base AND same row stride.
 // Any other overlap lets one thread's Op2 write land on a row another
@@ -544,7 +548,7 @@ inline bool fused_moe_src_op2dst_hazard(const std::vector<int> &M,
 //       (gate (G3)) for `op2_internal` only, where Op2's write footprint
 //       lands in the caller's src[].
 //
-//   (4) cross-expert N_down uniformity (only when moe_postop is
+//   (4) cross-expert N_down uniformity (only when weighted_reduce is
 //       engaged) — the weighted-reduce stage uses `fused.N_down[0]`
 //       as the common D for every expert; a divergent expert would
 //       cause OOB reads past its row.  Correctness-critical, always-on.
@@ -572,9 +576,9 @@ inline status_t validate_fused_moe_inputs(
         const std::vector<void *> &dst, const std::vector<int> &ldc,
         const std::vector<bool> &is_weights_const,
         const std::vector<matmul_params> &params,
-        const group_matmul_moe_postop_params *moe_postop, bool op1_internal,
-        bool op2_internal, size_t dst_elem_internal, int64_t *out_total_M,
-        size_t *out_total_bytes_internal) {
+        const group_matmul_moe_postop_params *weighted_reduce,
+        bool op1_internal, bool op2_internal, size_t dst_elem_internal,
+        int64_t *out_total_M, size_t *out_total_bytes_internal) {
     const size_t num_ops = M.size();
 
     // Vector sizes — must hold AT LEAST `num_ops` entries each.  Anything
@@ -640,7 +644,7 @@ inline status_t validate_fused_moe_inputs(
 
         // ── Op2 weight-scale metadata, checked BEFORE Op1 runs ─────────
         //
-        // `setup_op2_dispatch_scratch` gives Op2 Op1's weight dtype
+        // `prepare_op2_dispatch` gives Op2 Op1's weight dtype
         // verbatim (`p.dtypes.wei = params[i].dtypes.wei`), so a quantized
         // Op1 weight means Op2 also runs a quantized GEMM and needs its
         // own weight scale.  The vector-size checks above bound only the
@@ -887,10 +891,10 @@ inline status_t validate_fused_moe_inputs(
         }
     }
 
-    // Cross-expert N_down uniformity (when moe_postop is engaged).  The
+    // Cross-expert N_down uniformity (when weighted_reduce is engaged).  The
     // duplicate of `group_matmul_direct`'s phase-G check defends the
     // path for any future caller that bypasses that validator.
-    if (moe_postop != nullptr) {
+    if (weighted_reduce != nullptr) {
         for (size_t i = 1; i < num_ops; ++i)
             if (fused.N_down[i] != fused.N_down[0]) return status_t::failure;
     }
@@ -949,8 +953,8 @@ inline status_t validate_fused_moe_inputs(
 // writes the view-pair through the out-parameters.  Both views point
 // into either caller-supplied vectors or into `scratch`'s persistent
 // storage, so they stay valid until the next call on this thread.
-inline status_t setup_op1_arena_and_layout(FusedMoEArena &arena,
-        FusedMoEScratch &scratch, bool op1_internal, bool want_tight,
+inline status_t prepare_op1_output(FusedMoEIntermediateArena &arena,
+        FusedMoEDispatchScratch &scratch, bool op1_internal, bool want_tight,
         size_t arena_bytes_wide, size_t dst_elem_internal,
         const std::vector<int> &N, const std::vector<int> &M,
         const std::vector<int> &ldc_caller,
@@ -994,7 +998,7 @@ inline status_t setup_op1_arena_and_layout(FusedMoEArena &arena,
     //   * wide  : N[i]   cols/row (raw GEMM output; swiglu writes
     //             activated I cols into the first half in place).
     //   * tight : N[i]/2 cols/row (already-activated I-wide output via
-    //             flat_n_tile's per-thread-scratch + OOP swiglu path).
+    //             n_tile_execute's per-thread-scratch + OOP swiglu path).
     // Inactive (M <= 0) slots get an explicit nullptr.
     if (op1_internal) scratch.op1_dst_internal.resize(num_ops);
     if (want_tight) scratch.op1_ldc_local.resize(num_ops);
@@ -1089,7 +1093,7 @@ inline status_t setup_op1_arena_and_layout(FusedMoEArena &arena,
 // per pass.  (Vertical fusion's inline requant is per-token only, so
 // per-group routes to the two-pass legacy path.)  Per-group source
 // zero-points remain unsupported and return `status_t::failure`.
-inline status_t setup_op2_dispatch_scratch(FusedMoEScratch &scratch,
+inline status_t prepare_op2_dispatch(FusedMoEDispatchScratch &scratch,
         const grp_matmul_fused_moe_params &fused, grp_matmul_gated_act_t act,
         size_t num_ops, const std::vector<int> &N,
         const std::vector<const void *> &src, const std::vector<int> &lda,
@@ -1181,7 +1185,7 @@ inline status_t setup_op2_dispatch_scratch(FusedMoEScratch &scratch,
             // `mem_format_b == 'r'` / `pack_format_b == 1` left by a PRIOR GGML
             // fused call on this thread would otherwise leak into this plain call
             // — mis-routing the Op2 dispatch (e.g. the AOCL kernel would treat the
-            // weight as pre-reordered) and tripping `check_m_tile_safe`'s
+            // weight as pre-reordered) and tripping `m_tile_supported`'s
             // row-major gate so vertical fusion silently declines.
             p.mem_format_b = 'n';
             p.packing.pack_format_b = 0;
@@ -1270,15 +1274,15 @@ inline status_t setup_op2_dispatch_scratch(FusedMoEScratch &scratch,
 // Per-path dispatch wrappers.
 // ═══════════════════════════════════════════════════════════════════════
 //
-// The vertical-fusion wrapper `try_flat_m_tile_pipeline_bf16` lives
+// The vertical-fusion wrapper `try_fused_m_tile` lives
 // in `vertical_fusion_pipeline.cpp` — see its doc-block
 // there for the engagement contract.  Only the legacy two-pass
 // wrapper stays here because it is ALGO-agnostic: it forwards each
-// pass through `group_matmul_run_parallel_dispatch`, which internally
+// pass through `group_matmul_execute`, which internally
 // picks a generic ALGO from {1,2,3,5,6} based on shape and env knobs.
 
 // Legacy two-pass MoE dispatch.  Pass 1 = Op1 (W13 + optional gated
-// activation) via `group_matmul_run_parallel_dispatch`.  Pass 2 = Op2
+// activation) via `group_matmul_execute`.  Pass 2 = Op2
 // (W2 down-projection) via the same dispatcher with `act=none`.
 //
 // When Pass 1's dispatcher cannot fuse the activation (e.g. ALGO 3 +
@@ -1297,7 +1301,7 @@ inline status_t setup_op2_dispatch_scratch(FusedMoEScratch &scratch,
 // This is the NON-vertical-fusion fallback path; the vertical-fusion
 // executor (tried first by the caller) does its own in-pipeline quant
 // and is never reached when it engages.
-inline status_t run_fused_moe_legacy_two_pass(grp_matmul_gated_act_t act,
+inline status_t fused_moe_two_pass_execute(grp_matmul_gated_act_t act,
         data_type_t act_dtype, const std::vector<char> &layout,
         const std::vector<bool> &transA, const std::vector<bool> &transB,
         const std::vector<int> &M, const std::vector<int> &N,
@@ -1306,8 +1310,9 @@ inline status_t run_fused_moe_legacy_two_pass(grp_matmul_gated_act_t act,
         const std::vector<const void *> &weight, const std::vector<int> &ldb,
         const std::vector<const void *> &bias, const std::vector<float> &beta,
         const std::vector<void *> &op1_dst, const std::vector<int> &op1_ldc,
-        const grp_matmul_fused_moe_params &fused, FusedMoEScratch &scratch,
-        const std::vector<void *> &op2_dst, const std::vector<int> &op2_ldc,
+        const grp_matmul_fused_moe_params &fused,
+        FusedMoEDispatchScratch &scratch, const std::vector<void *> &op2_dst,
+        const std::vector<int> &op2_ldc,
         const std::vector<bool> &is_weights_const,
         std::vector<matmul_params> &params, int num_threads,
         const char *&pass1_mode, const char *&pass2_mode) {
@@ -1362,23 +1367,22 @@ inline status_t run_fused_moe_legacy_two_pass(grp_matmul_gated_act_t act,
     // regardless of `N_TILE_FUSED_ACT` (correctness contract).  When
     // grouped DQ did not run, `params` still carries dynamic_quant and
     // `execute_expert_slice` quantizes per expert.
-    const bool act_fused
-            = group_matmul_run_parallel_dispatch(layout, transA, transB, M, N,
-                    K, alpha, pass1_group_quantized ? pass1_quant_src : src,
-                    pass1_group_quantized ? pass1_quant_lda : lda, weight, ldb,
-                    bias, beta, op1_dst, op1_ldc, is_weights_const, params,
-                    num_threads, &pass1_mode, act, act_dtype);
+    const bool act_fused = group_matmul_execute(layout, transA, transB, M, N, K,
+            alpha, pass1_group_quantized ? pass1_quant_src : src,
+            pass1_group_quantized ? pass1_quant_lda : lda, weight, ldb, bias,
+            beta, op1_dst, op1_ldc, is_weights_const, params, num_threads,
+            &pass1_mode, act, act_dtype);
 
-    // CK-only-or-fail, fused-MoE side.  `group_matmul_run_parallel_dispatch`
+    // CK-only-or-fail, fused-MoE side.  `group_matmul_execute`
     // reports an unservable caller-prepacked CK VNNI weight through the
-    // `gemm_mode` sentinel and runs no compute; its `bool` return means
+    // `execution_path` sentinel and runs no compute; its `bool` return means
     // "activation was fused", NOT success.  `group_matmul_direct` converts
     // that sentinel for the plain route, but the fused-MoE entry returns its
     // own status and was dropping it — so a prepacked weight that declined
     // every CK consumer fell through to a regular GEMM here and reported
     // success over bytes it had misread.  Fail closed on both passes, matching
     // the plain route's contract.
-    if (gemm_mode_abort_sentinel(pass1_mode)) {
+    if (execution_path_is_fatal(pass1_mode)) {
         log_abort_sentinel("Op1", pass1_mode);
         return status_t::failure;
     }
@@ -1435,11 +1439,11 @@ inline status_t run_fused_moe_legacy_two_pass(grp_matmul_gated_act_t act,
     }
 
     // ── Pass 2: Op2 (down_proj) dispatch ────────────────────────────────
-    // Single route: `group_matmul_run_parallel_dispatch` with `act=none`.
+    // Single route: `group_matmul_execute` with `act=none`.
     // Honours generic `ZENDNNL_GRP_MATMUL_ALGO` values {1,2,3,5,6} and
     // `ZENDNNL_MATMUL_ALGO`
     // for inner BLAS, and routes through the custom BF16 microkernel
-    // inside flat_n_tile when `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=1` and
+    // inside n_tile_execute when `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=1` and
     // the ALGO 3 path is selected.
     //
     // Op2's lda (= op1_ldc) per Op1 layout × activation:
@@ -1447,15 +1451,15 @@ inline status_t run_fused_moe_legacy_two_pass(grp_matmul_gated_act_t act,
     //   wide  + act=none   — lda=N,    K_down=N.
     //   tight + gated act  — lda=N/2,  K_down=N/2.
     const double t_op2_start = s_optime ? omp_get_wtime() : 0.0;
-    group_matmul_run_parallel_dispatch(layout, scratch.transA_down, transB, M,
-            fused.N_down, scratch.K_down, scratch.alpha_down,
+    group_matmul_execute(layout, scratch.transA_down, transB, M, fused.N_down,
+            scratch.K_down, scratch.alpha_down,
             pass2_group_quantized ? pass2_quant_src : scratch.src_down,
             pass2_group_quantized ? pass2_quant_lda : op1_ldc,
             fused.down_weight, fused.ldb_down, fused.bias_down,
             scratch.beta_down, op2_dst, op2_ldc, is_weights_const,
             scratch.params_down, num_threads, &pass2_mode,
             grp_matmul_gated_act_t::none, act_dtype);
-    if (gemm_mode_abort_sentinel(pass2_mode)) {
+    if (execution_path_is_fatal(pass2_mode)) {
         log_abort_sentinel("Op2", pass2_mode);
         return status_t::failure;
     }
@@ -1483,7 +1487,7 @@ inline status_t run_fused_moe_legacy_two_pass(grp_matmul_gated_act_t act,
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// gemm_mode composition.
+// execution_path composition.
 // ═══════════════════════════════════════════════════════════════════════
 //
 // Composes a single string describing which fused-MoE path ran for
@@ -1496,14 +1500,14 @@ inline status_t run_fused_moe_legacy_two_pass(grp_matmul_gated_act_t act,
 // Returns a `const char *` whose lifetime is tied to a thread-local
 // `std::string` — valid until the next call to this function on the
 // same thread.
-inline const char *compose_fused_moe_gemm_mode(bool vertical_fusion_engaged,
+inline const char *compose_fused_moe_execution_path(bool fused_pipeline_engaged,
         bool op1_internal, bool op2_internal, bool want_tight,
         const char *pass1_mode, const char *pass2_mode, bool has_postop) {
     static thread_local std::string mode_buf;
     mode_buf.clear();
     mode_buf.reserve(64);
     mode_buf.append(
-            vertical_fusion_engaged ? "fused_moe_vertical" : "fused_moe_2pass");
+            fused_pipeline_engaged ? "fused_moe_vertical" : "fused_moe_2pass");
     if (op1_internal && op2_internal)
         mode_buf.append("_intalloc");
     else if (op1_internal)
@@ -1542,8 +1546,8 @@ status_t group_matmul_fused_moe_execute(
         const std::vector<void *> &dst, const std::vector<int> &ldc,
         const std::vector<bool> &is_weights_const,
         std::vector<matmul_params> &params, int num_threads,
-        const char **gemm_mode_out,
-        const group_matmul_moe_postop_params *moe_postop) {
+        const char **execution_path_out,
+        const group_matmul_moe_postop_params *weighted_reduce) {
     const size_t num_ops = M.size();
     if (num_ops == 0) return status_t::failure;
     scoped_grp_auto_mutation_tracking mutation_tracking;
@@ -1559,7 +1563,7 @@ status_t group_matmul_fused_moe_execute(
                               bool *out_internal) -> status_t {
         const status_t st
                 = detect_internal_alloc(v, num_ops, /*fused_moe_present=*/true,
-                        internal_alloc_mode::sweep_active, out_internal);
+                        internal_alloc_mode::active_range, out_internal);
         if (st != status_t::success) {
             log_error("group_matmul_fused_moe: ", name,
                     " has a mixed "
@@ -1585,7 +1589,7 @@ status_t group_matmul_fused_moe_execute(
     {
         const status_t v = validate_fused_moe_inputs(fused, act, act_dtype,
                 layout, transA, transB, M, N, K, alpha, src, lda, weight, ldb,
-                bias, beta, dst, ldc, is_weights_const, params, moe_postop,
+                bias, beta, dst, ldc, is_weights_const, params, weighted_reduce,
                 op1_internal, op2_internal, dst_elem_internal, &total_M,
                 &total_bytes_internal);
         if (v != status_t::success) return v;
@@ -1594,7 +1598,7 @@ status_t group_matmul_fused_moe_execute(
     // No active work (every expert has M=0): return success without
     // spawning OMP regions or touching the Op2 dispatch.
     if (total_M == 0) {
-        if (gemm_mode_out) *gemm_mode_out = "fused_moe_skip";
+        if (execution_path_out) *execution_path_out = "fused_moe_skip";
         return status_t::success;
     }
 
@@ -1610,28 +1614,28 @@ status_t group_matmul_fused_moe_execute(
     // makes `..._INT8=0` mean what it reads like: int8 on N-tile + DLP with
     // a separate activation pass in a wide arena, bf16 untouched on CK.
     const bool custom_kernel_en
-            = grp_matmul_custom_kernel_effective(params, M, N, act);
+            = group_matmul_custom_kernel_candidate(params, M, N, act);
     // Resolve (and safety-clamp) the ALGO for this call ONCE — shared by
     // both the tight-arena decision below and the vertical-fusion gate at
     // Step 8.  NOTE: this is NOT simply `env_algo_fused`: even a pinned
     // generic env algo ({1,2,3,5,6}) is clamped by m_tile_safe /
     // n_tile_safe inside
-    // `select_grp_matmul_algo`, so e.g. a pinned ALGO 2 on an m-tile-unsafe
+    // `group_matmul_algo_select`, so e.g. a pinned ALGO 2 on an m-tile-unsafe
     // shape resolves to 1 and vertical fusion must NOT engage.
     // The trace is collected HERE rather than defaulted away: a fused ALGO 5
-    // call bypasses `group_matmul_run_parallel_dispatch`, which is the only
+    // call bypasses `group_matmul_execute`, which is the only
     // other place that renders `[GRP_MATMUL.ALGO]`.  Without this the
     // `*_pin_honoured` flags are dropped exactly when a pin IS honoured — the
     // case an operator sets the pin to observe.
-    auto_algo_trace algo_trace;
+    GroupMatmulAlgoTrace algo_trace;
     // The Op1 arena is picked below from the resolved ALGO and is tight
     // whenever the CK runs, so only the CK's other epilogue terms apply.
     const bool single_expert_epilogue_ok = M.size() != 1
-            || ck_serves_single_expert_epilogue(alpha[0], beta[0], bias[0],
+            || single_expert_ck_epilogue_supported(alpha[0], beta[0], bias[0],
                     /*tight=*/true, act, act_dtype);
-    const int resolved_algo = select_grp_matmul_algo(layout, M, N, K, params,
+    const int resolved_algo = group_matmul_algo_select(layout, M, N, K, params,
             num_threads, &algo_trace, act, single_expert_epilogue_ok);
-    const bool want_tight = pick_fused_moe_want_tight(
+    const bool want_tight = should_use_tight_intermediate(
             op1_internal, act, custom_kernel_en, env_algo_fused, resolved_algo);
 
     // Publish the arena the DECODE call will get, for the prompt-side
@@ -1644,8 +1648,8 @@ status_t group_matmul_fused_moe_execute(
     // per-tile keys the decode never queries.
     // Asking the same predicate with `resolved_algo = 3` answers for the
     // decode instead.  Scoped to this call on this thread.
-    const scoped_decode_arena_hint decode_arena_hint(
-            pick_fused_moe_want_tight(op1_internal, act, custom_kernel_en,
+    const ScopedDecodeArenaHint decode_arena_hint(
+            should_use_tight_intermediate(op1_internal, act, custom_kernel_en,
                     env_algo_fused, /*resolved_algo=*/3));
 
     // EXEC APILOG — one line per fused_moe call summarising arena
@@ -1679,14 +1683,14 @@ status_t group_matmul_fused_moe_execute(
     // instance per thread, persistent for the thread's lifetime); the
     // indirection cost is zero after the first call on a given thread
     // (returns by reference to a static thread_local).
-    FusedMoEArena &arena = get_thread_local_arena();
-    FusedMoEScratch &scratch = get_thread_local_scratch();
+    FusedMoEIntermediateArena &arena = get_thread_local_arena();
+    FusedMoEDispatchScratch &scratch = get_thread_local_scratch();
     const std::vector<void *> *op1_dst_p = nullptr;
     const std::vector<int> *op1_ldc_p = nullptr;
     {
-        const status_t s = setup_op1_arena_and_layout(arena, scratch,
-                op1_internal, want_tight, total_bytes_internal,
-                dst_elem_internal, N, M, ldc, dst, op1_dst_p, op1_ldc_p);
+        const status_t s = prepare_op1_output(arena, scratch, op1_internal,
+                want_tight, total_bytes_internal, dst_elem_internal, N, M, ldc,
+                dst, op1_dst_p, op1_ldc_p);
         if (s != status_t::success) return s;
     }
     const std::vector<void *> &op1_dst = *op1_dst_p;
@@ -1697,10 +1701,10 @@ status_t group_matmul_fused_moe_execute(
         // Pass `num_ops` (= M.size() = ACTIVE matmul count) explicitly so
         // the setup loop is bounded by the active range, not by the
         // framework's prepack-extras-tail `params.size()`.  See the
-        // doc-block on setup_op2_dispatch_scratch() for the active/total
+        // doc-block on prepare_op2_dispatch() for the active/total
         // contract.
-        const status_t s = setup_op2_dispatch_scratch(scratch, fused, act,
-                num_ops, N, src, lda, params, op1_dst, op2_internal);
+        const status_t s = prepare_op2_dispatch(scratch, fused, act, num_ops, N,
+                src, lda, params, op1_dst, op2_internal);
         if (s != status_t::success) return s;
     }
     const std::vector<void *> &op2_dst
@@ -1720,8 +1724,8 @@ status_t group_matmul_fused_moe_execute(
                 "unsupported. Use "
                 "WEIGHT_CACHE=1, remove the phase override, or set "
                 "ZENDNNL_GRP_MATMUL_ALGO=0.");
-        if (gemm_mode_out != nullptr) {
-            *gemm_mode_out = kGrpMatmulErrWc2PhaseSplitUnsupported;
+        if (execution_path_out != nullptr) {
+            *execution_path_out = kGrpMatmulErrWc2PhaseSplitUnsupported;
         }
         return status_t::failure;
     }
@@ -1732,7 +1736,7 @@ status_t group_matmul_fused_moe_execute(
     // Op2 as one pool: both decode halves need a split-independent CK pack,
     // and a raw/caller-packed mixture on either side caps the whole call to
     // out-of-place caching.
-    const bool op2_custom_kernel_en = grp_matmul_custom_kernel_effective(
+    const bool op2_custom_kernel_en = group_matmul_custom_kernel_candidate(
             scratch.params_down, M, fused.N_down, grp_matmul_gated_act_t::none);
     const size_t op1_wei_elem
             = params.empty() ? 1 : size_of(params.front().dtypes.wei);
@@ -1744,11 +1748,10 @@ status_t group_matmul_fused_moe_execute(
                       &M, &N, &K, num_threads, op1_wei_elem)
             && aocl_strict_stable_decode_plan(&M, &fused.N_down,
                     &scratch.K_down, num_threads, op2_wei_elem);
-    const bool track_grouped_inplace_mutation
-            = prepare_grouped_auto_weight_cache(params,
-                    custom_kernel_en && op2_custom_kernel_en,
-                    &scratch.params_down, /*auto_algo3_layer=*/false,
-                    /*ck_inplace_licence=*/nullptr, strict_stable_decode_plan);
+    const bool track_grouped_inplace_mutation = prepare_auto_weight_cache(
+            params, custom_kernel_en && op2_custom_kernel_en,
+            &scratch.params_down, /*auto_algo3_layer=*/false,
+            /*ck_inplace_licence=*/nullptr, strict_stable_decode_plan);
     mutation_tracking.set(track_grouped_inplace_mutation);
     const uint64_t mutated_conflicts_before
             = aocl_mutated_source_conflict_count(
@@ -1756,16 +1759,16 @@ status_t group_matmul_fused_moe_execute(
 
     // ── Step 6: per-path dispatch fork ─────────────────────────────────
     // Try vertical fusion FIRST.  The eligibility gate inside
-    // `try_flat_m_tile_pipeline_bf16` (defined in m_tile.cpp) checks
+    // `try_fused_m_tile` (defined in m_tile.cpp) checks
     // env knob, dtype regime on both passes (BF16 end-to-end OR
     // WOQ-INT4 s4/u4 weights OR DQ-INT8 per-token-symmetric on s8
-    // weights), supported activation set, and `check_m_tile_safe` on
+    // weights), supported activation set, and `m_tile_supported` on
     // Op1 + synthesized Op2.  When it returns `false` NO writes have
     // been made to op1_dst / op2_dst, so the legacy two-pass below
     // overwrites cleanly.
     //
     // The three regimes share the SAME executor — see the doc-block
-    // on `flat_m_tile_pipeline_bf16` in `vertical_fusion_pipeline.cpp`
+    // on `try_fused_m_tile_core` in `vertical_fusion_pipeline.cpp`
     // for the per-regime memory-management notes (DQ-INT8 adds two
     // RAII-owned `std::vector<reorder_quant_buffers_t>` allocations
     // on the dispatcher stack: per-expert Op1 src hoist + per-thread
@@ -1774,7 +1777,7 @@ status_t group_matmul_fused_moe_execute(
     //
     // Pre-dispatch apilog tags emitted on EACH entry so a crash inside
     // either executor surfaces in the log immediately before the fault
-    // (the gemm_mode composition at Step 8 only runs on successful
+    // (the execution_path composition at Step 8 only runs on successful
     // completion).  Lets triage tell VF-vs-legacy without re-running
     // under gdb / ASAN.
     // Vertical fusion is an M-tile (ALGO 2) executor, NOT a separate
@@ -1789,7 +1792,7 @@ status_t group_matmul_fused_moe_execute(
     // tree and stops it from overriding a pinned ALGO 1/3/5/6 (e.g. an
     // ALGO-3 N-tile decode run, where it previously still *attempted*
     // before falling through to legacy two-pass).  Uses the same
-    // resolver `pick_fused_moe_want_tight` consults for its ALGO-3 tight
+    // resolver `should_use_tight_intermediate` consults for its ALGO-3 tight
     // check, so the gate agrees with the per-GEMM dispatch the legacy
     // two-pass below will pick.  `resolved_algo` was computed once at
     // Step 3 (reused here — same safety-clamped value).
@@ -1821,14 +1824,14 @@ status_t group_matmul_fused_moe_execute(
 
     const char *pass1_mode = nullptr;
     const char *pass2_mode = nullptr;
-    bool vertical_fusion_engaged = false;
+    bool fused_pipeline_engaged = false;
     if (vf_algo_allowed) {
         if (s_apilog) {
             apilog_info(
                     "[GRP_MATMUL.EXEC] op=fused_moe "
                     "enter=vertical_fusion_attempt");
         }
-        vertical_fusion_engaged = try_flat_m_tile_pipeline_bf16(layout, transA,
+        fused_pipeline_engaged = try_fused_m_tile(layout, transA,
                 scratch.transA_down, transB, M, N, K, alpha, src, lda, weight,
                 ldb, bias, beta, op1_dst, op1_ldc,
                 /*dst_w13_is_caller_alloc=*/!op1_internal, fused.N_down,
@@ -1845,14 +1848,14 @@ status_t group_matmul_fused_moe_execute(
         // Stages through `op1_dst` at `op1_ldc`, exactly where the two-pass
         // would leave the activated W13 output, so caller-allocated and
         // internal-arena modes need no distinction here.
-        const pipeline_half_t w13 {transA, N, K, alpha, weight, ldb, bias, beta,
+        const FusedProjection w13 {transA, N, K, alpha, weight, ldb, bias, beta,
                 op1_dst, op1_ldc, params};
-        const pipeline_half_t w2 {scratch.transA_down, fused.N_down,
+        const FusedProjection w2 {scratch.transA_down, fused.N_down,
                 scratch.K_down, scratch.alpha_down, fused.down_weight,
                 fused.ldb_down, fused.bias_down, scratch.beta_down, op2_dst,
                 op2_ldc, scratch.params_down};
         const expert_parallel_result ep_result
-                = try_expert_parallel_pipeline(layout, transB, M, src, lda,
+                = try_fused_expert_parallel(layout, transB, M, src, lda,
                         is_weights_const, act, act_dtype, num_threads, w13, w2);
         // A mid-region failure is TERMINAL: the pipeline has already written
         // part of the destinations and `reorder_quantization_wrapper` may have
@@ -1869,15 +1872,15 @@ status_t group_matmul_fused_moe_execute(
             }
             return status_t::failure;
         }
-        vertical_fusion_engaged
+        fused_pipeline_engaged
                 = (ep_result == expert_parallel_result::completed);
     }
-    if (vertical_fusion_engaged) {
+    if (fused_pipeline_engaged) {
         if (s_apilog) {
             apilog_info(
                     "[GRP_MATMUL.EXEC] op=fused_moe exit=vertical_fusion_ok");
             // Only on THIS branch: a declined pipeline falls through to the
-            // two-pass, which reaches `group_matmul_run_parallel_dispatch` and
+            // two-pass, which reaches `group_matmul_execute` and
             // renders the same flags there.  Emitting unconditionally would
             // double-report them.
             apilog_info("[GRP_MATMUL.ALGO] op=fused_moe chosen=ALGO_",
@@ -1926,7 +1929,7 @@ status_t group_matmul_fused_moe_execute(
         if (s_apilog) {
             apilog_info("[GRP_MATMUL.EXEC] op=fused_moe enter=legacy_two_pass");
         }
-        const status_t s = run_fused_moe_legacy_two_pass(act, act_dtype, layout,
+        const status_t s = fused_moe_two_pass_execute(act, act_dtype, layout,
                 transA, transB, M, N, K, alpha, src, lda, weight, ldb, bias,
                 beta, op1_dst, op1_ldc, fused, scratch, op2_dst, op2_ldc,
                 is_weights_const, params, num_threads, pass1_mode, pass2_mode);
@@ -1943,8 +1946,8 @@ status_t group_matmul_fused_moe_execute(
     // per pointer, avoiding false failures from unrelated concurrent calls.
     if (aocl_mutated_source_conflict_count(weight, &fused.down_weight, &M)
             != mutated_conflicts_before) {
-        if (gemm_mode_out != nullptr) {
-            *gemm_mode_out = kGrpMatmulErrMutatedWeightMiss;
+        if (execution_path_out != nullptr) {
+            *execution_path_out = kGrpMatmulErrMutatedWeightMiss;
         }
         return status_t::failure;
     }
@@ -1953,26 +1956,27 @@ status_t group_matmul_fused_moe_execute(
     // The post-op is the natural "Stage 4" of the fused MoE pipeline
     // (Op1 → activation → Op2 → weighted reduce).  D = fused.N_down[0]
     // — the validator already confirmed N_down is uniform across
-    // experts when moe_postop is engaged.
-    if (moe_postop != nullptr) {
+    // experts when weighted_reduce is engaged.
+    if (weighted_reduce != nullptr) {
         const int D_down = fused.N_down[0];
         const status_t postop_st = group_matmul_moe_postop_execute(
-                moe_postop, D_down, num_threads, params[0].dtypes.dst);
+                weighted_reduce, D_down, num_threads, params[0].dtypes.dst);
         if (postop_st != status_t::success) return postop_st;
     }
 
-    // ── Step 8: compose gemm_mode for profiler / apilog ────────────────
-    if (gemm_mode_out != nullptr) {
-        *gemm_mode_out = compose_fused_moe_gemm_mode(vertical_fusion_engaged,
-                op1_internal, op2_internal, want_tight, pass1_mode, pass2_mode,
-                /*has_postop=*/moe_postop != nullptr);
+    // ── Step 8: compose execution_path for profiler / apilog ────────────────
+    if (execution_path_out != nullptr) {
+        *execution_path_out = compose_fused_moe_execution_path(
+                fused_pipeline_engaged, op1_internal, op2_internal, want_tight,
+                pass1_mode, pass2_mode,
+                /*has_postop=*/weighted_reduce != nullptr);
     }
     return status_t::success;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Legacy ABI-preserving overload (no moe_postop parameter).  Forwards
-// to the primary entry with moe_postop = nullptr.  Kept as a separate
+// Legacy ABI-preserving overload (no weighted_reduce parameter).  Forwards
+// to the primary entry with weighted_reduce = nullptr.  Kept as a separate
 // non-inline exported symbol so binaries built against the pre-postop
 // version of the library continue to find their mangled name.
 // ═══════════════════════════════════════════════════════════════════════
@@ -1988,11 +1992,11 @@ status_t group_matmul_fused_moe_execute(
         const std::vector<void *> &dst, const std::vector<int> &ldc,
         const std::vector<bool> &is_weights_const,
         std::vector<matmul_params> &params, int num_threads,
-        const char **gemm_mode_out) {
+        const char **execution_path_out) {
     return group_matmul_fused_moe_execute(fused, act, act_dtype, layout, transA,
             transB, M, N, K, alpha, src, lda, weight, ldb, bias, beta, dst, ldc,
-            is_weights_const, params, num_threads, gemm_mode_out,
-            /*moe_postop=*/nullptr);
+            is_weights_const, params, num_threads, execution_path_out,
+            /*weighted_reduce=*/nullptr);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -2002,7 +2006,7 @@ status_t group_matmul_fused_moe_execute(
 // See doc-block on the declaration in `group_matmul_direct.hpp` for
 // semantics + limitations.  Implementation orchestrates an OMP
 // parallel region so each worker in the current OMP pool calls
-// `reset_thread_local_fused_moe_state()` against its OWN TLS — there
+// `clear_fused_moe_thread_state()` against its OWN TLS — there
 // is no shared-state path that one thread can use to reach another
 // thread's `thread_local` instance.
 //
@@ -2021,7 +2025,7 @@ status_t group_matmul_fused_moe_execute(
 void clear_fused_moe_scratch() {
     if (omp_in_parallel()) return;
 #pragma omp parallel
-    { reset_thread_local_fused_moe_state(); }
+    { clear_fused_moe_thread_state(); }
     group_matmul_routed_moe_flush_weight_cache();
 }
 } // namespace matmul

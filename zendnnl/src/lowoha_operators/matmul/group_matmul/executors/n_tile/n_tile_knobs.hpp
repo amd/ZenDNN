@@ -64,11 +64,11 @@ namespace test_api {
 inline std::atomic<int> s_grp_matmul_custom_kernel_n_tile_override {-1};
 
 // Sentinel `-1` = no override.  Settable values: 0 (auto, default —
-// try DecodeD if eligible, fall through to Rounds), 1 (decode —
-// prefer DecodeD when its eligibility passes; same behaviour as auto
+// try StaticExpertTeams if eligible, fall through to Rounds), 1 (decode —
+// prefer StaticExpertTeams when its eligibility passes; same behaviour as auto
 // today, kept distinct for explicit user intent + apilog hint), 2
-// (rounds — skip DecodeD attempt entirely, always run Rounds-based
-// FewExperts/ManyExperts).  See `get_grp_n_tile_strategy()` for the
+// (rounds — skip StaticExpertTeams attempt entirely, always run Rounds-based
+// ProportionalRounds/FixedTeamRounds).  See `get_grp_n_tile_strategy()` for the
 // production env path.
 inline std::atomic<int> s_grp_n_tile_strategy_override {-1};
 
@@ -132,30 +132,30 @@ inline bool get_grp_n_tile_fused_act() {
 // ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY = { 0, 1, 2, 3 } — cached, default 3
 // (decode_dynamic; see `kGrpNTileStrategyDefault`).
 //
-// Selects the ALGO 3 (flat_n_tile) per-tile dispatch shape AND
+// Selects the ALGO 3 (n_tile_execute) per-tile dispatch shape AND
 // controls whether the planner's viability perf gate fires.
 // Four values with distinct semantics:
 //
 //     0 = auto (opt-in heuristic).  Honour the planner's viability
 //         gate (route to Sequential when `ntile_viable` says N is too
 //         narrow to split usefully) unless the custom kernel engaged.
-//         If the call survives that gate, try DecodeD WITH its
+//         If the call survives that gate, try StaticExpertTeams WITH its
 //         eligibility heuristic (decode-class max_M ≤ 32,
 //         num_ops ∈ [6, num_ccds], min_M_active ≥ 3, skew_ratio ≤ 4,
 //         max_N / decode_n_tile ≤ team_size_est); fall through to
-//         Rounds (FewExperts / ManyExperts) when the heuristic
-//         refuses.  Not the default because DecodeD's eligibility gate
+//         Rounds (ProportionalRounds / FixedTeamRounds) when the heuristic
+//         refuses.  Not the default because StaticExpertTeams's eligibility gate
 //         rarely engages, so the auto branch reduces to "Rounds with
 //         extra precondition checks" in practice.
 //
 //     1 = decode (FORCE).  SKIP the viability gate AND skip the
-//         eligibility heuristic — run DecodeD on every shape where it
+//         eligibility heuristic — run StaticExpertTeams on every shape where it
 //         is STRUCTURALLY feasible (`num_threads >= num_ops`; smaller
-//         teams would over-subscribe DecodeD's OMP region and collide
-//         the `tid → expert` mapping).  Lets the caller run DecodeD on
+//         teams would over-subscribe StaticExpertTeams's OMP region and collide
+//         the `tid → expert` mapping).  Lets the caller run StaticExpertTeams on
 //         shapes the heuristic would route away (e.g. a decode call
 //         with active experts > num_ccds, where eligibility's `num_ops
-//         ≤ num_ccds` gate refuses but DecodeD's executor still runs
+//         ≤ num_ccds` gate refuses but StaticExpertTeams's executor still runs
 //         correctly with thin per-expert teams of size
 //         `num_threads / num_ops`).  Logs an apilog L3 line
 //         describing the resulting allocation, OR a fallback line
@@ -165,18 +165,18 @@ inline bool get_grp_n_tile_fused_act() {
 //         as 1) — when the caller
 //         (or ALGO 0 auto-pick) routed to ALGO 3 we mean to run
 //         N-tile, not silently bounce back to Sequential on a perf
-//         preference.  Skip the DecodeDynamic gate entirely; always run
-//         the Rounds path (FewExperts / ManyExperts).  The former
+//         preference.  Skip the CcdExpertWaves gate entirely; always run
+//         the Rounds path (ProportionalRounds / FixedTeamRounds).  The former
 //         production default, kept as the one-knob escape back to
 //         deterministic ALGO 3 = "true N-tile with rounds" behaviour on
 //         every shape that survives the structural gates.
 //
 //     3 = decode_dynamic (DEFAULT, FORCE).  SKIP the viability
 //         heuristic (same as 1/2).  Per op, a gate
-//         decides between the barrier-free CCD-cohesive DecodeDynamic
-//         executor (`DecodeDynamic` -> `execute_decode_dynamic`) and
+//         decides between the barrier-free CCD-cohesive CcdExpertWaves
+//         executor (`CcdExpertWaves` -> `execute_decode_dynamic`) and
 //         Rounds, from the active expert count and per-expert weight
-//         (see the DecodeDynamic knob block below).  DecodeDynamic targets the
+//         (see the CcdExpertWaves knob block below).  CcdExpertWaves targets the
 //         decode-class regime `num_ops > num_ccds` (max_M <= decode
 //         threshold); it maps whole experts onto CCDs and processes them
 //         in per-CCD waves, so it also runs when `num_ops > num_threads`.
@@ -186,7 +186,7 @@ inline bool get_grp_n_tile_fused_act() {
 //         barrier + apply_swiglu_oai post-pass inside the executor).
 //         A use_custom DQ-INT8 fused call is served too by default; set
 //         ZENDNNL_GRP_MATMUL_DECDYN_CK_INT8_FUSED=0 to fall it back to
-//         Rounds.  AUTO (value 0) engages DecodeDynamic under
+//         Rounds.  AUTO (value 0) engages CcdExpertWaves under
 //         the SAME gate (active_ops >= 4*num_ccds).
 //
 //         PRODUCTION DEFAULT, and a STRICT SUPERSET of value 2: the gate is
@@ -203,7 +203,7 @@ inline bool get_grp_n_tile_fused_act() {
 //   * R3 — capacity overflow (`num_ops > GroupNTilePlan::kMaxExperts
 //     = 256`).  Stack-array bound on the planner; demoting to
 //     Sequential is the only safe recourse.  Auto-select rule 0 also
-//     captures this upstream by routing to ALGO 1.  `flat_n_tile`
+//     captures this upstream by routing to ALGO 1.  `n_tile_execute`
 //     slices a larger ALGO-3 MoE call, or one whose weights only the
 //     custom kernel can read, so neither reaches the planner.
 //
@@ -218,7 +218,7 @@ inline bool get_grp_n_tile_fused_act() {
 //   * tight split-halves CK refusal — silu_and_mul / gelu_and_mul +
 //     tight caller (`ldc < N`) when the custom kernel refuses
 //     (typically silu/gelu + bias).  Handled post-plan in
-//     `flat_n_tile`; Sequential allocates the wide [M, N] scratch +
+//     `n_tile_execute`; Sequential allocates the wide [M, N] scratch +
 //     `apply_gated_act_inplace` + tight memcpy that the tight
 //     swiglu-only fast path cannot.
 //
@@ -287,7 +287,7 @@ inline int get_grp_n_tile_strategy() {
 // True when the caller EXPLICITLY selected a strategy — via the env or
 // the test override — as opposed to inheriting the default.  Mirrors
 // `grp_matmul_auto_decode_algo_is_set()`.  Needed because the planner
-// logs "DecodeDynamic NOT engaged" diagnostics that are useful when a
+// logs "CcdExpertWaves NOT engaged" diagnostics that are useful when a
 // user asked for strategy 3 and wants to know why it did not fire, but
 // are pure per-call spam now that 3 is the default and the common case
 // is a shape that legitimately falls through to Rounds.
@@ -298,11 +298,11 @@ inline bool grp_n_tile_strategy_is_set() {
     return grp_n_tile_strategy_env().is_set;
 }
 
-// NOTE: the DecodeDynamic knobs (`get_grp_decdyn_*`) moved to
+// NOTE: the CcdExpertWaves knobs (`get_grp_decdyn_*`) moved to
 // `multi_expert/multi_expert_policy.hpp`.
 
 // ZENDNNL_GRP_MATMUL_N_ORDER = { 0..4 } — cached, default 3 (pair-balanced).
-//   Permutation of experts walked by ALGO 3 FewExperts/ManyExperts.
+//   Permutation of experts walked by ALGO 3 ProportionalRounds/FixedTeamRounds.
 //     0 = auto: shape-aware picker (auto_pick_n_order); resolved
 //         sub-mode is logged in `[GRP_MATMUL.PLAN]` APILOG.
 //     1 = ascending  — by M, lightest first.  Was the previous
@@ -349,7 +349,7 @@ inline int get_grp_matmul_n_order() {
 //   `ZENDNNL_GRP_MATMUL_DECODE_PROPORTIONAL`.
 //
 // Three-mode dispatch for asymmetric per-expert thread distribution
-// inside the ALGO 3 ManyExperts Single-round plan.  ALL active modes
+// inside the ALGO 3 FixedTeamRounds Single-round plan.  ALL active modes
 // are PROMPT-ONLY (`max_M > kDecodeMaxM`); decode-class calls bypass
 // the N_TILE heavy-threshold dispatch entirely.  Decode balancing is governed
 // by `ZENDNNL_GRP_MATMUL_DECODE_PROPORTIONAL`; this knob only governs the
@@ -395,7 +395,7 @@ inline int get_grp_matmul_n_order() {
 // vars.  Mid-process env changes have no effect; relaunch to change it.
 //
 // All three modes share the same executor consumer
-// (`stable_n_thr_per_expert[]` + `per_expert_remainder = true`); the
+// (`expert_thread_counts[]` + `variable_expert_teams = true`); the
 // only difference is how the planner populates that array.
 inline int get_grp_matmul_n_tile_heavy_threshold() {
     static constexpr int kDefault = 0; // AUTO (prompt adaptive tiers)

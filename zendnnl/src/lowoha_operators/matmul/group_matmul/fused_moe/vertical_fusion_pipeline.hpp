@@ -38,12 +38,12 @@ namespace matmul {
 ///
 /// Returns `true` when the pipeline engaged AND completed
 /// successfully (caller skips legacy two-pass); `false` when it
-/// declined to engage (round-based / multi-tier / wide-N regime,
+/// declined to engage (round-based / multi-tier / shallow-M regime,
 /// scratch budget exhausted, per-thread alloc failure, or — in the
 /// DQ-INT8 regime — pre-OMP source-quant hoist failure) — in
 /// which case dst_w2 and dst_w13 are guaranteed to be untouched
 /// and the caller MUST run the legacy two-pass.
-bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
+bool try_fused_m_tile_core(const std::vector<char> &layout,
         const std::vector<bool> &transA, const std::vector<bool> &transA_w2,
         const std::vector<bool> &transB, const std::vector<int> &M,
         const std::vector<int> &N_w13, const std::vector<int> &K_in,
@@ -65,7 +65,7 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
         std::vector<matmul_params> &params_w13,
         std::vector<matmul_params> &params_w2, int num_threads);
 
-/// Eligibility-gated wrapper around `flat_m_tile_pipeline_bf16`.
+/// Eligibility-gated wrapper around `try_fused_m_tile_core`.
 ///
 /// Returns `true` iff ALL of the following hold, in which case the
 /// pipeline has produced both Op1 (W13) and Op2 (W2) outputs and the
@@ -100,9 +100,9 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
 ///     `gelu_and_mul`, or `swiglu_oai_mul` (the four activations
 ///     `apply_gated_act_inplace` handles on the thread-local scratch).
 ///   * Both Op1 and synthesized Op2 matmul shapes pass
-///     `check_m_tile_safe` (row-major, dtype uniformity, no packed-B,
+///     `m_tile_supported` (row-major, dtype uniformity, no packed-B,
 ///     etc. — see the predicate's doc-block in Section H.5 below).
-///   * `flat_m_tile_pipeline_bf16` itself committed (single-tier
+///   * `try_fused_m_tile_core` itself committed (single-tier
 ///     planner agreed, scratch budget fits including any DQ-INT8
 ///     Stage 2b bytes, per-thread alloc succeeded, and — in the
 ///     DQ-INT8 regime — the pre-OMP per-expert src hoist succeeded
@@ -111,7 +111,7 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
 /// When this returns `false`, NO writes have been made to either
 /// `dst_w13` or `dst_w2`, so the caller can safely fall through to a
 /// legacy two-pass dispatch over the same buffers.
-bool try_flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
+bool try_fused_m_tile(const std::vector<char> &layout,
         const std::vector<bool> &transA, const std::vector<bool> &transA_w2,
         const std::vector<bool> &transB, const std::vector<int> &M,
         const std::vector<int> &N_w13, const std::vector<int> &K_in,

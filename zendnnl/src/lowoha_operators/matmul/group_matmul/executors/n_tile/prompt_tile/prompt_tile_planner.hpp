@@ -83,7 +83,7 @@ struct PlannerConfig {
     int max_mr = 8;
     int64_t l2_bytes = 1 << 20;
     int64_t l3_bytes_per_team = int64_t(32) << 20;
-    /// `FamilyFacts` of the call, with `row_align` resolved.
+    /// `kernel_traits_t` of the call, with `row_align` resolved.
     int a_bytes = 2;
     int wei_bits = 16;
     int min_mr = 4;

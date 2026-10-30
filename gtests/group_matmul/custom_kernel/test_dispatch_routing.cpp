@@ -211,7 +211,7 @@ TEST(CkDispatchRouting, ScalarRouteUsesEffectiveMatmulAlgo1) {
     params.dtypes.bias = data_type_t::none;
 
     const auto routable = [&]() {
-        return zendnnl::lowoha::matmul::custom_kernel_routable('r',
+        return zendnnl::lowoha::matmul::single_matmul_group_routable('r',
                 /*M=*/8, /*N=*/2048, /*K=*/256, /*num_threads=*/32,
                 /*batch_count=*/1, /*transA=*/false, /*transB=*/true,
                 /*alpha=*/1.0f, /*beta=*/0.0f, /*bias=*/nullptr, /*ldb=*/256,
@@ -259,14 +259,14 @@ TEST(CkDispatchRouting, ScalarRouteUsesRequestedThreadTileCapacity) {
     const RouteCase boundary_cases[] = {
             {128, 2}, {256, 4}, {512, 8}, {1024, 16}, {2048, 32}, {4096, 64}};
     for (const auto &c : boundary_cases) {
-        EXPECT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r',
+        EXPECT_TRUE(zendnnl::lowoha::matmul::single_matmul_group_routable('r',
                 /*M=*/8, c.N, /*K=*/256, c.num_threads, /*batch_count=*/1,
                 /*transA=*/false, /*transB=*/true, /*alpha=*/1.0f,
                 /*beta=*/0.0f, /*bias=*/nullptr, /*ldb=*/256,
                 /*is_weights_const=*/true, params))
                 << "boundary route rejected for N=" << c.N
                 << " num_threads=" << c.num_threads;
-        EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r',
+        EXPECT_FALSE(zendnnl::lowoha::matmul::single_matmul_group_routable('r',
                 /*M=*/8, c.N, /*K=*/256, c.num_threads + 1,
                 /*batch_count=*/1, /*transA=*/false, /*transB=*/true,
                 /*alpha=*/1.0f, /*beta=*/0.0f, /*bias=*/nullptr, /*ldb=*/256,
@@ -338,8 +338,9 @@ TEST(CkDispatchRouting, ScalarCallOnGroupedInPlaceImageFailsClosed) {
     for (const bool route : {true, false}) {
         SCOPED_TRACE(route ? "route on" : "route off");
         guard.config.set_custom_kernel_route(route);
-        ASSERT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N,
-                K, 24, 1, false, false, 1.0f, 0.0f, nullptr, N, true, params));
+        ASSERT_FALSE(zendnnl::lowoha::matmul::single_matmul_group_routable('r',
+                M, N, K, 24, 1, false, false, 1.0f, 0.0f, nullptr, N, true,
+                params));
         EXPECT_EQ(
                 zendnnl::lowoha::matmul::matmul_direct('r', false, false, M, N,
                         K, 1.0f, src.data(), K, weight[0].data(), N, nullptr,
@@ -390,8 +391,8 @@ TEST(CkDispatchRouting, ScalarW4RouteUsesThreadAndGroupBoundaries) {
     const auto routable
             = [&](int M, int N, int K, int group_size, int num_threads) {
         const matmul_params params = make_params(M, N, K, group_size);
-        return zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
-                num_threads, 1, false, true, 1.0f, 0.0f, nullptr, K, true,
+        return zendnnl::lowoha::matmul::single_matmul_group_routable('r', M, N,
+                K, num_threads, 1, false, true, 1.0f, 0.0f, nullptr, K, true,
                 params);
     };
 
@@ -452,25 +453,29 @@ TEST(CkDispatchRouting, ScalarRouteAcceptsInt8AndW4) {
 
     {
         mt::CustomKernelInt8Override int8_ck_on(true);
-        EXPECT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N,
-                K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+        EXPECT_TRUE(zendnnl::lowoha::matmul::single_matmul_group_routable('r',
+                M, N, K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true,
+                params));
 
         // Per-group weight scales are an ALGO 3 shape, same as a direct
         // group_matmul call. Per-token source stays paired with them.
         params.quant_params.wei_scale.dims = {K / 32, N};
-        EXPECT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N,
-                K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+        EXPECT_TRUE(zendnnl::lowoha::matmul::single_matmul_group_routable('r',
+                M, N, K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true,
+                params));
 
         // llama.cpp supplies f32 activations with dynamic quantization. Group
         // DQ quantizes these to the same s8 representation before ALGO 3.
         params.dtypes.src = data_type_t::f32;
-        EXPECT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N,
-                K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+        EXPECT_TRUE(zendnnl::lowoha::matmul::single_matmul_group_routable('r',
+                M, N, K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true,
+                params));
         params.dtypes.src = data_type_t::bf16;
 
         params.quant_params.src_scale.dims = {M, K / 32};
-        EXPECT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N,
-                K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+        EXPECT_TRUE(zendnnl::lowoha::matmul::single_matmul_group_routable('r',
+                M, N, K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true,
+                params));
         params.quant_params.src_scale.dims = {M, 1};
 
         // Per-group source requires the same group count on the weight.
@@ -478,11 +483,13 @@ TEST(CkDispatchRouting, ScalarRouteAcceptsInt8AndW4) {
         params.dynamic_quant = false;
         params.quant_params.src_scale.buff = &src_scale;
         params.quant_params.src_scale.dims = {M, K / 32};
-        EXPECT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N,
-                K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+        EXPECT_TRUE(zendnnl::lowoha::matmul::single_matmul_group_routable('r',
+                M, N, K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true,
+                params));
         params.quant_params.wei_scale.dims = {1, N};
-        EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N,
-                K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+        EXPECT_FALSE(zendnnl::lowoha::matmul::single_matmul_group_routable('r',
+                M, N, K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true,
+                params));
 
         params.dtypes.src = data_type_t::bf16;
         params.dynamic_quant = true;
@@ -492,14 +499,15 @@ TEST(CkDispatchRouting, ScalarRouteAcceptsInt8AndW4) {
     }
     {
         mt::CustomKernelInt8Override int8_ck_off(false);
-        EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N,
-                K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+        EXPECT_FALSE(zendnnl::lowoha::matmul::single_matmul_group_routable('r',
+                M, N, K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true,
+                params));
     }
 
     params.dtypes.wei = data_type_t::s4;
     params.quant_params.wei_scale.dims = {K / 32, N};
-    EXPECT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
-            32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+    EXPECT_TRUE(zendnnl::lowoha::matmul::single_matmul_group_routable('r', M, N,
+            K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
 
     // W4A8 has exactly two supported source forms: dynamic BF16 and static,
     // already-quantized S8. S8 with dynamic_quant=true is contradictory and
@@ -508,41 +516,42 @@ TEST(CkDispatchRouting, ScalarRouteAcceptsInt8AndW4) {
     params.dynamic_quant = false;
     params.quant_params.src_scale.buff = &src_scale;
     EXPECT_TRUE(zendnnl::lowoha::matmul::is_w4a8_config(params));
-    EXPECT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
-            32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+    EXPECT_TRUE(zendnnl::lowoha::matmul::single_matmul_group_routable('r', M, N,
+            K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
 
     params.dynamic_quant = true;
     EXPECT_FALSE(zendnnl::lowoha::matmul::is_w4a8_config(params));
-    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
-            32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+    EXPECT_FALSE(zendnnl::lowoha::matmul::single_matmul_group_routable('r', M,
+            N, K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
 
     params.dtypes.src = data_type_t::bf16;
     params.dynamic_quant = true;
 
     // Group N-tile requires true per-group {G>1,N} metadata.
     params.quant_params.wei_scale.dims = {1, N};
-    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
-            32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+    EXPECT_FALSE(zendnnl::lowoha::matmul::single_matmul_group_routable('r', M,
+            N, K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
 
     // The S4 pack has no N-tail kernel.
     params.quant_params.wei_scale.dims = {K / 32, N + 1};
-    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N + 1,
-            K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+    EXPECT_FALSE(zendnnl::lowoha::matmul::single_matmul_group_routable('r', M,
+            N + 1, K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true,
+            params));
 
     // The S4 custom kernel consumes whole K-octets per scale group.
     params.quant_params.wei_scale.dims = {K / 4, N};
-    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
-            32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+    EXPECT_FALSE(zendnnl::lowoha::matmul::single_matmul_group_routable('r', M,
+            N, K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
 
     params.quant_params.wei_scale.dims = {K / 32, N - 1};
-    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
-            32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+    EXPECT_FALSE(zendnnl::lowoha::matmul::single_matmul_group_routable('r', M,
+            N, K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
 
     int32_t src_zp = 0;
     params.quant_params.wei_scale.dims = {K / 32, N};
     params.quant_params.src_zp.buff = &src_zp;
-    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
-            32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+    EXPECT_FALSE(zendnnl::lowoha::matmul::single_matmul_group_routable('r', M,
+            N, K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
 }
 
 TEST(CkDispatchRouting, ScalarRouteAcceptsStaticU8S8PerTensor) {
@@ -596,9 +605,9 @@ TEST(CkDispatchRouting, ScalarRouteAcceptsStaticU8S8PerTensor) {
                 params.quant_params.dst_zp.dt = data_type_t::s32;
                 params.quant_params.dst_zp.dims = shape;
             }
-            EXPECT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M,
-                    N, K, 4, 1, false, true, 1.0f, 0.0f, nullptr, K, true,
-                    params));
+            EXPECT_TRUE(zendnnl::lowoha::matmul::single_matmul_group_routable(
+                    'r', M, N, K, 4, 1, false, true, 1.0f, 0.0f, nullptr, K,
+                    true, params));
         }
     }
     params.dtypes.dst = data_type_t::u8;
@@ -612,45 +621,46 @@ TEST(CkDispatchRouting, ScalarRouteAcceptsStaticU8S8PerTensor) {
     params.quant_params.wei_zp.buff = &wei_zp;
     params.quant_params.wei_zp.dt = data_type_t::s32;
     params.quant_params.wei_zp.dims = {1, 1};
-    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
-            4, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+    EXPECT_FALSE(zendnnl::lowoha::matmul::single_matmul_group_routable('r', M,
+            N, K, 4, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
     params.quant_params.wei_zp = {};
 
     params.quant_params.src_scale.dims = {M, 1};
-    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
-            4, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+    EXPECT_FALSE(zendnnl::lowoha::matmul::single_matmul_group_routable('r', M,
+            N, K, 4, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
     params.quant_params.src_scale.dims = {1, 1};
 
     params.quant_params.wei_scale.buff = wei_scales.data();
     for (const std::vector<int64_t> &shape :
             std::vector<std::vector<int64_t>> {{N}, {1, N}}) {
         params.quant_params.wei_scale.dims = shape;
-        EXPECT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N,
-                K, 4, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+        EXPECT_TRUE(zendnnl::lowoha::matmul::single_matmul_group_routable('r',
+                M, N, K, 4, 1, false, true, 1.0f, 0.0f, nullptr, K, true,
+                params));
     }
     params.quant_params.wei_scale.dims = {N, 1};
-    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
-            4, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+    EXPECT_FALSE(zendnnl::lowoha::matmul::single_matmul_group_routable('r', M,
+            N, K, 4, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
     params.quant_params.wei_scale.buff = &wei_scale;
     params.quant_params.wei_scale.dims = {1, 1};
 
     params.quant_params.dst_scale.dims = {1, N};
-    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
-            4, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+    EXPECT_FALSE(zendnnl::lowoha::matmul::single_matmul_group_routable('r', M,
+            N, K, 4, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
     params.quant_params.dst_scale.dims = {1, 1};
 
     params.quant_params.src_zp.buff = nullptr;
-    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
-            4, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+    EXPECT_FALSE(zendnnl::lowoha::matmul::single_matmul_group_routable('r', M,
+            N, K, 4, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
     params.quant_params.src_zp.buff = &src_zp;
 
     src_scale = -1.0f;
-    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
-            4, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+    EXPECT_FALSE(zendnnl::lowoha::matmul::single_matmul_group_routable('r', M,
+            N, K, 4, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
     src_scale = 0.02f;
     src_zp = 256;
-    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
-            4, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+    EXPECT_FALSE(zendnnl::lowoha::matmul::single_matmul_group_routable('r', M,
+            N, K, 4, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
     src_zp = 127;
 
     for (post_op_type_t supported :
@@ -658,19 +668,20 @@ TEST(CkDispatchRouting, ScalarRouteAcceptsStaticU8S8PerTensor) {
         matmul_post_op po;
         po.po_type = supported;
         params.postop_ = {po};
-        EXPECT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N,
-                K, 4, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+        EXPECT_TRUE(zendnnl::lowoha::matmul::single_matmul_group_routable('r',
+                M, N, K, 4, 1, false, true, 1.0f, 0.0f, nullptr, K, true,
+                params));
     }
     matmul_post_op unsupported;
     unsupported.po_type = post_op_type_t::gelu_tanh;
     params.postop_ = {unsupported};
-    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
-            4, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+    EXPECT_FALSE(zendnnl::lowoha::matmul::single_matmul_group_routable('r', M,
+            N, K, 4, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
     params.postop_.clear();
 
     constexpr int unsafe_k = ((custom_kernel::kMaxSafeInt8AccumK / 4) + 1) * 4;
-    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N,
-            unsafe_k, 4, 1, false, true, 1.0f, 0.0f, nullptr, unsafe_k, true,
+    EXPECT_FALSE(zendnnl::lowoha::matmul::single_matmul_group_routable('r', M,
+            N, unsafe_k, 4, 1, false, true, 1.0f, 0.0f, nullptr, unsafe_k, true,
             params));
 }
 
@@ -695,9 +706,9 @@ void check_scalar_w4_route_matches_fallback(const ScalarW4RouteShape &s) {
     ScalarW4Problem route_problem(s.M, s.N, s.K, s.group_size, s.num_threads);
     ScalarW4Problem fallback_problem(
             s.M, s.N, s.K, s.group_size, s.num_threads);
-    ASSERT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r', s.M, s.N,
-            s.K, s.num_threads, 1, false, true, 1.0f, 0.0f, nullptr, s.K, true,
-            route_problem.params));
+    ASSERT_TRUE(zendnnl::lowoha::matmul::single_matmul_group_routable('r', s.M,
+            s.N, s.K, s.num_threads, 1, false, true, 1.0f, 0.0f, nullptr, s.K,
+            true, route_problem.params));
 
     constexpr float kOutputPoison = -123.0f;
     std::vector<bfloat16_t> dst_route(
@@ -708,10 +719,10 @@ void check_scalar_w4_route_matches_fallback(const ScalarW4RouteShape &s) {
 
     const char *mode = nullptr;
     {
-        mt::GemmModeCaptureGuard capture;
+        mt::ExecutionPathCaptureGuard capture;
         ASSERT_EQ(route_problem.run(dst_route), status_t::success);
         mode = zendnnl::lowoha::matmul::test_api ::
-                       s_last_group_matmul_direct_gemm_mode.load(
+                       s_last_group_matmul_direct_execution_path.load(
                                std::memory_order_relaxed);
     }
     ASSERT_NE(mode, nullptr);
@@ -841,7 +852,7 @@ TEST(CkDispatchRouting, ScalarInt8EndToEndMatchesFallbackAndRunsCk) {
 
     std::string mode;
     {
-        mt::GemmModeCaptureGuard mode_guard;
+        mt::ExecutionPathCaptureGuard mode_guard;
         ASSERT_EQ(zendnnl::lowoha::matmul::matmul_direct('r', false, true, M, N,
                           K, 1.0f, src.data(), K, weight.data(), K,
                           /*bias=*/nullptr, 0.0f, dst_ck.data(), N,
@@ -849,7 +860,7 @@ TEST(CkDispatchRouting, ScalarInt8EndToEndMatchesFallbackAndRunsCk) {
                 status_t::success);
         const char *captured
                 = zendnnl::lowoha::matmul::test_api::
-                          s_last_group_matmul_direct_gemm_mode.load(
+                          s_last_group_matmul_direct_execution_path.load(
                                   std::memory_order_relaxed);
         ASSERT_NE(captured, nullptr);
         mode = captured;
@@ -946,7 +957,7 @@ TEST(CkDispatchRouting, ScalarStaticU8S8PerTensorMatchesFallbackAndRunsCk) {
         guard.config.set_custom_kernel_route(true);
         std::string mode;
         {
-            mt::GemmModeCaptureGuard mode_guard;
+            mt::ExecutionPathCaptureGuard mode_guard;
             const status_t ck_status = zendnnl::lowoha::matmul::matmul_direct(
                     'r', false, true, M, N, K, 1.0f, src.data(), K,
                     weight.data(), K, bias.data(), 0.0f, dst_ck.data(), N, true,
@@ -954,7 +965,7 @@ TEST(CkDispatchRouting, ScalarStaticU8S8PerTensorMatchesFallbackAndRunsCk) {
             ASSERT_EQ(ck_status, status_t::success);
             const char *captured
                     = zendnnl::lowoha::matmul::test_api::
-                              s_last_group_matmul_direct_gemm_mode.load(
+                              s_last_group_matmul_direct_execution_path.load(
                                       std::memory_order_relaxed);
             ASSERT_NE(captured, nullptr);
             mode = captured;
@@ -1045,14 +1056,14 @@ TEST(CkDispatchRouting, ScalarStaticU8S8PerTensorMatchesFallbackAndRunsCk) {
     for (const std::vector<int64_t> &bad_dims :
             std::vector<std::vector<int64_t>> {{1, N}, {M * N}}) {
         unsupported_postop.postop_[1].dims = bad_dims;
-        EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N,
-                K, 4, 1, false, true, 1.0f, 0.0f, bias.data(), K, true,
+        EXPECT_FALSE(zendnnl::lowoha::matmul::single_matmul_group_routable('r',
+                M, N, K, 4, 1, false, true, 1.0f, 0.0f, bias.data(), K, true,
                 unsupported_postop));
     }
     unsupported_postop.postop_[1].dims = {M, N};
     unsupported_postop.postop_[1].leading_dim = N - 1;
-    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
-            4, 1, false, true, 1.0f, 0.0f, bias.data(), K, true,
+    EXPECT_FALSE(zendnnl::lowoha::matmul::single_matmul_group_routable('r', M,
+            N, K, 4, 1, false, true, 1.0f, 0.0f, bias.data(), K, true,
             unsupported_postop));
 
     for (post_op_type_t unary :
@@ -1109,26 +1120,28 @@ TEST(CkDispatchRouting, ScalarStaticU8S8PromptUsesGroupedAoclWarmup) {
     params.quant_params.wei_scale.dims = {1, 1};
     zendnnl::lowoha::matmul::matmul_batch_params_t batch_params;
 
-    EXPECT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K, 4,
-            1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
-    EXPECT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r', 2048, N, K,
-            4, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+    EXPECT_TRUE(zendnnl::lowoha::matmul::single_matmul_group_routable('r', M, N,
+            K, 4, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+    EXPECT_TRUE(zendnnl::lowoha::matmul::single_matmul_group_routable('r', 2048,
+            N, K, 4, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
 
     constexpr int decode_m = 5;
-    EXPECT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r', decode_m,
-            N, K, 4, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
-    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', decode_m,
-            N, K, 1, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params))
+    EXPECT_TRUE(zendnnl::lowoha::matmul::single_matmul_group_routable('r',
+            decode_m, N, K, 4, 1, false, true, 1.0f, 0.0f, nullptr, K, true,
+            params));
+    EXPECT_FALSE(zendnnl::lowoha::matmul::single_matmul_group_routable('r',
+            decode_m, N, K, 1, 1, false, true, 1.0f, 0.0f, nullptr, K, true,
+            params))
             << "one-op grouped AUTO selects ALGO 1 on a one-thread call";
     {
         mt::AlgoEnvGuard force_group_algo1(1);
-        EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r',
+        EXPECT_FALSE(zendnnl::lowoha::matmul::single_matmul_group_routable('r',
                 decode_m, N, K, 4, 1, false, true, 1.0f, 0.0f, nullptr, K, true,
                 params));
     }
     {
         mt::AutoDecodeAlgoOverride force_decode_algo1(1);
-        EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r',
+        EXPECT_FALSE(zendnnl::lowoha::matmul::single_matmul_group_routable('r',
                 decode_m, N, K, 4, 1, false, true, 1.0f, 0.0f, nullptr, K, true,
                 params));
     }
@@ -1284,8 +1297,8 @@ TEST(CkDispatchRouting,
     params.quant_params.wei_scale.dims = {N, 1};
     zendnnl::lowoha::matmul::matmul_batch_params_t batch_params;
 
-    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
-            4, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+    EXPECT_FALSE(zendnnl::lowoha::matmul::single_matmul_group_routable('r', M,
+            N, K, 4, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
     const status_t fallback_status = zendnnl::lowoha::matmul::matmul_direct('r',
             false, true, M, N, K, 1.0f, src.data(), K, weight.data(), K,
             nullptr, 0.0f, dst_route_on.data(), N, true, batch_params, params);
@@ -1428,18 +1441,19 @@ TEST(CkDispatchRouting, GroupedStaticU8S8MixedScaleStorageAndPostopFallback) {
         }
         const status_t result = group_matmul_direct(layout, transA, transB, Ms,
                 Ns, Ks, alpha, src_ptr, lda, weight_ptr, ldb, bias, beta, dst,
-                ldc, is_const, run_params, /*moe_postop=*/nullptr, gated_act);
+                ldc, is_const, run_params, /*weighted_reduce=*/nullptr,
+                gated_act);
         return result;
     };
 
     std::vector<std::vector<bfloat16_t>> ck_out(E), ref_out(E);
     std::string initial_mode;
     {
-        mt::GemmModeCaptureGuard mode_guard;
+        mt::ExecutionPathCaptureGuard mode_guard;
         ASSERT_EQ(run(3, params, ck_out), status_t::success);
         const char *captured
                 = zendnnl::lowoha::matmul::test_api::
-                          s_last_group_matmul_direct_gemm_mode.load(
+                          s_last_group_matmul_direct_execution_path.load(
                                   std::memory_order_relaxed);
         ASSERT_NE(captured, nullptr);
         initial_mode = captured;
@@ -1487,11 +1501,11 @@ TEST(CkDispatchRouting, GroupedStaticU8S8MixedScaleStorageAndPostopFallback) {
     ::reset_grp_matmul_caches();
     std::string binary_mode;
     {
-        mt::GemmModeCaptureGuard mode_guard;
+        mt::ExecutionPathCaptureGuard mode_guard;
         ASSERT_EQ(run(3, params, binary_ck), status_t::success);
         const char *captured
                 = zendnnl::lowoha::matmul::test_api::
-                          s_last_group_matmul_direct_gemm_mode.load(
+                          s_last_group_matmul_direct_execution_path.load(
                                   std::memory_order_relaxed);
         ASSERT_NE(captured, nullptr);
         binary_mode = captured;
@@ -1515,11 +1529,11 @@ TEST(CkDispatchRouting, GroupedStaticU8S8MixedScaleStorageAndPostopFallback) {
     ::reset_grp_matmul_caches();
     {
         mt::CustomKernelInt8Override ck_int8_off(false);
-        mt::GemmModeCaptureGuard mode_guard;
+        mt::ExecutionPathCaptureGuard mode_guard;
         ASSERT_EQ(run(3, params, ck_off_out), status_t::success);
         const char *captured
                 = zendnnl::lowoha::matmul::test_api::
-                          s_last_group_matmul_direct_gemm_mode.load(
+                          s_last_group_matmul_direct_execution_path.load(
                                   std::memory_order_relaxed);
         ASSERT_NE(captured, nullptr);
         ck_off_mode = captured;
@@ -1538,11 +1552,11 @@ TEST(CkDispatchRouting, GroupedStaticU8S8MixedScaleStorageAndPostopFallback) {
     std::fill(is_const.begin(), is_const.end(), false);
     ::reset_grp_matmul_caches();
     {
-        mt::GemmModeCaptureGuard mode_guard;
+        mt::ExecutionPathCaptureGuard mode_guard;
         ASSERT_EQ(run(3, params, ck_refused_out), status_t::success);
         const char *captured
                 = zendnnl::lowoha::matmul::test_api::
-                          s_last_group_matmul_direct_gemm_mode.load(
+                          s_last_group_matmul_direct_execution_path.load(
                                   std::memory_order_relaxed);
         ASSERT_NE(captured, nullptr);
         ck_refused_mode = captured;
@@ -1566,23 +1580,26 @@ TEST(CkDispatchRouting, GroupedStaticU8S8MixedScaleStorageAndPostopFallback) {
     }
     {
         mt::AlgoEnvGuard algo_guard(3);
-        EXPECT_TRUE(zendnnl::lowoha::matmul::grp_matmul_custom_kernel_effective(
-                params, Ms, Ns, mt::grp_matmul_gated_act_t::none));
-        EXPECT_TRUE(zendnnl::lowoha::matmul::grp_matmul_custom_kernel_effective(
-                unary_params, Ms, Ns, mt::grp_matmul_gated_act_t::none));
+        EXPECT_TRUE(
+                zendnnl::lowoha::matmul::group_matmul_custom_kernel_candidate(
+                        params, Ms, Ns, mt::grp_matmul_gated_act_t::none));
+        EXPECT_TRUE(
+                zendnnl::lowoha::matmul::group_matmul_custom_kernel_candidate(
+                        unary_params, Ms, Ns,
+                        mt::grp_matmul_gated_act_t::none));
         EXPECT_FALSE(
-                zendnnl::lowoha::matmul::grp_matmul_custom_kernel_effective(
+                zendnnl::lowoha::matmul::group_matmul_custom_kernel_candidate(
                         params, Ms, Ns,
                         mt::grp_matmul_gated_act_t::swiglu_oai_mul));
         EXPECT_FALSE(
-                zendnnl::lowoha::matmul::grp_matmul_custom_kernel_effective(
+                zendnnl::lowoha::matmul::group_matmul_custom_kernel_candidate(
                         unary_params, Ms, Ns,
                         mt::grp_matmul_gated_act_t::swiglu_oai_mul));
-        EXPECT_EQ(zendnnl::lowoha::matmul::select_grp_matmul_algo(layout, Ms,
+        EXPECT_EQ(zendnnl::lowoha::matmul::group_matmul_algo_select(layout, Ms,
                           Ns, Ks, params, /*num_threads=*/4, nullptr,
                           mt::grp_matmul_gated_act_t::swiglu_oai_mul),
                 1);
-        EXPECT_EQ(zendnnl::lowoha::matmul::select_grp_matmul_algo(layout, Ms,
+        EXPECT_EQ(zendnnl::lowoha::matmul::group_matmul_algo_select(layout, Ms,
                           Ns, Ks, unary_params, /*num_threads=*/4, nullptr,
                           mt::grp_matmul_gated_act_t::swiglu_oai_mul),
                 1);
@@ -1712,8 +1729,8 @@ TEST(CkDispatchRouting, ScalarInt8DstMetadataFallsBackNumerically) {
     params.quant_params.dst_zp.dims = {1, 1};
     zendnnl::lowoha::matmul::matmul_batch_params_t batch_params;
 
-    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
-            32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+    EXPECT_FALSE(zendnnl::lowoha::matmul::single_matmul_group_routable('r', M,
+            N, K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
     ASSERT_EQ(zendnnl::lowoha::matmul::matmul_direct('r', false, true, M, N, K,
                       1.0f, src.data(), K, weight.data(), K,
                       /*bias=*/nullptr, 0.0f, dst_route_on.data(), N,
@@ -1782,8 +1799,8 @@ TEST(CkDispatchRouting, ScalarSignedInt8SrcZpFallsBackWithGroupDqOff) {
     params.quant_params.wei_scale.dims = {1, N};
     zendnnl::lowoha::matmul::matmul_batch_params_t batch_params;
 
-    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
-            32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+    EXPECT_FALSE(zendnnl::lowoha::matmul::single_matmul_group_routable('r', M,
+            N, K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
     ASSERT_EQ(zendnnl::lowoha::matmul::matmul_direct('r', false, true, M, N, K,
                       1.0f, src.data(), K, weight.data(), K,
                       /*bias=*/nullptr, 0.0f, dst_route_on.data(), N,
@@ -1900,7 +1917,7 @@ TEST(CkDispatchRouting, F32RuntimeHoistPromptThenDecodeMatchesOutOfPlace) {
             ASSERT_EQ(group_matmul_direct(layout, transA, transB, Ms, Ns, Ks,
                               alpha, src_ptrs, lda_p, wei_ptrs, ldb, bias, beta,
                               dst_ptrs, ldc, is_wc, params,
-                              /*moe_postop=*/nullptr,
+                              /*weighted_reduce=*/nullptr,
                               /*gated_act=*/nullptr),
                     status_t::success);
         };
@@ -2017,7 +2034,7 @@ TEST(CkDispatchRouting, NonConstWeightsFallsBackToDlp) {
         ASSERT_EQ(group_matmul_direct(layout, transA, transB, Ms, Ns, Ks, alpha,
                           src_ptrs, lda, wei_ptrs, ldb, bias_ptrs, beta,
                           dst_ptrs, ldc, is_wc_false, params,
-                          /*moe_postop=*/nullptr,
+                          /*weighted_reduce=*/nullptr,
                           /*gated_act=*/nullptr),
                 status_t::success);
     }
@@ -2032,7 +2049,7 @@ TEST(CkDispatchRouting, NonConstWeightsFallsBackToDlp) {
         ASSERT_EQ(group_matmul_direct(layout, transA, transB, Ms, Ns, Ks, alpha,
                           src_ptrs, lda, wei_ptrs, ldb, bias_ptrs, beta,
                           dst_ptrs, ldc, is_wc_false, params,
-                          /*moe_postop=*/nullptr,
+                          /*weighted_reduce=*/nullptr,
                           /*gated_act=*/nullptr),
                 status_t::success);
     }
@@ -2068,7 +2085,7 @@ TEST(CkDispatchRouting, F16DstRefusedAtCkLayer) {
             ck::KernelVariant::kUnsupported);
 
     // prepare_for_call must also refuse on f16 dst, regardless of host ISA.
-    if (ck::dispatch_supported()) {
+    if (ck::bf16_isa_supported()) {
         ck_test::PrepCallCase c {};
         c.dst_dt = data_type_t::f16;
         c.label = "f16_dst_refusal";
@@ -2095,7 +2112,7 @@ TEST(CkDispatchRouting, F16DstRefusedAtCkLayer) {
 // both layers together.
 // ──────────────────────────────────────────────────────────────────
 TEST(CkDispatchRouting, ResolveAndPrepareAgreeOnRejectedTuples) {
-    if (!ck::dispatch_supported()) {
+    if (!ck::bf16_isa_supported()) {
         GTEST_SKIP() << "ISA gate would refuse anyway";
     }
     struct Row {
@@ -2196,8 +2213,8 @@ TEST(CkDispatchRouting, CallContextReusableAcrossFamilies) {
 // C.4 — bad-hoist routing.  When the caller passes
 // `dynamic_quant=true` with `wei.dtype != s8`, the
 // `reorder_quantization_wrapper` short-circuits (no-op) and the
-// pre-OMP hoist loop in `flat_n_tile` leaves `hoisted[e].valid =
-// false`.  Phase 1 hardening (B.1) added a defensive `do_tile`
+// pre-OMP hoist loop in `n_tile_execute` leaves `hoisted[e].valid =
+// false`.  Phase 1 hardening (B.1) added a defensive `execute_tile`
 // fall-through to the AOCL path in that case.  We verify the
 // behaviour structurally at the `prepare_for_call` level: a
 // `(bf16, bf16, bf16)` tuple with `dynamic_quant=true` is NOT in
@@ -2220,7 +2237,7 @@ TEST(CkDispatchRouting, DynamicQuantWithBf16WeiRefused) {
                "non-s8 weight; otherwise the int8 ukernel would consume "
                "the bf16 byte stream as if it were s8 and silently corrupt "
                "every accumulator (B.1 hardening defends a related case "
-               "at the do_tile level for completeness, but the structural "
+               "at the execute_tile level for completeness, but the structural "
                "refusal at the gate is the primary defence).";
     EXPECT_FALSE(kctx.enabled);
 }

@@ -24,7 +24,7 @@
 ///
 /// Three things are asserted:
 ///   1. NO RE-PACK: because every weight is `mem_format_b='r'`, the eager
-///      ALGO-3 warm (`prepack_for_algo_3`) is skipped, so no prepack
+///      ALGO-3 warm (`prepack_n_tile`) is skipped, so no prepack
 ///      invocation is recorded (`stats.valid == false`).
 ///   2. CK ENGAGED: `group_matmul_direct` returns `status_t::success`.
 ///      For a prepacked weight that is sufficient proof the custom kernel
@@ -93,7 +93,7 @@ private:
 // 8-expert MoE: warm via group_reorder, infer via group_matmul.
 // ──────────────────────────────────────────────────────────────────
 TEST(GroupReorderModelE2E, WarmUpThenInferenceFetchesReorderedWeights) {
-    if (!ck::dispatch_supported()) {
+    if (!ck::bf16_isa_supported()) {
         GTEST_SKIP() << "AVX-512 BF16 not available; the custom-kernel pack "
                         "path cannot run on this host";
     }
@@ -203,7 +203,7 @@ TEST(GroupReorderModelE2E, WarmUpThenInferenceFetchesReorderedWeights) {
 
     // Contract check: a pre-reordered (mem_format_b='r') weight is consumed
     // DIRECTLY by the custom kernel and must NOT be re-packed.  The eager
-    // ALGO-3 warm (`prepack_for_algo_3`, the only producer of these stats)
+    // ALGO-3 warm (`prepack_n_tile`, the only producer of these stats)
     // is therefore skipped — so NO prepack invocation should be recorded.
     // That CK actually engaged on ALGO 3 is already guaranteed by the
     // `status_t::success` assertion above: the CK-only-or-fail guard fails
@@ -249,7 +249,7 @@ TEST(GroupReorderModelE2E, WarmUpThenInferenceFetchesReorderedWeights) {
 // dispatcher's f16 caller-prepacked aliasing.
 //
 // Gated on `avx512f16_available()` (CPUID + toolchain FP16 intrinsics),
-// NOT `dispatch_supported()` (which only checks bf16): a bf16-only host
+// NOT `bf16_isa_supported()` (which only checks bf16): a bf16-only host
 // has no FP16 microkernel, so the CK f16 path cannot engage and the
 // CK-only-or-fail guard would (correctly) fail the prepacked call.
 // ──────────────────────────────────────────────────────────────────
@@ -389,7 +389,7 @@ TEST(GroupReorderModelE2E, F16WarmUpThenInferenceFetchesReorderedWeights) {
 // would consume the packed bytes as if they were plain row-major — producing
 // silently wrong output rather than an error.
 //
-// `group_matmul_run_parallel_dispatch` has always enforced this
+// `group_matmul_execute` has always enforced this
 // (`error_prepacked_no_ck`, any `use_algo != 3`), but the fused ALGO 5 pipeline
 // executes `execute_expert_slice` directly and never reaches that dispatcher, so
 // it bypassed the contract.  Pinning ALGO 5 over prepacked weights must FAIL,
@@ -603,7 +603,7 @@ void expect_prepacked_ck_call_matches_reference(
 // More experts than the planner holds run as slices on the custom kernel.
 // Before, the custom kernel declined the call and it failed closed.
 TEST(GroupReorderModelE2E, PrepackedCkWeightsPastPlanCapacity) {
-    if (!ck::dispatch_supported()) {
+    if (!ck::bf16_isa_supported()) {
         GTEST_SKIP() << "AVX-512 BF16 not available";
     }
     reset_grp_matmul_caches();
@@ -619,7 +619,7 @@ TEST(GroupReorderModelE2E, PrepackedCkWeightsPastPlanCapacity) {
 // on 16 threads leave a team of 8 per expert, and N=128 holds no full
 // decode tile.
 TEST(GroupReorderModelE2E, PrepackedCkWeightsThinNUnderAutoStrategy) {
-    if (!ck::dispatch_supported()) {
+    if (!ck::bf16_isa_supported()) {
         GTEST_SKIP() << "AVX-512 BF16 not available";
     }
     reset_grp_matmul_caches();
@@ -636,7 +636,7 @@ TEST(GroupReorderModelE2E, PrepackedCkWeightsThinNUnderAutoStrategy) {
 TEST(GroupReorderModelE2E, IdlePrepackedCkWeightsKeepTheirBytes) {
     using zendnnl::lowoha::matmul::group_matmul_direct;
     using zendnnl::ops::matmul_algo_t;
-    if (!ck::dispatch_supported()) {
+    if (!ck::bf16_isa_supported()) {
         GTEST_SKIP() << "AVX-512 BF16 not available";
     }
     reset_grp_matmul_caches();

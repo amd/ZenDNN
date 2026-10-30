@@ -45,7 +45,7 @@ Current pairing:
 
 - **Group route.** BF16, INT8, and S4 variants, plus F16 only when the
   single-expert custom kernel covers that layer. Any post-op declines
-  `custom_kernel_routable` except static u8 INT8 when
+  `single_matmul_group_routable` except static u8 INT8 when
   `int8_ck_postops_supported` says yes: one relu or sigmoid with no buffer,
   or f32 `binary_mul` then f32 `binary_add` with shape `[M, N]` and leading
   dimension at least N. Alpha is 1 and beta is 0.
@@ -101,7 +101,7 @@ in order. Dropping or reordering one entry changes the result.
 ## Routing into group matmul
 
 The hand-off is `matmul_direct` calling `group_matmul_direct` for one op when
-`custom_kernel_routable` accepts the call, and for every active gated
+`single_matmul_group_routable` accepts the call, and for every active gated
 activation. Treat that predicate and the success / decline handling as the
 contract.
 

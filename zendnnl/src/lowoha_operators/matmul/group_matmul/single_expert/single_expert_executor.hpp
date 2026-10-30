@@ -14,7 +14,7 @@
  * limitations under the License.
  *******************************************************************************/
 
-/// Single-expert EXECUTOR: runs a `se_block_plan_t` for a lone expert's
+/// Single-expert EXECUTOR: runs a `SingleExpertBlockPlan` for a lone expert's
 /// decode on the custom kernel, from a call view the N-tile executor fills.
 /// Built only on `custom_kernel/dispatch.hpp`'s tile and block pieces, so a
 /// new blocking scheme changes this file and the plan, not the shared
@@ -35,7 +35,7 @@ namespace matmul {
 /// One custom-kernel call of a lone expert.  For DQ-INT8 `src` is the
 /// quantized source and the scale and epilogue fields are the N-tile hoist's;
 /// BF16 leaves them null.  `dst` is the caller's wide [M, N] output.
-struct se_call_view_t {
+struct SingleExpertCallView {
     const custom_kernel::CallContext *kctx = nullptr;
     int M = 0;
     int N = 0;
@@ -53,12 +53,12 @@ struct se_call_view_t {
 };
 
 /// Whether the executor can run this call (the block pieces support it).
-bool se_executor_supports(const se_call_view_t &call);
+bool single_expert_call_supported(const SingleExpertCallView &call);
 
 /// Run `plan` on `call`.  False when the OpenMP team came up short; the
 /// destination is then incomplete and the caller must fail the call.
-bool execute_single_expert_plan(
-        const se_call_view_t &call, const se_block_plan_t &plan);
+bool single_expert_plan_execute(
+        const SingleExpertCallView &call, const SingleExpertBlockPlan &plan);
 
 } // namespace matmul
 } // namespace lowoha

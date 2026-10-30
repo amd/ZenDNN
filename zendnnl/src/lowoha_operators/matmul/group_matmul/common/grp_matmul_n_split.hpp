@@ -48,7 +48,7 @@ namespace matmul {
 // this (its pack cache is shape-keyed), so this whole subsystem is
 // non-custom only.
 //
-// Mitigation: for non-custom dispatch under ALGO 3 flat_n_tile,
+// Mitigation: for non-custom dispatch under ALGO 3 n_tile_execute,
 // pin the per-expert thread count to a `num_threads`-only formula:
 //
 //     stable = max(1, num_threads / kAoclTargetConcurrentSlots)
@@ -82,7 +82,7 @@ namespace matmul {
 // dominate the per-call thread-utilisation loss from the idle
 // threads in a strict-stable plan.
 //
-// `participating_n_thr` (group_matmul_n_tile.cpp) retains secondary
+// `tile_thread_count` (group_matmul_n_tile.cpp) retains secondary
 // clamps by `align_cap = N / nr_align` and `team_size` as defence-
 // in-depth: the strict-stable planner already guarantees
 // `team_size == stable` and `align_cap >= stable` (else the
@@ -133,7 +133,7 @@ inline int get_grp_matmul_aocl_target_slots() {
 //   `plan_group_n_tile`).
 //
 //   The env value is parsed (strict) and emitted in the
-//   `[GRP_MATMUL.PLAN] flat_n_tile ...` apilog line so external
+//   `[GRP_MATMUL.PLAN] n_tile_execute ...` apilog line so external
 //   telemetry can correlate user-set tuning with the planner's
 //   actual choices; setting it does NOT change planning behaviour.
 //   Non-positive → default.  Kept as a getter (rather than removed
@@ -166,7 +166,7 @@ inline int get_grp_matmul_aocl_blis_nc() {
 // in.
 
 // Per-expert thread count for the AOCL DLP / BRGEMM / oneDNN execute
-// path inside ALGO 3 flat_n_tile.  See the strict-stable doc-block
+// path inside ALGO 3 n_tile_execute.  See the strict-stable doc-block
 // above for the cache-stability contract and rationale.
 //
 // Depends ONLY on `num_threads`.  An earlier formula included a
@@ -204,9 +204,9 @@ inline int backend_n_align(matmul_algo_t algo) {
 /// nr_align)`, so warming at a different alignment prefills keys the
 /// runtime never looks up and every tile misses on the first decode call.
 ///
-/// This mirrors `flat_n_tile`'s own derivation and must keep mirroring it:
+/// This mirrors `n_tile_execute`'s own derivation and must keep mirroring it:
 ///
-///   * the dispatcher hands ALGO 3 `a3_can_fuse_act(act, CK) ? act : none`,
+///   * the dispatcher hands ALGO 3 `n_tile_can_fuse_activation(act, CK) ? act : none`,
 ///     so silu / gelu with the custom kernel off arrive as `none` and the
 ///     arena is wide;
 ///   * a fused epilogue with `ldc[0] < N[0]` is the tight arena, whose OOP
@@ -220,7 +220,7 @@ inline int backend_n_align(matmul_algo_t algo) {
 /// the tight pair-aligned case.  This only selects which keys get warmed;
 /// a wrong answer costs a first-call reorder, never correctness.
 /// `ck_enabled` must be the EFFECTIVE per-call verdict, not the master env
-/// knob: `grp_matmul_custom_kernel_effective`, which folds in the family
+/// knob: `group_matmul_custom_kernel_candidate`, which folds in the family
 /// sub-toggle.  Passing the raw env mispredicts int8 or f16 whenever their
 /// sub-knob is off, because those reach decode with the custom kernel
 /// disabled and therefore split on the tight alignment.
@@ -228,23 +228,23 @@ inline int backend_n_align(matmul_algo_t algo) {
 /// `decode_arena_tight` is the arena the DECODE call will use, which is not
 /// observable from the prompt call's `ldc`.  Under AUTO a prompt that
 /// resolves to ALGO 1 gets a wide library-owned Op1 arena, because
-/// `pick_fused_moe_want_tight` requires `resolved_algo == 3`, while the
+/// `should_use_tight_intermediate` requires `resolved_algo == 3`, while the
 /// decode call gets a tight one.  Reading `ldc[0] < N[0]` here would
 /// therefore invert the prediction on exactly the fused-MoE layers this
 /// exists to serve.
 /// Callers that know the decode arena (the fused-MoE entry) pass it; callers
 /// that own their own destination and keep one stride across both phases
 /// pass their observed tightness.
-inline int algo3_decode_nr_align(
+inline int n_tile_decode_nr_align(
         grp_matmul_gated_act_t act, bool ck_enabled, bool decode_arena_tight) {
     const int backend_nr = backend_n_align(matmul_algo_t::aocl_dlp_blocked);
-    // Mirrors `ntile_effective_nr_align`: the custom kernel widens to its
+    // Mirrors `n_tile_nr_align`: the custom kernel widens to its
     // own pack_nr and owns the pairing, so only the CK-off tight case needs
     // the pair alignment.  When the custom kernel will run, the per-tile
     // AOCL keys are not what decode queries at all -- the custom-kernel pack
     // arena is -- so the value here is immaterial and `backend_nr` is right.
-    const bool tight_pair_align
-            = !ck_enabled && decode_arena_tight && a3_can_fuse_act(act, false);
+    const bool tight_pair_align = !ck_enabled && decode_arena_tight
+            && n_tile_can_fuse_activation(act, false);
     return tight_pair_align ? std::max(backend_nr, 2) : backend_nr;
 }
 
@@ -253,7 +253,7 @@ inline int algo3_decode_nr_align(
 ///
 /// The fused-MoE entry is the only place that can answer "will the decode
 /// call get a tight arena?", because it owns the arena and can evaluate
-/// `pick_fused_moe_want_tight(..., resolved_algo = 3)` regardless of what
+/// `should_use_tight_intermediate(..., resolved_algo = 3)` regardless of what
 /// this particular call resolved to.  The prompt-side prepack lives several
 /// frames down inside the ALGO executors, and threading a parameter there
 /// would touch the dispatcher signature and every executor.  A scoped
@@ -262,21 +262,20 @@ inline int algo3_decode_nr_align(
 inline thread_local bool tls_decode_arena_tight = false;
 inline thread_local bool tls_decode_arena_known = false;
 
-class scoped_decode_arena_hint {
+class ScopedDecodeArenaHint {
 public:
-    explicit scoped_decode_arena_hint(bool tight)
+    explicit ScopedDecodeArenaHint(bool tight)
         : prev_tight_(tls_decode_arena_tight)
         , prev_known_(tls_decode_arena_known) {
         tls_decode_arena_tight = tight;
         tls_decode_arena_known = true;
     }
-    ~scoped_decode_arena_hint() {
+    ~ScopedDecodeArenaHint() {
         tls_decode_arena_tight = prev_tight_;
         tls_decode_arena_known = prev_known_;
     }
-    scoped_decode_arena_hint(const scoped_decode_arena_hint &) = delete;
-    scoped_decode_arena_hint &operator=(const scoped_decode_arena_hint &)
-            = delete;
+    ScopedDecodeArenaHint(const ScopedDecodeArenaHint &) = delete;
+    ScopedDecodeArenaHint &operator=(const ScopedDecodeArenaHint &) = delete;
 
 private:
     bool prev_tight_;

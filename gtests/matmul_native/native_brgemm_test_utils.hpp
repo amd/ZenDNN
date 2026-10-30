@@ -144,7 +144,7 @@ private:
 };
 
 /// True when the default route (and with it the custom kernel) is reachable
-/// in this process: resolve_kernel() keeps the algorithm the process started
+/// in this process: resolve_matmul_backend() keeps the algorithm the process started
 /// with, so no pin brings the default route back under another one.
 bool default_route_reachable();
 

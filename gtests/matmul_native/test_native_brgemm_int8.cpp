@@ -1038,8 +1038,8 @@ TEST_P(NativeBrgemmInt8VsCkKernel, BitIdentical) {
         const int8_t *blk = reinterpret_cast<const int8_t *>(w.view.block(ob));
         for (int r0 = 0; r0 < c.M; r0 += max_mr) {
             const int rows = std::min(max_mr, c.M - r0);
-            auto fn = ck::select_int8_ukernel(
-                    rows, NV, compute, ck::ActKind::none, ck::DstDt::kF32);
+            auto fn = ck::select_int8_ukernel(rows, NV, compute,
+                    ck::ActivationKind::none, ck::OutputType::kF32);
             ASSERT_NE(fn, nullptr);
             const int s_off = per_tensor ? 0 : r0;
             fn(src.data() + static_cast<size_t>(r0) * c.K, c.K, blk,
@@ -1205,18 +1205,19 @@ TEST_P(NativeBrgemmInt8VsCkRoute, DynamicQuantBitIdentical) {
             dynamic_off_t() { omp_set_dynamic(0); }
             ~dynamic_off_t() { omp_set_dynamic(was); }
         } const dynamic_off;
-        mt::GemmModeCaptureGuard mode;
+        mt::ExecutionPathCaptureGuard mode;
         const status_t st = mm::group_matmul_direct({'r'}, {false}, {true},
                 {c.M}, {c.N}, {c.K}, {1.0f}, {src.data()}, {c.K},
                 {weight.data()}, {c.K}, {bias_ptr}, {0.0f}, {ck_dst}, {c.N},
                 {true}, {make_params(ck_scale.data(), ck_zp.data())});
         ASSERT_EQ(st, status_t::success);
-        const char *gemm_mode
-                = mm::test_api::s_last_group_matmul_direct_gemm_mode.load(
+        const char *execution_path
+                = mm::test_api::s_last_group_matmul_direct_execution_path.load(
                         std::memory_order_relaxed);
-        ASSERT_NE(gemm_mode, nullptr);
-        ck_serves = std::string(gemm_mode).find("custom") != std::string::npos;
-        RecordProperty("ck_gemm_mode", gemm_mode);
+        ASSERT_NE(execution_path, nullptr);
+        ck_serves = std::string(execution_path).find("custom")
+                != std::string::npos;
+        RecordProperty("ck_execution_path", execution_path);
     }
 
     CkWeight w;

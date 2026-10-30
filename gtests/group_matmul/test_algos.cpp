@@ -58,7 +58,7 @@
 // to white-box assert on the planner's Phase B output.
 #include "lowoha_operators/matmul/group_matmul/executors/n_tile/group_matmul_n_tile.hpp"
 
-// `custom_kernel::dispatch_supported()` — Phase B tests check it
+// `custom_kernel::bf16_isa_supported()` — Phase B tests check it
 // to skip cleanly on hosts without AVX512BF16 (where forcing the
 // env-cache CK override is necessary but not sufficient: the
 // runtime `prepare_for_call` would refuse CK independently).
@@ -281,7 +281,7 @@ static std::vector<FusedAlgoTestParam> make_fused_algo_params() {
     // columns, which aliased thread t's compact-output writes
     // [p_start_t, p_end_t) with a lower-index thread's pair-read range
     // [2?p_start_{t-1}, 2?p_start_t).  The race only fires when
-    // flat_n_tile actually runs more than one thread per expert ?
+    // n_tile_execute actually runs more than one thread per expert ?
     // i.e. (1) `ntile_viable` is true and (2) `thr_per_expert` (or the
     // path-B `n_thr`) resolves to ?2.  Every earlier swiglu case in this
     // file used dim ? 128 so N_gate_up ? 256 = kDecodeNTile ? fallback ?
@@ -289,7 +289,7 @@ static std::vector<FusedAlgoTestParam> make_fused_algo_params() {
     //
     // The shapes below hit the race-prone code on both a typical 16-thread
     // developer run AND a 128-thread EPYC CI run (verified with a Python
-    // simulation of flat_n_tile's decision tree):
+    // simulation of n_tile_execute's decision tree):
     //
     //   shape (M=8, E=8, d=1024):
     //       16t  ? path (B), n_thr=2 per expert, 2-round batched N-tile
@@ -337,7 +337,7 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulFusedAlgos, TestFusedMoEAlgos,
 //                                              specialist; engages only
 //                                              when env_algo ? {0, 3}).
 //   * ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=0/1   ? custom BF16 ukernel hook
-//                                              (flat_n_tile + V2 Op2).
+//                                              (n_tile_execute + V2 Op2).
 //
 // Reference strategy: a single known-good baseline ? forced ALGO=1,
 // TIGHT=0, CUSTOM=0, legacy two-call (Op1 via group_matmul_direct +
@@ -506,9 +506,9 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulFusedAlgoCustom, TestFusedMoEAlgoCustom,
 // [8] TestGroupMatmulAlgoCustom: non-fused Phase B env-knob matrix
 //
 // Targets the env-knob combinations that gate the custom BF16 microkernel's
-// engagement in the non-fused group_matmul path (ALGO 3 via flat_n_tile):
+// engagement in the non-fused group_matmul path (ALGO 3 via n_tile_execute):
 //
-//   * GRP_MATMUL_ALGO          ? 1 (sequential_experts), 3 (flat_n_tile),
+//   * GRP_MATMUL_ALGO          ? 1 (sequential_execute), 3 (n_tile_execute),
 //                                5 (per_expert); covers "custom kernel
 //                                engages", "no engagement but same output",
 //                                and "per-expert distribution" respectively.
@@ -519,7 +519,7 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulFusedAlgoCustom, TestFusedMoEAlgoCustom,
 //   * gated_act                ? none / silu / gelu / swiglu_oai_mul.
 //   * bias dtype               ? none / bf16 / fp32 (fp32 bias on bf16 dst
 //                                exercises the BiasKind::fp32 load path).
-//   * moe_postop (weighted)    ? off / on.
+//   * weighted_reduce (weighted)    ? off / on.
 //
 // Reference strategy: run the same call twice ? once with CUSTOM_KERNEL=0
 // (standard dispatch, already verified by TestGroupMatmul / TestGatedAct /
@@ -545,7 +545,7 @@ struct AlgoCustomParam {
     // pack addressing produces bit-equivalent output to the standard
     // AOCL path.
     int transB; // 0 or 1
-    // NOTE: moe_postop is intentionally not swept here.  The moe_postop
+    // NOTE: weighted_reduce is intentionally not swept here.  The weighted_reduce
     // executor reduces the full wide Op1 output (D = N[0]), which for
     // gated activations is 2*dim and includes the un-activated second
     // half ? that region's contents legitimately differ between the
@@ -637,7 +637,7 @@ static void run_one_algo_custom_pass(const AlgoCustomParam &p,
     ASSERT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns,
                       gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb, biases,
                       gv.beta, dsts, gv.ldc, gv.is_wc, params,
-                      /*moe_postop=*/nullptr, act_ptr),
+                      /*weighted_reduce=*/nullptr, act_ptr),
             status_t::success)
             << "call failed: custom=" << custom_value;
 }
@@ -732,7 +732,7 @@ TEST_P(TestGroupMatmulAlgoCustom, Correctness) {
 
 static std::vector<AlgoCustomParam> make_algo_custom_params() {
     std::vector<AlgoCustomParam> out;
-    // Strategy coverage ? 1 (sequential), 3 (flat_n_tile = custom hook),
+    // Strategy coverage ? 1 (sequential), 3 (n_tile_execute = custom hook),
     // 5 (per-expert).  Skip 2 and 6 to keep the grid tight; those
     // executors don't look at CUSTOM_KERNEL anyway (ALGO 3 is the only
     // engagement site in the non-fused path).
@@ -853,7 +853,7 @@ static void run_int8_dq_pass(bool int8_on, std::vector<tensor_t> &src_tensors,
     ASSERT_EQ(group_matmul_kernel_test(src_tensors, wei_tensors, bias_tensors,
                       dst_tensors, matmul_algo_t::aocl_dlp_blocked,
                       /*alpha=*/1.0f,
-                      /*beta=*/0.0f, /*moe_postop=*/nullptr, act_ptr),
+                      /*beta=*/0.0f, /*weighted_reduce=*/nullptr, act_ptr),
             status_t::success)
             << "DQ-INT8 ALGO 3 kernel call failed (int8_on=" << int8_on << ")";
 
@@ -1195,7 +1195,7 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulInt8AlgoCustom,
 // a symmetric INT8 PER-GROUP dynamic-quant group matmul (bf16 src + {M,G}
 // src_scale, s8 wei + {G,N} wei_scale) MUST produce correct results on EVERY
 // group ALGO (1/2/3/5) and under both ENABLE_GROUP_DQ settings.  Per-group
-// either engages the optimized path (e.g. flat_m_tile for dynamic + GROUP_DQ=0)
+// either engages the optimized path (e.g. m_tile_execute for dynamic + GROUP_DQ=0)
 // or falls back to a per-group-capable AOCL path (ALGO 1 / per-expert) — and is
 // NEVER misrouted to a per-token-only custom/native kernel (which would silently
 // corrupt output by slicing the source scale as one-scalar-per-row).  Every
@@ -1332,7 +1332,7 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulInt8PerGroupAlgos,
                 {/*M=*/64, /*num_ops=*/4, /*dim=*/128,
                         /*G=*/8}, // larger N, G=8
                 // Wide N (> the N-tile min tile width) so the N-tile planner
-                // column-splits across threads — exercises do_tile's per-group
+                // column-splits across threads — exercises execute_tile's per-group
                 // {G,N}->{G,n_tile} weight-scale repack on the AOCL path.
                 {/*M=*/8, /*num_ops=*/2, /*dim=*/1024,
                         /*G=*/4}, // wide-N column split
@@ -1398,7 +1398,7 @@ TEST(GroupMatmulInt8PerGroupValidation, AcceptsGroupSizeMultipleOfFour) {
 // reorder emits the per-token src_scale (and the caller supplies the
 // per-channel wei_scale) in BF16, but the int8 microkernel loads scales
 // with `_mm512_loadu_ps` / `_mm512_set1_ps` (f32-only).  Before the
-// f32-scale-view materialisation in `flat_n_tile`, the CK reinterpreted
+// f32-scale-view materialisation in `n_tile_execute`, the CK reinterpreted
 // the bf16 scale bytes as f32 and produced systematic garbage (zero
 // accuracy on real bf16 models), while the AOCL DLP fallback consumed
 // the declared bf16 dtype correctly.  The whole class was invisible to
@@ -1524,13 +1524,13 @@ TEST(TestGroupMatmulInt8Bf16ScaleCache, WeightCacheOnOffBitExact) {
                 std::fill(raw, raw + static_cast<size_t>(p.M) * N_op1,
                         bfloat16_t(0.0f));
             }
-            GemmModeCaptureGuard gemm_mode_guard;
+            ExecutionPathCaptureGuard execution_path_guard;
             ASSERT_NO_FATAL_FAILURE(
                     run_int8_dq_pass(/*int8_on=*/true, src, wei, bias, dst,
                             grp_matmul_gated_act_t::none, out[wc], p.M, N_op1));
             const char *mode
                     = zendnnl::lowoha::matmul::test_api ::
-                              s_last_group_matmul_direct_gemm_mode.load(
+                              s_last_group_matmul_direct_execution_path.load(
                                       std::memory_order_relaxed);
             ASSERT_NE(mode, nullptr);
             ASSERT_NE(std::strstr(mode, "_custom"), nullptr)
@@ -1576,12 +1576,13 @@ TEST(TestGroupMatmulInt8Bf16ScaleCache, InPlaceScaleUpdateIsHonored) {
             std::fill(raw, raw + static_cast<size_t>(p.M) * N_op1,
                     bfloat16_t(0.0f));
         }
-        GemmModeCaptureGuard gemm_mode_guard;
+        ExecutionPathCaptureGuard execution_path_guard;
         ASSERT_NO_FATAL_FAILURE(run_int8_dq_pass(/*int8_on=*/true, src, wei,
                 bias, dst, grp_matmul_gated_act_t::none, out, p.M, N_op1));
-        const char *mode = zendnnl::lowoha::matmul::test_api ::
-                                   s_last_group_matmul_direct_gemm_mode.load(
-                                           std::memory_order_relaxed);
+        const char *mode
+                = zendnnl::lowoha::matmul::test_api ::
+                          s_last_group_matmul_direct_execution_path.load(
+                                  std::memory_order_relaxed);
         ASSERT_NE(mode, nullptr);
         ASSERT_NE(std::strstr(mode, "_custom"), nullptr)
                 << "ran on '" << mode << "' instead of the INT8 CK";
@@ -1686,18 +1687,18 @@ TEST_P(TestGroupMatmulInt8OblockOuter, MatchesOracle) {
     act_params.act = act_type;
     CustomKernelOverride ck_master(true);
     CustomKernelInt8Override ck_int8(true);
-    GemmModeCaptureGuard gemm_mode_guard;
+    ExecutionPathCaptureGuard execution_path_guard;
     ASSERT_EQ(group_matmul_kernel_test(src, wei, bias, dst,
                       matmul_algo_t::aocl_dlp_blocked, 1.0f, 0.0f,
-                      /*moe_postop=*/nullptr,
+                      /*weighted_reduce=*/nullptr,
                       p.act_int == 0 ? nullptr : &act_params,
                       /*pack_format_b=*/ {}, /*active_rows=*/ {}, p.compute),
             status_t::success);
     const char *mode = zendnnl::lowoha::matmul::test_api ::
-                               s_last_group_matmul_direct_gemm_mode.load(
+                               s_last_group_matmul_direct_execution_path.load(
                                        std::memory_order_relaxed);
     ASSERT_NE(mode, nullptr)
-            << "group_matmul_direct did not publish a gemm_mode";
+            << "group_matmul_direct did not publish a execution_path";
     ASSERT_NE(std::strstr(mode, "_custom"), nullptr)
             << "M=" << p.M << " E=" << p.num_ops << " ran on '" << mode
             << "' instead of the INT8 microkernel, so the loop nesting "
@@ -1895,18 +1896,18 @@ TEST(TestGroupMatmulInt8PromptTile, DefaultMaskRunsTheTile) {
     AlgoEnvGuard algo(3);
     CustomKernelOverride ck_on(true);
     CustomKernelInt8Override ck_int8(true);
-    GemmModeCaptureGuard capture;
+    ExecutionPathCaptureGuard capture;
     reset_grp_matmul_caches();
     const long served0 = pt::test_api::s_calls_served.load();
     ASSERT_EQ(group_matmul_kernel_test(src, wei, bias, dst,
                       matmul_algo_t::aocl_dlp_blocked, 1.0f, 0.0f,
-                      /*moe_postop=*/nullptr, /*gated_act=*/nullptr,
+                      /*weighted_reduce=*/nullptr, /*gated_act=*/nullptr,
                       /*pack_format_b=*/ {}, rows, data_type_t::s8),
             status_t::success);
-    EXPECT_TRUE(pt::enabled(pt::Family::kInt8));
+    EXPECT_TRUE(pt::enabled(pt::kernel_type_t::kInt8));
     EXPECT_GT(pt::test_api::s_calls_served.load(), served0);
     const char *m = zendnnl::lowoha::matmul::test_api::
-                            s_last_group_matmul_direct_gemm_mode.load(
+                            s_last_group_matmul_direct_execution_path.load(
                                     std::memory_order_relaxed);
     const std::string mode = m != nullptr ? m : "";
     EXPECT_NE(mode.find("_custom"), std::string::npos) << mode;
@@ -1916,17 +1917,17 @@ TEST(TestGroupMatmulInt8PromptTile, DefaultMaskRunsTheTile) {
 // [8a] TestGroupMatmulPhaseBRemainder — CK Single-round + non-zero-remainder
 //
 // Targets the planner+executor path that
-// `apply_round_pick(RoundPick::Single, use_custom=true)` populates
+// `apply_round_pick(RoundPick::SingleRound, use_custom=true)` populates
 // when `num_threads % num_ops != 0`:
 //
 //   * `apply_round_pick` runs the heaviest-first eligibility filter,
-//     populates `stable_n_thr_per_expert[]` non-uniformly (M-heaviest
+//     populates `expert_thread_counts[]` non-uniformly (M-heaviest
 //     experts get `base + 1` threads, the rest get `base`), and sets
-//     `plan.per_expert_remainder = true`.
-//   * `execute_rounds` reads `per_expert_remainder` and switches from
+//     `plan.variable_expert_teams = true`.
+//   * `execute_rounds` reads `variable_expert_teams` and switches from
 //     the O(1) `tid / thr_per_expert` mapping to the per-round
 //     prefix-sum `tid → (expert, local_tid)` scan that consumes the
-//     non-uniform `stable_n_thr_per_expert[]`.
+//     non-uniform `expert_thread_counts[]`.
 //
 // Failure modes the test catches:
 //   * Drop tiles — a regression in the prefix-sum mapping that
@@ -1935,7 +1936,7 @@ TEST(TestGroupMatmulInt8PromptTile, DefaultMaskRunsTheTile) {
 //   * Duplicate tiles — a regression that maps two threads onto the
 //     same N-column → race-corrupted cells diverge.
 //   * Eligibility filter bugs — wrong `extras` count or per-expert
-//     `n_thr` of zero → `do_tile`'s `local_tid >= n_thr` early-return
+//     `n_thr` of zero → `execute_tile`'s `local_tid >= n_thr` early-return
 //     leaves columns un-written → diverge from the reference.
 //
 // Strategy: run the same call twice — once with ALGO=3 (current
@@ -2036,13 +2037,13 @@ TEST(TestGroupMatmulPhaseBRemainder, CkSingleRoundRemainderCorrectness) {
     CustomKernelNTileOverride default_n_tile(0);
     // Pin the N-tile strategy knob to 0 (auto / heuristic) so this
     // test is insulated from a process-level
-    // `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=1` (force DecodeD) or `=2`
+    // `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=1` (force StaticExpertTeams) or `=2`
     // (force Rounds) that some surrounding benchmark / sweep might
     // have set.  Phase B's per-expert remainder distribution only
-    // populates inside ManyExperts Single-round; values 1/2 would
-    // override the heuristic DecodeD attempt, taking different
+    // populates inside FixedTeamRounds Single-round; values 1/2 would
+    // override the heuristic StaticExpertTeams attempt, taking different
     // planner branches that bypass Phase B and leave
-    // `snap.per_expert_remainder = false`.
+    // `snap.variable_expert_teams = false`.
     NTileStrategyOverride auto_strategy(0);
 
     // Defence-in-depth: the env-cache overrides force the planner's
@@ -2054,7 +2055,7 @@ TEST(TestGroupMatmulPhaseBRemainder, CkSingleRoundRemainderCorrectness) {
     // null quant buffers, would ALSO produce numerically equivalent
     // output to ALGO 1, so the comparison below would pass without
     // exercising Phase B.  Skip when CK is structurally unavailable.
-    if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
+    if (!zendnnl::lowoha::matmul::custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "Test requires AVX512BF16 / custom-kernel "
                         "dispatch support; forcing the cached env "
                         "knobs is necessary but not sufficient on this "
@@ -2083,7 +2084,7 @@ TEST(TestGroupMatmulPhaseBRemainder, CkSingleRoundRemainderCorrectness) {
     //       change per-cell numerics, only the per-expert thread
     //       distribution.  That ordering is covered separately by the
     //       white-box `HeaviestFirstAssignment` test below, which
-    //       captures `plan.stable_n_thr_per_expert[]` via the
+    //       captures `plan.expert_thread_counts[]` via the
     //       `test_api::PhaseBSnapshot` hook in
     //       `group_matmul_n_tile.hpp` and asserts on the per-expert
     //       thread counts directly.
@@ -2174,7 +2175,7 @@ TEST(TestGroupMatmulPhaseBRemainder, CkSingleRoundRemainderCorrectness) {
                     group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms,
                             gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb,
                             biases, gv.beta, dsts, gv.ldc, gv.is_wc, params,
-                            /*moe_postop=*/nullptr,
+                            /*weighted_reduce=*/nullptr,
                             /*gated_act=*/nullptr),
                     status_t::success)
                     << "algo=" << algo;
@@ -2191,7 +2192,7 @@ TEST(TestGroupMatmulPhaseBRemainder, CkSingleRoundRemainderCorrectness) {
         // ── Test: ALGO 3 (Phase B fires on CK Single + remainder) ──
         // Wrap in a `PhaseBCaptureGuard` so we can ASSERT_TRUE after
         // the call that the snapshot was actually populated AND that
-        // `per_expert_remainder` is set — otherwise a future change
+        // `variable_expert_teams` is set — otherwise a future change
         // that bypasses Phase B (e.g. plan strategy changed, gate
         // moved) would silently produce equivalent output and the
         // comparison below would pass while Phase B coverage is lost.
@@ -2212,9 +2213,10 @@ TEST(TestGroupMatmulPhaseBRemainder, CkSingleRoundRemainderCorrectness) {
                     s_last_phase_b_snapshot;
             ASSERT_TRUE(snap.valid)
                     << "PhaseBSnapshot was not captured during the ALGO 3 "
-                       "run — flat_n_tile may not have been reached (variant: "
+                       "run — n_tile_execute may not have been reached "
+                       "(variant: "
                     << var.label << ")";
-            ASSERT_TRUE(snap.per_expert_remainder)
+            ASSERT_TRUE(snap.variable_expert_teams)
                     << "Phase B did not fire on the ALGO 3 run.  The "
                        "numerical comparison below would still pass on a "
                        "fallback path but the test would lose Phase B "
@@ -2261,10 +2263,10 @@ TEST(TestGroupMatmulPhaseBRemainder, CkSingleRoundRemainderCorrectness) {
 //
 // Use the planner's test-only `PhaseBSnapshot` (defined in
 // `group_matmul_n_tile.hpp::test_api`) to read out the per-expert
-// thread counts the planner committed for the next `flat_n_tile`
+// thread counts the planner committed for the next `n_tile_execute`
 // call.  Assert that:
 //
-//   * `per_expert_remainder` is true (Phase B fired).
+//   * `variable_expert_teams` is true (Phase B fired).
 //   * Every active expert has 1..cap threads and the team is saturated.
 //   * The decode auto default chose the M-proportional split: the
 //     heaviest expert reaches its cap and the lightest stays at the
@@ -2301,7 +2303,7 @@ TEST(TestGroupMatmulPhaseBRemainder, HeaviestFirstAssignment) {
     // Force the env-cached config Phase B needs (RAII, restored on
     // scope exit).  `NTileStrategyOverride(0)` insulates the test
     // from a process-level `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=1/2`
-    // that would otherwise bypass ManyExperts and skip Phase B —
+    // that would otherwise bypass FixedTeamRounds and skip Phase B —
     // see `CkSingleRoundRemainderCorrectness` for the full rationale.
     CustomKernelOverride ck_on(true);
     NRoundsModeOverride single_round(1);
@@ -2319,9 +2321,9 @@ TEST(TestGroupMatmulPhaseBRemainder, HeaviestFirstAssignment) {
     // Defence-in-depth: env overrides force the PLANNER's intent to
     // take the CK path, but `prepare_for_call` separately refuses CK
     // on hosts without AVX512BF16.  Without this skip the test would
-    // run, fail to capture per_expert_remainder, and report a noisy
+    // run, fail to capture variable_expert_teams, and report a noisy
     // failure on a structural ISA limitation.
-    if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
+    if (!zendnnl::lowoha::matmul::custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "Test requires AVX512BF16 / custom-kernel "
                         "dispatch support; cannot exercise Phase B "
                         "without CK engagement.";
@@ -2375,34 +2377,34 @@ TEST(TestGroupMatmulPhaseBRemainder, HeaviestFirstAssignment) {
 
     // Arm the snapshot capture via RAII so the flag is always
     // disarmed on scope exit (including on test failure / early
-    // ASSERT abort).  `flat_n_tile` will exchange the flag back to
-    // false and copy `plan.stable_n_thr_per_expert[]` +
-    // `plan.per_expert_remainder` into `s_last_phase_b_snapshot`.
+    // ASSERT abort).  `n_tile_execute` will exchange the flag back to
+    // false and copy `plan.expert_thread_counts[]` +
+    // `plan.variable_expert_teams` into `s_last_phase_b_snapshot`.
     AlgoEnvGuard algo_guard(3);
     PhaseBCaptureGuard cap;
 
     ASSERT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns,
                       gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb, biases,
                       gv.beta, dsts, gv.ldc, gv.is_wc, params,
-                      /*moe_postop=*/nullptr,
+                      /*weighted_reduce=*/nullptr,
                       /*gated_act=*/nullptr),
             status_t::success);
 
-    // Read the snapshot.  `flat_n_tile`'s exchange should have
+    // Read the snapshot.  `n_tile_execute`'s exchange should have
     // cleared the flag; the snapshot holds the planner's output.
     const auto &snap
             = zendnnl::lowoha::matmul::test_api::s_last_phase_b_snapshot;
 
     ASSERT_TRUE(snap.valid)
-            << "PhaseBSnapshot was not captured — flat_n_tile may not "
+            << "PhaseBSnapshot was not captured — n_tile_execute may not "
                "have been reached.";
-    EXPECT_TRUE(snap.per_expert_remainder)
+    EXPECT_TRUE(snap.variable_expert_teams)
             << "Phase B did not fire; planner may have routed to a "
                "non-Single strategy or the eligibility filter rejected "
                "every expert.  Check `strategy` / `n_thr_fixed` below.";
     EXPECT_EQ(static_cast<int>(snap.strategy),
-            static_cast<int>(GroupNTileStrategy::ManyExperts))
-            << "Phase B is only populated on the ManyExperts strategy "
+            static_cast<int>(GroupNTileStrategy::FixedTeamRounds))
+            << "Phase B is only populated on the FixedTeamRounds strategy "
                "(Single round picked by N_ROUNDS=1 + use_custom).";
     EXPECT_EQ(snap.num_ops_active, num_ops);
 
@@ -2417,7 +2419,7 @@ TEST(TestGroupMatmulPhaseBRemainder, HeaviestFirstAssignment) {
 
     int sum = 0;
     for (int e = 0; e < num_ops; ++e) {
-        const int n = static_cast<int>(snap.stable_n_thr_per_expert[e]);
+        const int n = static_cast<int>(snap.expert_thread_counts[e]);
         if (Ms[e] > 0) {
             EXPECT_GE(n, 1) << "active expert e=" << e << " starved (0 thr)";
         }
@@ -2427,15 +2429,15 @@ TEST(TestGroupMatmulPhaseBRemainder, HeaviestFirstAssignment) {
     }
     EXPECT_EQ(sum, 32)
             << "M-proportional should saturate the full thread team; "
-               "sum(stable_n_thr_per_expert) = "
+               "sum(expert_thread_counts) = "
             << sum;
     // The uniform split would give {3,3,3,3,2,...,2}.  Proportional fills
     // the heaviest expert (M=16, want 5.8) to its cap of 4 and leaves the
     // last light experts (M=4, want 1.45) at the floor of 1, a pair the
     // uniform split cannot produce.
-    EXPECT_EQ(static_cast<int>(snap.stable_n_thr_per_expert[0]), 4)
+    EXPECT_EQ(static_cast<int>(snap.expert_thread_counts[0]), 4)
             << "heaviest expert (M=16) must reach its N-tile cap";
-    EXPECT_EQ(static_cast<int>(snap.stable_n_thr_per_expert[13]), 1)
+    EXPECT_EQ(static_cast<int>(snap.expert_thread_counts[13]), 1)
             << "lightest expert (M=4) must stay at the 1-thread floor";
 }
 
@@ -2465,7 +2467,7 @@ TEST(TestGroupMatmulPhaseBRemainder, HeaviestFirstAssignment) {
 // A regression that ignores `pairs[e].eligible` would route the
 // extra to e=0 (highest M, sorted first), leaving e=4 at base —
 // the assertion below would catch that immediately because e=0's
-// `stable_n_thr_per_expert` would read 3 instead of 2.
+// `expert_thread_counts` would read 3 instead of 2.
 // ===============================================================================
 
 TEST(TestGroupMatmulPhaseBRemainder, EligibilityFilter_NonUniformN) {
@@ -2496,14 +2498,14 @@ TEST(TestGroupMatmulPhaseBRemainder, EligibilityFilter_NonUniformN) {
     CustomKernelNTileOverride default_n_tile(0);
     // Insulate from a process-level
     // `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=1/2` that would bypass
-    // ManyExperts and skip Phase B — see
+    // FixedTeamRounds and skip Phase B — see
     // `CkSingleRoundRemainderCorrectness` for the full rationale.
     NTileStrategyOverride auto_strategy(0);
     // Pin the proportional path ON so this non-uniform-N fixture exercises the
     // forced per-expert capacity clamp rather than the default-auto gate.
     DecodeProportionalOverride prop_on(true);
 
-    if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
+    if (!zendnnl::lowoha::matmul::custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "Test requires AVX512BF16 / custom-kernel "
                         "dispatch support; cannot exercise Phase B "
                         "without CK engagement.";
@@ -2566,7 +2568,7 @@ TEST(TestGroupMatmulPhaseBRemainder, EligibilityFilter_NonUniformN) {
     ASSERT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns,
                       gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb, biases,
                       gv.beta, dsts, gv.ldc, gv.is_wc, params,
-                      /*moe_postop=*/nullptr,
+                      /*weighted_reduce=*/nullptr,
                       /*gated_act=*/nullptr),
             status_t::success);
 
@@ -2574,14 +2576,14 @@ TEST(TestGroupMatmulPhaseBRemainder, EligibilityFilter_NonUniformN) {
             = zendnnl::lowoha::matmul::test_api::s_last_phase_b_snapshot;
 
     ASSERT_TRUE(snap.valid) << "PhaseBSnapshot was not captured.";
-    EXPECT_TRUE(snap.per_expert_remainder)
+    EXPECT_TRUE(snap.variable_expert_teams)
             << "Phase B did not fire — eligibility filter may have "
                "rejected EVERY expert (eligible_count == 0 short-"
-               "circuits with `per_expert_remainder = false`).  "
+               "circuits with `variable_expert_teams = false`).  "
                "strategy="
             << static_cast<int>(snap.strategy);
     EXPECT_EQ(static_cast<int>(snap.strategy),
-            static_cast<int>(GroupNTileStrategy::ManyExperts));
+            static_cast<int>(GroupNTileStrategy::FixedTeamRounds));
     EXPECT_EQ(snap.num_ops_active, num_ops);
 
     // Decode-class (max_M=16 <= kDecodeMaxM) → M-proportional split.  The
@@ -2594,7 +2596,7 @@ TEST(TestGroupMatmulPhaseBRemainder, EligibilityFilter_NonUniformN) {
 
     int sum = 0;
     for (int e = 0; e < num_ops; ++e) {
-        const int n = static_cast<int>(snap.stable_n_thr_per_expert[e]);
+        const int n = static_cast<int>(snap.expert_thread_counts[e]);
         if (Ms[e] > 0) {
             EXPECT_GE(n, 1) << "active expert e=" << e << " starved (0 thr)";
         }
@@ -2607,7 +2609,7 @@ TEST(TestGroupMatmulPhaseBRemainder, EligibilityFilter_NonUniformN) {
 
     // KEY: e=0 (M-heaviest but N=512) is clamped to its N-tile capacity
     // cap=2 and must NOT receive more, even though it sorts first by M.
-    const int n_e0 = static_cast<int>(snap.stable_n_thr_per_expert[0]);
+    const int n_e0 = static_cast<int>(snap.expert_thread_counts[0]);
     EXPECT_LE(n_e0, 2)
             << "INELIGIBLE/capacity-capped expert e=0 (M=16, N=512, cap=2) "
                "must not exceed its N-tile capacity; got "
@@ -2616,7 +2618,7 @@ TEST(TestGroupMatmulPhaseBRemainder, EligibilityFilter_NonUniformN) {
                "proportional split.";
     // A full-N eligible heavy (e=1, M=12, N=1024, cap=4) outranks the
     // capacity-capped e=0.
-    EXPECT_GT(static_cast<int>(snap.stable_n_thr_per_expert[1]), n_e0)
+    EXPECT_GT(static_cast<int>(snap.expert_thread_counts[1]), n_e0)
             << "full-capacity heavy e=1 should outrank capacity-capped e=0.";
 }
 
@@ -2660,7 +2662,7 @@ TEST(TestGroupMatmulPhaseBRemainder, DefaultAutoDeclinesNonUniformNK) {
     NTileStrategyOverride auto_strategy(0);
     DecodeProportionalOverride prop_default_auto(-1);
 
-    if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
+    if (!zendnnl::lowoha::matmul::custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "Test requires AVX512BF16 / custom-kernel "
                         "dispatch support; cannot exercise Phase B "
                         "without CK engagement.";
@@ -2718,28 +2720,28 @@ TEST(TestGroupMatmulPhaseBRemainder, DefaultAutoDeclinesNonUniformNK) {
     ASSERT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns,
                       gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb, biases,
                       gv.beta, dsts, gv.ldc, gv.is_wc, params,
-                      /*moe_postop=*/nullptr,
+                      /*weighted_reduce=*/nullptr,
                       /*gated_act=*/nullptr),
             status_t::success);
 
     const auto &snap
             = zendnnl::lowoha::matmul::test_api::s_last_phase_b_snapshot;
     ASSERT_TRUE(snap.valid);
-    EXPECT_TRUE(snap.per_expert_remainder);
+    EXPECT_TRUE(snap.variable_expert_teams);
     EXPECT_EQ(static_cast<int>(snap.strategy),
-            static_cast<int>(GroupNTileStrategy::ManyExperts));
+            static_cast<int>(GroupNTileStrategy::FixedTeamRounds));
 
     const int base = 2; // 32 threads / 14 experts, single-round fixture.
-    EXPECT_EQ(static_cast<int>(snap.stable_n_thr_per_expert[0]), base)
+    EXPECT_EQ(static_cast<int>(snap.expert_thread_counts[0]), base)
             << "default auto should decline M-only proportional split for "
                "heterogeneous active N/K groups";
-    EXPECT_EQ(static_cast<int>(snap.stable_n_thr_per_expert[1]), base + 1)
+    EXPECT_EQ(static_cast<int>(snap.expert_thread_counts[1]), base + 1)
             << "fallback Phase B should distribute extras only to eligible "
                "experts";
 }
 
 // ===============================================================================
-// [8b] TestGroupMatmulAutoSelectAlgo — pin down `select_grp_matmul_algo`'s
+// [8b] TestGroupMatmulAutoSelectAlgo — pin down `group_matmul_algo_select`'s
 //      decisions on the (max_M, num_threads, num_ops) grid.
 //
 // Both phase settings are pinned to 0, the LEGACY cascade, evaluated in
@@ -2768,10 +2770,10 @@ TEST(TestGroupMatmulPhaseBRemainder, DefaultAutoDeclinesNonUniformNK) {
 //   These cases assert auto-select's ROUTING DECISION only — i.e.,
 //   which top-level ALGO the dispatcher picks for the given inputs.
 //   They do NOT verify the downstream N-tile planner's strategy
-//   choice (`ManyExperts` vs `Sequential` vs `FewExperts` etc.) for
+//   choice (`FixedTeamRounds` vs `Sequential` vs `ProportionalRounds` etc.) for
 //   the ALGO 3 rows.  For shapes where ALGO 3 is selected but the
 //   N-tile planner's `ntile_viable` returns false (e.g., Qwen
-//   prompt at N=1536 → only 3 tiles, below the ManyExperts minimum
+//   prompt at N=1536 → only 3 tiles, below the FixedTeamRounds minimum
 //   of ccd_size/2 = 4), the planner falls back to Sequential and
 //   executes a path equivalent to ALGO 1 plus one-time ALGO 3
 //   prepack overhead.  That fallback is the user-visible behaviour
@@ -2779,10 +2781,10 @@ TEST(TestGroupMatmulPhaseBRemainder, DefaultAutoDeclinesNonUniformNK) {
 //   NOTE in `group_matmul_dispatch.cpp::auto_select_algo` and
 //   accepted as a trade-off for the simpler 3-rule selector.
 //   Verifying which strategy fires at execute time would require
-//   either a gemm_mode assertion or the white-box planner snapshot
+//   either a execution_path assertion or the white-box planner snapshot
 //   (`PhaseBSnapshot`) — currently used only for Phase B coverage.
 //
-// The test pokes `select_grp_matmul_algo` directly so we don't need to
+// The test pokes `group_matmul_algo_select` directly so we don't need to
 // build the full dispatcher stack just to read out the decision.  It
 // uses `AlgoEnvGuard` to clear `ZENDNNL_GRP_MATMUL_ALGO` (the override
 // is intentionally re-read each call so in-process setenv works) so
@@ -2833,8 +2835,8 @@ TEST_P(TestGroupMatmulAutoSelectAlgo, MatchesExpected) {
     const int N_ops = p.num_ops;
 
     // Minimal but valid inputs for the dispatcher safety checks
-    // (`check_m_tile_safe` / `check_n_tile_extra`) inside
-    // `select_grp_matmul_algo`.  Row-major, uniform BF16 dtypes, no
+    // (`m_tile_supported` / `n_tile_supported`) inside
+    // `group_matmul_algo_select`.  Row-major, uniform BF16 dtypes, no
     // packed-B, no quant.
     std::vector<char> layout(N_ops, 'r');
     std::vector<int> M(N_ops, p.M);
@@ -2853,7 +2855,7 @@ TEST_P(TestGroupMatmulAutoSelectAlgo, MatchesExpected) {
     }
 
     const int got
-            = select_grp_matmul_algo(layout, M, N, K, params, p.num_threads);
+            = group_matmul_algo_select(layout, M, N, K, params, p.num_threads);
     EXPECT_EQ(got, p.expected_algo)
             << "auto-select picked ALGO " << got << ", expected "
             << p.expected_algo << "  [" << p.label << "]";
@@ -2878,14 +2880,16 @@ TEST(TestGroupMatmulAutoSelectAlgo,
         p.mem_format_b = 'r';
         p.lowoha_algo = matmul_algo_t::aocl_dlp_blocked;
     }
-    EXPECT_EQ(select_grp_matmul_algo(layout, M, N, K, params, /*threads=*/E), 3)
+    EXPECT_EQ(
+            group_matmul_algo_select(layout, M, N, K, params, /*threads=*/E), 3)
             << "eligible AOCL-packed decode should reach CK";
 
     matmul_post_op relu;
     relu.po_type = post_op_type_t::relu;
     for (auto &p : params)
         p.postop_.push_back(relu);
-    EXPECT_EQ(select_grp_matmul_algo(layout, M, N, K, params, /*threads=*/E), 1)
+    EXPECT_EQ(
+            group_matmul_algo_select(layout, M, N, K, params, /*threads=*/E), 1)
             << "CK does not apply generic unary post-ops; full-weight AOCL "
                "must "
                "preserve them";
@@ -2894,7 +2898,8 @@ TEST(TestGroupMatmulAutoSelectAlgo,
         p.postop_.clear();
         p.lowoha_algo = matmul_algo_t::onednn_blocked;
     }
-    EXPECT_EQ(select_grp_matmul_algo(layout, M, N, K, params, /*threads=*/E), 1)
+    EXPECT_EQ(
+            group_matmul_algo_select(layout, M, N, K, params, /*threads=*/E), 1)
             << "packed bytes explicitly owned by another backend must never "
                "reach AOCL unreorder or CK";
 }
@@ -2981,13 +2986,13 @@ static std::vector<AutoSelectParam> make_auto_select_params() {
     //
     // EXECUTION TIME — known fallback for the prompt rows.
     //   At N=1536, `kMinNTile=512` → `1536 / 512 = 3` tiles per expert,
-    //   below the ManyExperts minimum (ccd_size/2 = 4 on 8-core CCDs).
+    //   below the FixedTeamRounds minimum (ccd_size/2 = 4 on 8-core CCDs).
     //   The N-tile planner's `ntile_viable` therefore returns false for
     //   the prompt-class rows here (max_M ∈ {128, 256, 512}) and the
     //   call falls back to Sequential — behaving like ALGO 1 plus one
     //   ALGO 3 prepack pass per process.  Decode-class rows
     //   (max_M ∈ {4, 16, 32}) take the decode tile (256), get 6 tiles
-    //   per expert, clear `ntile_viable`, and run via ManyExperts (the
+    //   per expert, clear `ntile_viable`, and run via FixedTeamRounds (the
     //   path Phase B is sized for).  Both behaviours are intentional
     //   under the simplified 3-rule selector; see the rule-1 SCOPE
     //   NOTE in `group_matmul_dispatch.cpp::auto_select_algo` for the
@@ -3020,7 +3025,7 @@ static std::vector<AutoSelectParam> make_auto_select_params() {
     //
     // Three pins cover this boundary:
     //   * E256 — exactly at capacity, still ALGO 3 (rule 1: num_ops ≥
-    //     num_threads; ManyExperts handles 256 experts fine).
+    //     num_threads; FixedTeamRounds handles 256 experts fine).
     //   * E257 — first value above capacity, must flip to ALGO 1.
     //   * E512 — well above capacity, must stay on ALGO 1.
     //
@@ -3059,9 +3064,9 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulAutoSelect, TestGroupMatmulAutoSelectAlgo,
 
 // ===============================================================================
 // [8c] TestGroupMatmulAutoSelectAlgo_DynamicQuant — the single
-//      quant configuration `check_n_tile_extra` currently accepts:
+//      quant configuration `n_tile_supported` currently accepts:
 //      `dynamic_quant=true` with `{M, 1}` source + `{1, N}` per-
-//      channel weight.  ALGO 3 reaches that case via `flat_n_tile`'s
+//      channel weight.  ALGO 3 reaches that case via `n_tile_execute`'s
 //      pre-OMP source-reorder hoist (`HoistedSrcQuant` in
 //      `group_matmul_n_tile.cpp`); per-tile threads then share the
 //      hoisted S8 src + column-sliced wei scale.  Anything else —
@@ -3081,11 +3086,11 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulAutoSelect, TestGroupMatmulAutoSelectAlgo,
 //
 // (The hoist path itself is exercised end-to-end by the
 // `TestGroupMatmulQuant.INT8_DYNAMIC_GEMM_*` suites, which carry
-// both sides of the per-token pair and reach `flat_n_tile` when
+// both sides of the per-token pair and reach `n_tile_execute` when
 // their random num_ops × num_threads combo trips auto-select's
 // rule 1 or rule 3-decode arm.)
 //
-// `check_m_tile_safe`'s row-local granularity gate
+// `m_tile_supported`'s row-local granularity gate
 // (`src_scale.dims[0] == M[i]`) is still a precondition; the
 // per-token gate below is stricter, so anything that fails this
 // test's `dynamic_quant=true + {M[i], 1}` requirement is also
@@ -3138,7 +3143,7 @@ TEST(TestGroupMatmulAutoSelectAlgo_DynamicQuant, AcceptsAlgo3ViaHoist) {
 
     // Case 1 — Sanity: same shape WITHOUT any quant lands on ALGO 3
     // (decode-class + many experts + wide-N + ntile_viable).
-    ASSERT_EQ(select_grp_matmul_algo(layout, M, N, K, params, num_threads), 3)
+    ASSERT_EQ(group_matmul_algo_select(layout, M, N, K, params, num_threads), 3)
             << "baseline non-quant shape must select ALGO 3 — otherwise "
                "the negative cases below cannot distinguish a "
                "shape-induced fallback from a quant-gate rejection";
@@ -3159,13 +3164,13 @@ TEST(TestGroupMatmulAutoSelectAlgo_DynamicQuant, AcceptsAlgo3ViaHoist) {
         params[i].quant_params.wei_scale.buff = &wei_scale_sentinel;
     }
 
-    EXPECT_EQ(select_grp_matmul_algo(layout, M, N, K, params, num_threads), 3)
+    EXPECT_EQ(group_matmul_algo_select(layout, M, N, K, params, num_threads), 3)
             << "dynamic_quant=true with `{M, 1}` src + `{1, N}` wei "
                "(the only in-scope quant pair) and otherwise N-tile-"
                "viable inputs should reach ALGO 3 via the pre-OMP hoist "
                "path.  A regression here would indicate either that "
-               "`check_n_tile_extra` has tightened its dynamic / per-token "
-               "/ per-channel gate, or that `check_m_tile_safe`'s "
+               "`n_tile_supported` has tightened its dynamic / per-token "
+               "/ per-channel gate, or that `m_tile_supported`'s "
                "row-local gate has tightened.";
 
     // Case 3 — Static src rejection: same shape and dims, but flip
@@ -3179,7 +3184,7 @@ TEST(TestGroupMatmulAutoSelectAlgo_DynamicQuant, AcceptsAlgo3ViaHoist) {
         params[i].quant_params.src_scale.buff = &wei_scale_sentinel;
     }
 
-    EXPECT_EQ(select_grp_matmul_algo(layout, M, N, K, params, num_threads), 1)
+    EXPECT_EQ(group_matmul_algo_select(layout, M, N, K, params, num_threads), 1)
             << "static src quant (`dynamic_quant=false`) is intentionally "
                "outside the current per-token-dynamic scope — even with "
                "the otherwise-valid `{M, 1}` src + `{1, N}` wei pair, the "
@@ -3198,10 +3203,10 @@ TEST(TestGroupMatmulAutoSelectAlgo_DynamicQuant, AcceptsAlgo3ViaHoist) {
         params[i].quant_params.wei_scale.dt = data_type_t::none;
     }
 
-    EXPECT_EQ(select_grp_matmul_algo(layout, M, N, K, params, num_threads), 1)
+    EXPECT_EQ(group_matmul_algo_select(layout, M, N, K, params, num_threads), 1)
             << "dynamic_quant=true with `{M, 1}` src but NO wei scale "
                "should fall back to ALGO 1 — the per-token scope guard "
-               "in `check_n_tile_extra` requires the paired per-channel "
+               "in `n_tile_supported` requires the paired per-channel "
                "wei.  A regression here would indicate the gate has "
                "accidentally relaxed the wei-side requirement.";
 
@@ -3232,8 +3237,8 @@ TEST(TestGroupMatmulAutoSelectAlgo_DynamicQuant, AcceptsAlgo3ViaHoist) {
         params[i].quant_params.wei_scale.buff = &wei_scale_sentinel;
     }
 
-    EXPECT_EQ(
-            select_grp_matmul_algo(layout, M_mixed, N, K, params, num_threads),
+    EXPECT_EQ(group_matmul_algo_select(
+                      layout, M_mixed, N, K, params, num_threads),
             3)
             << "sparse-MoE batch with one M[i]=1 expert (`src_scale.dims "
                "= {1, 1}`) should still reach ALGO 3 — the M[i]-aware "
@@ -3242,7 +3247,7 @@ TEST(TestGroupMatmulAutoSelectAlgo_DynamicQuant, AcceptsAlgo3ViaHoist) {
                "the per-token scale equals the full-matrix scale "
                "trivially.  A regression here means the gate is using "
                "the old brittle `dims[0] > 1` proxy again and will drag "
-               "every sparse-MoE decode batch onto sequential_experts.";
+               "every sparse-MoE decode batch onto sequential_execute.";
 }
 
 // ===============================================================================
@@ -3261,7 +3266,7 @@ TEST(TestGroupMatmulAutoSelectAlgo_DynamicQuant, AcceptsAlgo3ViaHoist) {
 // inherited default policy after a decline. Coverage also includes the safety
 // clamps (ALGO 3 on !n_tile_safe) and the legacy cascade's R0 capacity gate.
 //
-// All tests use `select_grp_matmul_algo` directly with `ALGO=0` so
+// All tests use `group_matmul_algo_select` directly with `ALGO=0` so
 // auto-select fires; the phase env is the only thing that varies.
 // ===============================================================================
 
@@ -3280,7 +3285,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, ExplicitZeroEnablesLegacyMixtralPrompt) {
     // Legacy Rule 2 → ALGO 1.
     auto s = build_auto_probe(/*M=*/256, /*K=*/4096, /*N=*/14336,
             /*num_ops=*/8, /*num_threads=*/128);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             1)
             << "AUTO_PROMPT_ALGO=0 must defer to legacy rules (Mixtral-8 "
@@ -3298,7 +3303,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, ExplicitZeroEnablesLegacyQwenPrompt) {
 
     auto s = build_auto_probe(/*M=*/256, /*K=*/2048, /*N=*/1536,
             /*num_ops=*/128, /*num_threads=*/128);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             3)
             << "AUTO_PROMPT_ALGO=0 must defer to legacy rules (Qwen "
@@ -3319,8 +3324,8 @@ TEST(TestGroupMatmulAutoPhaseEnv, DefaultPromptRoutesToAlgo3) {
     // Mixtral-class BF16 prompt.
     auto s = build_auto_probe(/*M=*/256, /*K=*/4096, /*N=*/14336,
             /*num_ops=*/8, /*num_threads=*/128);
-    auto_algo_trace trace;
-    EXPECT_EQ(select_grp_matmul_algo(
+    GroupMatmulAlgoTrace trace;
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads, &trace),
             3)
             << "the unpinned prompt policy must route prompt → ALGO 3";
@@ -3338,7 +3343,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, DefaultDecodeRoutesToAlgo3) {
     // gpt-oss-style decode, n_tile_safe.
     auto s = build_auto_probe(/*M=*/16, /*K=*/2880, /*N=*/5760,
             /*num_ops=*/32, /*num_threads=*/64);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             3)
             << "AUTO_DECODE_ALGO default (=3) must route decode → ALGO 3";
@@ -3374,7 +3379,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, Int8DecodePinHonouredGateUp) {
     for (auto &p : s.params) {
         p.dtypes.wei = data_type_t::s8;
     }
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             5)
             << "AUTO_DECODE_ALGO=5 must be honoured for an INT8 gate_up decode "
@@ -3394,7 +3399,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, Int8DecodePinHonouredDownProj) {
     for (auto &p : s.params) {
         p.dtypes.wei = data_type_t::s8;
     }
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             5)
             << "AUTO_DECODE_ALGO=5 must be honoured for an INT8 down-proj "
@@ -3416,7 +3421,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, Int8DecodePinHonouredShapeAgnostic) {
     for (auto &p : s.params) {
         p.dtypes.wei = data_type_t::s8;
     }
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             5)
             << "AUTO_DECODE_ALGO=5 must be honoured for ANY INT8 saturated "
@@ -3438,7 +3443,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, Int8DecodeNoPinStaysOnDefault) {
     for (auto &p : s.params) {
         p.dtypes.wei = data_type_t::s8;
     }
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             3)
             << "AUTO with no pin must not emit ALGO 5 (s8 decode stays on the "
@@ -3456,7 +3461,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, Bf16DecodePinDeclined) {
     // build_auto_probe leaves wei=bf16.
     auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
             /*num_ops=*/40, /*num_threads=*/32);
-    EXPECT_NE(select_grp_matmul_algo(
+    EXPECT_NE(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             5)
             << "A =5 pin on a bf16 decode frame must be declined (s8-only)";
@@ -3475,7 +3480,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, LowOccupancyDecodePinDeclined) {
     for (auto &p : s.params) {
         p.dtypes.wei = data_type_t::s8;
     }
-    EXPECT_NE(select_grp_matmul_algo(
+    EXPECT_NE(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             5)
             << "active_ops < num_threads must decline the =5 pin (occupancy)";
@@ -3494,7 +3499,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, Int8PromptPinDeclined) {
     for (auto &p : s.params) {
         p.dtypes.wei = data_type_t::s8;
     }
-    EXPECT_NE(select_grp_matmul_algo(
+    EXPECT_NE(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             5)
             << "An s8 PROMPT (max_M>32) must not route to ALGO 5 (decode-only "
@@ -3517,7 +3522,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, MixedDtypeDecodePinDeclined) {
     }
     // One ACTIVE expert carries bf16 weights → all_active_wei_s8 fails.
     s.params[1].dtypes.wei = data_type_t::bf16;
-    EXPECT_NE(select_grp_matmul_algo(
+    EXPECT_NE(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             5)
             << "A mixed s8/bf16 active group must decline the =5 pin";
@@ -3536,7 +3541,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, DecodeAlgo5PinVerbatimWhenGateOff) {
     // bf16 frame — the qualifier would decline it, but the gate is bypassed.
     auto s = build_auto_probe(/*M=*/16, /*K=*/2816, /*N=*/1408,
             /*num_ops=*/40, /*num_threads=*/32);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             5)
             << "Gate=0 must honour AUTO_DECODE_ALGO=5 verbatim for any decode "
@@ -3558,7 +3563,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, PromptPinAlgo5DeclinedUnderOccupancy) {
     // Prompt-class (max_M=256) with 16 active experts on a 64-wide team.
     auto s = build_auto_probe(/*M=*/256, /*K=*/2048, /*N=*/1536,
             /*num_ops=*/16, /*num_threads=*/64);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             3)
             << "active_ops(16) < num_threads(64) must decline the prompt =5 "
@@ -3573,7 +3578,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, PromptPinAlgo5DeclinedUnderOccupancy) {
 //
 // Same frame as the test above plus `dynamic_quant=true` with a per-token
 // src_scale but NO weight-scale buffer.  The n_tile_safe=false is caused by
-// `check_n_tile_extra` returning false at the `!wei_per_channel &&
+// `n_tile_supported` returning false at the `!wei_per_channel &&
 // !wei_per_group` guard (no wei_scale.buff supplied), NOT by dynamic_quant
 // alone — a dynamic-quant call with a proper per-channel weight scale WOULD
 // be n_tile_safe.  The `src_scale.dims={M,1}` is there to satisfy the
@@ -3593,7 +3598,7 @@ TEST(TestGroupMatmulAutoPhaseEnv,
         p.quant_params.src_scale.dims = {256, 1};
         p.quant_params.src_scale.dt = data_type_t::f32;
     }
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             1)
             << "the =5 occupancy redirect to ALGO 3 must still honour the "
@@ -3615,7 +3620,7 @@ TEST(TestGroupMatmulAutoPhaseEnv,
     // build_auto_probe leaves wei=bf16; occupancy is satisfied.
     auto s = build_auto_probe(/*M=*/256, /*K=*/2048, /*N=*/1536,
             /*num_ops=*/40, /*num_threads=*/32);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             5)
             << "bf16 must not decline a prompt =5 pin: the s8 term is "
@@ -3634,7 +3639,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, PromptAlgo5PinVerbatimWhenGateOff) {
     PromptAlgo5GateOverride gate_off(0);
     auto s = build_auto_probe(/*M=*/256, /*K=*/2048, /*N=*/1536,
             /*num_ops=*/16, /*num_threads=*/64);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             5)
             << "Gate=0 must honour AUTO_PROMPT_ALGO=5 verbatim regardless of "
@@ -3656,7 +3661,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, PromptAlgo5GateDoesNotAffectDecode) {
     // Decode-class, under-occupied: the DECODE gate still declines.
     auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
             /*num_ops=*/16, /*num_threads=*/64);
-    EXPECT_NE(select_grp_matmul_algo(
+    EXPECT_NE(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             5)
             << "PROMPT_ALGO5_GATE=0 must not disable the decode qualifier";
@@ -3675,7 +3680,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, DecodeAlgo3PinHonouredVerbatim) {
     for (auto &p : s.params) {
         p.dtypes.wei = data_type_t::s8;
     }
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             3)
             << "An explicit AUTO_DECODE_ALGO=3 pin is honoured (gate qualifies "
@@ -3694,7 +3699,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, PromptEnvForcesAlgo3OnMixtralPrompt) {
 
     auto s = build_auto_probe(/*M=*/256, /*K=*/4096, /*N=*/14336,
             /*num_ops=*/8, /*num_threads=*/128);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             3)
             << "AUTO_PROMPT_ALGO=3 must override Rule 2 (num_ops≤8) for "
@@ -3714,7 +3719,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, DecodeEnvForcesAlgo1OnGptOssDecode) {
 
     auto s = build_auto_probe(/*M=*/16, /*K=*/2880, /*N=*/5760,
             /*num_ops=*/32, /*num_threads=*/64);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             1)
             << "AUTO_DECODE_ALGO=1 must override Rule 3 (decode → ALGO 3) "
@@ -3737,7 +3742,7 @@ TEST(TestGroupMatmulAutoPhaseEnv,
 
     auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
             /*num_ops=*/88, /*num_threads=*/64);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             3)
             << "num_ops(88) > num_threads(64) under n_tile strategy 2 must "
@@ -3746,7 +3751,7 @@ TEST(TestGroupMatmulAutoPhaseEnv,
 
 // Under the DEFAULT strategy (3 = decode_dynamic) the same
 // experts-exceed-threads decode frame stays on ALGO 3 so the CCD-cohesive
-// DecodeDynamic pool can engage.
+// CcdExpertWaves pool can engage.
 TEST(TestGroupMatmulAutoPhaseEnv,
         MoreExpertsThanThreadsRoutesToAlgo3UnderDefault) {
     using namespace zendnnl::lowoha::matmul;
@@ -3757,7 +3762,7 @@ TEST(TestGroupMatmulAutoPhaseEnv,
 
     auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
             /*num_ops=*/88, /*num_threads=*/64);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             3)
             << "num_ops(88) > num_threads(64) must stay on ALGO 3 under the "
@@ -3774,7 +3779,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, ExpertsLeqThreadsKeepsAlgo3) {
 
     auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
             /*num_ops=*/88, /*num_threads=*/128);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             3)
             << "num_ops(88) <= num_threads(128): ALGO 3 single round feasible, "
@@ -3796,7 +3801,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, MoreExpertsThanThreadsDecodePin3RunsAlgo3) {
 
     auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
             /*num_ops=*/88, /*num_threads=*/64);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             3)
             << "decode num_ops(88) > num_threads(64) with AUTO_DECODE_ALGO=3 "
@@ -3817,7 +3822,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, ExplicitPhasePinOutranksPolicyRule) {
 
     auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
             /*num_ops=*/88, /*num_threads=*/64);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             1)
             << "an explicit AUTO_DECODE_ALGO=1 pin must outrank Rule 0.6's "
@@ -3841,7 +3846,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, PhasePinsAlgo5And6AreHonoured) {
         // itself is covered by `PromptPinAlgo5*` below.
         auto s = build_auto_probe(/*M=*/256, /*K=*/2048, /*N=*/1536,
                 /*num_ops=*/64, /*num_threads=*/64);
-        EXPECT_EQ(select_grp_matmul_algo(
+        EXPECT_EQ(group_matmul_algo_select(
                           s.layout, s.M, s.N, s.K, s.params, s.num_threads),
                 5)
                 << "explicit AUTO_PROMPT_ALGO=5 must be honoured, not clamped "
@@ -3852,7 +3857,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, PhasePinsAlgo5And6AreHonoured) {
         AutoDecodeAlgoOverride force_decode(6);
         auto s = build_auto_probe(/*M=*/8, /*K=*/2048, /*N=*/1536,
                 /*num_ops=*/16, /*num_threads=*/64);
-        EXPECT_EQ(select_grp_matmul_algo(
+        EXPECT_EQ(group_matmul_algo_select(
                           s.layout, s.M, s.N, s.K, s.params, s.num_threads),
                 6)
                 << "explicit AUTO_DECODE_ALGO=6 must be honoured, not clamped "
@@ -3871,14 +3876,14 @@ TEST(TestGroupMatmulAutoPhaseEnv, MoreExpertsThanThreadsGlobalForceWins) {
 
     auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
             /*num_ops=*/88, /*num_threads=*/64);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             3)
             << "global ZENDNNL_GRP_MATMUL_ALGO=3 must win over Rule 0.6";
 }
 
 // ── The experts-exceed-threads decode regime runs ALGO 3 (where ────────
-// ── DecodeDynamic lives) under every N-tile strategy. ─────────────────
+// ── CcdExpertWaves lives) under every N-tile strategy. ─────────────────
 // These tests lock the routing: strategies 3, 2 and 0
 // route the n_tile-safe shape to ALGO 3, and an n_tile-unsafe shape clamps
 // to ALGO 1.  AUTO env (env_algo=0) throughout.
@@ -3893,11 +3898,11 @@ TEST(TestGroupMatmulAutoPhaseEnv,
 
     auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
             /*num_ops=*/88, /*num_threads=*/64);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             3)
             << "forced N_TILE_STRATEGY=3: decode num_ops(88) > num_threads(64) "
-               "must route to ALGO 3 (DecodeDynamic), not ALGO 5";
+               "must route to ALGO 3 (CcdExpertWaves), not ALGO 5";
 }
 
 // Companion: with the strategy set to Rounds (=2) the same shape ALSO lands
@@ -3913,7 +3918,7 @@ TEST(TestGroupMatmulAutoPhaseEnv,
 
     auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
             /*num_ops=*/88, /*num_threads=*/64);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             3)
             << "strategy=2: decode num_ops(88) > num_threads(64) must still "
@@ -3921,7 +3926,7 @@ TEST(TestGroupMatmulAutoPhaseEnv,
 }
 
 // Smart-AUTO (n_tile_strategy=0) routes the experts-exceed-threads decode
-// regime to ALGO 3 (where DecodeDynamic lives), same as strategies 3 and 2
+// regime to ALGO 3 (where CcdExpertWaves lives), same as strategies 3 and 2
 // above.
 TEST(TestGroupMatmulAutoPhaseEnv, SmartAutoManyExpertsDecodeRoutesToAlgo3) {
     using namespace zendnnl::lowoha::matmul;
@@ -3932,14 +3937,14 @@ TEST(TestGroupMatmulAutoPhaseEnv, SmartAutoManyExpertsDecodeRoutesToAlgo3) {
 
     auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
             /*num_ops=*/88, /*num_threads=*/64);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             3)
             << "smart-auto (strategy=0): decode num_ops(88) > num_threads(64) "
-               "must route to ALGO 3 so DecodeDynamic can engage";
+               "must route to ALGO 3 so CcdExpertWaves can engage";
 }
 
-// Safety clamp: forced DecodeDynamic still honours n_tile_safe.  A
+// Safety clamp: forced CcdExpertWaves still honours n_tile_safe.  A
 // non-row-major layout is n_tile-unsafe (ALGO 3 cannot serve it), so the
 // re-route must fall through rather than hand an unsafe shape to ALGO 3.
 // The fallback is ALGO 1 (sequential full-team) — auto-select never emits 5,
@@ -3957,21 +3962,21 @@ TEST(TestGroupMatmulAutoPhaseEnv, ForcedDecodeDynamicHonorsNTileSafetyClamp) {
     // hence n_tile_safe).
     for (auto &c : s.layout)
         c = 'c';
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             1)
-            << "forced DecodeDynamic on an n_tile-unsafe shape must clamp to "
+            << "forced CcdExpertWaves on an n_tile-unsafe shape must clamp to "
                "ALGO 1 (not hand an unsafe shape to ALGO 3)";
 }
 
-// ── DecodeDynamic non-custom WIDE swiglu parity with Rounds ──────────
-// DecodeDynamic hosts the non-custom wide-fused activation via a
+// ── CcdExpertWaves non-custom WIDE swiglu parity with Rounds ──────────
+// CcdExpertWaves hosts the non-custom wide-fused activation via a
 // team-wide barrier + apply_swiglu_oai post-pass (it used to route such
 // calls to Rounds).  Verify true parity: the SAME non-custom wide-swiglu
 // decode shape must produce identical output under N_TILE_STRATEGY=3
-// (DecodeDynamic) and =2 (Rounds).  Without the post-pass DecodeDynamic
-// would leave raw (gate, up) pairs in dst and diverge.  The gemm_mode
-// capture asserts DecodeDynamic actually engaged (else the comparison
+// (CcdExpertWaves) and =2 (Rounds).  Without the post-pass CcdExpertWaves
+// would leave raw (gate, up) pairs in dst and diverge.  The execution_path
+// capture asserts CcdExpertWaves actually engaged (else the comparison
 // would be vacuous).
 TEST(TestGroupMatmulDecodeDynamic, NonCustomWideSwigluMatchesRounds) {
     using namespace zendnnl::lowoha::matmul;
@@ -4012,11 +4017,10 @@ TEST(TestGroupMatmulDecodeDynamic, NonCustomWideSwigluMatchesRounds) {
             dsts[e] = dst[e].data();
         }
         const char *mode = nullptr;
-        group_matmul_run_parallel_dispatch(gv.layout, gv.transA, gv.transB,
-                gv.Ms, gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb,
-                biases, gv.beta, dsts, gv.ldc, gv.is_wc, params, num_threads,
-                &mode, grp_matmul_gated_act_t::swiglu_oai_mul,
-                data_type_t::bf16);
+        group_matmul_execute(gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns,
+                gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb, biases, gv.beta,
+                dsts, gv.ldc, gv.is_wc, params, num_threads, &mode,
+                grp_matmul_gated_act_t::swiglu_oai_mul, data_type_t::bf16);
         mode_out = (mode != nullptr) ? mode : "";
         return dst;
     };
@@ -4026,7 +4030,7 @@ TEST(TestGroupMatmulDecodeDynamic, NonCustomWideSwigluMatchesRounds) {
     const auto dst_rounds = run(2, mode_rounds);
 
     ASSERT_NE(mode_decdyn.find("decdyn"), std::string::npos)
-            << "DecodeDynamic did not engage (gemm_mode=" << mode_decdyn
+            << "CcdExpertWaves did not engage (execution_path=" << mode_decdyn
             << "); the non-custom wide-swiglu parity check would be vacuous.";
 
     // Compare the activated output region [0, N/2) of every expert.
@@ -4042,7 +4046,7 @@ TEST(TestGroupMatmulDecodeDynamic, NonCustomWideSwigluMatchesRounds) {
         }
     }
     EXPECT_LT(max_d, 1e-2)
-            << "DecodeDynamic non-custom wide swiglu must match Rounds "
+            << "CcdExpertWaves non-custom wide swiglu must match Rounds "
                "(mode_decdyn="
             << mode_decdyn << " mode_rounds=" << mode_rounds
             << "); max_abs_diff=" << max_d;
@@ -4056,7 +4060,7 @@ TEST(TestGroupMatmulDecodeDynamic,
         FewLargeExpertsSpreadOverL3DomainsMatchRounds) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
-    if (!custom_kernel::dispatch_supported()) {
+    if (!custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "the BF16 custom kernel needs AVX-512 BF16";
     }
     // 2048 x 16384 bf16 = 64 MiB per expert, twice one L3.
@@ -4093,10 +4097,10 @@ TEST(TestGroupMatmulDecodeDynamic,
                     dsts[e] = dst[e].data();
                 }
                 const char *mode = nullptr;
-                group_matmul_run_parallel_dispatch(gv.layout, gv.transA,
-                        gv.transB, gv.Ms, gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda,
-                        weis, gv.ldb, biases, gv.beta, dsts, gv.ldc, gv.is_wc,
-                        params, threads, &mode, grp_matmul_gated_act_t::none,
+                group_matmul_execute(gv.layout, gv.transA, gv.transB, gv.Ms,
+                        gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb,
+                        biases, gv.beta, dsts, gv.ldc, gv.is_wc, params,
+                        threads, &mode, grp_matmul_gated_act_t::none,
                         data_type_t::bf16);
                 mode_out = (mode != nullptr) ? mode : "";
                 return dst;
@@ -4106,7 +4110,7 @@ TEST(TestGroupMatmulDecodeDynamic,
             const auto rounds = run(2, mode_rounds);
             ASSERT_NE(mode_decdyn.find("decdyn_custom"), std::string::npos)
                     << "experts=" << experts << " threads=" << threads
-                    << " gemm_mode=" << mode_decdyn;
+                    << " execution_path=" << mode_decdyn;
             for (int e = 0; e < experts; ++e) {
                 EXPECT_EQ(std::memcmp(decdyn[e].data(), rounds[e].data(),
                                   decdyn[e].size() * sizeof(bfloat16_t)),
@@ -4119,7 +4123,7 @@ TEST(TestGroupMatmulDecodeDynamic,
 }
 
 // ── WEIGHT_CACHE=2 (in-place) grouped-route policy ──────────────────
-// `group_matmul_run_parallel_dispatch` downgrades the process-wide
+// `group_matmul_execute` downgrades the process-wide
 // weight-cache mode 2 -> 1 ONLY for AUTO (env_algo=0), where an AOCL
 // prompt reorder and an ALGO 3 decode reorder touch the same weight
 // buffer with different layouts.  Pinned ALGO 1/2/5/6 (single AOCL
@@ -4143,7 +4147,7 @@ struct MinRunResult {
 };
 
 // Minimal valid bf16 grouped matmul (even-K, CK-eligible shape) that
-// reaches group_matmul_run_parallel_dispatch.  Deterministic varied fill
+// reaches group_matmul_execute.  Deterministic varied fill
 // so an incorrect pack layout would change the output.  Captures the
 // per-expert dst and whether the weight buffers were mutated in place by
 // the reorder/pack.  `weight_offset_elems` shifts the weight base by that
@@ -4197,7 +4201,7 @@ inline MinRunResult run_min_grp_matmul(
     EXPECT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns,
                       gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb, biases,
                       gv.beta, dsts, gv.ldc, gv.is_wc, params,
-                      /*moe_postop=*/nullptr, /*gated_act=*/nullptr),
+                      /*weighted_reduce=*/nullptr, /*gated_act=*/nullptr),
             zendnnl::error_handling::status_t::success);
     MinRunResult r;
     r.dst = dst;
@@ -4238,7 +4242,7 @@ struct MinRunResultT {
 
 // `N_dim` lets a caller pick an N that no CK `pack_nr` (32 or 64) divides,
 // which is a PER-CALL custom-kernel refusal: it leaves
-// `grp_matmul_custom_kernel_effective()` (master + family sub-knobs + weight
+// `group_matmul_custom_kernel_candidate()` (master + family sub-knobs + weight
 // scales) untouched, so AUTO mixed mode stays ELIGIBLE process-wide while
 // `ck_eligible_*` declines this particular weight.  That is the only way to
 // reach the local refusal handling; turning a family sub-knob off instead
@@ -4289,7 +4293,7 @@ inline MinRunResultT<T> run_min_grp_matmul_typed(data_type_t dt,
     EXPECT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns,
                       gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb, biases,
                       gv.beta, dsts, gv.ldc, gv.is_wc, params,
-                      /*moe_postop=*/nullptr, /*gated_act=*/nullptr),
+                      /*weighted_reduce=*/nullptr, /*gated_act=*/nullptr),
             zendnnl::error_handling::status_t::success);
     MinRunResultT<T> r;
     r.dst = dst;
@@ -4353,7 +4357,7 @@ UnsupportedPhaseSplitResult<T> run_unsupported_phase_split(
     result.status = group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms,
             gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, weights, gv.ldb, biases,
             gv.beta, dsts, gv.ldc, gv.is_wc, params,
-            /*moe_postop=*/nullptr, /*gated_act=*/nullptr);
+            /*weighted_reduce=*/nullptr, /*gated_act=*/nullptr);
     for (int e = 0; e < E; ++e) {
         result.weights_changed |= std::memcmp(wei[e].data(), raw[e].data(),
                                           raw[e].size() * sizeof(T))
@@ -4422,7 +4426,7 @@ UnsupportedFusedPhaseSplitResult<T> run_unsupported_fused_phase_split(
     result.status = group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms,
             gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, w13_ptrs, gv.ldb, no_bias,
             gv.beta, dst_op1, ldc_op1, gv.is_wc, params,
-            /*moe_postop=*/nullptr, &act, &fused);
+            /*weighted_reduce=*/nullptr, &act, &fused);
     for (int e = 0; e < E; ++e) {
         result.w13_changed |= std::memcmp(w13[e].data(), raw_w13[e].data(),
                                       raw_w13[e].size() * sizeof(T))
@@ -4511,7 +4515,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade,
         GlobalAlgo3PromptPin1Wc2FailsGracefullyBf16) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
-    if (!custom_kernel::dispatch_supported()) {
+    if (!custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "needs the BF16 custom kernel";
     }
     AlgoEnvGuard global_algo3(3);
@@ -4709,7 +4713,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkOffStrictStableWc2MatchesWc1) {
                        << d;
 }
 
-// Default strategy would otherwise select DecodeDynamic for this
+// Default strategy would otherwise select CcdExpertWaves for this
 // four-expert decode shape.  With the custom kernel off, WC=2 still
 // reorders the prompt weight into the caller's buffer; decode is
 // retargeted onto the strict-stable split that cross-warm packed.
@@ -4796,7 +4800,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade,
         const auto stats
                 = group_matmul_prepack::test_api::get_last_invocation_stats();
         EXPECT_TRUE(stats.valid);
-        EXPECT_EQ(stats.scheduling_algo, 3);
+        EXPECT_EQ(stats.group_schedule, 3);
         EXPECT_EQ(stats.cross_warm_regime,
                 group_matmul_prepack::CrossWarmRegime::none);
     }
@@ -4820,7 +4824,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade,
 //
 // The refusal is driven by an N that no CK `pack_nr` divides, NOT by the FP16
 // sub-knob.  Turning the sub-knob off would make
-// `grp_matmul_custom_kernel_effective()` false, which downgrades the whole
+// `group_matmul_custom_kernel_candidate()` false, which downgrades the whole
 // process to WC=1 -- the test would then pass through the global downgrade and
 // would keep passing even if `mixed_inplace_for_wei()` or the `allow_inplace`
 // arm regressed.  The mixed-mode assertion below is what pins that
@@ -4861,7 +4865,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade, AutoF16Wc2CkRefusedKeepsWeightsRaw) {
                 = group_matmul_prepack::test_api::get_last_invocation_stats();
     }
     EXPECT_TRUE(refused_stats.valid);
-    EXPECT_EQ(refused_stats.scheduling_algo, 3)
+    EXPECT_EQ(refused_stats.group_schedule, 3)
             << "an unpinned multi-expert FP16 prompt must stay on ALGO 3 even "
                "when this shape is refused by the custom kernel";
     EXPECT_EQ(refused_stats.cross_warm_regime,
@@ -4922,7 +4926,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade,
                 = group_matmul_prepack::test_api::get_last_invocation_stats();
     }
     EXPECT_TRUE(narrow_stats.valid);
-    EXPECT_EQ(narrow_stats.scheduling_algo, 3)
+    EXPECT_EQ(narrow_stats.group_schedule, 3)
             << "this regression is the ALGO 3 narrow-N full-weight warm; "
                "ALGO 1 does not take that arm";
     EXPECT_EQ(narrow_stats.cross_warm_regime,
@@ -5004,7 +5008,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade,
             group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns,
                     gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb, biases,
                     gv.beta, dptr, gv.ldc, gv.is_wc, params,
-                    /*moe_postop=*/nullptr, /*gated_act=*/nullptr);
+                    /*weighted_reduce=*/nullptr, /*gated_act=*/nullptr);
         });
     }
     for (auto &th : ths)
@@ -5247,12 +5251,12 @@ TEST(TestGroupMatmulWeightCacheDowngrade,
     auto op2 = make_uniform_params(2, data_type_t::bf16);
     const std::vector<int> M = {128, 128};
     const std::vector<int> N = {128, 128};
-    ASSERT_TRUE(grp_matmul_custom_kernel_effective(
+    ASSERT_TRUE(group_matmul_custom_kernel_candidate(
             op1, M, N, grp_matmul_gated_act_t::none));
-    ASSERT_TRUE(grp_matmul_custom_kernel_effective(
+    ASSERT_TRUE(group_matmul_custom_kernel_candidate(
             op2, M, N, grp_matmul_gated_act_t::none));
 
-    EXPECT_TRUE(prepare_grouped_auto_weight_cache(
+    EXPECT_TRUE(prepare_auto_weight_cache(
             op1, /*custom_kernel_effective=*/true, &op2));
     EXPECT_TRUE(cfg.get_grp_auto_mixed_inplace())
             << "the first fused call must license cross-warm before a vertical "
@@ -5365,12 +5369,12 @@ TEST(TestGroupMatmulWeightCacheDowngrade, F32AutoWc2StaysOutOfPlace) {
     int32_t effective_weight_cache = -1;
     bool mixed_inplace = true;
     {
-        GemmModeCaptureGuard mode_capture;
+        ExecutionPathCaptureGuard mode_capture;
         reset_grp_matmul_caches();
         WeightCacheGuard wc(2);
         test = run_min_grp_matmul_typed<float>(data_type_t::f32);
         const char *captured
-                = test_api::s_last_group_matmul_direct_gemm_mode.load(
+                = test_api::s_last_group_matmul_direct_execution_path.load(
                         std::memory_order_relaxed);
         ASSERT_NE(captured, nullptr);
         mode = captured;
@@ -5479,7 +5483,7 @@ struct Bf16Layer {
         return group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms,
                 gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb, biases,
                 gv.beta, dsts, gv.ldc, gv.is_wc, params,
-                /*moe_postop=*/nullptr, /*gated_act=*/nullptr);
+                /*weighted_reduce=*/nullptr, /*gated_act=*/nullptr);
     }
 
     // The experts as a sequential chain (`src.size() == 1`): each op reads
@@ -5505,7 +5509,7 @@ struct Bf16Layer {
         return group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms,
                 gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb, biases,
                 gv.beta, dsts, gv.ldc, gv.is_wc, params,
-                /*moe_postop=*/nullptr, /*gated_act=*/nullptr);
+                /*weighted_reduce=*/nullptr, /*gated_act=*/nullptr);
     }
 };
 
@@ -5517,7 +5521,7 @@ struct Bf16Layer {
 TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkInPlaceWc2MatchesWc1) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
-    if (!custom_kernel::dispatch_supported()) {
+    if (!custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "the BF16 custom kernel needs AVX-512 BF16";
     }
     AlgoEnvGuard reset_algo(0);
@@ -5551,7 +5555,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade, AutoBf16MoeOffAlgo3KeepsMixedMode) {
     SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
-    if (!custom_kernel::dispatch_supported()) {
+    if (!custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "the BF16 custom kernel needs AVX-512 BF16";
     }
     AlgoEnvGuard reset_algo(0);
@@ -5601,7 +5605,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade, AutoSingleExpertAfterLicensedCall) {
     SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
-    if (!custom_kernel::dispatch_supported()) {
+    if (!custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "the BF16 custom kernel needs AVX-512 BF16";
     }
     AlgoEnvGuard reset_algo(0);
@@ -5648,7 +5652,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade,
         AutoCkInPlacePrepackPacksIdleExperts) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
-    if (!custom_kernel::dispatch_supported()) {
+    if (!custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "the BF16 custom kernel needs AVX-512 BF16";
     }
     AlgoEnvGuard reset_algo(0);
@@ -5685,7 +5689,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade,
 TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkInPlaceHonoursPerCallCap) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
-    if (!custom_kernel::dispatch_supported()) {
+    if (!custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "the BF16 custom kernel needs AVX-512 BF16";
     }
     AlgoEnvGuard reset_algo(0);
@@ -5740,13 +5744,14 @@ TEST(TestGroupMatmulWeightCacheDowngrade, PerTileHonoursPerCallCacheOff) {
     std::vector<std::vector<bfloat16_t>> first, second, ref;
     const auto run_tiled
             = [&](Bf16Layer &l, std::vector<std::vector<bfloat16_t>> &dst) {
-        GemmModeCaptureGuard capture;
+        ExecutionPathCaptureGuard capture;
         ASSERT_EQ(l.run(M, dst, 1.0f, 8, /*weight_cache_type=*/0),
                 status_t::success);
-        const char *mode = test_api::s_last_group_matmul_direct_gemm_mode.load(
-                std::memory_order_relaxed);
+        const char *mode
+                = test_api::s_last_group_matmul_direct_execution_path.load(
+                        std::memory_order_relaxed);
         ASSERT_NE(mode, nullptr);
-        EXPECT_EQ(std::string(mode).rfind("flat_n_tile", 0), 0u) << mode;
+        EXPECT_EQ(executed_algo_from_execution_path(mode), 3) << mode;
         EXPECT_EQ(std::strstr(mode, "sequential"), nullptr)
                 << "the call never reached the per-tile path; mode=" << mode;
     };
@@ -5882,7 +5887,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade, CappedCallKeepsMixedModePolicy) {
 TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkInPlaceSequentialChain) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
-    if (!custom_kernel::dispatch_supported()) {
+    if (!custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "the BF16 custom kernel needs AVX-512 BF16";
     }
     AlgoEnvGuard reset_algo(0);
@@ -5942,7 +5947,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkInPlaceLeavesOtherLayoutsRaw) {
 TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkInPlaceRefusedCallFailsClosed) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
-    if (!custom_kernel::dispatch_supported()) {
+    if (!custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "the BF16 custom kernel needs AVX-512 BF16";
     }
     AlgoEnvGuard reset_algo(0);
@@ -5964,7 +5969,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkInPlaceRefusedCallFailsClosed) {
 TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkInPlaceConcurrentMatchesWc1) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
-    if (!custom_kernel::dispatch_supported()) {
+    if (!custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "the BF16 custom kernel needs AVX-512 BF16";
     }
     AlgoEnvGuard reset_algo(0);
@@ -6006,7 +6011,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkInPlaceConcurrentMatchesWc1) {
 TEST(TestGroupMatmulWeightCacheDowngrade, Algo3PartialInPlacePackFailsClosed) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
-    if (!custom_kernel::dispatch_supported()) {
+    if (!custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "the BF16 custom kernel needs AVX-512 BF16";
     }
     AlgoEnvGuard algo3(3);
@@ -6038,7 +6043,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade, Algo3PartialInPlacePackFailsClosed) {
     EXPECT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns,
                       gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb, biases,
                       gv.beta, dsts, gv.ldc, gv.is_wc, params,
-                      /*moe_postop=*/nullptr, /*gated_act=*/nullptr),
+                      /*weighted_reduce=*/nullptr, /*gated_act=*/nullptr),
             status_t::failure);
 }
 
@@ -6060,7 +6065,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, UnpinnedPromptRoutesToAlgo3AtEveryShape) {
                  Shape {40, 8, 64}, Shape {512, 16, 64}, Shape {256, 8, 1}}) {
         auto s = build_auto_probe(
                 sh.M, /*K=*/2048, /*N=*/1536, sh.num_ops, sh.num_threads);
-        EXPECT_EQ(select_grp_matmul_algo(
+        EXPECT_EQ(group_matmul_algo_select(
                           s.layout, s.M, s.N, s.K, s.params, s.num_threads),
                 3)
                 << "M=" << sh.M << " num_ops=" << sh.num_ops
@@ -6083,7 +6088,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, FewExpertsDecodeRoutesToAlgo3) {
     for (const int m : {16, 1}) {
         auto s = build_auto_probe(m, /*K=*/4096, /*N=*/14336,
                 /*num_ops=*/8, /*num_threads=*/128);
-        EXPECT_EQ(select_grp_matmul_algo(
+        EXPECT_EQ(group_matmul_algo_select(
                           s.layout, s.M, s.N, s.K, s.params, s.num_threads),
                 3)
                 << "M=" << m;
@@ -6108,7 +6113,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, PhaseKnobOutranksGlobalAlgoBothPhases) {
                 AutoDecodeAlgoOverride decode_pin(phase_pin);
                 auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
                         /*num_ops=*/16, /*num_threads=*/64);
-                EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K,
+                EXPECT_EQ(group_matmul_algo_select(s.layout, s.M, s.N, s.K,
                                   s.params, s.num_threads),
                         phase_pin)
                         << "AUTO_DECODE_ALGO=" << phase_pin
@@ -6121,7 +6126,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, PhaseKnobOutranksGlobalAlgoBothPhases) {
                 AutoPromptAlgoOverride prompt_pin(phase_pin);
                 auto s = build_auto_probe(/*M=*/256, /*K=*/2048, /*N=*/1536,
                         /*num_ops=*/16, /*num_threads=*/64);
-                EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K,
+                EXPECT_EQ(group_matmul_algo_select(s.layout, s.M, s.N, s.K,
                                   s.params, s.num_threads),
                         phase_pin)
                         << "AUTO_PROMPT_ALGO=" << phase_pin
@@ -6143,7 +6148,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, GlobalStillAppliesToTheUnsetPhase) {
         AutoDecodeAlgoOverride decode_pin(3); // only decode is pinned
         auto prompt = build_auto_probe(/*M=*/256, /*K=*/2048, /*N=*/1536,
                 /*num_ops=*/16, /*num_threads=*/64);
-        EXPECT_EQ(select_grp_matmul_algo(prompt.layout, prompt.M, prompt.N,
+        EXPECT_EQ(group_matmul_algo_select(prompt.layout, prompt.M, prompt.N,
                           prompt.K, prompt.params, prompt.num_threads),
                 6)
                 << "prompt knob unset → the global pin still governs prompt";
@@ -6154,7 +6159,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, GlobalStillAppliesToTheUnsetPhase) {
         AutoPromptAlgoOverride prompt_pin(1); // only prompt is pinned
         auto decode = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
                 /*num_ops=*/16, /*num_threads=*/64);
-        EXPECT_EQ(select_grp_matmul_algo(decode.layout, decode.M, decode.N,
+        EXPECT_EQ(group_matmul_algo_select(decode.layout, decode.M, decode.N,
                           decode.K, decode.params, decode.num_threads),
                 6)
                 << "decode knob unset → the global pin still governs decode";
@@ -6176,7 +6181,7 @@ TEST(TestGroupMatmulAutoPhaseEnv,
                 AlgoEnvGuard reset_algo(0); // global AUTO, no phase pins
                 auto s = build_auto_probe(
                         M, /*K=*/4096, /*N=*/14336, num_ops, nthr);
-                const int got = select_grp_matmul_algo(
+                const int got = group_matmul_algo_select(
                         s.layout, s.M, s.N, s.K, s.params, s.num_threads);
                 EXPECT_NE(got, 2)
                         << "AUTO selected ALGO 2 without an env pin at "
@@ -6200,7 +6205,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, FewExpertsExplicitDecodePinStillWins) {
 
     auto s = build_auto_probe(/*M=*/16, /*K=*/4096, /*N=*/14336,
             /*num_ops=*/8, /*num_threads=*/128);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             3)
             << "explicit AUTO_DECODE_ALGO=3 must win over the few-experts "
@@ -6216,13 +6221,13 @@ TEST(TestGroupMatmulW4A8RuntimeAlgo, AutoIgnoresInnerKernel) {
     using namespace moe_test_utils;
     AlgoEnvGuard auto_algo(0);
 
-    EXPECT_EQ(w4a8_runtime_algo(3, matmul_algo_t::aocl_dlp_blocked),
+    EXPECT_EQ(resolve_w4a8_backend(3, matmul_algo_t::aocl_dlp_blocked),
             matmul_algo_t::aocl_dlp_blocked);
-    EXPECT_EQ(w4a8_runtime_algo(3, matmul_algo_t::aocl_dlp),
+    EXPECT_EQ(resolve_w4a8_backend(3, matmul_algo_t::aocl_dlp),
             matmul_algo_t::aocl_dlp_blocked);
-    EXPECT_EQ(w4a8_runtime_algo(1, matmul_algo_t::aocl_dlp_blocked),
+    EXPECT_EQ(resolve_w4a8_backend(1, matmul_algo_t::aocl_dlp_blocked),
             matmul_algo_t::aocl_dlp);
-    EXPECT_EQ(w4a8_runtime_algo(1, matmul_algo_t::aocl_dlp),
+    EXPECT_EQ(resolve_w4a8_backend(1, matmul_algo_t::aocl_dlp),
             matmul_algo_t::aocl_dlp);
 }
 
@@ -6232,16 +6237,16 @@ TEST(TestGroupMatmulW4A8RuntimeAlgo, PinnedGroupAlgoRespectsInnerKernel) {
 
     {
         AlgoEnvGuard pin_algo3(3);
-        EXPECT_EQ(w4a8_runtime_algo(3, matmul_algo_t::aocl_dlp_blocked),
+        EXPECT_EQ(resolve_w4a8_backend(3, matmul_algo_t::aocl_dlp_blocked),
                 matmul_algo_t::aocl_dlp_blocked);
-        EXPECT_EQ(w4a8_runtime_algo(3, matmul_algo_t::aocl_dlp),
+        EXPECT_EQ(resolve_w4a8_backend(3, matmul_algo_t::aocl_dlp),
                 matmul_algo_t::aocl_dlp);
     }
     {
         AlgoEnvGuard pin_algo1(1);
-        EXPECT_EQ(w4a8_runtime_algo(1, matmul_algo_t::aocl_dlp_blocked),
+        EXPECT_EQ(resolve_w4a8_backend(1, matmul_algo_t::aocl_dlp_blocked),
                 matmul_algo_t::aocl_dlp_blocked);
-        EXPECT_EQ(w4a8_runtime_algo(1, matmul_algo_t::aocl_dlp),
+        EXPECT_EQ(resolve_w4a8_backend(1, matmul_algo_t::aocl_dlp),
                 matmul_algo_t::aocl_dlp);
     }
 }
@@ -6261,12 +6266,12 @@ TEST(TestGroupMatmulExpertKernel, AppliesPolicyOnlyToW4A8Experts) {
     bf16_params.dtypes.wei = data_type_t::bf16;
     bf16_params.dtypes.dst = data_type_t::bf16;
 
-    EXPECT_EQ(resolve_expert_kernel(3, matmul_algo_t::aocl_dlp, w4a8_params),
+    EXPECT_EQ(resolve_expert_backend(3, matmul_algo_t::aocl_dlp, w4a8_params),
             matmul_algo_t::aocl_dlp_blocked);
-    EXPECT_EQ(resolve_expert_kernel(
+    EXPECT_EQ(resolve_expert_backend(
                       1, matmul_algo_t::aocl_dlp_blocked, w4a8_params),
             matmul_algo_t::aocl_dlp);
-    EXPECT_EQ(resolve_expert_kernel(
+    EXPECT_EQ(resolve_expert_backend(
                       1, matmul_algo_t::aocl_dlp_blocked, bf16_params),
             matmul_algo_t::aocl_dlp_blocked)
             << "non-W4A8 experts must preserve the selected inner kernel";
@@ -6288,14 +6293,14 @@ TEST(TestGroupMatmulAutoPhaseEnv, W4A8PromptRunsAlgo3) {
     // keeps the shape rules.
     const bool vnni
             = zendnnl::lowoha::matmul::custom_kernel::avx512vnni_available();
-    auto_algo_trace trace;
-    EXPECT_EQ(select_grp_matmul_algo(
+    GroupMatmulAlgoTrace trace;
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads, &trace),
             vnni ? 3 : 1);
     EXPECT_STREQ(trace.reason, vnni ? "auto_algo3" : "auto_rule07_prompt_seq");
 
     AlgoLegacyOverride legacy(true);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads, &trace),
             1)
             << "an explicit ALGO 0 W4A8 prompt must use the ALGO 1 default";
@@ -6381,8 +6386,8 @@ TEST(TestGroupMatmulAutoPhaseEnv, PerGroupInt8KeepsShapeRules) {
             p.quant_params.wei_scale.dt = data_type_t::f32;
             p.quant_params.wei_scale.buff = &wei_scale_sentinel;
         }
-        auto_algo_trace trace;
-        EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+        GroupMatmulAlgoTrace trace;
+        EXPECT_EQ(group_matmul_algo_select(s.layout, s.M, s.N, s.K, s.params,
                           s.num_threads, &trace),
                 c.algo)
                 << "groups=" << c.groups << " experts=" << c.num_ops
@@ -6402,17 +6407,17 @@ TEST(TestGroupMatmulAutoPhaseEnv, Bf16MoeScopeCountsDeclaredPool) {
     reset_grp_matmul_caches();
     AlgoEnvGuard reset_algo(0);
     SingleExpertCkPolicy single_expert_off(0, 0, 0);
-    auto_algo_trace trace;
+    GroupMatmulAlgoTrace trace;
 
     auto one = build_auto_probe(/*M=*/256, /*K=*/2048, /*N=*/1536,
             /*num_ops=*/1, /*num_threads=*/64);
-    EXPECT_EQ(select_grp_matmul_algo(one.layout, one.M, one.N, one.K,
+    EXPECT_EQ(group_matmul_algo_select(one.layout, one.M, one.N, one.K,
                       one.params, one.num_threads, &trace),
             1);
     EXPECT_STREQ(trace.reason, "auto_rule07_prompt_seq");
     one.params[0].active_matmul = 1;
     one.params[0].total_matmul = 8;
-    EXPECT_EQ(select_grp_matmul_algo(one.layout, one.M, one.N, one.K,
+    EXPECT_EQ(group_matmul_algo_select(one.layout, one.M, one.N, one.K,
                       one.params, one.num_threads, &trace),
             3);
     EXPECT_STREQ(trace.reason, "auto_algo3");
@@ -6423,7 +6428,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, Bf16MoeScopeCountsDeclaredPool) {
         p.mem_format_b = 'r';
         p.lowoha_algo = matmul_algo_t::aocl_dlp_blocked;
     }
-    EXPECT_EQ(select_grp_matmul_algo(packed.layout, packed.M, packed.N,
+    EXPECT_EQ(group_matmul_algo_select(packed.layout, packed.M, packed.N,
                       packed.K, packed.params, packed.num_threads, &trace),
             1);
     EXPECT_STREQ(trace.reason, "auto_rule07_prompt_seq");
@@ -6447,7 +6452,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, CapacityOverflowIgnoresPhaseEnv) {
     auto s = build_auto_probe(/*M=*/4, /*K=*/2880, /*N=*/5760,
             /*num_ops=*/300, /*num_threads=*/128);
     apply_shape_rules_probe(s);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             1)
             << "R0 capacity gate must override phase env "
@@ -6478,7 +6483,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, DecodeUsesActiveExpertCountNotSlotCount) {
     apply_shape_rules_probe(s);
     for (int i = 58; i < 88; ++i)
         s.M[i] = 0;
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             3)
             << "decode slot count(88) > threads(64) but active(58) <= "
@@ -6490,7 +6495,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, DecodeUsesActiveExpertCountNotSlotCount) {
     // than on a distinct algo: see the reason= telemetry for the split.
     for (int i = 0; i < 88; ++i)
         s.M[i] = (i < 78) ? 16 : 0;
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             3)
             << "decode active(78) > threads(64) must route to ALGO 3";
@@ -6512,7 +6517,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, DefaultPromptRoutesToAlgo1) {
     auto s = build_auto_probe(/*M=*/256, /*K=*/4096, /*N=*/14336,
             /*num_ops=*/8, /*num_threads=*/128);
     apply_shape_rules_probe(s);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             1)
             << "the unpinned prompt policy must route prompt → ALGO 1";
@@ -6532,7 +6537,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, FewExpertsDecodeShallowMRoutesToAlgo1) {
     auto s = build_auto_probe(/*M=*/16, /*K=*/4096, /*N=*/14336,
             /*num_ops=*/8, /*num_threads=*/128);
     apply_shape_rules_probe(s);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             1)
             << "8 active * 4 < 128 threads must select full-team ALGO 1";
@@ -6554,7 +6559,7 @@ TEST(TestGroupMatmulAutoPhaseEnv,
     auto s = build_auto_probe(/*M=*/1, /*K=*/4096, /*N=*/14336,
             /*num_ops=*/8, /*num_threads=*/128);
     apply_shape_rules_probe(s);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             1)
             << "AUTO must not select ALGO 2: a ≤8-expert single-token decode "
@@ -6577,7 +6582,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, FewExpertsUsesTotalNotActiveCount) {
     apply_shape_rules_probe(s);
     s.params[0].active_matmul = 4;
     s.params[0].total_matmul = 16;
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             3)
             << "Rule 0.5 must use TOTAL (16), not active (4); total>8 → "
@@ -6588,7 +6593,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, FewExpertsUsesTotalNotActiveCount) {
     // different outcome proves that TOTAL scopes entry to Rule 0.5 while
     // ACTIVE count drives its occupancy decision.
     s.params[0].total_matmul = 8;
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             1)
             << "total=8 (≤ threshold) must fire Rule 0.5 even with only 4 "
@@ -6612,7 +6617,7 @@ TEST(TestGroupMatmulAutoPhaseEnv,
     auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
             /*num_ops=*/88, /*num_threads=*/64);
     apply_shape_rules_probe(s);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             3)
             << "decode num_ops(88) > num_threads(64) must be decided by Rule "
@@ -6635,7 +6640,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, PromptManyExpertsDeepRoutesToAlgo1) {
     auto s = build_auto_probe(/*M=*/768, /*K=*/2048, /*N=*/1536,
             /*num_ops=*/88, /*num_threads=*/64);
     apply_shape_rules_probe(s);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             1)
             << "an unpinned prompt must route to ALGO 1 regardless of depth";
@@ -6654,7 +6659,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, PromptManyExpertsThinRoutesToAlgo1) {
     auto s = build_auto_probe(/*M=*/kDecodeMaxM + 1, /*K=*/2048, /*N=*/1536,
             /*num_ops=*/88, /*num_threads=*/64);
     apply_shape_rules_probe(s);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             1)
             << "an unpinned prompt must route to ALGO 1 regardless of depth";
@@ -6671,7 +6676,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, PromptMTileRegimeRoutesToAlgo1) {
     auto s = build_auto_probe(/*M=*/512, /*K=*/2048, /*N=*/1536,
             /*num_ops=*/16, /*num_threads=*/64);
     apply_shape_rules_probe(s);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             1)
             << "the unpinned prompt policy must route M-tile shapes to ALGO 1";
@@ -6679,7 +6684,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, PromptMTileRegimeRoutesToAlgo1) {
 
 // Rule 0.7: a PROMPT-class wide-N frame (few actives × shallow M ×
 // large N: max_M>1 && total_need*2 <= num_threads) routes to ALGO 1
-// (sequential full-team) — reproducing flat_m_tile's old wide-N fallback,
+// (sequential full-team) — reproducing m_tile_execute's old wide-N fallback,
 // now that ALGO 2 is pure M-tile.
 TEST(TestGroupMatmulAutoPhaseEnv, PromptWideNRoutesToAlgo1) {
     using namespace zendnnl::lowoha::matmul;
@@ -6692,7 +6697,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, PromptWideNRoutesToAlgo1) {
     auto s = build_auto_probe(/*M=*/kDecodeMaxM + 1, /*K=*/2048, /*N=*/1536,
             /*num_ops=*/8, /*num_threads=*/64);
     apply_shape_rules_probe(s);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             1)
             << "prompt-class wide-N (8 actives, M just above kDecodeMaxM) "
@@ -6712,7 +6717,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, S8FewExpertsDecodeStillTakesRule05) {
         p.dtypes.dst = data_type_t::bf16;
         p.dtypes.compute = data_type_t::s8;
     }
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             1)
             << "s8/W8A8 few-expert shallow-M decode must use Rule 0.5 → "
@@ -6732,8 +6737,8 @@ TEST(TestGroupMatmulAutoPhaseEnv,
     auto s = build_auto_probe(/*M=*/1, /*K=*/4096, /*N=*/14336,
             /*num_ops=*/8, /*num_threads=*/32);
     apply_w4a8_auto_probe(s);
-    auto_algo_trace trace;
-    EXPECT_EQ(select_grp_matmul_algo(
+    GroupMatmulAlgoTrace trace;
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads, &trace),
             3)
             << "8 active * 4 >= 32 threads must route W4A8 through the "
@@ -6752,8 +6757,8 @@ TEST(TestGroupMatmulAutoPhaseEnv,
     auto s = build_auto_probe(/*M=*/16, /*K=*/4096, /*N=*/14336,
             /*num_ops=*/8, /*num_threads=*/128);
     apply_w4a8_auto_probe(s);
-    auto_algo_trace trace;
-    EXPECT_EQ(select_grp_matmul_algo(
+    GroupMatmulAlgoTrace trace;
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads, &trace),
             1)
             << "8 active * 4 < 128 threads must route W4A8 through the "
@@ -6776,8 +6781,8 @@ TEST(TestGroupMatmulAutoPhaseEnv, W4A8InactiveLeftoverUsesRule05Occupancy) {
     s.params[0].dtypes.wei = data_type_t::bf16;
     s.params[0].dynamic_quant = false;
     s.params[0].quant_params = {};
-    auto_algo_trace trace;
-    EXPECT_EQ(select_grp_matmul_algo(
+    GroupMatmulAlgoTrace trace;
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads, &trace),
             3)
             << "7 active * 4 >= 28 threads must use Rule 0.5's ALGO 3 arm";
@@ -6794,7 +6799,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, W4A8DecodeHonoursExplicitPin) {
     auto s = build_auto_probe(/*M=*/16, /*K=*/4096, /*N=*/14336,
             /*num_ops=*/8, /*num_threads=*/128);
     apply_w4a8_auto_probe(s);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             2)
             << "an explicit AUTO_DECODE_ALGO pin must outrank generic Rule 0.5";
@@ -6811,8 +6816,8 @@ TEST(TestGroupMatmulAutoPhaseEnv, W4A8DecodeHonoursNTileSafetyClamp) {
     apply_w4a8_auto_probe(s);
     for (auto &c : s.layout)
         c = 'c';
-    auto_algo_trace trace;
-    EXPECT_EQ(select_grp_matmul_algo(
+    GroupMatmulAlgoTrace trace;
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads, &trace),
             1)
             << "the generic ALGO 3 occupancy arm must honour n_tile_safe";
@@ -6822,7 +6827,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, W4A8DecodeHonoursNTileSafetyClamp) {
 // Grouped-s8 post-quant call with INACTIVE experts must NOT be vetoed to
 // ALGO 1.  The grouped/fallback DQ pre-pass leaves inactive (M==0)
 // experts at bf16 + dynamic_quant=false while active experts are s8 +
-// per-token src_scale.  check_m_tile_safe / check_n_tile_extra must skip
+// per-token src_scale.  m_tile_supported / n_tile_supported must skip
 // the inactive experts (and key dtype uniformity off the first active
 // one) so a >8-expert decode shape still routes to ALGO 3, isolating the
 // n_tile/m_tile eligibility veto.
@@ -6873,7 +6878,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, GroupedS8WithInactiveExpertsKeepsAlgo3) {
         }
     }
 
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             3)
             << "grouped-s8 decode with inactive experts must still route to "
@@ -6895,7 +6900,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, PromptEnvDoesNotLeakIntoDecode) {
     // Legacy rule 3 → ALGO 3.  Prompt env must not bleed in.
     auto s = build_auto_probe(/*M=*/16, /*K=*/2880, /*N=*/5760,
             /*num_ops=*/32, /*num_threads=*/64);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             3)
             << "Decode-class call must read AUTO_DECODE_ALGO (=0, legacy "
@@ -6914,7 +6919,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, DecodeEnvDoesNotLeakIntoPrompt) {
     // Legacy rule 2 → ALGO 1.  Decode env must not bleed in.
     auto s = build_auto_probe(/*M=*/256, /*K=*/4096, /*N=*/14336,
             /*num_ops=*/8, /*num_threads=*/128);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             1)
             << "Prompt-class call must read AUTO_PROMPT_ALGO (=0, legacy "
@@ -7023,7 +7028,7 @@ TEST(TestGroupMatmulAutoPhaseEnv,
 
         auto decode = build_auto_probe(/*M=*/8, /*K=*/2048, /*N=*/1536,
                 /*num_ops=*/16, /*num_threads=*/64);
-        EXPECT_EQ(select_grp_matmul_algo(decode.layout, decode.M, decode.N,
+        EXPECT_EQ(group_matmul_algo_select(decode.layout, decode.M, decode.N,
                           decode.K, decode.params, decode.num_threads),
                 6)
                 << "inactive prompt phase 4 must not disturb decode ALGO 6";
@@ -7041,7 +7046,7 @@ TEST(TestGroupMatmulAutoPhaseEnv,
 
         auto prompt = build_auto_probe(/*M=*/256, /*K=*/2048, /*N=*/1536,
                 /*num_ops=*/16, /*num_threads=*/64);
-        EXPECT_EQ(select_grp_matmul_algo(prompt.layout, prompt.M, prompt.N,
+        EXPECT_EQ(group_matmul_algo_select(prompt.layout, prompt.M, prompt.N,
                           prompt.K, prompt.params, prompt.num_threads),
                 6)
                 << "inactive decode phase 4 must not disturb prompt ALGO 6";
@@ -7088,7 +7093,7 @@ TEST(TestGroupMatmulAutoPhaseEnv,
     auto s = build_auto_probe(/*M=*/256, /*K=*/4096, /*N=*/14336,
             /*num_ops=*/8, /*num_threads=*/128);
     apply_shape_rules_probe(s);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             1)
             << "phase 4 must expose the inherited prompt policy (ALGO 1)";
@@ -7096,7 +7101,7 @@ TEST(TestGroupMatmulAutoPhaseEnv,
     // Decode shape with n_tile_safe=true → inherited decode default 3.
     auto sd = build_auto_probe(/*M=*/16, /*K=*/2880, /*N=*/5760,
             /*num_ops=*/32, /*num_threads=*/64);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       sd.layout, sd.M, sd.N, sd.K, sd.params, sd.num_threads),
             3)
             << "phase 4 must expose the inherited decode default (=3)";
@@ -7106,8 +7111,8 @@ TEST(TestGroupMatmulAutoPhaseEnv,
     auto wide_prompt = build_auto_probe(/*M=*/kDecodeMaxM + 1, /*K=*/2048,
             /*N=*/8192, /*num_ops=*/8, /*num_threads=*/64);
     apply_shape_rules_probe(wide_prompt);
-    auto_algo_trace prompt_trace;
-    EXPECT_EQ(select_grp_matmul_algo(wide_prompt.layout, wide_prompt.M,
+    GroupMatmulAlgoTrace prompt_trace;
+    EXPECT_EQ(group_matmul_algo_select(wide_prompt.layout, wide_prompt.M,
                       wide_prompt.N, wide_prompt.K, wide_prompt.params,
                       wide_prompt.num_threads, &prompt_trace),
             1);
@@ -7117,8 +7122,8 @@ TEST(TestGroupMatmulAutoPhaseEnv,
     auto few_decode = build_auto_probe(/*M=*/8, /*K=*/2048, /*N=*/8192,
             /*num_ops=*/4, /*num_threads=*/64);
     apply_shape_rules_probe(few_decode);
-    auto_algo_trace decode_trace;
-    EXPECT_EQ(select_grp_matmul_algo(few_decode.layout, few_decode.M,
+    GroupMatmulAlgoTrace decode_trace;
+    EXPECT_EQ(group_matmul_algo_select(few_decode.layout, few_decode.M,
                       few_decode.N, few_decode.K, few_decode.params,
                       few_decode.num_threads, &decode_trace),
             1);
@@ -7128,8 +7133,8 @@ TEST(TestGroupMatmulAutoPhaseEnv,
     // A BF16/FP16 layer of several experts runs ALGO 3 after the decline too.
     auto moe = build_auto_probe(/*M=*/256, /*K=*/4096, /*N=*/14336,
             /*num_ops=*/8, /*num_threads=*/128);
-    auto_algo_trace moe_trace;
-    EXPECT_EQ(select_grp_matmul_algo(moe.layout, moe.M, moe.N, moe.K,
+    GroupMatmulAlgoTrace moe_trace;
+    EXPECT_EQ(group_matmul_algo_select(moe.layout, moe.M, moe.N, moe.K,
                       moe.params, moe.num_threads, &moe_trace),
             3);
     EXPECT_STREQ(moe_trace.reason, "auto_algo3");
@@ -7147,13 +7152,13 @@ TEST(TestGroupMatmulAutoPhaseEnv, ExplicitPromptAlgo2PinBeatsRegimeRouting) {
     // Prompt frame: few experts, M just above the decode cutoff.
     auto s = build_auto_probe(/*M=*/kDecodeMaxM + 1, /*K=*/2048, /*N=*/8192,
             /*num_ops=*/8, /*num_threads=*/64);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             3)
             << "the unpinned prompt default must route to ALGO 3";
 
     AutoPromptAlgoOverride pin_prompt(2);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             2)
             << "an explicit AUTO_PROMPT_ALGO=2 must be honoured verbatim";
@@ -7172,8 +7177,8 @@ TEST(TestGroupMatmulAutoPhaseEnv, TraceNamesTheMatchedRule) {
                       int *algo_out, bool shape_rules = true) {
         auto s = build_auto_probe(M, K, N, num_ops, num_threads);
         if (shape_rules) { apply_shape_rules_probe(s); }
-        auto_algo_trace trace;
-        const int algo = select_grp_matmul_algo(
+        GroupMatmulAlgoTrace trace;
+        const int algo = group_matmul_algo_select(
                 s.layout, s.M, s.N, s.K, s.params, s.num_threads, &trace);
         if (algo_out != nullptr) { *algo_out = algo; }
         return std::string(trace.reason != nullptr ? trace.reason : "<none>");
@@ -7199,8 +7204,8 @@ TEST(TestGroupMatmulAutoPhaseEnv, TraceNamesTheMatchedRule) {
         auto s = build_auto_probe(/*M=*/8, /*K=*/2048, /*N=*/8192,
                 /*num_ops=*/4, /*num_threads=*/64);
         apply_w4a8_auto_probe(s);
-        auto_algo_trace trace;
-        algo = select_grp_matmul_algo(
+        GroupMatmulAlgoTrace trace;
+        algo = group_matmul_algo_select(
                 s.layout, s.M, s.N, s.K, s.params, s.num_threads, &trace);
         EXPECT_STREQ(trace.reason, "auto_rule05_few_active");
         EXPECT_EQ(algo, 1);
@@ -7255,8 +7260,8 @@ TEST(TestGroupMatmulAutoPhaseEnv, InvalidPromptValueFallsBackToDefault) {
                 << "value " << bogus
                 << " is outside {0,1,2,3,4,5,6} and must not read as an "
                    "explicit pin";
-        auto_algo_trace trace;
-        EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+        GroupMatmulAlgoTrace trace;
+        EXPECT_EQ(group_matmul_algo_select(s.layout, s.M, s.N, s.K, s.params,
                           s.num_threads, &trace),
                 3)
                 << "value " << bogus;
@@ -7360,17 +7365,17 @@ TEST(TestGroupMatmulAutoPhaseEnv, CapacityOverflowRoutesToAlgo3UnlessLegacy) {
 
     auto s = build_auto_probe(/*M=*/4, /*K=*/2880, /*N=*/5760,
             /*num_ops=*/300, /*num_threads=*/128);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             3);
     {
         AutoDecodeAlgoOverride force_decode(3);
-        EXPECT_EQ(select_grp_matmul_algo(
+        EXPECT_EQ(group_matmul_algo_select(
                           s.layout, s.M, s.N, s.K, s.params, s.num_threads),
                 3);
     }
     AutoDecodeAlgoOverride legacy_decode(0);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             1)
             << "the legacy cascade must keep num_ops > kNTilePlanMaxExperts "
@@ -7387,7 +7392,7 @@ TEST(TestGroupMatmulManyExperts, Algo3SlicesPastPlanCapacity) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
-    if (!custom_kernel::dispatch_supported()) {
+    if (!custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "needs the BF16 custom kernel (AVX512-BF16)";
     }
     CustomKernelOverride ck_on(true);
@@ -7458,17 +7463,18 @@ TEST(TestGroupMatmulManyExperts, Algo3SlicesPastPlanCapacity) {
             for (int e = 0; e < W; ++e) {
                 weis[e] = wei[e].data();
             }
-            GemmModeCaptureGuard capture;
+            ExecutionPathCaptureGuard capture;
             ASSERT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB,
                               gv.Ms, gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, weis,
                               gv.ldb, biases, gv.beta, dsts, gv.ldc, gv.is_wc,
-                              params, /*moe_postop=*/nullptr,
+                              params, /*weighted_reduce=*/nullptr,
                               /*gated_act=*/nullptr),
                     status_t::success)
                     << "algo=" << algo;
-            const char *m = zendnnl::lowoha::matmul::test_api::
-                                    s_last_group_matmul_direct_gemm_mode.load(
-                                            std::memory_order_relaxed);
+            const char *m
+                    = zendnnl::lowoha::matmul::test_api::
+                              s_last_group_matmul_direct_execution_path.load(
+                                      std::memory_order_relaxed);
             mode = m != nullptr ? m : "";
         };
 
@@ -7481,7 +7487,7 @@ TEST(TestGroupMatmulManyExperts, Algo3SlicesPastPlanCapacity) {
 
         EXPECT_NE(got_mode.find("_custom"), std::string::npos)
                 << "ALGO 3 ran '" << got_mode << "' off the custom kernel";
-        EXPECT_EQ(executed_algo_from_gemm_mode(got_mode.c_str()), 3)
+        EXPECT_EQ(executed_algo_from_execution_path(got_mode.c_str()), 3)
                 << got_mode;
 
         std::vector<const void *> weis(W);
@@ -7523,7 +7529,7 @@ TEST(TestGroupMatmulManyExperts, Algo3SlicesPastPlanCapacity) {
 TEST(TestGroupMatmulManyExperts, AutoStrategyKeepsCustomKernelOnThinN) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
-    if (!custom_kernel::dispatch_supported()) {
+    if (!custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "needs the BF16 custom kernel (AVX512-BF16)";
     }
     CustomKernelOverride ck_on(true);
@@ -7559,15 +7565,15 @@ TEST(TestGroupMatmulManyExperts, AutoStrategyKeepsCustomKernelOnThinN) {
             weis[e] = wei[e].data();
             dsts[e] = dst[e].data();
         }
-        GemmModeCaptureGuard capture;
+        ExecutionPathCaptureGuard capture;
         ASSERT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms,
                           gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb,
                           biases, gv.beta, dsts, gv.ldc, gv.is_wc, params,
-                          /*moe_postop=*/nullptr, /*gated_act=*/nullptr),
+                          /*weighted_reduce=*/nullptr, /*gated_act=*/nullptr),
                 status_t::success)
                 << "algo=" << algo;
         const char *m = zendnnl::lowoha::matmul::test_api::
-                                s_last_group_matmul_direct_gemm_mode.load(
+                                s_last_group_matmul_direct_execution_path.load(
                                         std::memory_order_relaxed);
         mode = m != nullptr ? m : "";
     };
@@ -7600,7 +7606,7 @@ TEST(TestGroupMatmulManyExperts,
         PinnedAlgo3KeepsPlannerGatesOutsideCkFloatMoe) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
-    if (!custom_kernel::dispatch_supported()) {
+    if (!custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "needs the BF16 custom kernel (AVX512-BF16)";
     }
     CustomKernelOverride ck_on(true);
@@ -7608,7 +7614,7 @@ TEST(TestGroupMatmulManyExperts,
     WeightCacheGuard wc_out_of_place(1);
 
     // One call of `E` experts of `dst`'s element type on ALGO `algo`; returns
-    // its gemm_mode and fills `dst`.
+    // its execution_path and fills `dst`.
     const auto run = [](auto &dst, data_type_t dt, int algo, int E, int M,
                              int K, int N, int threads) {
         using T = typename std::decay_t<decltype(dst)>::value_type::value_type;
@@ -7632,15 +7638,15 @@ TEST(TestGroupMatmulManyExperts,
         for (auto &p : params) {
             p.num_threads = threads;
         }
-        GemmModeCaptureGuard capture;
+        ExecutionPathCaptureGuard capture;
         EXPECT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms,
                           gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb,
                           biases, gv.beta, dsts, gv.ldc, gv.is_wc, params,
-                          /*moe_postop=*/nullptr, /*gated_act=*/nullptr),
+                          /*weighted_reduce=*/nullptr, /*gated_act=*/nullptr),
                 status_t::success)
                 << "algo=" << algo << " E=" << E;
         const char *m = zendnnl::lowoha::matmul::test_api::
-                                s_last_group_matmul_direct_gemm_mode.load(
+                                s_last_group_matmul_direct_execution_path.load(
                                         std::memory_order_relaxed);
         return std::string(m != nullptr ? m : "");
     };
@@ -7745,7 +7751,7 @@ bool all_sentinel(const Experts &dst) {
 }
 
 // One call; `ldc < kN` is the tight layout of a gated activation.  `dst` is
-// refilled with `kSentinel` first.  `mode` receives the executed gemm_mode,
+// refilled with `kSentinel` first.  `mode` receives the executed execution_path,
 // which is only recorded for a call that succeeds.
 status_t run(int algo, float alpha, grp_matmul_gated_act_t act, int ldc,
         Experts &src, Experts &wei, Experts &dst, std::string *mode = nullptr) {
@@ -7769,14 +7775,16 @@ status_t run(int algo, float alpha, grp_matmul_gated_act_t act, int ldc,
     }
     grp_matmul_gated_act_params gated {};
     gated.act = act;
-    GemmModeCaptureGuard capture;
+    ExecutionPathCaptureGuard capture;
     const status_t st = group_matmul_direct(gv.layout, gv.transA, gv.transB,
             gv.Ms, gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb, biases,
-            gv.beta, dsts, gv.ldc, gv.is_wc, params, /*moe_postop=*/nullptr,
+            gv.beta, dsts, gv.ldc, gv.is_wc, params,
+            /*weighted_reduce=*/nullptr,
             act == grp_matmul_gated_act_t::none ? nullptr : &gated);
     if (mode != nullptr) {
-        const char *m = test_api::s_last_group_matmul_direct_gemm_mode.load(
-                std::memory_order_relaxed);
+        const char *m
+                = test_api::s_last_group_matmul_direct_execution_path.load(
+                        std::memory_order_relaxed);
         *mode = (st == status_t::success && m != nullptr) ? m : "";
     }
     return st;
@@ -7790,7 +7798,7 @@ TEST(TestGroupMatmulInPlaceCkPack, OffKernelCallsFailClosed) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     using namespace in_place_ck;
-    if (!custom_kernel::dispatch_supported()) {
+    if (!custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "needs the BF16 custom kernel (AVX512-BF16)";
     }
     CustomKernelOverride ck_on(true);
@@ -7839,7 +7847,7 @@ TEST(TestGroupMatmulInPlaceCkPack, ImageServesBothActivationLayouts) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     using namespace in_place_ck;
-    if (!custom_kernel::dispatch_supported()) {
+    if (!custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "needs the BF16 custom kernel (AVX512-BF16)";
     }
     CustomKernelOverride ck_on(true);
@@ -7890,7 +7898,7 @@ TEST(TestGroupMatmulInPlaceCkPack, WideFusedEpilogueKeepsTheWeightRaw) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     using namespace in_place_ck;
-    if (!custom_kernel::dispatch_supported()) {
+    if (!custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "needs the BF16 custom kernel (AVX512-BF16)";
     }
     if (!get_grp_n_tile_fused_act()) {
@@ -7928,7 +7936,7 @@ TEST(TestGroupMatmulInPlaceCkPack, WideFusedEpilogueKeepsTheWeightRaw) {
 TEST(TestGroupMatmulInPlaceCkPack, FusedMoEOffKernelFailsClosed) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
-    if (!custom_kernel::dispatch_supported()) {
+    if (!custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "needs the BF16 custom kernel (AVX512-BF16)";
     }
     CustomKernelOverride ck_on(true);
@@ -8119,7 +8127,7 @@ TEST(TestGroupMatmulInPlaceCkPack, F16UnpinnedPromptDecodeReusesOneImage) {
                 = group_matmul_prepack::test_api::get_last_invocation_stats();
     }
     ASSERT_TRUE(prompt_stats.valid);
-    EXPECT_EQ(prompt_stats.scheduling_algo, 3);
+    EXPECT_EQ(prompt_stats.group_schedule, 3);
     EXPECT_EQ(prompt_stats.cross_warm_regime,
             group_matmul_prepack::CrossWarmRegime::none);
     for (int e = 0; e < kE; ++e)
@@ -8274,7 +8282,7 @@ TEST(TestGroupMatmulInPlaceCkPack, F16FusedMoeOffKernelFailsClosed) {
 }
 
 // ALGO 3 phase env clamps to ALGO 1 when the shape fails
-// `check_n_tile_extra` (e.g., dynamic_quant=true).  Same correctness
+// `n_tile_supported` (e.g., dynamic_quant=true).  Same correctness
 // contract the global ALGO=3 path has, applied to the auto path.
 // ===============================================================================
 // [8e] TestGroupMatmulHybridMSplit — Option-A M-weighted water-fill
@@ -8282,7 +8290,7 @@ TEST(TestGroupMatmulInPlaceCkPack, F16FusedMoeOffKernelFailsClosed) {
 //      `ZENDNNL_GRP_MATMUL_N_TILE_HEAVY_THRESHOLD`.
 //
 // Targets the new path inside
-// `apply_round_pick(RoundPick::Single, use_custom=true)` that fires
+// `apply_round_pick(RoundPick::SingleRound, use_custom=true)` that fires
 // when the env (or test override) is positive AND the M distribution
 // has both heavy and light experts.  Verified via the existing
 // `PhaseBSnapshot` capture hook so the test is a true white-box
@@ -8402,7 +8410,7 @@ TEST(TestGroupMatmulHybridMSplit, OffByDefaultRunsPhaseB) {
     // fire on decode regardless of this.
     DecodeProportionalOverride prop_on(true);
 
-    if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
+    if (!zendnnl::lowoha::matmul::custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "Requires AVX512BF16 / CK dispatch support.";
     }
     reset_grp_matmul_caches();
@@ -8423,7 +8431,7 @@ TEST(TestGroupMatmulHybridMSplit, OffByDefaultRunsPhaseB) {
     const auto &snap
             = zendnnl::lowoha::matmul::test_api::s_last_phase_b_snapshot;
     ASSERT_TRUE(snap.valid);
-    EXPECT_TRUE(snap.per_expert_remainder);
+    EXPECT_TRUE(snap.variable_expert_teams);
     // The prompt-only HYBRID water-fill keeps n_thr_fixed=0; the decode
     // M-proportional split (and legacy Phase B) leave it at base.  A
     // non-zero value confirms the HYBRID gate did NOT fire.
@@ -8435,22 +8443,22 @@ TEST(TestGroupMatmulHybridMSplit, OffByDefaultRunsPhaseB) {
     // thread split regardless of this knob, so even with the hybrid
     // threshold explicitly disabled (-1) decode still load-balances by
     // M.  Assert the proportional contract (not the legacy uniform
-    // base/base+1): per_expert_remainder set, no active expert starved,
+    // base/base+1): variable_expert_teams set, no active expert starved,
     // total <= num_threads, and the heaviest expert (M=16) gets a
     // proportional share above the uniform base+1 (=3).
     int sum_thr = 0;
     for (int e = 0; e < s.num_ops; ++e) {
-        const int n = static_cast<int>(snap.stable_n_thr_per_expert[e]);
+        const int n = static_cast<int>(snap.expert_thread_counts[e]);
         if (s.Ms[e] > 0) {
             EXPECT_GE(n, 1) << "active expert e=" << e << " starved (0 thr)";
         }
         sum_thr += n;
     }
     EXPECT_LE(sum_thr, 32) << "M-proportional over-allocated threads";
-    EXPECT_GE(static_cast<int>(snap.stable_n_thr_per_expert[0]), 4)
+    EXPECT_GE(static_cast<int>(snap.expert_thread_counts[0]), 4)
             << "heaviest expert (M=16) should get a proportional share "
                "(> uniform base+1=3); got "
-            << static_cast<int>(snap.stable_n_thr_per_expert[0]);
+            << static_cast<int>(snap.expert_thread_counts[0]);
 }
 
 // Hybrid ON → water-fill distribution: heavier-M experts receive
@@ -8489,7 +8497,7 @@ TEST(TestGroupMatmulHybridMSplit, DecodeProportionalOffUsesUniformPhaseB) {
     NTileStrategyOverride auto_strategy(0);
     DecodeProportionalOverride prop_off(false); // knob under test
 
-    if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
+    if (!zendnnl::lowoha::matmul::custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "Requires AVX512BF16 / CK dispatch support.";
     }
     reset_grp_matmul_caches();
@@ -8507,13 +8515,13 @@ TEST(TestGroupMatmulHybridMSplit, DecodeProportionalOffUsesUniformPhaseB) {
     const auto &snap
             = zendnnl::lowoha::matmul::test_api::s_last_phase_b_snapshot;
     ASSERT_TRUE(snap.valid);
-    EXPECT_TRUE(snap.per_expert_remainder);
+    EXPECT_TRUE(snap.variable_expert_teams);
     EXPECT_NE(snap.n_thr_fixed, 0)
             << "proportional OFF keeps n_thr_fixed at base (not the hybrid 0).";
     // With proportional disabled every active expert gets base (2) or
     // base+1 (3) only — NO M-weighted spread.
     for (int e = 0; e < s.num_ops; ++e) {
-        const int n = static_cast<int>(snap.stable_n_thr_per_expert[e]);
+        const int n = static_cast<int>(snap.expert_thread_counts[e]);
         if (s.Ms[e] > 0) {
             EXPECT_TRUE(n == 2 || n == 3)
                     << "proportional OFF -> uniform Phase B; expert e=" << e
@@ -8551,7 +8559,7 @@ TEST(TestGroupMatmulHybridMSplit, DecodeProportionalOnUsesMWeightedSplit) {
     NTileStrategyOverride auto_strategy(0);
     DecodeProportionalOverride prop_on(true); // knob under test
 
-    if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
+    if (!zendnnl::lowoha::matmul::custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "Requires AVX512BF16 / CK dispatch support.";
     }
     reset_grp_matmul_caches();
@@ -8569,10 +8577,10 @@ TEST(TestGroupMatmulHybridMSplit, DecodeProportionalOnUsesMWeightedSplit) {
     const auto &snap
             = zendnnl::lowoha::matmul::test_api::s_last_phase_b_snapshot;
     ASSERT_TRUE(snap.valid);
-    EXPECT_TRUE(snap.per_expert_remainder);
+    EXPECT_TRUE(snap.variable_expert_teams);
     int sum_thr = 0;
     for (int e = 0; e < s.num_ops; ++e) {
-        const int n = static_cast<int>(snap.stable_n_thr_per_expert[e]);
+        const int n = static_cast<int>(snap.expert_thread_counts[e]);
         if (s.Ms[e] > 0) {
             EXPECT_GE(n, 1) << "active expert e=" << e << " starved";
         }
@@ -8581,11 +8589,11 @@ TEST(TestGroupMatmulHybridMSplit, DecodeProportionalOnUsesMWeightedSplit) {
     EXPECT_LE(sum_thr, 32);
     // Heaviest (M=16) gets a proportional share > uniform base+1 (=3),
     // and strictly more than the lightest (M=4) experts.
-    const int n_heavy = static_cast<int>(snap.stable_n_thr_per_expert[0]);
+    const int n_heavy = static_cast<int>(snap.expert_thread_counts[0]);
     EXPECT_GE(n_heavy, 4)
             << "proportional ON: heaviest expert under-allocated (" << n_heavy
             << ")";
-    EXPECT_GT(n_heavy, static_cast<int>(snap.stable_n_thr_per_expert[13]));
+    EXPECT_GT(n_heavy, static_cast<int>(snap.expert_thread_counts[13]));
 }
 
 TEST(TestGroupMatmulHybridMSplit, OnDistributesHeavyByM) {
@@ -8614,14 +8622,14 @@ TEST(TestGroupMatmulHybridMSplit, OnDistributesHeavyByM) {
     CustomKernelNTileOverride default_n_tile(0);
     // MANUAL HYBRID is now prompt-only (max_M > kDecodeMaxM=32).  Force
     // `n_tile_strategy=2` (rounds, force) so the planner stays in
-    // ManyExperts, where the Single-round HYBRID dispatch fires, whatever
+    // FixedTeamRounds, where the Single-round HYBRID dispatch fires, whatever
     // strategy the process runs with.
     NTileStrategyOverride force_rounds(2);
     // Threshold chosen so M > 200 = heavy AND every Ms entry crosses
     // the new `max_M > kDecodeMaxM=32` prompt gate.
     NTileHeavyThresholdOverride hybrid_on(200);
 
-    if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
+    if (!zendnnl::lowoha::matmul::custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "Requires AVX512BF16 / CK dispatch support.";
     }
     reset_grp_matmul_caches();
@@ -8645,9 +8653,9 @@ TEST(TestGroupMatmulHybridMSplit, OnDistributesHeavyByM) {
     const auto &snap
             = zendnnl::lowoha::matmul::test_api::s_last_phase_b_snapshot;
     ASSERT_TRUE(snap.valid);
-    EXPECT_TRUE(snap.per_expert_remainder)
-            << "Hybrid path MUST set per_expert_remainder=true so the "
-               "executor reads stable_n_thr_per_expert[].";
+    EXPECT_TRUE(snap.variable_expert_teams)
+            << "Hybrid path MUST set variable_expert_teams=true so the "
+               "executor reads expert_thread_counts[].";
     EXPECT_EQ(snap.n_thr_fixed, 0)
             << "Hybrid path MUST set n_thr_fixed=0 so the executor takes "
                "the prefix-sum scan instead of the uniform `tid/tpe` mapping.";
@@ -8659,9 +8667,9 @@ TEST(TestGroupMatmulHybridMSplit, OnDistributesHeavyByM) {
     // fill ordering implies n_thr[e=0] >= n_thr[e=1] >= n_thr[e=2].
     // Messages below derive the M values from `s.Ms[]` so the failure
     // report stays correct if the probe Ms get retuned in a follow-up.
-    const int n0 = static_cast<int>(snap.stable_n_thr_per_expert[0]);
-    const int n1 = static_cast<int>(snap.stable_n_thr_per_expert[1]);
-    const int n2 = static_cast<int>(snap.stable_n_thr_per_expert[2]);
+    const int n0 = static_cast<int>(snap.expert_thread_counts[0]);
+    const int n1 = static_cast<int>(snap.expert_thread_counts[1]);
+    const int n2 = static_cast<int>(snap.expert_thread_counts[2]);
     EXPECT_GE(n0, 1);
     EXPECT_GE(n0, n1) << "Heavier expert e=0 (M=" << s.Ms[0]
                       << ") must receive >= threads "
@@ -8678,7 +8686,7 @@ TEST(TestGroupMatmulHybridMSplit, OnDistributesHeavyByM) {
     EXPECT_GT(n0 + n1 + n2, 3)
             << "Heavies should collectively absorb more than 1 thread each.";
     for (int e = 3; e < s.num_ops; ++e) {
-        const int n = static_cast<int>(snap.stable_n_thr_per_expert[e]);
+        const int n = static_cast<int>(snap.expert_thread_counts[e]);
         EXPECT_EQ(n, 1)
                 << "Light expert e=" << e << " (M=" << s.Ms[e]
                 << ") must receive exactly 1 thread under hybrid M-split.";
@@ -8688,11 +8696,11 @@ TEST(TestGroupMatmulHybridMSplit, OnDistributesHeavyByM) {
     // less can happen if every heavy hits its per-expert cap.
     int sum = 0;
     for (int e = 0; e < s.num_ops; ++e) {
-        sum += static_cast<int>(snap.stable_n_thr_per_expert[e]);
+        sum += static_cast<int>(snap.expert_thread_counts[e]);
     }
     EXPECT_LE(sum, 32)
             << "Hybrid distribution must not over-subscribe the team; "
-               "sum(stable_n_thr_per_expert) = "
+               "sum(expert_thread_counts) = "
             << sum;
     EXPECT_GT(sum, s.num_ops - 3 /*lights*/ + 3 /*heavies*/)
             << "Hybrid distribution should give heavies > 1 thread each; "
@@ -8702,17 +8710,17 @@ TEST(TestGroupMatmulHybridMSplit, OnDistributesHeavyByM) {
 
 // AUTO (env=0) → planner-driven adaptive tiers fire, producing a
 // monotone-by-M per-expert allocation with the Hybrid dispatch
-// signature (`per_expert_remainder=true`, `n_thr_fixed=0`).  Verifies
+// signature (`variable_expert_teams=true`, `n_thr_fixed=0`).  Verifies
 // AUTO engages on a sufficiently-skewed prompt-class shape AND
 // produces a heaviest-first allocation distinct from Phase B base+1.
 //
-// Shape constraints to keep the planner in ManyExperts:
+// Shape constraints to keep the planner in FixedTeamRounds:
 //   * `max_M > kDecodeMaxM` (prompt-class) is now MANDATORY — AUTO's
 //     new decode gate (`apply_adaptive_tiers()` returns false on
 //     `max_M ≤ kDecodeMaxM`) makes the previous decode-class probe
 //     fall through to Phase B.  Use max_M=400 (firmly prompt-class).
 //   * Force `n_tile_strategy=2` (rounds) so the planner stays in
-//     ManyExperts, where the Single-round HYBRID dispatch lives,
+//     FixedTeamRounds, where the Single-round HYBRID dispatch lives,
 //     whatever strategy the process runs with.
 //   * `N` chosen so `max_tiles = N/min_n_tile` lifts the per-expert
 //     cap above 2.  N=4096 with the prompt `min_n_tile=512` →
@@ -8740,10 +8748,10 @@ TEST(TestGroupMatmulHybridMSplit, AutoTierEngagesAtZero) {
     CustomKernelOverride ck_on(true);
     NRoundsModeOverride single_round(1);
     CustomKernelNTileOverride default_n_tile(0);
-    NTileStrategyOverride force_rounds(2); // stay in ManyExperts
+    NTileStrategyOverride force_rounds(2); // stay in FixedTeamRounds
     NTileHeavyThresholdOverride hybrid_auto(0); // AUTO mode
 
-    if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
+    if (!zendnnl::lowoha::matmul::custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "Requires AVX512BF16 / CK dispatch support.";
     }
     reset_grp_matmul_caches();
@@ -8770,9 +8778,9 @@ TEST(TestGroupMatmulHybridMSplit, AutoTierEngagesAtZero) {
     const auto &snap
             = zendnnl::lowoha::matmul::test_api::s_last_phase_b_snapshot;
     ASSERT_TRUE(snap.valid);
-    EXPECT_TRUE(snap.per_expert_remainder)
-            << "AUTO_TIER must set per_expert_remainder=true so the executor "
-               "reads stable_n_thr_per_expert[].";
+    EXPECT_TRUE(snap.variable_expert_teams)
+            << "AUTO_TIER must set variable_expert_teams=true so the executor "
+               "reads expert_thread_counts[].";
     EXPECT_EQ(snap.n_thr_fixed, 0)
             << "AUTO_TIER must set n_thr_fixed=0 (Hybrid signature, distinct "
                "from Phase B's n_thr_fixed=base).";
@@ -8781,12 +8789,12 @@ TEST(TestGroupMatmulHybridMSplit, AutoTierEngagesAtZero) {
     // shape; see the Ms vector above) must receive >= threads as any
     // lower-M expert.  The water-fill is M-weighted so the heaviest
     // expert always wins the marginal next-thread.
-    const int n0 = static_cast<int>(snap.stable_n_thr_per_expert[0]);
+    const int n0 = static_cast<int>(snap.expert_thread_counts[0]);
     EXPECT_GT(n0, 1)
             << "Heaviest expert (M=400, high tier) must receive multiple "
                "threads; AUTO_TIER didn't engage if n0 = 1.";
     for (int e = 1; e < s.num_ops; ++e) {
-        const int n = static_cast<int>(snap.stable_n_thr_per_expert[e]);
+        const int n = static_cast<int>(snap.expert_thread_counts[e]);
         EXPECT_GE(n0, n) << "AUTO_TIER must be M-monotone: heaviest (e=0, M="
                          << s.Ms[0] << ") got " << n0 << " threads but e=" << e
                          << " (M=" << s.Ms[e] << ") got " << n << ".";
@@ -8797,7 +8805,7 @@ TEST(TestGroupMatmulHybridMSplit, AutoTierEngagesAtZero) {
     // class probe).  Otherwise the tier structure collapsed and AUTO
     // is just a no-op.
     const int n_last
-            = static_cast<int>(snap.stable_n_thr_per_expert[s.num_ops - 1]);
+            = static_cast<int>(snap.expert_thread_counts[s.num_ops - 1]);
     EXPECT_GT(n0, n_last)
             << "AUTO_TIER must produce asymmetry: high tier (n0=" << n0
             << ") must receive strictly more threads than baseline "
@@ -8807,7 +8815,7 @@ TEST(TestGroupMatmulHybridMSplit, AutoTierEngagesAtZero) {
     // Total must NOT exceed num_threads (water-fill respects budget).
     int sum = 0;
     for (int e = 0; e < s.num_ops; ++e) {
-        sum += static_cast<int>(snap.stable_n_thr_per_expert[e]);
+        sum += static_cast<int>(snap.expert_thread_counts[e]);
     }
     EXPECT_LE(sum, 32) << "AUTO_TIER must not over-subscribe the OMP team; sum="
                        << sum;
@@ -8839,10 +8847,10 @@ TEST(TestGroupMatmulHybridMSplit, AutoTierSkipsLowSkew) {
     CustomKernelOverride ck_on(true);
     NRoundsModeOverride single_round(1);
     CustomKernelNTileOverride default_n_tile(0);
-    NTileStrategyOverride force_rounds(2); // stay in ManyExperts
+    NTileStrategyOverride force_rounds(2); // stay in FixedTeamRounds
     NTileHeavyThresholdOverride hybrid_auto(0); // AUTO mode
 
-    if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
+    if (!zendnnl::lowoha::matmul::custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "Requires AVX512BF16 / CK dispatch support.";
     }
     reset_grp_matmul_caches();
@@ -8879,7 +8887,7 @@ TEST(TestGroupMatmulHybridMSplit, AutoTierSkipsLowSkew) {
     // Every allocation must be base (= 2) or base+1 (= 3) — Phase B's
     // signature, NOT the multi-tier 1/2/4/8 pattern.
     for (int e = 0; e < s.num_ops; ++e) {
-        const int n = static_cast<int>(snap.stable_n_thr_per_expert[e]);
+        const int n = static_cast<int>(snap.expert_thread_counts[e]);
         EXPECT_TRUE(n == 2 || n == 3)
                 << "Uniform-M expert e=" << e << " got n_thr=" << n
                 << " (Phase B should produce 2 or 3).";
@@ -8918,10 +8926,10 @@ TEST(TestGroupMatmulHybridMSplit, AutoTierSkipsThreadStarvation) {
     CustomKernelOverride ck_on(true);
     NRoundsModeOverride single_round(1);
     CustomKernelNTileOverride default_n_tile(0);
-    NTileStrategyOverride force_rounds(2); // stay in ManyExperts
+    NTileStrategyOverride force_rounds(2); // stay in FixedTeamRounds
     NTileHeavyThresholdOverride hybrid_auto(0); // AUTO mode
 
-    if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
+    if (!zendnnl::lowoha::matmul::custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "Requires AVX512BF16 / CK dispatch support.";
     }
     reset_grp_matmul_caches();
@@ -8948,17 +8956,17 @@ TEST(TestGroupMatmulHybridMSplit, AutoTierSkipsThreadStarvation) {
     const auto &snap
             = zendnnl::lowoha::matmul::test_api::s_last_phase_b_snapshot;
     ASSERT_TRUE(snap.valid);
-    // AUTO's signature is `(per_expert_remainder=true, n_thr_fixed=0)`.
+    // AUTO's signature is `(variable_expert_teams=true, n_thr_fixed=0)`.
     // Phase B (the fallback we expect to fire here) leaves
-    // `per_expert_remainder=false` and `n_thr_fixed=base`.  Asserting
+    // `variable_expert_teams=false` and `n_thr_fixed=base`.  Asserting
     // BOTH negations confirms AUTO returned false and the planner took
-    // the Phase B branch instead.  `stable_n_thr_per_expert[]` is not
+    // the Phase B branch instead.  `expert_thread_counts[]` is not
     // populated in the Phase B branch (the executor uses uniform
     // `tid / n_thr_fixed` mapping in that case), so no point asserting
     // on its contents — they are correctly left at zero.
-    EXPECT_FALSE(snap.per_expert_remainder)
+    EXPECT_FALSE(snap.variable_expert_teams)
             << "AUTO_TIER must fall through when extras_budget = 0; "
-               "expected Phase B (per_expert_remainder=false), got true "
+               "expected Phase B (variable_expert_teams=false), got true "
                "(AUTO engaged spuriously).";
     EXPECT_NE(snap.n_thr_fixed, 0)
             << "AUTO_TIER must fall through when extras_budget = 0; "
@@ -8977,7 +8985,7 @@ TEST(TestGroupMatmulHybridMSplit, AutoTierSkipsThreadStarvation) {
 //                           branch) keeps `n_thr_fixed = base`,
 //                           while both HYBRID modes zero it to
 //                           tell the executor to use the prefix-
-//                           sum scan.  `per_expert_remainder` is
+//                           sum scan.  `variable_expert_teams` is
 //                           NOT a distinguishing signal here:
 //                           Phase B's remainder branch also sets
 //                           it to true with base/base+1 entries,
@@ -9009,7 +9017,7 @@ TEST(TestGroupMatmulHybridMSplit, AutoTierSkipsDecodeClass) {
         GTEST_SKIP() << "Requires >= 32 OMP threads; have " << actual_team_size;
     }
 
-    if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
+    if (!zendnnl::lowoha::matmul::custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "Requires AVX512BF16 / CK dispatch support.";
     }
 
@@ -9055,15 +9063,15 @@ TEST(TestGroupMatmulHybridMSplit, AutoTierSkipsDecodeClass) {
         // of the legacy uniform Phase B base/base+1.  That is still NOT the
         // adaptive-tier water-fill (n_thr_fixed stays != 0, asserted above).
         // Assert the proportional contract rather than the old {0,2,3}:
-        //   - per_expert_remainder set (prefix-sum executor path),
+        //   - variable_expert_teams set (prefix-sum executor path),
         //   - every active expert gets >= 1 thread (no starvation),
         //   - total allocation <= num_threads,
         //   - the heaviest expert (M=24) gets a proportional share > the
         //     uniform base+1 (=3) — distinguishes proportional from Phase B.
-        EXPECT_TRUE(snap.per_expert_remainder);
+        EXPECT_TRUE(snap.variable_expert_teams);
         int sum_thr = 0;
         for (int e = 0; e < s.num_ops; ++e) {
-            const int n = static_cast<int>(snap.stable_n_thr_per_expert[e]);
+            const int n = static_cast<int>(snap.expert_thread_counts[e]);
             if (s.Ms[e] > 0) {
                 EXPECT_GE(n, 1)
                         << "active expert e=" << e << " starved (0 thr)";
@@ -9071,10 +9079,10 @@ TEST(TestGroupMatmulHybridMSplit, AutoTierSkipsDecodeClass) {
             sum_thr += n;
         }
         EXPECT_LE(sum_thr, 32) << "M-proportional over-allocated threads";
-        EXPECT_GE(static_cast<int>(snap.stable_n_thr_per_expert[0]), 4)
+        EXPECT_GE(static_cast<int>(snap.expert_thread_counts[0]), 4)
                 << "heaviest expert (M=24) should get a proportional share "
                    "(> uniform base+1=3); got "
-                << static_cast<int>(snap.stable_n_thr_per_expert[0]);
+                << static_cast<int>(snap.expert_thread_counts[0]);
     }
 
     // Sub-case 2: MANUAL (HYBRID=10, would tag heavies on this Ms)
@@ -9115,10 +9123,10 @@ TEST(TestGroupMatmulHybridMSplit, AutoTierSkipsDecodeClass) {
         // MANUAL adaptive-tier water-fill.  threshold=10 (!= -1) keeps the
         // proportional split enabled; only an explicit -1 disable would
         // restore uniform Phase B.  Assert the proportional contract.
-        EXPECT_TRUE(snap.per_expert_remainder);
+        EXPECT_TRUE(snap.variable_expert_teams);
         int sum_thr = 0;
         for (int e = 0; e < s.num_ops; ++e) {
-            const int n = static_cast<int>(snap.stable_n_thr_per_expert[e]);
+            const int n = static_cast<int>(snap.expert_thread_counts[e]);
             if (s.Ms[e] > 0) {
                 EXPECT_GE(n, 1)
                         << "active expert e=" << e << " starved (0 thr)";
@@ -9126,10 +9134,10 @@ TEST(TestGroupMatmulHybridMSplit, AutoTierSkipsDecodeClass) {
             sum_thr += n;
         }
         EXPECT_LE(sum_thr, 32) << "M-proportional over-allocated threads";
-        EXPECT_GE(static_cast<int>(snap.stable_n_thr_per_expert[0]), 4)
+        EXPECT_GE(static_cast<int>(snap.expert_thread_counts[0]), 4)
                 << "heaviest expert (M=24) should get a proportional share "
                    "(> uniform base+1=3); got "
-                << static_cast<int>(snap.stable_n_thr_per_expert[0]);
+                << static_cast<int>(snap.expert_thread_counts[0]);
     }
 }
 
@@ -9150,7 +9158,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, Algo3PhaseEnvClampedOnNonNTileSafe) {
         p.quant_params.src_scale.dims = {256, 1};
         p.quant_params.src_scale.dt = data_type_t::f32;
     }
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             1)
             << "AUTO_PROMPT_ALGO=3 with !n_tile_safe must clamp to ALGO 1 "
@@ -9160,17 +9168,17 @@ TEST(TestGroupMatmulAutoPhaseEnv, Algo3PhaseEnvClampedOnNonNTileSafe) {
 // ============================================================================
 // [8f] TestGroupMatmulMTileBranches — ALGO 2 (M-tile) internal branch dispatch.
 //
-// `flat_m_tile` dispatches between four internal branches based on
+// `m_tile_execute` dispatches between four internal branches based on
 // workload shape:
 //   round-based            (active_ops > num_threads)
 //   multi-tier hybrid      (Qwen3-class many-expert skewed prompt)
-//   wide-N memory-bound    (total_need * 2 ≤ num_threads, max_M > 1)
+//   shallow-M fallback     (total_need * 2 ≤ num_threads, max_M > 1)
 //   phase-2 single-tier    (default M-weighted fallthrough)
 //
 // These tests pin ALGO 2 via `AlgoEnvGuard(2)`, exercise shapes that
 // should drive each branch, and assert the tag published by the
 // chosen branch (`test_api::s_last_m_tile_path`) matches expectation.
-// Adds focused coverage for the wide-N fallback and multi-tier hybrid
+// Adds focused coverage for the shallow-M fallback and multi-tier hybrid
 // gates so silent regressions surface as failed tag asserts instead
 // of perf regressions in downstream benchmarks.
 //
@@ -9183,10 +9191,10 @@ TEST(TestGroupMatmulAutoPhaseEnv, Algo3PhaseEnvClampedOnNonNTileSafe) {
 // ============================================================================
 
 // ALGO 2 is now PURE M-tile: a FORCED `ZENDNNL_GRP_MATMUL_ALGO=2` on a
-// wide-N shape (`total_need*2 ≤ num_threads && max_M > 1`) no longer falls
+// shallow-M shape (`total_need*2 ≤ num_threads && max_M > 1`) no longer falls
 // back to the sequential-full-team loop — it runs the single-tier M-tile
 // plan (kPhase2Single). AUTO never selects ALGO 2 without an explicit pin.
-TEST(TestGroupMatmulMTileBranches, ForcedAlgo2OnWideNRunsSingleTier) {
+TEST(TestGroupMatmulMTileBranches, ForcedAlgo2OnShallowMRunsSingleTier) {
     using namespace moe_test_utils;
     using zendnnl::lowoha::matmul::group_matmul_direct;
     using zendnnl::lowoha::matmul::status_t;
@@ -9209,7 +9217,7 @@ TEST(TestGroupMatmulMTileBranches, ForcedAlgo2OnWideNRunsSingleTier) {
     }
 
     // 8 actives × M=8 × K=64 × N=1024.
-    //   total_need = 8 × ceil(8/16) = 8;  2*8 = 16 ≤ 32 ⇒ wide-N gate ✓
+    //   total_need = 8 × ceil(8/16) = 8;  2*8 = 16 ≤ 32 ⇒ shallow-M gate ✓
     //   max_M = 8 > 1                                  ⇒ decode-exclusion clears
     //   max_M = 8 < 256                                ⇒ multi-tier gate fails
     auto s = build_hybrid_probe(/*num_threads=*/32,
@@ -9219,7 +9227,7 @@ TEST(TestGroupMatmulMTileBranches, ForcedAlgo2OnWideNRunsSingleTier) {
     AlgoEnvGuard algo_guard(2);
     MTileHybridOverride hybrid_auto(0);
     MTilePathCaptureGuard cap;
-    GemmModeCaptureGuard mode_cap;
+    ExecutionPathCaptureGuard mode_cap;
 
     ASSERT_EQ(group_matmul_direct(s.gv.layout, s.gv.transA, s.gv.transB,
                       s.gv.Ms, s.gv.Ns, s.gv.Ks, s.gv.alpha, s.srcs, s.gv.lda,
@@ -9230,33 +9238,36 @@ TEST(TestGroupMatmulMTileBranches, ForcedAlgo2OnWideNRunsSingleTier) {
     const int tag = zendnnl::lowoha::matmul::test_api ::s_last_m_tile_path.load(
             std::memory_order_relaxed);
     EXPECT_EQ(tag, kPhase2Single)
-            << "Forced ALGO 2 on a wide-N shape (8 actives × M=8 / 32t) must "
+            << "Forced ALGO 2 on a shallow-M shape (8 actives × M=8 / 32t) "
+               "must "
                "run "
-               "PURE single-tier M-tile now (no internal wide-N fallback); "
+               "PURE single-tier M-tile now (no internal shallow-M fallback); "
                "got tag="
             << tag
             << " (kMultiTier=1, kPhase2Single=3, kManyExpertsSeqFallback=7)";
 
-    // gemm_mode must name the executed branch, and exec_algo must map to 2.
+    // execution_path must name the executed branch, and exec_algo must map to 2.
     const char *mode = zendnnl::lowoha::matmul::test_api ::
-                               s_last_group_matmul_direct_gemm_mode.load(
+                               s_last_group_matmul_direct_execution_path.load(
                                        std::memory_order_relaxed);
     ASSERT_NE(mode, nullptr);
     EXPECT_STREQ(mode, "flat_m_tile_single_tier");
-    EXPECT_EQ(zendnnl::lowoha::matmul::executed_algo_from_gemm_mode(mode), 2);
+    EXPECT_EQ(zendnnl::lowoha::matmul::executed_algo_from_execution_path(mode),
+            2);
 }
 
-// Wide-N fallback MUST be excluded for pure-decode workloads (max_M==1).
+// Shallow-M fallback MUST be excluded for pure-decode workloads (max_M==1).
 // The Phase 2 single-tier CCD-stripe layout is the latency-optimal
 // mapping for M=1 — one thread per CCD, experts parallel across CCDs.
-// Routing M=1 to wide-N would serialise each expert on the full thread
+// Routing M=1 to the shallow-M fallback would serialise each expert on the full
+// thread
 // team and trade away the CCD-parallel decode win.
-TEST(TestGroupMatmulMTileBranches, WideNFallbackExcludesDecodeM1) {
+TEST(TestGroupMatmulMTileBranches, ShallowMFallbackExcludesDecodeM1) {
     using namespace moe_test_utils;
     using zendnnl::lowoha::matmul::group_matmul_direct;
     using zendnnl::lowoha::matmul::status_t;
     using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kPhase2Single;
-    using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kWideNFallback;
+    using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kShallowMFallback;
 
     const int saved_num_threads = omp_get_max_threads();
     struct ThreadGuard {
@@ -9275,8 +9286,8 @@ TEST(TestGroupMatmulMTileBranches, WideNFallbackExcludesDecodeM1) {
     }
 
     // 8 actives × M=1.  Numerically `total_need*2 = 16 ≤ 32` would PASS
-    // the wide-N count gate; the `max_M_single_tier > 1` decode-exclusion
-    // clamp must keep wide-N off and route to Phase 2 single-tier
+    // the shallow-M count gate; the `max_M_single_tier > 1` decode-exclusion
+    // clamp must keep the fallback off and route to Phase 2 single-tier
     // (CCD-stripe).
     auto s = build_hybrid_probe(/*num_threads=*/32,
             /*Ms=*/ {1, 1, 1, 1, 1, 1, 1, 1});
@@ -9294,9 +9305,9 @@ TEST(TestGroupMatmulMTileBranches, WideNFallbackExcludesDecodeM1) {
 
     const int tag = zendnnl::lowoha::matmul::test_api ::s_last_m_tile_path.load(
             std::memory_order_relaxed);
-    EXPECT_NE(tag, kWideNFallback)
-            << "Wide-N fallback MUST be excluded on decode-class max_M=1; "
-               "got wide-N (tag="
+    EXPECT_NE(tag, kShallowMFallback)
+            << "Shallow-M fallback MUST be excluded on decode-class max_M=1; "
+               "got fallback (tag="
             << tag << ")";
     EXPECT_EQ(tag, kPhase2Single)
             << "max_M=1 must fall through to Phase 2 single-tier (CCD-stripe); "
@@ -9347,7 +9358,7 @@ TEST(TestGroupMatmulMTileBranches, MultiTierEngagesOnSkewedPrompt) {
     AlgoEnvGuard algo_guard(2);
     MTileHybridOverride hybrid_auto(0);
     MTilePathCaptureGuard cap;
-    GemmModeCaptureGuard mode_cap;
+    ExecutionPathCaptureGuard mode_cap;
 
     ASSERT_EQ(group_matmul_direct(s.gv.layout, s.gv.transA, s.gv.transB,
                       s.gv.Ms, s.gv.Ns, s.gv.Ks, s.gv.alpha, s.srcs, s.gv.lda,
@@ -9362,18 +9373,19 @@ TEST(TestGroupMatmulMTileBranches, MultiTierEngagesOnSkewedPrompt) {
                "(1 heavy M=1024 + 15 lights M=4, skew ≈ 15×); got tag="
             << tag;
 
-    // gemm_mode must name the multi-tier branch; exec_algo maps to 2.
+    // execution_path must name the multi-tier branch; exec_algo maps to 2.
     const char *mode = zendnnl::lowoha::matmul::test_api ::
-                               s_last_group_matmul_direct_gemm_mode.load(
+                               s_last_group_matmul_direct_execution_path.load(
                                        std::memory_order_relaxed);
     ASSERT_NE(mode, nullptr);
     EXPECT_STREQ(mode, "flat_m_tile_multitier");
-    EXPECT_EQ(zendnnl::lowoha::matmul::executed_algo_from_gemm_mode(mode), 2);
+    EXPECT_EQ(zendnnl::lowoha::matmul::executed_algo_from_execution_path(mode),
+            2);
 }
 
 // ============================================================================
-// [8j] Logging truth: gemm_mode names the executed branch, and
-//      executed_algo_from_gemm_mode maps it to the ALGO that actually ran.
+// [8j] Logging truth: execution_path names the executed branch, and
+//      executed_algo_from_execution_path maps it to the ALGO that actually ran.
 // ============================================================================
 
 // `ZENDNNL_GRP_MATMUL_KBLOCK` is tri-state, and an explicit setting outranks
@@ -9397,41 +9409,51 @@ TEST(TestGroupMatmulKblock, EnvTriStatePrecedence) {
 
 // Unit test for the mode->algo mapping used by the post-exec
 // [GRP_MATMUL.CALL] exec_algo= field.  Pure function, no execution.
-TEST(TestGroupMatmulGemmMode, ExecutedAlgoFromGemmModeMapping) {
-    using zendnnl::lowoha::matmul::executed_algo_from_gemm_mode;
-    EXPECT_EQ(executed_algo_from_gemm_mode(nullptr), 0);
-    EXPECT_EQ(executed_algo_from_gemm_mode("garbage"), 0);
-    EXPECT_EQ(executed_algo_from_gemm_mode("sequential"), 1);
-    EXPECT_EQ(executed_algo_from_gemm_mode("sequential_experts"), 1);
+TEST(TestGroupMatmulExecutionPath, ExecutedAlgoFromExecutionPathMapping) {
+    using zendnnl::lowoha::matmul::executed_algo_from_execution_path;
+    EXPECT_EQ(executed_algo_from_execution_path(nullptr), 0);
+    EXPECT_EQ(executed_algo_from_execution_path("garbage"), 0);
+    EXPECT_EQ(executed_algo_from_execution_path("sequential"), 1);
+    EXPECT_EQ(executed_algo_from_execution_path("sequential_execute"), 1);
     // seq-clamp wears an ALGO-2 mode prefix but runs ALGO-1 behaviour -> 1.
-    EXPECT_EQ(executed_algo_from_gemm_mode("flat_m_tile_seq_clamp"), 1);
-    EXPECT_EQ(executed_algo_from_gemm_mode("flat_m_tile_single_tier"), 2);
-    EXPECT_EQ(executed_algo_from_gemm_mode("flat_m_tile_multitier"), 2);
-    EXPECT_EQ(executed_algo_from_gemm_mode("flat_m_tile"), 2);
-    EXPECT_EQ(executed_algo_from_gemm_mode("vertical_fusion_bf16"), 2);
-    EXPECT_EQ(executed_algo_from_gemm_mode("flat_n_tile_custom"), 3);
-    EXPECT_EQ(executed_algo_from_gemm_mode("ntile_flat_parallel"), 4);
-    EXPECT_EQ(executed_algo_from_gemm_mode("multilevel_rounds"), 6);
-    EXPECT_EQ(executed_algo_from_gemm_mode("per_expert"), 5);
+    EXPECT_EQ(executed_algo_from_execution_path("flat_m_tile_seq_clamp"), 1);
+    EXPECT_EQ(executed_algo_from_execution_path("flat_m_tile_single_tier"), 2);
+    EXPECT_EQ(executed_algo_from_execution_path("flat_m_tile_multitier"), 2);
+    EXPECT_EQ(executed_algo_from_execution_path("m_tile_execute"), 2);
+    EXPECT_EQ(executed_algo_from_execution_path("vertical_fusion_bf16"), 2);
+    EXPECT_EQ(executed_algo_from_execution_path("n_tile_execute"), 3);
+    EXPECT_EQ(executed_algo_from_execution_path("flat_n_tile_custom"), 3);
+    // Prompt-tile and decode-dynamic paths still emit the legacy flat_n_tile
+    // vocabulary; they are ALGO 3 just like the renamed executor prefix.
+    EXPECT_EQ(executed_algo_from_execution_path("flat_n_tile_ptile_custom"), 3);
+    EXPECT_EQ(executed_algo_from_execution_path(
+                      "flat_n_tile_ptile_fused_swiglu_oai_tight_custom"),
+            3);
+    EXPECT_EQ(
+            executed_algo_from_execution_path("flat_n_tile_decdyn_custom"), 3);
+    EXPECT_EQ(executed_algo_from_execution_path("ntile_flat_parallel"), 4);
+    EXPECT_EQ(executed_algo_from_execution_path("multilevel_rounds"), 6);
+    EXPECT_EQ(executed_algo_from_execution_path("per_expert"), 5);
     // Fused composites derive the algo from the Op1 sub-mode.
-    EXPECT_EQ(executed_algo_from_gemm_mode(
+    EXPECT_EQ(executed_algo_from_execution_path(
                       "fused_moe_2pass_intalloc(op1=flat_m_tile_single_tier,"
                       "op2=flat_m_tile_single_tier)+postop"),
             2);
-    EXPECT_EQ(executed_algo_from_gemm_mode(
+    EXPECT_EQ(executed_algo_from_execution_path(
                       "fused_moe_vertical_intalloc(op1=vertical_fusion_bf16,"
                       "op2=vertical_fusion_bf16)"),
             2);
-    EXPECT_EQ(executed_algo_from_gemm_mode("fused_moe_2pass(op1=flat_n_tile_"
-                                           "custom,op2=flat_n_tile_custom)"),
+    EXPECT_EQ(
+            executed_algo_from_execution_path("fused_moe_2pass(op1=flat_n_tile_"
+                                              "custom,op2=flat_n_tile_custom)"),
             3);
     // No-op / skip markers map to 0 (nothing executed).
-    EXPECT_EQ(executed_algo_from_gemm_mode("fused_moe_skip"), 0);
-    EXPECT_EQ(executed_algo_from_gemm_mode("flat_m_tile_skip"), 0);
-    EXPECT_EQ(executed_algo_from_gemm_mode("multilevel_skip"), 0);
+    EXPECT_EQ(executed_algo_from_execution_path("fused_moe_skip"), 0);
+    EXPECT_EQ(executed_algo_from_execution_path("flat_m_tile_skip"), 0);
+    EXPECT_EQ(executed_algo_from_execution_path("multilevel_skip"), 0);
 }
 
-// Forced ALGO 2 with active_ops > num_threads: gemm_mode must name the
+// Forced ALGO 2 with active_ops > num_threads: execution_path must name the
 // sequential-full-team clamp, and exec_algo must report 1 (the ALGO-1
 // behaviour that actually ran) even though chosen=ALGO_2.  This is the
 // headline selection-vs-execution divergence the logging makes explicit.
@@ -9466,7 +9488,7 @@ TEST(TestGroupMatmulMTileBranches, ForcedAlgo2SeqClampWritesMode) {
     reset_grp_matmul_caches();
     AlgoEnvGuard algo_guard(2);
     MTilePathCaptureGuard cap;
-    GemmModeCaptureGuard mode_cap;
+    ExecutionPathCaptureGuard mode_cap;
 
     ASSERT_EQ(group_matmul_direct(s.gv.layout, s.gv.transA, s.gv.transB,
                       s.gv.Ms, s.gv.Ns, s.gv.Ks, s.gv.alpha, s.srcs, s.gv.lda,
@@ -9479,11 +9501,12 @@ TEST(TestGroupMatmulMTileBranches, ForcedAlgo2SeqClampWritesMode) {
     EXPECT_EQ(tag, kManyExpertsSeqFallback);
 
     const char *mode = zendnnl::lowoha::matmul::test_api ::
-                               s_last_group_matmul_direct_gemm_mode.load(
+                               s_last_group_matmul_direct_execution_path.load(
                                        std::memory_order_relaxed);
     ASSERT_NE(mode, nullptr);
     EXPECT_STREQ(mode, "flat_m_tile_seq_clamp");
-    EXPECT_EQ(zendnnl::lowoha::matmul::executed_algo_from_gemm_mode(mode), 1)
+    EXPECT_EQ(
+            zendnnl::lowoha::matmul::executed_algo_from_execution_path(mode), 1)
             << "forced ALGO 2 clamped to sequential-full-team must report "
                "exec_algo=1 (ran ALGO-1 behaviour) despite chosen=ALGO_2";
 }
@@ -9662,9 +9685,9 @@ TEST(TestGroupMatmulMTileBranches, MultiTierLowSkewFallsThrough) {
 }
 
 // ============================================================================
-// [8g] TestGroupMatmulMTileStandalone: numerical correctness of `flat_m_tile`
+// [8g] TestGroupMatmulMTileStandalone: numerical correctness of `m_tile_execute`
 // when called as a standalone grouped matmul (no `fused_moe`, no `gated_act`,
-// no `moe_postop`) — the llama.cpp use case.  Existing `TestGroupMatmulMTile
+// no `weighted_reduce`) — the llama.cpp use case.  Existing `TestGroupMatmulMTile
 // Branches` only verify branch tags; they never check that the dst[] values
 // produced by the M-tile path match what the caller expects.  This fixture
 // adds the per-expert × per-row × per-col value comparison against an ALGO 1
@@ -9870,7 +9893,7 @@ static void run_and_compare_standalone(StandaloneMTileShape &s, int algo_test,
     EXPECT_EQ(tag, expected_tag)
             << "Path tag mismatch on " << case_label << ": expected "
             << expected_tag << ", got " << tag
-            << " (kRoundBased=0, kMultiTier=1, kWideNFallback=2, "
+            << " (kRoundBased=0, kMultiTier=1, kShallowMFallback=2, "
                "kPhase2Single=3, kVerticalFusionBF16=4)";
     using zendnnl::lowoha::matmul::grp_matmul_gated_act_t;
     const int compare_cols
@@ -9991,7 +10014,7 @@ TEST(TestGroupMatmulMTileStandalone, CallerAllocAlphaBeta) {
 //
 // Why this is the most informative test in Batch 2: the act is invoked
 // per-slice from `execute_m_tile_act` (rows [row_start, row_end) per
-// thread) under ALGO 2, but full-M from `sequential_experts` under
+// thread) under ALGO 2, but full-M from `sequential_execute` under
 // ALGO 1.  Numerical parity across these two row-range semantics
 // confirms that the slice-stitched activation is correct.
 TEST(TestGroupMatmulMTileStandalone, GatedActSiluAndMul) {
@@ -10221,7 +10244,7 @@ TEST(TestGroupMatmulMTileBranches, ForcedAlgo2WideNValueParityOnLightFrames) {
 
 // ============================================================================
 // [8i] TestGroupMatmulMTileQuantGate: direct unit-test of
-// `check_m_tile_safe`'s dynamic-quant arm.  The gate's contract
+// `m_tile_supported`'s dynamic-quant arm.  The gate's contract
 // (`group_matmul_parallel_common.hpp:159-161`) is that
 // `dynamic_quant = true` requires `src_scale.dims[0] == M[i]` so the
 // per-thread reorder operates on its own rows.  Per-token `{M, 1}`
@@ -10231,8 +10254,8 @@ TEST(TestGroupMatmulMTileBranches, ForcedAlgo2WideNValueParityOnLightFrames) {
 // Why this matters: forcing `ZENDNNL_GRP_MATMUL_ALGO=2` with a
 // per-tensor src_scale must fall back to ALGO 1 (the M-tile slicer
 // cannot safely partition a shared scalar scale across threads).
-// The fallback is enforced by `select_grp_matmul_algo` reading
-// `check_m_tile_safe`'s return value.
+// The fallback is enforced by `group_matmul_algo_select` reading
+// `m_tile_supported`'s return value.
 //
 // Replaces the per-call cost of constructing a full int8 fused-MoE
 // fixture (which would need wei reorder, runtime BF16→S8 scratch,
@@ -10263,7 +10286,7 @@ TEST(TestGroupMatmulMTileQuantGate, AcceptsPerTokenAndPerGroup) {
         params[i].quant_params.src_scale.dims = {16, 1};
         params[i].quant_params.src_scale.dt = data_type_t::f32;
     }
-    EXPECT_TRUE(check_m_tile_safe(layout, M, params, num_ops))
+    EXPECT_TRUE(m_tile_supported(layout, M, params, num_ops))
             << "per-token src_scale dims={M,1} must be accepted by M-tile gate";
 
     // Per-group-on-K `{M, G>1}` — also accepted.  Per-group is row-local
@@ -10272,7 +10295,7 @@ TEST(TestGroupMatmulMTileQuantGate, AcceptsPerTokenAndPerGroup) {
     for (int i = 0; i < num_ops; ++i) {
         params[i].quant_params.src_scale.dims = {16, 4};
     }
-    EXPECT_TRUE(check_m_tile_safe(layout, M, params, num_ops))
+    EXPECT_TRUE(m_tile_supported(layout, M, params, num_ops))
             << "per-group-on-K src_scale dims={M,G>1} must be accepted "
                "(row-local granularity is what the M-tile slicer requires)";
 }
@@ -10306,39 +10329,39 @@ TEST(TestGroupMatmulMTileQuantGate, RejectsPerTensorAndMismatched) {
     // Per-tensor (dims empty): rejected — sd.empty() at gate line 194.
     {
         auto p = make_params({});
-        EXPECT_FALSE(check_m_tile_safe(layout, M, p, num_ops))
+        EXPECT_FALSE(m_tile_supported(layout, M, p, num_ops))
                 << "empty src_scale dims must be rejected by M-tile gate";
     }
     // Per-tensor {1}: rejected — sd[0] != M[i] (1 != 16).
     {
         auto p = make_params({1});
-        EXPECT_FALSE(check_m_tile_safe(layout, M, p, num_ops))
+        EXPECT_FALSE(m_tile_supported(layout, M, p, num_ops))
                 << "per-tensor src_scale dims={1} must be rejected "
                    "(single shared scalar cannot be safely row-sliced)";
     }
     // Per-tensor {1, 1}: rejected — sd[0] != M[i].
     {
         auto p = make_params({1, 1});
-        EXPECT_FALSE(check_m_tile_safe(layout, M, p, num_ops))
+        EXPECT_FALSE(m_tile_supported(layout, M, p, num_ops))
                 << "per-tensor src_scale dims={1,1} must be rejected";
     }
     // Per-column / per-K (no M dim): {1, K}: rejected — sd[0] != M[i].
     {
         auto p = make_params({1, 64});
-        EXPECT_FALSE(check_m_tile_safe(layout, M, p, num_ops))
+        EXPECT_FALSE(m_tile_supported(layout, M, p, num_ops))
                 << "per-K-only src_scale dims={1, K} must be rejected";
     }
     // Mismatched M dim: {M+1, 1}: rejected.
     {
         auto p = make_params({17, 1});
-        EXPECT_FALSE(check_m_tile_safe(layout, M, p, num_ops))
+        EXPECT_FALSE(m_tile_supported(layout, M, p, num_ops))
                 << "src_scale dims[0] != M[i] must be rejected";
     }
     // Mismatched src_zp dim while src_scale is valid: rejected — line 196.
     {
         auto p = make_params({16, 1});
         p[0].quant_params.src_zp.dims = {17, 1};
-        EXPECT_FALSE(check_m_tile_safe(layout, M, p, num_ops))
+        EXPECT_FALSE(m_tile_supported(layout, M, p, num_ops))
                 << "src_zp dims[0] != M[i] must be rejected even when "
                    "src_scale dims are valid";
     }
@@ -10346,7 +10369,7 @@ TEST(TestGroupMatmulMTileQuantGate, RejectsPerTensorAndMismatched) {
 
 // ============================================================================
 // [8j] TestGroupMatmulMTilePostopGate — direct unit-test of
-//      `check_m_tile_safe`'s post-op rejection arm (lines 198-202 of
+//      `m_tile_supported`'s post-op rejection arm (lines 198-202 of
 //      `group_matmul_parallel_common.hpp`).  The M-tile per-thread row
 //      slicer cannot handle post-ops that REQUIRE the full M block
 //      (softmax normalises across the rows of a tile, pooling
@@ -10361,7 +10384,7 @@ TEST(TestGroupMatmulMTileQuantGate, RejectsPerTensorAndMismatched) {
 //      tensors unchanged).
 //
 //      All four M-tile branches (kRoundBased, kMultiTier,
-//      kWideNFallback, kPhase2Single) route through the SAME
+//      kShallowMFallback, kPhase2Single) route through the SAME
 //      `execute_m_tile` / `execute_m_tile_act` entry points for the
 //      sliced experts — round-based and multi-tier-light dispatch the
 //      full M of each expert to a single team, so the row-offset code
@@ -10410,7 +10433,7 @@ TEST(TestGroupMatmulMTilePostopGate, AcceptsBinaryAddAndMul) {
         mul_po.leading_dim = 64;
         params[i].postop_.push_back(mul_po);
     }
-    EXPECT_TRUE(check_m_tile_safe(layout, M, params, num_ops))
+    EXPECT_TRUE(m_tile_supported(layout, M, params, num_ops))
             << "binary_add (2D row-varying) and binary_mul (1D broadcast) "
                "post-ops must be accepted by the M-tile safety gate "
                "(row-offset handled in execute_m_tile lines 165-182)";
@@ -10446,7 +10469,7 @@ TEST(TestGroupMatmulMTilePostopGate, RejectsSoftmaxAndPooling) {
     // softmax: rejected — needs full M block for row-wise normalisation.
     {
         auto p = make_params_with_postop(post_op_type_t::softmax);
-        EXPECT_FALSE(check_m_tile_safe(layout, M, p, num_ops))
+        EXPECT_FALSE(m_tile_supported(layout, M, p, num_ops))
                 << "softmax post-op must be rejected — row-wise normalisation "
                    "across the full M block cannot be satisfied by the M-tile "
                    "per-thread row slicer";
@@ -10454,7 +10477,7 @@ TEST(TestGroupMatmulMTilePostopGate, RejectsSoftmaxAndPooling) {
     // pooling: rejected — needs full M block for cross-row aggregation.
     {
         auto p = make_params_with_postop(post_op_type_t::pooling);
-        EXPECT_FALSE(check_m_tile_safe(layout, M, p, num_ops))
+        EXPECT_FALSE(m_tile_supported(layout, M, p, num_ops))
                 << "pooling post-op must be rejected — cross-row aggregation "
                    "cannot be partitioned across M-tile threads";
     }
@@ -10467,7 +10490,7 @@ TEST(TestGroupMatmulMTilePostopGate, RejectsSoftmaxAndPooling) {
         pool_po.po_type = post_op_type_t::pooling;
         pool_po.dtype = data_type_t::bf16;
         p[2].postop_.push_back(pool_po); // single expert in the batch
-        EXPECT_FALSE(check_m_tile_safe(layout, M, p, num_ops))
+        EXPECT_FALSE(m_tile_supported(layout, M, p, num_ops))
                 << "ANY expert carrying softmax/pooling must reject the whole "
                    "batch (mixed-postop batches fall back to ALGO 1 because "
                    "the M-tile planner cannot split planner state across the "
@@ -10477,7 +10500,7 @@ TEST(TestGroupMatmulMTilePostopGate, RejectsSoftmaxAndPooling) {
 
 // ============================================================================
 // [8k] TestGroupMatmulMTileDtypeGate — direct unit-test of
-//      `check_m_tile_safe`'s dtype-uniformity arm (lines 185-188 of
+//      `m_tile_supported`'s dtype-uniformity arm (lines 185-188 of
 //      `group_matmul_parallel_common.hpp`).  The gate requires
 //      cross-expert dtype uniformity for src / wei / dst / bias —
 //      M-tile's per-thread row slicer dispatches uniform GEMM tiles to
@@ -10511,7 +10534,7 @@ TEST(TestGroupMatmulMTileDtypeGate, AcceptsUniformBF16) {
         params[i].mem_format_b = 'n';
         params[i].packing.pack_format_b = 0;
     }
-    EXPECT_TRUE(check_m_tile_safe(layout, M, params, num_ops))
+    EXPECT_TRUE(m_tile_supported(layout, M, params, num_ops))
             << "uniform bf16 src/wei/dst/bias must be accepted by the M-tile "
                "gate";
 }
@@ -10533,7 +10556,7 @@ TEST(TestGroupMatmulMTileDtypeGate, AcceptsUniformFP32) {
         params[i].mem_format_b = 'n';
         params[i].packing.pack_format_b = 0;
     }
-    EXPECT_TRUE(check_m_tile_safe(layout, M, params, num_ops))
+    EXPECT_TRUE(m_tile_supported(layout, M, params, num_ops))
             << "uniform f32 src/wei/dst/bias must be accepted — M-tile is "
                "dtype-agnostic at the safety gate (kernel routing handled "
                "by `kernel_select`)";
@@ -10558,7 +10581,7 @@ TEST(TestGroupMatmulMTileDtypeGate, AcceptsMixedPrecisionBF16toFP32) {
         params[i].mem_format_b = 'n';
         params[i].packing.pack_format_b = 0;
     }
-    EXPECT_TRUE(check_m_tile_safe(layout, M, params, num_ops))
+    EXPECT_TRUE(m_tile_supported(layout, M, params, num_ops))
             << "mixed-precision (bf16 in, f32 out) must be accepted — the "
                "gate enforces ACROSS-expert uniformity, not BETWEEN src/dst";
 }
@@ -10581,7 +10604,7 @@ TEST(TestGroupMatmulMTileDtypeGate, RejectsCrossExpertSrcMismatch) {
     }
     // Mismatch one expert's src dtype.
     params[2].dtypes.src = data_type_t::f32;
-    EXPECT_FALSE(check_m_tile_safe(layout, M, params, num_ops))
+    EXPECT_FALSE(m_tile_supported(layout, M, params, num_ops))
             << "cross-expert src dtype mismatch must be rejected — M-tile's "
                "per-thread slicer dispatches uniform GEMM tiles and cannot "
                "switch dtype mid-batch";
@@ -10605,7 +10628,7 @@ TEST(TestGroupMatmulMTileDtypeGate, RejectsCrossExpertWeiMismatch) {
     }
     // s8 weights on one expert (quantised), bf16 on the others.
     params[0].dtypes.wei = data_type_t::s8;
-    EXPECT_FALSE(check_m_tile_safe(layout, M, params, num_ops))
+    EXPECT_FALSE(m_tile_supported(layout, M, params, num_ops))
             << "cross-expert wei dtype mismatch must be rejected (e.g. one "
                "quantised expert + dense others) — the M-tile planner cannot "
                "route a single team to two different kernel families";
@@ -10628,7 +10651,7 @@ TEST(TestGroupMatmulMTileDtypeGate, RejectsCrossExpertDstMismatch) {
         params[i].mem_format_b = 'n';
     }
     params[3].dtypes.dst = data_type_t::f32;
-    EXPECT_FALSE(check_m_tile_safe(layout, M, params, num_ops))
+    EXPECT_FALSE(m_tile_supported(layout, M, params, num_ops))
             << "cross-expert dst dtype mismatch must be rejected — the row "
                "slicer's dst pointer arithmetic assumes uniform `dst_elem` "
                "(`size_of(dtypes.dst)`) across all experts";
@@ -10651,7 +10674,7 @@ TEST(TestGroupMatmulMTileDtypeGate, RejectsCrossExpertBiasMismatch) {
         params[i].mem_format_b = 'n';
     }
     params[1].dtypes.bias = data_type_t::bf16;
-    EXPECT_FALSE(check_m_tile_safe(layout, M, params, num_ops))
+    EXPECT_FALSE(m_tile_supported(layout, M, params, num_ops))
             << "cross-expert bias dtype mismatch must be rejected (e.g. f32 "
                "bias on most experts + bf16 bias on one) — the kernel select "
                "would diverge mid-batch";
@@ -10666,7 +10689,7 @@ TEST(TestGroupMatmulMTileDtypeGate, RejectsCrossExpertBiasMismatch) {
 // in dtype handling that the bf16-only standalone tests would miss.
 //
 // Reference: ALGO 1 (sequential per-expert) on the same f32 inputs.
-// Test:      ALGO 2 (M-tile / `flat_m_tile`).
+// Test:      ALGO 2 (M-tile / `m_tile_execute`).
 // Tolerance: tight (rtol=1e-5, atol=1e-5) — f32 has 7-digit precision so
 //            the reduction-order noise between sequential and M-tile is
 //            well below 1e-5 for this small K=64 / M=64 / N=128 shape.
@@ -10870,7 +10893,7 @@ TEST(TestGroupMatmulMTileStandalone, F32NoBias) {
 // miss.
 //
 // CRITICAL CONTRACT THIS TEST LOCKS:
-//   `flat_m_tile`'s per-thread offset arithmetic uses
+//   `m_tile_execute`'s per-thread offset arithmetic uses
 //   `size_of(params[0].dtypes.*)` for the element sizes
 //   (`group_matmul_m_tile.cpp:520-521`).  For F16 this resolves to 2
 //   (same as BF16), so the M-tile arithmetic happens to be correct
@@ -10880,9 +10903,9 @@ TEST(TestGroupMatmulMTileStandalone, F32NoBias) {
 //   break F16 and trip this test.
 //
 // Reference: ALGO 1 (sequential per-expert) on the same f16 inputs.
-// Test:      ALGO 2 (M-tile / `flat_m_tile`).
+// Test:      ALGO 2 (M-tile / `m_tile_execute`).
 // Path tag:  kPhase2Single (the M-weighted single-tier branch — see
-//            `flat_m_tile.cpp:1192-1203`).
+//            `group_matmul_m_tile.cpp:1192-1203`).
 // Tolerance: rtol=5e-3, atol=5e-3 — F16 has ~10 fraction bits, so the
 //            reduction-order noise between sequential and M-tile is
 //            comparable to the bf16 case at K=64 (worst-case
@@ -11140,9 +11163,9 @@ TEST(TestGroupMatmulMTileStandalone, F16NoBias) {
 // [8m] TestGroupMatmulMTileCustomKernelInvariance — verify the M-tile
 // (ALGO 2) runtime is independent of the CUSTOM_KERNEL env knob.
 //
-// Contract: M-tile (`flat_m_tile`) dispatches every per-thread slice
+// Contract: M-tile (`m_tile_execute`) dispatches every per-thread slice
 // through `execute_expert_slice`, which selects the kernel via
-// `resolve_kernel()` (returns the matmul_algo_t from `matmul_config_t`
+// `resolve_matmul_backend()` (returns the matmul_algo_t from `matmul_config_t`
 // — defaults to `aocl_dlp_blocked`).  This is independent of the CK
 // env knob — `get_grp_matmul_custom_kernel()` is consulted only by the
 // PREPACK call BEFORE the OMP region (see m_tile.cpp lines 629-635 for
@@ -11204,7 +11227,8 @@ TEST(TestGroupMatmulMTileEdgeCases, NumOpsZeroSucceeds) {
     EXPECT_EQ(st, status_t::failure)
             << "empty input vectors must be rejected by the public-API "
                "validator (defends M-tile's `num_ops == 0` invariant — "
-               "the dispatcher never reaches `flat_m_tile` on an empty batch)";
+               "the dispatcher never reaches `m_tile_execute` on an empty "
+               "batch)";
 }
 
 TEST(TestGroupMatmulMTileEdgeCases, AllExpertsInactiveSucceeds) {
@@ -11226,7 +11250,7 @@ TEST(TestGroupMatmulMTileEdgeCases, AllExpertsInactiveSucceeds) {
     }
 
     // 8 experts, all with M=0 — `active_ops` should be 0 at line 657
-    // and `flat_m_tile` returns immediately without entering any
+    // and `m_tile_execute` returns immediately without entering any
     // branch.  No tag is set (capture stays at its initial value).
     const int num_ops = 8;
     const int N = 128;
@@ -12095,7 +12119,7 @@ TEST(TestGroupMatmulMTileCustomKernelInvariance, BF16ByteIdenticalDst) {
                        << e << " byte_off=" << b
                        << " CK=0=" << static_cast<int>(p0[b])
                        << " CK=1=" << static_cast<int>(p1[b])
-                       << " — `flat_m_tile` must not pick up a CK-dependent "
+                       << " — `m_tile_execute` must not pick up a CK-dependent "
                           "kernel-select branch";
             }
         }

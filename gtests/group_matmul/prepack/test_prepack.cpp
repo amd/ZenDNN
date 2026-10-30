@@ -66,7 +66,7 @@
 // `group_matmul/prepack/prepack_custom_kernel.hpp`; the per-call
 // dispatcher header (`custom_kernel/dispatch.hpp`) is still pulled in
 // for completeness, and `pack.hpp` is needed for
-// `clear_custom_kernel_pack_cache()`.
+// `clear_custom_kernel_pack_cache_bf16()`.
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/dispatch.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
 // `src_scale_is_collapsed_per_token` — the shared sym-quant scale-shape
@@ -177,10 +177,10 @@ TEST_F(TestFusedMoECacheStress, PerCallCacheOffSkipsAotCkWarm) {
             << "per-call cache-off must not publish a persistent CK pack";
 
 #if ZENDNNL_DEPENDS_AOCLDLP
-    group_matmul_prepack::aocl_dlp::AoclDlpPackProbeStats aocl_disabled;
-    ASSERT_EQ(group_matmul_prepack::aocl_dlp::warm_pack_all_aocl_dlp_experts(
-                      weights, ks, ns, ldb, trans_b, /*is_weights_const=*/ {},
-                      E, data_type_t::bf16, data_type_t::bf16, aocl_disabled,
+    group_matmul_prepack::aocl_dlp::PackStats aocl_disabled;
+    ASSERT_EQ(group_matmul_prepack::aocl_dlp::warm_aocl_weight_cache(weights,
+                      ks, ns, ldb, trans_b, /*is_weights_const=*/ {}, E,
+                      data_type_t::bf16, data_type_t::bf16, aocl_disabled,
                       /*num_threads=*/4,
                       /*allow_inplace=*/false,
                       /*weight_cache_type=*/0),
@@ -272,7 +272,7 @@ class TestPrepackPerAlgoFunctions : public ::testing::Test,
                                     private OutOfPlaceCacheFixture {};
 
 namespace {
-// Build a minimal `PrepackParams` that points at caller-owned vectors.
+// Build a minimal `PrepackRequest` that points at caller-owned vectors.
 // Each "expert" gets its own owned buffer so each cache key
 // (weight_ptr, K, N, ldb, transB, pack_nr) is unique — necessary for
 // the post-prepack probe to give meaningful hit/miss counts (a
@@ -296,7 +296,7 @@ struct PrepackHarness {
     std::vector<bool> transA;
     std::vector<float> alpha;
     std::vector<float> beta;
-    zendnnl::lowoha::matmul::group_matmul_prepack::PrepackParams pp;
+    zendnnl::lowoha::matmul::group_matmul_prepack::PrepackRequest pp;
 };
 
 PrepackHarness make_harness(
@@ -360,16 +360,16 @@ TEST_F(TestPrepackPerAlgoFunctions, EagerWarmsAllExpertsWhenTotalEqualsActive) {
     // subprocess env-matrix tests in section [26].
     auto h = make_harness(/*total=*/4, /*active=*/4,
             /*K=*/32, /*N=*/64, /*fill=*/0.5f);
-    prepack::prepack_for_algo_1(h.pp);
-    prepack::prepack_for_algo_2(h.pp);
-    prepack::prepack_for_algo_3(h.pp);
-    prepack::prepack_for_algo_5(h.pp);
-    prepack::prepack_for_algo_6(h.pp);
+    prepack::prepack_sequential(h.pp);
+    prepack::prepack_m_tile(h.pp);
+    prepack::prepack_n_tile(h.pp);
+    prepack::prepack_expert_parallel(h.pp);
+    prepack::prepack_hierarchical(h.pp);
 
     // Probe the custom-kernel cache.  ALGO 3's body warms it (BF16 +
     // custom-kernel-on satisfied via `make_harness`); the other ALGO
     // bodies don't touch the custom cache, so the probe reflects the
-    // single contribution from `prepack_for_algo_3`.
+    // single contribution from `prepack_n_tile`.
     prepack::custom_kernel::PackProbeStats probe;
     prepack::custom_kernel::warm_pack_all_custom_kernel_experts(h.weight, h.K,
             h.N, h.ldb, h.transB, h.is_weights_const,
@@ -396,11 +396,11 @@ TEST_F(TestPrepackPerAlgoFunctions, FingerprintCacheDedup) {
     // BF16/BF16/BF16, total > active).  AOCL DLP cache is also warmed
     // when inner_kernel resolves to aocl_dlp_blocked, but we check the
     // observable side (custom-kernel HIT/MISS) below.
-    prepack::prepack_for_algo_3(h.pp);
+    prepack::prepack_n_tile(h.pp);
 
     // Second call with the same fingerprint: should short-circuit via
     // the per-thread fingerprint cache, no new packs.
-    prepack::prepack_for_algo_3(h.pp);
+    prepack::prepack_n_tile(h.pp);
 
     // Probe the cache state via warm_pack_all_custom_kernel_experts:
     // since the first call populated all 4 entries and the second was
@@ -410,7 +410,7 @@ TEST_F(TestPrepackPerAlgoFunctions, FingerprintCacheDedup) {
             h.N, h.ldb, h.transB, h.is_weights_const,
             /*total_count=*/4, probe);
     EXPECT_EQ(probe.cache_hits, 4)
-            << "expected the first prepack_for_algo_3 to have populated all "
+            << "expected the first prepack_n_tile to have populated all "
                "entries; the second invocation must have been a fingerprint "
                "no-op (otherwise cache would also be warm).";
     EXPECT_EQ(probe.cache_misses, 0);
@@ -427,7 +427,7 @@ TEST_F(TestPrepackPerAlgoFunctions, Algo3CustomKernelBranch) {
     auto h = make_harness(/*total=*/4, /*active=*/2,
             /*K=*/32, /*N=*/64, /*fill=*/0.75f);
 
-    prepack::prepack_for_algo_3(h.pp);
+    prepack::prepack_n_tile(h.pp);
 
     // Custom-kernel branch fired (BF16 + custom_kernel_on); a probe
     // should now hit all 4 entries.
@@ -456,7 +456,7 @@ TEST_F(TestPrepackPerAlgoFunctions, Algo3CustomKernelBranchSkippedOnNonBF16) {
     // non-BF16 source case must not prefill the BF16 custom-kernel cache.
     h.pp.src_dtype = data_type_t::f32;
 
-    prepack::prepack_for_algo_3(h.pp);
+    prepack::prepack_n_tile(h.pp);
 
     // Custom-kernel cache should be UNTOUCHED.  Verify by re-warming and
     // asserting all-misses.
@@ -470,13 +470,13 @@ TEST_F(TestPrepackPerAlgoFunctions, Algo3CustomKernelBranchSkippedOnNonBF16) {
 
 // ── AOCL DLP per-tile warm-pack coverage ─────────────────────────────
 //
-// The `warm_pack_all_aocl_dlp_experts_n_tile(...)` warmer mirrors the
+// The `warm_aocl_weight_cache_n_tile(...)` warmer mirrors the
 // runtime `aligned_n_split(N[e], n_thr_e, tid, nr_align)` decomposition
-// used by ALGO 3 flat_n_tile under the strict-stable plan
+// used by ALGO 3 n_tile_execute under the strict-stable plan
 // (`ZENDNNL_GRP_MATMUL_AOCL_STABLE_NTILE=1`, default).  These tests
 // drive the warmer directly so we can assert byte-precise pack counts
 // independent of the global env-knob caching that
-// `prepack_for_algo_3(...)` is subject to.
+// `prepack_n_tile(...)` is subject to.
 //
 // Counts asserted: `total_attempted = sum_e min(stable, N[e]/nr_align)`
 // for valid experts; `packed_ok` ≤ `total_attempted` (the AOCL DLP
@@ -486,8 +486,8 @@ TEST_F(TestPrepackPerAlgoFunctions, Algo3CustomKernelBranchSkippedOnNonBF16) {
 // constant.
 
 // ── DQ-INT8 sym-quant AOCL DLP warmers (full-weight + per-tile) ──────
-// Direct unit tests for `warm_pack_all_aocl_dlp_experts_sym_quant` and
-// `warm_pack_all_aocl_dlp_experts_n_tile_sym_quant` — the int8 siblings
+// Direct unit tests for `warm_aocl_weight_cache_sym_quant` and
+// `warm_aocl_weight_cache_n_tile_sym_quant` — the int8 siblings
 // of the bf16 full-weight / per-tile warmers above.  s8 weights built
 // inline (make_harness is bf16-only).
 namespace {
@@ -525,12 +525,11 @@ TEST_F(TestPrepackPerAlgoFunctions, AoclDlpSymQuantNTileTotalAttemptedCount) {
     // n_thr_e=4 per expert -> 4 experts x 4 tiles = 16 attempts.  Same
     // decomposition as the bf16 per-tile warmer, sym-quant reorder.
     auto h = make_int8_weights(/*E=*/4, /*K=*/64, /*N=*/128, /*base=*/7);
-    prepack::aocl_dlp::AoclDlpPackProbeStats st;
-    ASSERT_EQ(
-            prepack::aocl_dlp::warm_pack_all_aocl_dlp_experts_n_tile_sym_quant(
-                    h.weight, h.K, h.N, h.ldb, h.transB, h.is_weights_const,
-                    /*total_count=*/4, /*wei_dtype=*/data_type_t::s8,
-                    /*num_threads=*/64, /*stable=*/4, /*nr_align=*/1, st),
+    prepack::aocl_dlp::PackStats st;
+    ASSERT_EQ(prepack::aocl_dlp::warm_aocl_weight_cache_n_tile_sym_quant(
+                      h.weight, h.K, h.N, h.ldb, h.transB, h.is_weights_const,
+                      /*total_count=*/4, /*wei_dtype=*/data_type_t::s8,
+                      /*num_threads=*/64, /*stable=*/4, /*nr_align=*/1, st),
             status_t::success);
 #if ZENDNNL_DEPENDS_AOCLDLP
     EXPECT_EQ(st.total_attempted, 16);
@@ -549,12 +548,11 @@ TEST_F(TestPrepackPerAlgoFunctions, AoclDlpSymQuantNTileSkipsNonS8) {
     // wei_dtype=bf16 to the sym-quant warmer -> every reachable entry
     // counted as skipped (the sym-quant reorder only serves s8).
     auto h = make_int8_weights(/*E=*/3, /*K=*/64, /*N=*/128, /*base=*/3);
-    prepack::aocl_dlp::AoclDlpPackProbeStats st;
-    ASSERT_EQ(
-            prepack::aocl_dlp::warm_pack_all_aocl_dlp_experts_n_tile_sym_quant(
-                    h.weight, h.K, h.N, h.ldb, h.transB, h.is_weights_const,
-                    /*total_count=*/3, /*wei_dtype=*/data_type_t::bf16,
-                    /*num_threads=*/64, /*stable=*/4, /*nr_align=*/1, st),
+    prepack::aocl_dlp::PackStats st;
+    ASSERT_EQ(prepack::aocl_dlp::warm_aocl_weight_cache_n_tile_sym_quant(
+                      h.weight, h.K, h.N, h.ldb, h.transB, h.is_weights_const,
+                      /*total_count=*/3, /*wei_dtype=*/data_type_t::bf16,
+                      /*num_threads=*/64, /*stable=*/4, /*nr_align=*/1, st),
             status_t::success);
     EXPECT_EQ(st.skipped_invalid, st.total_attempted);
     EXPECT_EQ(st.packed_ok, 0);
@@ -567,12 +565,11 @@ TEST_F(TestPrepackPerAlgoFunctions, AoclDlpSymQuantNTileSkipsNonConstExperts) {
     auto h = make_int8_weights(/*E=*/4, /*K=*/64, /*N=*/128, /*base=*/2);
     h.is_weights_const[1] = false;
     h.is_weights_const[3] = false;
-    prepack::aocl_dlp::AoclDlpPackProbeStats st;
-    ASSERT_EQ(
-            prepack::aocl_dlp::warm_pack_all_aocl_dlp_experts_n_tile_sym_quant(
-                    h.weight, h.K, h.N, h.ldb, h.transB, h.is_weights_const,
-                    /*total_count=*/4, /*wei_dtype=*/data_type_t::s8,
-                    /*num_threads=*/64, /*stable=*/4, /*nr_align=*/1, st),
+    prepack::aocl_dlp::PackStats st;
+    ASSERT_EQ(prepack::aocl_dlp::warm_aocl_weight_cache_n_tile_sym_quant(
+                      h.weight, h.K, h.N, h.ldb, h.transB, h.is_weights_const,
+                      /*total_count=*/4, /*wei_dtype=*/data_type_t::s8,
+                      /*num_threads=*/64, /*stable=*/4, /*nr_align=*/1, st),
             status_t::success);
 // Experts 1 + 3 (non-const) are skipped at the expert level (1 skip
 // each); experts 0 + 2 contribute 4 tiles each.
@@ -589,9 +586,9 @@ TEST_F(TestPrepackPerAlgoFunctions, AoclDlpSymQuantFullWeightPacks) {
     namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
     reset_grp_matmul_caches();
     auto h = make_int8_weights(/*E=*/4, /*K=*/64, /*N=*/128, /*base=*/9);
-    prepack::aocl_dlp::AoclDlpPackProbeStats st;
-    ASSERT_EQ(prepack::aocl_dlp::warm_pack_all_aocl_dlp_experts_sym_quant(
-                      h.weight, h.K, h.N, h.ldb, h.transB, h.is_weights_const,
+    prepack::aocl_dlp::PackStats st;
+    ASSERT_EQ(prepack::aocl_dlp::warm_aocl_weight_cache_sym_quant(h.weight, h.K,
+                      h.N, h.ldb, h.transB, h.is_weights_const,
                       /*total_count=*/4, /*wei_dtype=*/data_type_t::s8, st),
             status_t::success);
     EXPECT_EQ(st.total_attempted, 4); // one full-weight reorder per expert
@@ -614,9 +611,9 @@ TEST_F(TestPrepackPerAlgoFunctions, AoclDlpNTileTotalAttemptedCount) {
     auto h = make_harness(/*total=*/4, /*active=*/2,
             /*K=*/64, /*N=*/128, /*fill=*/0.5f);
 
-    prepack::aocl_dlp::AoclDlpPackProbeStats st;
-    ASSERT_EQ(prepack::aocl_dlp::warm_pack_all_aocl_dlp_experts_n_tile(h.weight,
-                      h.K, h.N, h.ldb, h.transB, h.is_weights_const,
+    prepack::aocl_dlp::PackStats st;
+    ASSERT_EQ(prepack::aocl_dlp::warm_aocl_weight_cache_n_tile(h.weight, h.K,
+                      h.N, h.ldb, h.transB, h.is_weights_const,
                       /*total_count=*/4,
                       /*wei_dtype=*/data_type_t::bf16,
                       /*num_threads=*/64,
@@ -650,9 +647,9 @@ TEST_F(TestPrepackPerAlgoFunctions, AoclDlpNTilePerExpertNarrowNClamp) {
     auto h = make_harness(/*total=*/3, /*active=*/2,
             /*K=*/32, /*N=*/64, /*fill=*/0.25f);
 
-    prepack::aocl_dlp::AoclDlpPackProbeStats st;
-    ASSERT_EQ(prepack::aocl_dlp::warm_pack_all_aocl_dlp_experts_n_tile(h.weight,
-                      h.K, h.N, h.ldb, h.transB, h.is_weights_const,
+    prepack::aocl_dlp::PackStats st;
+    ASSERT_EQ(prepack::aocl_dlp::warm_aocl_weight_cache_n_tile(h.weight, h.K,
+                      h.N, h.ldb, h.transB, h.is_weights_const,
                       /*total_count=*/3,
                       /*wei_dtype=*/data_type_t::bf16,
                       /*num_threads=*/64,
@@ -681,9 +678,9 @@ TEST_F(TestPrepackPerAlgoFunctions, AoclDlpNTileNonBf16IsSkipped) {
     // Force F32 — the warmer mirrors `run_dlp(...)`'s BF16-only gate
     // (other dtypes count every entry as `skipped_invalid` and exit
     // without touching the cache, see `prepack_aocl_dlp.cpp`).
-    prepack::aocl_dlp::AoclDlpPackProbeStats st;
-    ASSERT_EQ(prepack::aocl_dlp::warm_pack_all_aocl_dlp_experts_n_tile(h.weight,
-                      h.K, h.N, h.ldb, h.transB, h.is_weights_const,
+    prepack::aocl_dlp::PackStats st;
+    ASSERT_EQ(prepack::aocl_dlp::warm_aocl_weight_cache_n_tile(h.weight, h.K,
+                      h.N, h.ldb, h.transB, h.is_weights_const,
                       /*total_count=*/4,
                       /*wei_dtype=*/data_type_t::f32,
                       /*num_threads=*/64,
@@ -717,9 +714,9 @@ TEST_F(TestPrepackPerAlgoFunctions, AoclDlpNTileSkipsNonConstExperts) {
     h.is_weights_const[1] = false;
     h.is_weights_const[3] = false;
 
-    prepack::aocl_dlp::AoclDlpPackProbeStats st;
-    ASSERT_EQ(prepack::aocl_dlp::warm_pack_all_aocl_dlp_experts_n_tile(h.weight,
-                      h.K, h.N, h.ldb, h.transB, h.is_weights_const,
+    prepack::aocl_dlp::PackStats st;
+    ASSERT_EQ(prepack::aocl_dlp::warm_aocl_weight_cache_n_tile(h.weight, h.K,
+                      h.N, h.ldb, h.transB, h.is_weights_const,
                       /*total_count=*/4,
                       /*wei_dtype=*/data_type_t::bf16,
                       /*num_threads=*/64,
@@ -823,8 +820,8 @@ TEST_F(TestPrepackPerAlgoFunctions, Algo3PerTilePathRunsWithThreadContext) {
 
     reset_grp_matmul_caches();
 
-    // End-to-end through `prepack_for_algo_3` with a thread context
-    // populated.  This is the path `flat_n_tile` takes in production.
+    // End-to-end through `prepack_n_tile` with a thread context
+    // populated.  This is the path `n_tile_execute` takes in production.
     // We can't directly observe the AOCL DLP cache (the per-dtype LRU
     // is private to `aocl_kernel.cpp`), but we can assert that the
     // custom-kernel side still warms — the dispatcher's per-tile AOCL
@@ -834,7 +831,7 @@ TEST_F(TestPrepackPerAlgoFunctions, Algo3PerTilePathRunsWithThreadContext) {
     h.pp.num_threads = 64;
     h.pp.nr_align = 1;
 
-    prepack::prepack_for_algo_3(h.pp);
+    prepack::prepack_n_tile(h.pp);
 
     prepack::custom_kernel::PackProbeStats probe;
     prepack::custom_kernel::warm_pack_all_custom_kernel_experts(h.weight, h.K,
@@ -854,7 +851,7 @@ TEST_F(TestPrepackPerAlgoFunctions, Algo3PerTilePathRunsWithThreadContext) {
 //      custom-kernel cache (cache_hits = E for both probes).
 //
 //      The fused-MoE flow internally invokes
-//      group_matmul_run_parallel_dispatch TWICE (Pass 1 with Op1
+//      group_matmul_execute TWICE (Pass 1 with Op1
 //      weights, Pass 2 with Op2's down_weight); each pass triggers
 //      its per-ALGO prepack which warms its own weights.  The
 //      original Pass-2 implementation under-warmed Op2 because
@@ -962,7 +959,7 @@ TEST_F(TestPrepackFusedMoEEndToEnd, BothPassesWarmAllExperts) {
             /*interleave_split_halves=*/true);
     EXPECT_EQ(probe_op1.cache_hits, E)
             << "all " << E << " Op1 weights must be in the custom-kernel cache "
-            << "after Pass 1's prepack_for_algo_3 fired";
+            << "after Pass 1's prepack_n_tile fired";
     EXPECT_EQ(probe_op1.cache_misses, 0);
 
     // ── Probe Op2 ──────────────────────────────────────────────────
@@ -982,7 +979,7 @@ TEST_F(TestPrepackFusedMoEEndToEnd, BothPassesWarmAllExperts) {
             /*total_count=*/E, probe_op2);
     EXPECT_EQ(probe_op2.cache_hits, E)
             << "all " << E << " Op2 weights must be in the custom-kernel cache "
-            << "after Pass 2's prepack_for_algo_3 fired - if cache_misses > 0 "
+            << "after Pass 2's prepack_n_tile fired - if cache_misses > 0 "
             << "for entries [" << K << ", " << E
             << "), Pass 2's scratch.K_down "
             << "is back to being sized to `num_ops` (active) instead of "
@@ -1025,7 +1022,7 @@ TEST_P(TestPrepackKDownSynthesis, BothPassesWarmAllExperts) {
 
     reset_grp_matmul_caches();
 
-    // Force ALGO=3 + custom-kernel ON so prepack_for_algo_3's body fires
+    // Force ALGO=3 + custom-kernel ON so prepack_n_tile's body fires
     // its custom-kernel branch (the only side with observable HIT/MISS
     // counters).  Per-tile AOCL DLP warm also runs but is unobservable
     // through public API (tested separately in [18]).
@@ -1211,7 +1208,7 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulPrepackKDownSynth,
 //          cache state is itself deterministic).
 //
 //        * Algo1VsAlgo3 - same inputs run with ALGO=1 then ALGO=3.
-//          Prepack module fires for both (different scheduling_algo
+//          Prepack module fires for both (different group_schedule
 //          fingerprints) so each path independently warms its
 //          backend cache.  Output must match within BF16 fused-MoE
 //          tolerance.  Catches algorithmic divergence (weight buffer
@@ -1386,7 +1383,7 @@ TEST_P(TestPrepackResultInvariance, Algo1VsAlgo3) {
     dst_a1.alloc(p.num_ops, (size_t)4 * h.H, /*is_bf16=*/true);
     dst_a3.alloc(p.num_ops, (size_t)4 * h.H, /*is_bf16=*/true);
 
-    // ALGO 1 (sequential_experts): full-weight reorder cache, no
+    // ALGO 1 (sequential_execute): full-weight reorder cache, no
     // tile decomposition.
     {
         AlgoEnvGuard algo_guard(1);
@@ -1394,9 +1391,9 @@ TEST_P(TestPrepackResultInvariance, Algo1VsAlgo3) {
                 run_fused_moe_capture(h, p.num_ops, dst_a1), status_t::success);
     }
 
-    // ALGO 3 (flat_n_tile): per-tile reorder cache under strict-stable
+    // ALGO 3 (n_tile_execute): per-tile reorder cache under strict-stable
     // plan, custom-kernel BF16 fast path when env says so.  Different
-    // scheduling_algo fingerprint → independent prepack pass.
+    // group_schedule fingerprint → independent prepack pass.
     reset_grp_matmul_caches();
     {
         AlgoEnvGuard algo_guard(3);
@@ -1448,10 +1445,10 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulPrepackResultInvariance,
 
 // ===============================================================================
 // [22] TestPrepackClearCacheDirect - direct regression tests for the
-//      cache-clear APIs (`clear_custom_kernel_pack_cache()` and
+//      cache-clear APIs (`clear_custom_kernel_pack_cache_bf16()` and
 //      `clear_fingerprint_cache_for_test()`).
 //
-//      Targeted bug class: the `clear_custom_kernel_pack_cache()` size_t
+//      Targeted bug class: the `clear_custom_kernel_pack_cache_bf16()` size_t
 //      underflow regression that lets the LRU fast-path on
 //      `set_capacity(0)` → `set_capacity(MAX)` without iterating any
 //      eviction.  Symptom: tests that re-use heap addresses across
@@ -1501,14 +1498,14 @@ TEST_F(TestPrepackClearCacheDirect, CustomKernelCacheClearEvictsEntries) {
     // `set_capacity(0)` followed by `set_capacity(MAX)` the LRU's
     // `evict(0 - MAX)` underflows (size_t) and never iterates, so the
     // post-clear probe sees HITS instead of MISSES.
-    custom_kernel::clear_custom_kernel_pack_cache();
+    custom_kernel::clear_custom_kernel_pack_cache_bf16();
 
     prepack::custom_kernel::PackProbeStats st_after_clear;
     prepack::custom_kernel::warm_pack_all_custom_kernel_experts(h.weight, h.K,
             h.N, h.ldb, h.transB, h.is_weights_const,
             /*total_count=*/4, st_after_clear);
     EXPECT_EQ(st_after_clear.cache_misses, 4)
-            << "clear_custom_kernel_pack_cache() must evict all entries; "
+            << "clear_custom_kernel_pack_cache_bf16() must evict all entries; "
                "if cache_misses < 4 the size_t-underflow regression is back "
                "(set_capacity(0) → set_capacity(MAX) which never iterates "
                "evict).";
@@ -1527,8 +1524,8 @@ TEST_F(TestPrepackClearCacheDirect, FingerprintClearEnablesPrepackReFire) {
     // Call 1: prepack fires (cold fingerprint cache).  ALGO 3 + the
     // BF16/BF16/BF16 dtype triple drive the custom-kernel branch
     // (custom_kernel_on=true is set by `make_harness` on the harness
-    // PrepackParams).
-    prepack::prepack_for_algo_3(h.pp);
+    // PrepackRequest).
+    prepack::prepack_n_tile(h.pp);
 
     // Probe: all 4 should be HITS (warmed by call 1).
     prepack::custom_kernel::PackProbeStats st_after_call1;
@@ -1536,24 +1533,24 @@ TEST_F(TestPrepackClearCacheDirect, FingerprintClearEnablesPrepackReFire) {
             h.N, h.ldb, h.transB, h.is_weights_const,
             /*total_count=*/4, st_after_call1);
     EXPECT_EQ(st_after_call1.cache_hits, 4)
-            << "first prepack_for_algo_3 should have populated all entries";
+            << "first prepack_n_tile should have populated all entries";
 
     // Wipe the custom-kernel cache only (fingerprint cache stays).
     // The cache is now COLD again but the per-thread fingerprint set
     // still says "we already warmed this configuration".
-    custom_kernel::clear_custom_kernel_pack_cache();
+    custom_kernel::clear_custom_kernel_pack_cache_bf16();
 
     // Call 2: prepack short-circuits via fingerprint cache, leaves
     // the (cleared) custom-kernel cache cold.  Verifiable via the
     // probe immediately after.
-    prepack::prepack_for_algo_3(h.pp);
+    prepack::prepack_n_tile(h.pp);
 
     prepack::custom_kernel::PackProbeStats st_after_call2;
     prepack::custom_kernel::warm_pack_all_custom_kernel_experts(h.weight, h.K,
             h.N, h.ldb, h.transB, h.is_weights_const,
             /*total_count=*/4, st_after_call2);
     EXPECT_EQ(st_after_call2.cache_misses, 4)
-            << "second prepack_for_algo_3 with same fingerprint should "
+            << "second prepack_n_tile with same fingerprint should "
                "short-circuit; if it had re-warmed, cache_misses would be 0 "
                "and cache_hits would be 4.";
 
@@ -1562,7 +1559,7 @@ TEST_F(TestPrepackClearCacheDirect, FingerprintClearEnablesPrepackReFire) {
 
     // Call 3: fingerprint MISS (was cleared) → prepack fires → custom-
     // kernel cache populates again.
-    prepack::prepack_for_algo_3(h.pp);
+    prepack::prepack_n_tile(h.pp);
 
     prepack::custom_kernel::PackProbeStats st_after_call3;
     prepack::custom_kernel::warm_pack_all_custom_kernel_experts(h.weight, h.K,
@@ -1592,7 +1589,7 @@ TEST_F(TestPrepackClearCacheDirect, UmbrellaClearRefiresSwigluPrepack) {
     h.pp.act = grp_matmul_gated_act_t::swiglu_oai_mul;
     h.pp.act_dtype = data_type_t::bf16;
 
-    prepack::prepack_for_algo_3(h.pp);
+    prepack::prepack_n_tile(h.pp);
 
     prepack::custom_kernel::PackProbeStats st_warm;
     prepack::custom_kernel::warm_pack_all_custom_kernel_experts(h.weight, h.K,
@@ -1603,8 +1600,8 @@ TEST_F(TestPrepackClearCacheDirect, UmbrellaClearRefiresSwigluPrepack) {
     clear_matmul_weight_caches();
 
     // Do not probe here: the probe packs on a miss and would hide a
-    // fingerprint that still short-circuits prepack_for_algo_3.
-    prepack::prepack_for_algo_3(h.pp);
+    // fingerprint that still short-circuits prepack_n_tile.
+    prepack::prepack_n_tile(h.pp);
 
     prepack::custom_kernel::PackProbeStats st_rewarm;
     prepack::custom_kernel::warm_pack_all_custom_kernel_experts(h.weight, h.K,
@@ -1619,7 +1616,7 @@ TEST_F(TestPrepackClearCacheDirect, UmbrellaClearRefiresSwigluPrepack) {
 // ===============================================================================
 // [23] TestPrepackAoclDlpFullWeightConstGate - mirrors the existing
 //      per-tile `AoclDlpNTileSkipsNonConstExperts` test for the
-//      FULL-WEIGHT warmer path (`warm_pack_all_aocl_dlp_experts`).
+//      FULL-WEIGHT warmer path (`warm_aocl_weight_cache`).
 //
 //      Targeted bug class B5: the AOCL DLP warmer used to populate
 //      its LRU for every expert regardless of `is_weights_const[e]`,
@@ -1651,9 +1648,9 @@ TEST_F(TestPrepackAoclDlpFullWeight, SkipsNonConstExperts) {
     h.is_weights_const[1] = false;
     h.is_weights_const[3] = false;
 
-    prepack::aocl_dlp::AoclDlpPackProbeStats st;
-    ASSERT_EQ(prepack::aocl_dlp::warm_pack_all_aocl_dlp_experts(h.weight, h.K,
-                      h.N, h.ldb, h.transB, h.is_weights_const,
+    prepack::aocl_dlp::PackStats st;
+    ASSERT_EQ(prepack::aocl_dlp::warm_aocl_weight_cache(h.weight, h.K, h.N,
+                      h.ldb, h.transB, h.is_weights_const,
                       /*total_count=*/4,
                       /*src_dtype=*/data_type_t::bf16,
                       /*wei_dtype=*/data_type_t::bf16, st),
@@ -1690,9 +1687,9 @@ TEST_F(TestPrepackAoclDlpFullWeight, EmptyIsConstTreatsAllAsConst) {
     // as const" sentinel for legacy callers that don't pass the field.
     // The warmer's contract guarantees it processes all entries.
     std::vector<bool> empty_iwc;
-    prepack::aocl_dlp::AoclDlpPackProbeStats st;
-    ASSERT_EQ(prepack::aocl_dlp::warm_pack_all_aocl_dlp_experts(h.weight, h.K,
-                      h.N, h.ldb, h.transB, empty_iwc,
+    prepack::aocl_dlp::PackStats st;
+    ASSERT_EQ(prepack::aocl_dlp::warm_aocl_weight_cache(h.weight, h.K, h.N,
+                      h.ldb, h.transB, empty_iwc,
                       /*total_count=*/4,
                       /*src_dtype=*/data_type_t::bf16,
                       /*wei_dtype=*/data_type_t::bf16, st),
@@ -1752,9 +1749,9 @@ TEST(TestPrepackAoclDlpFullWeightF16, MixedModeAllowsInPlaceWhenPermitted) {
     std::vector<int> Ks(E, K), Ns(E, N), ldbs(E, N);
     std::vector<bool> transBs(E, false), is_const(E, true);
 
-    prepack::aocl_dlp::AoclDlpPackProbeStats st;
-    ASSERT_EQ(prepack::aocl_dlp::warm_pack_all_aocl_dlp_experts(weights, Ks, Ns,
-                      ldbs, transBs, is_const, /*total_count=*/E,
+    prepack::aocl_dlp::PackStats st;
+    ASSERT_EQ(prepack::aocl_dlp::warm_aocl_weight_cache(weights, Ks, Ns, ldbs,
+                      transBs, is_const, /*total_count=*/E,
                       /*src_dtype=*/data_type_t::f16,
                       /*wei_dtype=*/data_type_t::f16, st,
                       /*num_threads=*/32, /*allow_inplace=*/true),
@@ -1823,9 +1820,9 @@ TEST(TestPrepackAoclDlpFullWeightF16, MixedModeHonorsInPlaceRefusal) {
     std::vector<int> Ks(E, K), Ns(E, N), ldbs(E, N);
     std::vector<bool> transBs(E, false), is_const(E, true);
 
-    prepack::aocl_dlp::AoclDlpPackProbeStats st;
-    ASSERT_EQ(prepack::aocl_dlp::warm_pack_all_aocl_dlp_experts(weights, Ks, Ns,
-                      ldbs, transBs, is_const, /*total_count=*/E,
+    prepack::aocl_dlp::PackStats st;
+    ASSERT_EQ(prepack::aocl_dlp::warm_aocl_weight_cache(weights, Ks, Ns, ldbs,
+                      transBs, is_const, /*total_count=*/E,
                       /*src_dtype=*/data_type_t::f16,
                       /*wei_dtype=*/data_type_t::f16, st,
                       /*num_threads=*/32, /*allow_inplace=*/false),
@@ -1890,9 +1887,9 @@ TEST_F(TestPrepackPerAlgoFunctions, AoclDlpNTileF16CountsAndLeavesWeightsRaw) {
     std::vector<int> Ks(E, K), Ns(E, N), ldbs(E, N);
     std::vector<bool> transBs(E, false), is_const(E, true);
 
-    prepack::aocl_dlp::AoclDlpPackProbeStats st;
-    ASSERT_EQ(prepack::aocl_dlp::warm_pack_all_aocl_dlp_experts_n_tile(weights,
-                      Ks, Ns, ldbs, transBs, is_const, /*total_count=*/E,
+    prepack::aocl_dlp::PackStats st;
+    ASSERT_EQ(prepack::aocl_dlp::warm_aocl_weight_cache_n_tile(weights, Ks, Ns,
+                      ldbs, transBs, is_const, /*total_count=*/E,
                       /*wei_dtype=*/data_type_t::f16,
                       /*num_threads=*/64, /*stable=*/4,
                       /*nr_align=*/1, st),
@@ -2094,7 +2091,7 @@ TEST_F(TestPrepackVariableN, MixedNAcrossExperts) {
 //
 //        * E=256 single-iteration: stress the kNTilePlanMaxExperts
 //          boundary.  256 is the planner's hardcoded max and the
-//          stable_n_thr_per_expert array's upper bound (defined as
+//          expert_thread_counts array's upper bound (defined as
 //          kNTilePlanMaxExperts in group_matmul_parallel_common.hpp,
 //          aliased on GroupNTilePlan::kMaxExperts).
 //          A regression that off-by-ones the boundary check would
@@ -2267,7 +2264,7 @@ TEST_F(TestPrepackStress, E256BoundaryAllExpertsWarmed) {
     moe_test_utils::CustomKernelOverride custom_guard(true);
 
     // 256 experts is `kNTilePlanMaxExperts` — the planner's hardcoded
-    // upper bound for `stable_n_thr_per_expert` (single source of
+    // upper bound for `expert_thread_counts` (single source of
     // truth in `group_matmul_parallel_common.hpp`, aliased on
     // `GroupNTilePlan::kMaxExperts`).  A regression that off-by-ones
     // the boundary check would truncate prepack to 255 entries; the
@@ -2723,7 +2720,7 @@ static std::vector<EnvCase> make_interaction_matrix_cases() {
                     V {{"ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL", "1"}}),
 
             // ALGO 3 + tight off (forces wide path).  Exercises the
-            // wide-swiglu correctness guard in flat_n_tile.
+            // wide-swiglu correctness guard in n_tile_execute.
             env_case("algo3_wide_layout",
                     V {{"ZENDNNL_GRP_MATMUL_ALGO", "3"},
                             {"ZENDNNL_GRP_MATMUL_FUSED_MOE_TIGHT", "0"}}),
@@ -2773,9 +2770,9 @@ INSTANTIATE_TEST_SUITE_P(GrpMatmulEnvInteraction,
 //      The custom-kernel pack arena exposes per-entry HIT / MISS
 //      counters (unlike AOCL DLP, whose probe coalesces both into
 //      `packed_ok`), so we use it as the load-bearing observable:
-//      after a CK=1 `prepack_for_algo_1`, a custom-kernel probe must
+//      after a CK=1 `prepack_sequential`, a custom-kernel probe must
 //      report HIT=4 (cross-warm populated all entries); after a CK=0
-//      `prepack_for_algo_1`, the same probe must report MISS=4
+//      `prepack_sequential`, the same probe must report MISS=4
 //      (cross-warm picked regime 2, not regime 3 — custom-kernel
 //      cache is untouched).
 // ===============================================================================
@@ -2814,9 +2811,9 @@ TEST_F(TestPrepackCrossWarmRegimes, Algo0UnpinnedCrossWarmsOnlyOffAlgo3) {
         h.pp.num_threads = 16;
         h.pp.nr_align = 1;
         if (algo == 1) {
-            prepack::prepack_for_algo_1(h.pp);
+            prepack::prepack_sequential(h.pp);
         } else {
-            prepack::prepack_for_algo_3(h.pp);
+            prepack::prepack_n_tile(h.pp);
         }
         const auto stats = prepack::test_api::get_last_invocation_stats();
         EXPECT_EQ(stats.cross_warm_regime == prepack::CrossWarmRegime::none,
@@ -2833,7 +2830,7 @@ TEST_F(TestPrepackCrossWarmRegimes, CkOnAlgo1CrossWarmsCustomKernelPack) {
     reset_grp_matmul_caches();
 
     // CK=1 (set by make_harness default), BF16 dtypes — ck_eligible(p)
-    // holds.  `prepack_for_algo_1`'s primary warm populates regime 1
+    // holds.  `prepack_sequential`'s primary warm populates regime 1
     // (full-weight AOCL); cross-warm should additionally populate
     // regime 3 (custom-kernel pack) because decode will be served by
     // ALGO 3 + custom kernel.
@@ -2841,7 +2838,7 @@ TEST_F(TestPrepackCrossWarmRegimes, CkOnAlgo1CrossWarmsCustomKernelPack) {
             /*K=*/32, /*N=*/64, /*fill=*/0.123f);
     ASSERT_TRUE(h.pp.custom_kernel_on);
 
-    prepack::prepack_for_algo_1(h.pp);
+    prepack::prepack_sequential(h.pp);
 
     // Probe the custom-kernel cache: all 4 entries should be HITS
     // because cross-warm populated them.  If cross-warm regressed,
@@ -2851,7 +2848,7 @@ TEST_F(TestPrepackCrossWarmRegimes, CkOnAlgo1CrossWarmsCustomKernelPack) {
             h.N, h.ldb, h.transB, h.is_weights_const,
             /*total_count=*/4, probe);
     EXPECT_EQ(probe.cache_hits, 4)
-            << "CK=1: prepack_for_algo_1 should cross-warm regime 3 "
+            << "CK=1: prepack_sequential should cross-warm regime 3 "
                "(custom-kernel pack).  If hits<4 the CUSTOM_KERNEL-aware "
                "cross-warm has regressed.";
     EXPECT_EQ(probe.cache_misses, 0);
@@ -2871,7 +2868,7 @@ TEST_F(TestPrepackCrossWarmRegimes,
             /*K=*/32, /*N=*/64, /*fill=*/0.234f);
     h.pp.custom_kernel_on = false;
 
-    prepack::prepack_for_algo_1(h.pp);
+    prepack::prepack_sequential(h.pp);
 
     prepack::custom_kernel::PackProbeStats probe;
     prepack::custom_kernel::warm_pack_all_custom_kernel_experts(h.weight, h.K,
@@ -2890,9 +2887,9 @@ TEST_F(TestPrepackCrossWarmRegimes,
 
     reset_grp_matmul_caches();
 
-    // After CK=1 `prepack_for_algo_1` cross-warms regime 3,
-    // a subsequent `prepack_for_algo_3` on the same shape:
-    //   - has a DIFFERENT fingerprint (scheduling_algo=3 vs 1) so the
+    // After CK=1 `prepack_sequential` cross-warms regime 3,
+    // a subsequent `prepack_n_tile` on the same shape:
+    //   - has a DIFFERENT fingerprint (group_schedule=3 vs 1) so the
     //     process-wide fingerprint cache lets it run, BUT
     //   - finds the custom-kernel cache already populated (cross-warm
     //     did it) → ck_hits should be 4 there too.
@@ -2902,9 +2899,8 @@ TEST_F(TestPrepackCrossWarmRegimes,
             /*K=*/32, /*N=*/64, /*fill=*/0.345f);
     ASSERT_TRUE(h.pp.custom_kernel_on);
 
-    prepack::prepack_for_algo_1(h.pp); // primary regime 1 + cross regime 3
-    prepack::prepack_for_algo_3(
-            h.pp); // primary regime 2 + 3 — regime 3 finds hits
+    prepack::prepack_sequential(h.pp); // primary regime 1 + cross regime 3
+    prepack::prepack_n_tile(h.pp); // primary regime 2 + 3 — regime 3 finds hits
 
     // Probe regime 3 again: still 4 hits (custom-kernel cache is
     // populated once and dedupes across both prepack invocations).
@@ -2930,7 +2926,7 @@ TEST_F(TestPrepackCrossWarmRegimes, CkOnAlgo3CrossWarmsRegime1) {
     // (its probe coalesces both into `packed_ok`).  Instead, we assert
     // that the cross-warm path completes (no allocator / runtime
     // failure) and that the symmetric custom-kernel population still
-    // holds via the regime-3 probe — i.e., `prepack_for_algo_3` ran
+    // holds via the regime-3 probe — i.e., `prepack_n_tile` ran
     // its primary warm correctly.  The regime-1 cross-warm is exercised
     // by the same code path as `warm_aocl(...)` which has its own
     // dedicated regression test in section [23] TestPrepackAoclDlpFullWeight;
@@ -2943,7 +2939,7 @@ TEST_F(TestPrepackCrossWarmRegimes, CkOnAlgo3CrossWarmsRegime1) {
     h.pp.num_threads = 16;
     h.pp.nr_align = 1;
 
-    prepack::prepack_for_algo_3(h.pp);
+    prepack::prepack_n_tile(h.pp);
 
     // Confirm primary regime 3 warm ran (independent of cross-warm).
     prepack::custom_kernel::PackProbeStats probe;
@@ -2985,13 +2981,13 @@ TEST_F(TestPrepackCrossWarmRegimes, CkOnAlgo3CrossWarmsRegime1) {
 
 // ── Grouped-s8 (group_dynamic_quant) prepack integration ────────────
 // The production-default int8 form reaching prepack: src ALREADY s8,
-// dynamic_quant CLEARED, wei=s8, compute=s8.  Builds PrepackParams via
+// dynamic_quant CLEARED, wei=s8, compute=s8.  Builds PrepackRequest via
 // build_prepack_params (which must mark it int8 via compute_dtype) and
-// drives prepack_for_algo_3 / _1, asserting (a) D1 fix: the int8 CK
+// drives prepack_n_tile / _1, asserting (a) D1 fix: the int8 CK
 // pack LRU is warmed (not bf16), and (b) the int8 sym-quant cross-warm
 // regimes fire.
 namespace {
-inline group_matmul_prepack::PrepackParams build_grouped_s8_pp(
+inline group_matmul_prepack::PrepackRequest build_grouped_s8_pp(
         const std::vector<const void *> &weight, const std::vector<int> &K,
         const std::vector<int> &N, const std::vector<int> &ldb,
         const std::vector<bool> &transB, const std::vector<bool> &iwc,
@@ -3041,10 +3037,10 @@ TEST_F(TestPrepackCrossWarmRegimes,
     ASSERT_EQ(pp.compute_dtype, data_type_t::s8)
             << "build_prepack_params must mark grouped-s8 as int8 (compute=s8)";
 
-    prepack::prepack_for_algo_3(pp);
+    prepack::prepack_n_tile(pp);
     auto stats = prepack::test_api::get_last_invocation_stats();
     ASSERT_TRUE(stats.valid);
-    EXPECT_EQ(stats.scheduling_algo, 3);
+    EXPECT_EQ(stats.group_schedule, 3);
     // D1 fix: int8 CK pack warmed (family routed to int8 LRU, not bf16).
     EXPECT_GT(stats.ck.cache_misses, 0)
             << "grouped-s8 ALGO3 must warm the int8 CK pack (D1 regression "
@@ -3089,10 +3085,10 @@ TEST_F(TestPrepackCrossWarmRegimes, GroupedS8Algo1CrossWarmsSymQuantPerTile) {
     // ALGO 1 (prompt) primary = sym-quant full-weight (M1); cross-warm of
     // the upcoming ALGO 3 decode (CK int8 OFF -> AOCL DLP per-tile) =
     // aocl_per_tile_sym_quant (M5).
-    prepack::prepack_for_algo_1(pp);
+    prepack::prepack_sequential(pp);
     auto stats = prepack::test_api::get_last_invocation_stats();
     ASSERT_TRUE(stats.valid);
-    EXPECT_EQ(stats.scheduling_algo, 1);
+    EXPECT_EQ(stats.group_schedule, 1);
 #if ZENDNNL_DEPENDS_AOCLDLP
     EXPECT_EQ(static_cast<int>(stats.cross_warm_regime),
             static_cast<int>(
@@ -3128,11 +3124,11 @@ TEST_F(TestPrepackCrossWarmRegimes, FixB_CkOnAlgo3SkipsRegime2Warm) {
     h.pp.nr_align = 1;
     ASSERT_TRUE(h.pp.custom_kernel_on); // make_harness default
 
-    prepack::prepack_for_algo_3(h.pp);
+    prepack::prepack_n_tile(h.pp);
 
     auto stats = prepack::test_api::get_last_invocation_stats();
     EXPECT_TRUE(stats.valid);
-    EXPECT_EQ(stats.scheduling_algo, 3);
+    EXPECT_EQ(stats.group_schedule, 3);
 #if ZENDNNL_DEPENDS_AOCLDLP
     EXPECT_EQ(stats.aocl.total_attempted, 4)
             << "Fix B: under CK=1 + BF16, the per-tile AOCL DLP warm must "
@@ -3156,7 +3152,7 @@ TEST_F(TestPrepackCrossWarmRegimes, FixB_CkOffAlgo3WarmsRegime2) {
     reset_grp_matmul_caches();
     prepack::test_api::clear_last_invocation_stats();
 
-    // Symmetric to the above: under CK=0, `prepack_for_algo_3`'s
+    // Symmetric to the above: under CK=0, `prepack_n_tile`'s
     // primary warm IS the per-tile AOCL (regime 2), contributing
     // `N × stable_n_thr = 4 × 4 = 16` attempts.  Cross-warm regime 1
     // is SKIPPED here because the per-tile branch ran (sets
@@ -3173,11 +3169,11 @@ TEST_F(TestPrepackCrossWarmRegimes, FixB_CkOffAlgo3WarmsRegime2) {
     h.pp.nr_align = 1;
     h.pp.custom_kernel_on = false; // CK=0
 
-    prepack::prepack_for_algo_3(h.pp);
+    prepack::prepack_n_tile(h.pp);
 
     auto stats = prepack::test_api::get_last_invocation_stats();
     EXPECT_TRUE(stats.valid);
-    EXPECT_EQ(stats.scheduling_algo, 3);
+    EXPECT_EQ(stats.group_schedule, 3);
 #if ZENDNNL_DEPENDS_AOCLDLP
     EXPECT_EQ(stats.aocl.total_attempted, 4 + 4 * 4)
             << "CK=0: regime 2 (per-tile, N*stable_n_thr = 16) + cross-warm "
@@ -3212,11 +3208,11 @@ TEST_F(TestPrepackCrossWarmRegimes, FixD_CkOnAlgo1CrossWarmsRegime3OnlyAocl) {
     h.pp.nr_align = 1;
     ASSERT_TRUE(h.pp.custom_kernel_on);
 
-    prepack::prepack_for_algo_1(h.pp);
+    prepack::prepack_sequential(h.pp);
 
     auto stats = prepack::test_api::get_last_invocation_stats();
     EXPECT_TRUE(stats.valid);
-    EXPECT_EQ(stats.scheduling_algo, 1);
+    EXPECT_EQ(stats.group_schedule, 1);
 #if ZENDNNL_DEPENDS_AOCLDLP
     EXPECT_EQ(stats.aocl.total_attempted, 4)
             << "CK=1 + ALGO 1: cross-warm picks regime 3, not regime 2 — "
@@ -3247,11 +3243,11 @@ TEST_F(TestPrepackCrossWarmRegimes, FixD_CkOffAlgo1CrossWarmsRegime2) {
     h.pp.nr_align = 1;
     h.pp.custom_kernel_on = false; // CK=0
 
-    prepack::prepack_for_algo_1(h.pp);
+    prepack::prepack_sequential(h.pp);
 
     auto stats = prepack::test_api::get_last_invocation_stats();
     EXPECT_TRUE(stats.valid);
-    EXPECT_EQ(stats.scheduling_algo, 1);
+    EXPECT_EQ(stats.group_schedule, 1);
 #if ZENDNNL_DEPENDS_AOCLDLP
     EXPECT_EQ(stats.aocl.total_attempted, 4 + 4 * 4)
             << "CK=0 + ALGO 1: cross-warm should populate regime 2 — "
@@ -3282,11 +3278,11 @@ TEST_F(TestPrepackCrossWarmRegimes,
     h.pp.num_threads = 0; // missing thread context
     h.pp.nr_align = 0;
 
-    prepack::prepack_for_algo_1(h.pp);
+    prepack::prepack_sequential(h.pp);
 
     auto stats = prepack::test_api::get_last_invocation_stats();
     EXPECT_TRUE(stats.valid);
-    EXPECT_EQ(stats.scheduling_algo, 1);
+    EXPECT_EQ(stats.group_schedule, 1);
 #if ZENDNNL_DEPENDS_AOCLDLP
     EXPECT_EQ(stats.aocl.total_attempted, 4)
             << "ALGO 1 primary regime-1 warm should run unconditionally on "
@@ -3325,11 +3321,11 @@ TEST_F(TestPrepackCrossWarmRegimes, PinnedAlgo1DisablesCrossWarm) {
     ASSERT_TRUE(h.pp.custom_kernel_on);
 
     AlgoEnvGuard algo_guard(1);
-    prepack::prepack_for_algo_1(h.pp);
+    prepack::prepack_sequential(h.pp);
 
     auto stats = prepack::test_api::get_last_invocation_stats();
     EXPECT_TRUE(stats.valid);
-    EXPECT_EQ(stats.scheduling_algo, 1);
+    EXPECT_EQ(stats.group_schedule, 1);
     EXPECT_EQ(static_cast<int>(stats.cross_warm_regime),
             static_cast<int>(prepack::CrossWarmRegime::none))
             << "Pinned ALGO 1: cross-warm is AUTO-only and must short-circuit.";
@@ -3366,11 +3362,11 @@ TEST_F(TestPrepackCrossWarmRegimes, PinnedAlgo3DisablesCrossWarm) {
     ASSERT_TRUE(h.pp.custom_kernel_on);
 
     AlgoEnvGuard algo_guard(3);
-    prepack::prepack_for_algo_3(h.pp);
+    prepack::prepack_n_tile(h.pp);
 
     auto stats = prepack::test_api::get_last_invocation_stats();
     EXPECT_TRUE(stats.valid);
-    EXPECT_EQ(stats.scheduling_algo, 3);
+    EXPECT_EQ(stats.group_schedule, 3);
     EXPECT_EQ(static_cast<int>(stats.cross_warm_regime),
             static_cast<int>(prepack::CrossWarmRegime::none))
             << "Pinned ALGO 3: cross-warm is AUTO-only and must short-circuit.";
@@ -3394,12 +3390,12 @@ TEST_F(TestPrepackCrossWarmRegimes, PinnedAlgo256DisableCrossWarm) {
 
     struct AlgoCase {
         int algo;
-        void (*fn)(const prepack::PrepackParams &);
+        void (*fn)(const prepack::PrepackRequest &);
     };
     const AlgoCase cases[] = {
-            {2, &prepack::prepack_for_algo_2},
-            {5, &prepack::prepack_for_algo_5},
-            {6, &prepack::prepack_for_algo_6},
+            {2, &prepack::prepack_m_tile},
+            {5, &prepack::prepack_expert_parallel},
+            {6, &prepack::prepack_hierarchical},
     };
 
     for (const auto &c : cases) {
@@ -3420,7 +3416,7 @@ TEST_F(TestPrepackCrossWarmRegimes, PinnedAlgo256DisableCrossWarm) {
 
         auto stats = prepack::test_api::get_last_invocation_stats();
         EXPECT_TRUE(stats.valid) << "algo=" << c.algo;
-        EXPECT_EQ(stats.scheduling_algo, c.algo) << "algo=" << c.algo;
+        EXPECT_EQ(stats.group_schedule, c.algo) << "algo=" << c.algo;
         EXPECT_EQ(static_cast<int>(stats.cross_warm_regime),
                 static_cast<int>(prepack::CrossWarmRegime::none))
                 << "Pinned ALGO " << c.algo
@@ -3474,7 +3470,7 @@ TEST_F(TestPrepackCrossWarmRegimes, Algo0DecodePinnedAwayFromAlgo3SkipsWarm) {
         // Global selector stays AUTO; only the decode PHASE is pinned.
         AlgoEnvGuard algo_guard(0);
         AutoDecodeAlgoOverride decode_guard(decode_pin);
-        prepack::prepack_for_algo_1(h.pp);
+        prepack::prepack_sequential(h.pp);
 
         auto stats = prepack::test_api::get_last_invocation_stats();
         EXPECT_TRUE(stats.valid) << "decode_pin=" << decode_pin;
@@ -3507,7 +3503,7 @@ TEST_F(TestPrepackCrossWarmRegimes,
     AlgoEnvGuard algo_guard(0);
     AutoPromptAlgoOverride prompt_unpinned(-1);
     AutoDecodeAlgoOverride decode_guard(1);
-    prepack::prepack_for_algo_1(h.pp);
+    prepack::prepack_sequential(h.pp);
 
     const auto stats = prepack::test_api::get_last_invocation_stats();
     ASSERT_TRUE(stats.valid);
@@ -3533,7 +3529,7 @@ TEST_F(TestPrepackCrossWarmRegimes, Algo0DecodePinnedTo5StillCrossWarms) {
 
     AlgoEnvGuard algo_guard(0);
     AutoDecodeAlgoOverride decode_guard(kGrpMatmulAlgoExpertParallel);
-    prepack::prepack_for_algo_1(h.pp);
+    prepack::prepack_sequential(h.pp);
 
     auto stats = prepack::test_api::get_last_invocation_stats();
     ASSERT_TRUE(stats.valid);
@@ -3547,8 +3543,8 @@ TEST_F(TestPrepackCrossWarmRegimes, Algo0DecodePinnedTo5StillCrossWarms) {
 }
 
 // Safety-clamp corner case.  When the user pins an ALGO but the shape
-// is unsafe for it, `select_grp_matmul_algo` clamps the call down to
-// ALGO 1 and the ALGO 1 executor runs `prepack_for_algo_1` while the
+// is unsafe for it, `group_matmul_algo_select` clamps the call down to
+// ALGO 1 and the ALGO 1 executor runs `prepack_sequential` while the
 // GLOBAL pin env is still the original (here 3).  The AUTO gate reads
 // the ENV pin, NOT the clamped runtime algo, so cross-warm must STILL
 // short-circuit: the pinned ALGO 3 decode the cross-warm would target
@@ -3569,11 +3565,11 @@ TEST_F(TestPrepackCrossWarmRegimes,
     ASSERT_TRUE(h.pp.custom_kernel_on);
 
     AlgoEnvGuard algo_guard(3); // env pinned to ALGO 3 ...
-    prepack::prepack_for_algo_1(h.pp); // ... but the shape clamped to ALGO 1
+    prepack::prepack_sequential(h.pp); // ... but the shape clamped to ALGO 1
 
     auto stats = prepack::test_api::get_last_invocation_stats();
     EXPECT_TRUE(stats.valid);
-    EXPECT_EQ(stats.scheduling_algo, 1)
+    EXPECT_EQ(stats.group_schedule, 1)
             << "Clamp executed the ALGO 1 prepack body.";
     EXPECT_EQ(static_cast<int>(stats.cross_warm_regime),
             static_cast<int>(prepack::CrossWarmRegime::none))
@@ -3629,7 +3625,7 @@ TEST_F(TestPrepackFingerprintInvariance, PermutationDoesNotRefireWarm) {
     h.pp.custom_kernel_on = false;
     h.pp.num_threads = 1;
     h.pp.nr_align = 1;
-    prepack::prepack_for_algo_1(h.pp);
+    prepack::prepack_sequential(h.pp);
     ASSERT_TRUE(prepack::test_api::get_last_invocation_stats().valid)
             << "first call must populate the test_api accumulator";
 
@@ -3641,7 +3637,7 @@ TEST_F(TestPrepackFingerprintInvariance, PermutationDoesNotRefireWarm) {
     std::swap(h.weight[1], h.weight[2]);
 
     prepack::test_api::clear_last_invocation_stats();
-    prepack::prepack_for_algo_1(h.pp);
+    prepack::prepack_sequential(h.pp);
 
     // Second call should hit `already_warmed` in the prelude and
     // short-circuit before reaching `log_pack_probe`, leaving the
@@ -3650,8 +3646,8 @@ TEST_F(TestPrepackFingerprintInvariance, PermutationDoesNotRefireWarm) {
     EXPECT_FALSE(stats.valid)
             << "permuting the pointer pool with the same set must NOT "
                "re-fire the warm — fingerprint is order-independent (XOR "
-               "across the full pool).  scheduling_algo="
-            << stats.scheduling_algo;
+               "across the full pool).  group_schedule="
+            << stats.group_schedule;
 }
 
 TEST_F(TestPrepackFingerprintInvariance, MembershipChangeRefireWarm) {
@@ -3666,7 +3662,7 @@ TEST_F(TestPrepackFingerprintInvariance, MembershipChangeRefireWarm) {
     h.pp.custom_kernel_on = false;
     h.pp.num_threads = 1;
     h.pp.nr_align = 1;
-    prepack::prepack_for_algo_1(h.pp);
+    prepack::prepack_sequential(h.pp);
     ASSERT_TRUE(prepack::test_api::get_last_invocation_stats().valid);
 
     // Swap one entry for a brand-new buffer — different SET means the
@@ -3677,13 +3673,13 @@ TEST_F(TestPrepackFingerprintInvariance, MembershipChangeRefireWarm) {
     h.weight[2] = fresh_bank.data();
 
     prepack::test_api::clear_last_invocation_stats();
-    prepack::prepack_for_algo_1(h.pp);
+    prepack::prepack_sequential(h.pp);
 
     const auto stats = prepack::test_api::get_last_invocation_stats();
     EXPECT_TRUE(stats.valid)
             << "replacing a pool member with a new pointer must re-fire "
                "the warm — fingerprint is sensitive to set membership.";
-    EXPECT_EQ(stats.scheduling_algo, 1);
+    EXPECT_EQ(stats.group_schedule, 1);
 }
 
 TEST_F(TestPrepackFingerprintInvariance, PoolSizeChangeRefireWarm) {
@@ -3703,7 +3699,7 @@ TEST_F(TestPrepackFingerprintInvariance, PoolSizeChangeRefireWarm) {
     h_small.pp.custom_kernel_on = false;
     h_small.pp.num_threads = 1;
     h_small.pp.nr_align = 1;
-    prepack::prepack_for_algo_1(h_small.pp);
+    prepack::prepack_sequential(h_small.pp);
     ASSERT_TRUE(prepack::test_api::get_last_invocation_stats().valid);
 
     auto h_big = make_harness(/*total=*/8, /*active=*/8,
@@ -3713,7 +3709,7 @@ TEST_F(TestPrepackFingerprintInvariance, PoolSizeChangeRefireWarm) {
     h_big.pp.nr_align = 1;
 
     prepack::test_api::clear_last_invocation_stats();
-    prepack::prepack_for_algo_1(h_big.pp);
+    prepack::prepack_sequential(h_big.pp);
 
     const auto stats = prepack::test_api::get_last_invocation_stats();
     EXPECT_TRUE(stats.valid)
@@ -3753,7 +3749,7 @@ TEST_F(TestPrepackFingerprintInvariance, PoolSizeChangeRefireWarm) {
 //          fused swiglu store helper writes BF16 only).
 //        * pack_nr in {32, 64} divides representative N
 //
-//      Each TEST_F drives `prepack_for_algo_3` with one gate flipped
+//      Each TEST_F drives `prepack_n_tile` with one gate flipped
 //      in isolation, then asserts via the test_api accumulator that
 //      no CK warm fired (= ck_eligible returned false) for the
 //      refusal cases, and that all-good config does fire CK warm.
@@ -3770,8 +3766,8 @@ protected:
 TEST_F(TestPrepackCkGateSymmetry, AllGatesPassEnablesCustomKernelWarm) {
     namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
     using zendnnl::lowoha::matmul::custom_kernel::
-            clear_custom_kernel_pack_cache;
-    clear_custom_kernel_pack_cache();
+            clear_custom_kernel_pack_cache_bf16;
+    clear_custom_kernel_pack_cache_bf16();
     prepack::clear_fingerprint_cache_for_test();
     prepack::test_api::clear_last_invocation_stats();
 
@@ -3783,7 +3779,7 @@ TEST_F(TestPrepackCkGateSymmetry, AllGatesPassEnablesCustomKernelWarm) {
     h.pp.act_dtype = data_type_t::bf16;
     h.pp.num_threads = 1;
     h.pp.nr_align = 1;
-    prepack::prepack_for_algo_3(h.pp);
+    prepack::prepack_n_tile(h.pp);
 
     const auto stats = prepack::test_api::get_last_invocation_stats();
     ASSERT_TRUE(stats.valid);
@@ -3795,8 +3791,8 @@ TEST_F(TestPrepackCkGateSymmetry, AllGatesPassEnablesCustomKernelWarm) {
 TEST_F(TestPrepackCkGateSymmetry, ActSiluWithoutBiasWarmsCkArena) {
     namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
     using zendnnl::lowoha::matmul::custom_kernel::
-            clear_custom_kernel_pack_cache;
-    clear_custom_kernel_pack_cache();
+            clear_custom_kernel_pack_cache_bf16;
+    clear_custom_kernel_pack_cache_bf16();
     prepack::clear_fingerprint_cache_for_test();
     prepack::test_api::clear_last_invocation_stats();
 
@@ -3813,7 +3809,7 @@ TEST_F(TestPrepackCkGateSymmetry, ActSiluWithoutBiasWarmsCkArena) {
     h.pp.act_dtype = data_type_t::bf16;
     h.pp.num_threads = 1;
     h.pp.nr_align = 1;
-    prepack::prepack_for_algo_3(h.pp);
+    prepack::prepack_n_tile(h.pp);
 
     const auto stats = prepack::test_api::get_last_invocation_stats();
     ASSERT_TRUE(stats.valid);
@@ -3826,8 +3822,8 @@ TEST_F(TestPrepackCkGateSymmetry, ActSiluWithoutBiasWarmsCkArena) {
 TEST_F(TestPrepackCkGateSymmetry, ActSiluWithBiasRefusedNoCkWarm) {
     namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
     using zendnnl::lowoha::matmul::custom_kernel::
-            clear_custom_kernel_pack_cache;
-    clear_custom_kernel_pack_cache();
+            clear_custom_kernel_pack_cache_bf16;
+    clear_custom_kernel_pack_cache_bf16();
     prepack::clear_fingerprint_cache_for_test();
     prepack::test_api::clear_last_invocation_stats();
 
@@ -3841,7 +3837,7 @@ TEST_F(TestPrepackCkGateSymmetry, ActSiluWithBiasRefusedNoCkWarm) {
     h.pp.bias_dtype = data_type_t::bf16;
     h.pp.num_threads = 1;
     h.pp.nr_align = 1;
-    prepack::prepack_for_algo_3(h.pp);
+    prepack::prepack_n_tile(h.pp);
 
     const auto stats = prepack::test_api::get_last_invocation_stats();
     ASSERT_TRUE(stats.valid);
@@ -3854,8 +3850,8 @@ TEST_F(TestPrepackCkGateSymmetry, ActSiluWithBiasRefusedNoCkWarm) {
 TEST_F(TestPrepackCkGateSymmetry, ActGeluWithoutBiasWarmsCkArena) {
     namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
     using zendnnl::lowoha::matmul::custom_kernel::
-            clear_custom_kernel_pack_cache;
-    clear_custom_kernel_pack_cache();
+            clear_custom_kernel_pack_cache_bf16;
+    clear_custom_kernel_pack_cache_bf16();
     prepack::clear_fingerprint_cache_for_test();
     prepack::test_api::clear_last_invocation_stats();
 
@@ -3871,7 +3867,7 @@ TEST_F(TestPrepackCkGateSymmetry, ActGeluWithoutBiasWarmsCkArena) {
     h.pp.act_dtype = data_type_t::bf16;
     h.pp.num_threads = 1;
     h.pp.nr_align = 1;
-    prepack::prepack_for_algo_3(h.pp);
+    prepack::prepack_n_tile(h.pp);
 
     const auto stats = prepack::test_api::get_last_invocation_stats();
     ASSERT_TRUE(stats.valid);
@@ -3884,8 +3880,8 @@ TEST_F(TestPrepackCkGateSymmetry, ActGeluWithoutBiasWarmsCkArena) {
 TEST_F(TestPrepackCkGateSymmetry, ActGeluWithBiasRefusedNoCkWarm) {
     namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
     using zendnnl::lowoha::matmul::custom_kernel::
-            clear_custom_kernel_pack_cache;
-    clear_custom_kernel_pack_cache();
+            clear_custom_kernel_pack_cache_bf16;
+    clear_custom_kernel_pack_cache_bf16();
     prepack::clear_fingerprint_cache_for_test();
     prepack::test_api::clear_last_invocation_stats();
 
@@ -3900,7 +3896,7 @@ TEST_F(TestPrepackCkGateSymmetry, ActGeluWithBiasRefusedNoCkWarm) {
     h.pp.bias_dtype = data_type_t::bf16;
     h.pp.num_threads = 1;
     h.pp.nr_align = 1;
-    prepack::prepack_for_algo_3(h.pp);
+    prepack::prepack_n_tile(h.pp);
 
     const auto stats = prepack::test_api::get_last_invocation_stats();
     ASSERT_TRUE(stats.valid);
@@ -3913,8 +3909,8 @@ TEST_F(TestPrepackCkGateSymmetry, ActGeluWithBiasRefusedNoCkWarm) {
 TEST_F(TestPrepackCkGateSymmetry, ActDtypeF32WithGatedActRefusedNoCkWarm) {
     namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
     using zendnnl::lowoha::matmul::custom_kernel::
-            clear_custom_kernel_pack_cache;
-    clear_custom_kernel_pack_cache();
+            clear_custom_kernel_pack_cache_bf16;
+    clear_custom_kernel_pack_cache_bf16();
     prepack::clear_fingerprint_cache_for_test();
     prepack::test_api::clear_last_invocation_stats();
 
@@ -3926,7 +3922,7 @@ TEST_F(TestPrepackCkGateSymmetry, ActDtypeF32WithGatedActRefusedNoCkWarm) {
     h.pp.act_dtype = data_type_t::f32; // refused
     h.pp.num_threads = 1;
     h.pp.nr_align = 1;
-    prepack::prepack_for_algo_3(h.pp);
+    prepack::prepack_n_tile(h.pp);
 
     const auto stats = prepack::test_api::get_last_invocation_stats();
     ASSERT_TRUE(stats.valid);
@@ -3938,8 +3934,8 @@ TEST_F(TestPrepackCkGateSymmetry, ActDtypeF32WithGatedActRefusedNoCkWarm) {
 TEST_F(TestPrepackCkGateSymmetry, ActNoneIgnoresActDtype) {
     namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
     using zendnnl::lowoha::matmul::custom_kernel::
-            clear_custom_kernel_pack_cache;
-    clear_custom_kernel_pack_cache();
+            clear_custom_kernel_pack_cache_bf16;
+    clear_custom_kernel_pack_cache_bf16();
     prepack::clear_fingerprint_cache_for_test();
     prepack::test_api::clear_last_invocation_stats();
 
@@ -3952,7 +3948,7 @@ TEST_F(TestPrepackCkGateSymmetry, ActNoneIgnoresActDtype) {
     h.pp.act_dtype = data_type_t::f32; // ignored when act=none
     h.pp.num_threads = 1;
     h.pp.nr_align = 1;
-    prepack::prepack_for_algo_3(h.pp);
+    prepack::prepack_n_tile(h.pp);
 
     const auto stats = prepack::test_api::get_last_invocation_stats();
     ASSERT_TRUE(stats.valid);
@@ -3963,8 +3959,8 @@ TEST_F(TestPrepackCkGateSymmetry, ActNoneIgnoresActDtype) {
 TEST_F(TestPrepackCkGateSymmetry, BiasDtypeF16AcceptedCkWarms) {
     namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
     using zendnnl::lowoha::matmul::custom_kernel::
-            clear_custom_kernel_pack_cache;
-    clear_custom_kernel_pack_cache();
+            clear_custom_kernel_pack_cache_bf16;
+    clear_custom_kernel_pack_cache_bf16();
     prepack::clear_fingerprint_cache_for_test();
     prepack::test_api::clear_last_invocation_stats();
 
@@ -3978,7 +3974,7 @@ TEST_F(TestPrepackCkGateSymmetry, BiasDtypeF16AcceptedCkWarms) {
     h.pp.bias_dtype = data_type_t::f16;
     h.pp.num_threads = 1;
     h.pp.nr_align = 1;
-    prepack::prepack_for_algo_3(h.pp);
+    prepack::prepack_n_tile(h.pp);
 
     const auto stats = prepack::test_api::get_last_invocation_stats();
     ASSERT_TRUE(stats.valid);
@@ -3990,11 +3986,11 @@ TEST_F(TestPrepackCkGateSymmetry, BiasDtypeF16AcceptedCkWarms) {
 TEST_F(TestPrepackCkGateSymmetry, BiasDtypeBf16AndF32Accepted) {
     namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
     using zendnnl::lowoha::matmul::custom_kernel::
-            clear_custom_kernel_pack_cache;
+            clear_custom_kernel_pack_cache_bf16;
 
     for (data_type_t bias_dt :
             {data_type_t::none, data_type_t::bf16, data_type_t::f32}) {
-        clear_custom_kernel_pack_cache();
+        clear_custom_kernel_pack_cache_bf16();
         prepack::clear_fingerprint_cache_for_test();
         prepack::test_api::clear_last_invocation_stats();
 
@@ -4004,7 +4000,7 @@ TEST_F(TestPrepackCkGateSymmetry, BiasDtypeBf16AndF32Accepted) {
         h.pp.bias_dtype = bias_dt;
         h.pp.num_threads = 1;
         h.pp.nr_align = 1;
-        prepack::prepack_for_algo_3(h.pp);
+        prepack::prepack_n_tile(h.pp);
 
         const auto stats = prepack::test_api::get_last_invocation_stats();
         ASSERT_TRUE(stats.valid);
@@ -4020,8 +4016,8 @@ TEST_F(TestPrepackCkGateSymmetry, BiasDtypeBf16AndF32Accepted) {
 TEST_F(TestPrepackCkGateSymmetry, DstF32ActNoneEnablesCkWarm) {
     namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
     using zendnnl::lowoha::matmul::custom_kernel::
-            clear_custom_kernel_pack_cache;
-    clear_custom_kernel_pack_cache();
+            clear_custom_kernel_pack_cache_bf16;
+    clear_custom_kernel_pack_cache_bf16();
     prepack::clear_fingerprint_cache_for_test();
     prepack::test_api::clear_last_invocation_stats();
 
@@ -4035,7 +4031,7 @@ TEST_F(TestPrepackCkGateSymmetry, DstF32ActNoneEnablesCkWarm) {
     h.pp.dst_dtype = data_type_t::f32;
     h.pp.num_threads = 1;
     h.pp.nr_align = 1;
-    prepack::prepack_for_algo_3(h.pp);
+    prepack::prepack_n_tile(h.pp);
 
     const auto stats = prepack::test_api::get_last_invocation_stats();
     ASSERT_TRUE(stats.valid);
@@ -4049,15 +4045,15 @@ TEST_F(TestPrepackCkGateSymmetry, DstF32ActNoneEnablesCkWarm) {
 TEST_F(TestPrepackCkGateSymmetry, DstF32SwigluRefusedNoCkWarm) {
     namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
     using zendnnl::lowoha::matmul::custom_kernel::
-            clear_custom_kernel_pack_cache;
-    clear_custom_kernel_pack_cache();
+            clear_custom_kernel_pack_cache_bf16;
+    clear_custom_kernel_pack_cache_bf16();
     prepack::clear_fingerprint_cache_for_test();
     prepack::test_api::clear_last_invocation_stats();
 
     // (swiglu_oai_mul, f32 dst) is structurally rejected by runtime CK:
     // the fused swiglu store helper writes BF16 only, so
-    // `select_ukernel(MR, NV, swiglu_oai_mul, kF32)` returns nullptr
-    // and `prepare_for_call` refuses with `kfn_table_fill_failed`.
+    // `select_bf16_ukernel(MR, NV, swiglu_oai_mul, kF32)` returns nullptr
+    // and `prepare_for_call` refuses with `kernel_table_fill_failed`.
     // Prepack mirrors via the (swiglu, dst != bf16) cross-check in
     // `ck_eligible`; without that mirror, prepack would warm the CK
     // arena while the runtime falls back to AOCL DLP + a separate
@@ -4070,7 +4066,7 @@ TEST_F(TestPrepackCkGateSymmetry, DstF32SwigluRefusedNoCkWarm) {
     h.pp.dst_dtype = data_type_t::f32; // refused under swiglu
     h.pp.num_threads = 1;
     h.pp.nr_align = 1;
-    prepack::prepack_for_algo_3(h.pp);
+    prepack::prepack_n_tile(h.pp);
 
     const auto stats = prepack::test_api::get_last_invocation_stats();
     ASSERT_TRUE(stats.valid);
@@ -4082,8 +4078,8 @@ TEST_F(TestPrepackCkGateSymmetry, DstF32SwigluRefusedNoCkWarm) {
 TEST_F(TestPrepackCkGateSymmetry, NNotMultipleOfPackNrRefusedNoCkWarm) {
     namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
     using zendnnl::lowoha::matmul::custom_kernel::
-            clear_custom_kernel_pack_cache;
-    clear_custom_kernel_pack_cache();
+            clear_custom_kernel_pack_cache_bf16;
+    clear_custom_kernel_pack_cache_bf16();
     prepack::clear_fingerprint_cache_for_test();
     prepack::test_api::clear_last_invocation_stats();
 
@@ -4094,7 +4090,7 @@ TEST_F(TestPrepackCkGateSymmetry, NNotMultipleOfPackNrRefusedNoCkWarm) {
     h.pp.act = grp_matmul_gated_act_t::none;
     h.pp.num_threads = 1;
     h.pp.nr_align = 1;
-    prepack::prepack_for_algo_3(h.pp);
+    prepack::prepack_n_tile(h.pp);
 
     const auto stats = prepack::test_api::get_last_invocation_stats();
     ASSERT_TRUE(stats.valid);
@@ -4106,8 +4102,8 @@ TEST_F(TestPrepackCkGateSymmetry, NNotMultipleOfPackNrRefusedNoCkWarm) {
 TEST_F(TestPrepackCkGateSymmetry, FingerprintReDispatchesOnActChange) {
     namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
     using zendnnl::lowoha::matmul::custom_kernel::
-            clear_custom_kernel_pack_cache;
-    clear_custom_kernel_pack_cache();
+            clear_custom_kernel_pack_cache_bf16;
+    clear_custom_kernel_pack_cache_bf16();
     prepack::clear_fingerprint_cache_for_test();
     prepack::test_api::clear_last_invocation_stats();
 
@@ -4118,7 +4114,7 @@ TEST_F(TestPrepackCkGateSymmetry, FingerprintReDispatchesOnActChange) {
     h.pp.act_dtype = data_type_t::bf16;
     h.pp.num_threads = 1;
     h.pp.nr_align = 1;
-    prepack::prepack_for_algo_3(h.pp);
+    prepack::prepack_n_tile(h.pp);
     ASSERT_TRUE(prepack::test_api::get_last_invocation_stats().valid);
 
     // Same pool, same scheduling algo, but flip act_dtype to f32 — that
@@ -4138,7 +4134,7 @@ TEST_F(TestPrepackCkGateSymmetry, FingerprintReDispatchesOnActChange) {
     // doesn't depend on the eligibility envelope evolving.
     prepack::test_api::clear_last_invocation_stats();
     h.pp.act_dtype = data_type_t::f32;
-    prepack::prepack_for_algo_3(h.pp);
+    prepack::prepack_n_tile(h.pp);
 
     const auto stats = prepack::test_api::get_last_invocation_stats();
     EXPECT_TRUE(stats.valid)
@@ -4177,8 +4173,8 @@ TEST_F(TestPrepackCkGateSymmetry, FingerprintReDispatchesOnActChange) {
 TEST_F(TestPrepackCkGateSymmetry, TransATrueRefusedNoCkWarm) {
     namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
     using zendnnl::lowoha::matmul::custom_kernel::
-            clear_custom_kernel_pack_cache;
-    clear_custom_kernel_pack_cache();
+            clear_custom_kernel_pack_cache_bf16;
+    clear_custom_kernel_pack_cache_bf16();
     prepack::clear_fingerprint_cache_for_test();
     prepack::test_api::clear_last_invocation_stats();
 
@@ -4191,7 +4187,7 @@ TEST_F(TestPrepackCkGateSymmetry, TransATrueRefusedNoCkWarm) {
     h.pp.nr_align = 1;
     // Flip transA on a single active expert to trigger the gate.
     h.transA[2] = true;
-    prepack::prepack_for_algo_3(h.pp);
+    prepack::prepack_n_tile(h.pp);
 
     const auto stats = prepack::test_api::get_last_invocation_stats();
     ASSERT_TRUE(stats.valid);
@@ -4205,8 +4201,8 @@ TEST_F(TestPrepackCkGateSymmetry, TransATrueRefusedNoCkWarm) {
 TEST_F(TestPrepackCkGateSymmetry, AlphaNotOneRefusedNoCkWarm) {
     namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
     using zendnnl::lowoha::matmul::custom_kernel::
-            clear_custom_kernel_pack_cache;
-    clear_custom_kernel_pack_cache();
+            clear_custom_kernel_pack_cache_bf16;
+    clear_custom_kernel_pack_cache_bf16();
     prepack::clear_fingerprint_cache_for_test();
     prepack::test_api::clear_last_invocation_stats();
 
@@ -4219,7 +4215,7 @@ TEST_F(TestPrepackCkGateSymmetry, AlphaNotOneRefusedNoCkWarm) {
     h.pp.num_threads = 1;
     h.pp.nr_align = 1;
     h.alpha[1] = 2.0f; // !=1
-    prepack::prepack_for_algo_3(h.pp);
+    prepack::prepack_n_tile(h.pp);
 
     const auto stats = prepack::test_api::get_last_invocation_stats();
     ASSERT_TRUE(stats.valid);
@@ -4230,8 +4226,8 @@ TEST_F(TestPrepackCkGateSymmetry, AlphaNotOneRefusedNoCkWarm) {
 TEST_F(TestPrepackCkGateSymmetry, BetaNotZeroRefusedNoCkWarm) {
     namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
     using zendnnl::lowoha::matmul::custom_kernel::
-            clear_custom_kernel_pack_cache;
-    clear_custom_kernel_pack_cache();
+            clear_custom_kernel_pack_cache_bf16;
+    clear_custom_kernel_pack_cache_bf16();
     prepack::clear_fingerprint_cache_for_test();
     prepack::test_api::clear_last_invocation_stats();
 
@@ -4241,7 +4237,7 @@ TEST_F(TestPrepackCkGateSymmetry, BetaNotZeroRefusedNoCkWarm) {
     h.pp.num_threads = 1;
     h.pp.nr_align = 1;
     h.beta[0] = 0.5f; // !=0
-    prepack::prepack_for_algo_3(h.pp);
+    prepack::prepack_n_tile(h.pp);
 
     const auto stats = prepack::test_api::get_last_invocation_stats();
     ASSERT_TRUE(stats.valid);
@@ -4252,8 +4248,8 @@ TEST_F(TestPrepackCkGateSymmetry, BetaNotZeroRefusedNoCkWarm) {
 TEST_F(TestPrepackCkGateSymmetry, IsWeightsConstFalseRefusedNoCkWarm) {
     namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
     using zendnnl::lowoha::matmul::custom_kernel::
-            clear_custom_kernel_pack_cache;
-    clear_custom_kernel_pack_cache();
+            clear_custom_kernel_pack_cache_bf16;
+    clear_custom_kernel_pack_cache_bf16();
     prepack::clear_fingerprint_cache_for_test();
     prepack::test_api::clear_last_invocation_stats();
 
@@ -4273,7 +4269,7 @@ TEST_F(TestPrepackCkGateSymmetry, IsWeightsConstFalseRefusedNoCkWarm) {
     h.pp.num_threads = 1;
     h.pp.nr_align = 1;
     h.is_weights_const[3] = false;
-    prepack::prepack_for_algo_3(h.pp);
+    prepack::prepack_n_tile(h.pp);
 
     const auto stats = prepack::test_api::get_last_invocation_stats();
     ASSERT_TRUE(stats.valid);
@@ -4286,8 +4282,8 @@ TEST_F(TestPrepackCkGateSymmetry, IsWeightsConstFalseRefusedNoCkWarm) {
 TEST_F(TestPrepackCkGateSymmetry, RefusalScopedToActiveExpertsOnly) {
     namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
     using zendnnl::lowoha::matmul::custom_kernel::
-            clear_custom_kernel_pack_cache;
-    clear_custom_kernel_pack_cache();
+            clear_custom_kernel_pack_cache_bf16;
+    clear_custom_kernel_pack_cache_bf16();
     prepack::clear_fingerprint_cache_for_test();
     prepack::test_api::clear_last_invocation_stats();
 
@@ -4305,7 +4301,7 @@ TEST_F(TestPrepackCkGateSymmetry, RefusalScopedToActiveExpertsOnly) {
     h.transA[5] = true;
     h.alpha[6] = 3.0f;
     h.is_weights_const[7] = false;
-    prepack::prepack_for_algo_3(h.pp);
+    prepack::prepack_n_tile(h.pp);
 
     const auto stats = prepack::test_api::get_last_invocation_stats();
     ASSERT_TRUE(stats.valid);
@@ -4351,7 +4347,7 @@ namespace {
 // Local helper — builds the minimum weight/K/N/ldb/transB/is_const
 // vectors needed to call `build_prepack_params`.  All sized to
 // `pool_n` and filled with placeholder values; the test only reads
-// the returned `PrepackParams`' `num_ops_active` / `num_ops_total`.
+// the returned `PrepackRequest`' `num_ops_active` / `num_ops_total`.
 struct BuildParamsFixture {
     std::vector<float> bank_storage; // single backing buffer
     std::vector<const void *> weight;
@@ -4673,7 +4669,7 @@ TEST_F(TestPrepackInt8WarmDtypeFamily, StaticU8S8WarmsInt8Family) {
     EXPECT_EQ(warm.src_dtype, data_type_t::u8);
     EXPECT_EQ(warm.wei_dtype, data_type_t::s8);
     EXPECT_EQ(warm.dst_dtype, data_type_t::u8);
-    prepack::prepack_for_algo_3(warm);
+    prepack::prepack_n_tile(warm);
 
     prepack::custom_kernel::PackProbeStats probe;
     ASSERT_EQ(prepack::custom_kernel::warm_pack_all_custom_kernel_experts(
@@ -4713,7 +4709,7 @@ TEST_F(TestPrepackInt8WarmDtypeFamily, GroupedS8ToU8SkipsCkWarm) {
             is_const, params, Ms, /*custom_kernel_env=*/1,
             /*num_threads=*/4, /*nr_align=*/1, grp_matmul_gated_act_t::none,
             data_type_t::none, &transA, &alpha, &beta);
-    prepack::prepack_for_algo_3(warm);
+    prepack::prepack_n_tile(warm);
 
     prepack::custom_kernel::PackProbeStats probe;
     ASSERT_EQ(prepack::custom_kernel::warm_pack_all_custom_kernel_experts(
@@ -4756,7 +4752,7 @@ TEST_F(TestPrepackInt8WarmDtypeFamily, HeterogeneousUnsafeKSkipsCkWarm) {
             is_const, params, Ms, /*custom_kernel_env=*/1,
             /*num_threads=*/4, /*nr_align=*/1, grp_matmul_gated_act_t::none,
             data_type_t::none, &transA, &alpha, &beta);
-    prepack::prepack_for_algo_3(warm);
+    prepack::prepack_n_tile(warm);
 
     prepack::custom_kernel::PackProbeStats probe;
     ASSERT_EQ(prepack::custom_kernel::warm_pack_all_custom_kernel_experts(
@@ -5108,7 +5104,7 @@ TEST_F(TestPrepackF16WarmDtypeFamily, ClearF16CacheDoesNotEvictBf16) {
 // ──────────────────────────────────────────────────────────────────
 // C.7 — fingerprint trio.  bf16, DQ-INT8 sym and DQ-INT8 asym must
 // produce three distinct fingerprints when running through
-// `prepack_for_algo_3`.  Otherwise a process that runs the families
+// `prepack_n_tile`.  Otherwise a process that runs the families
 // in sequence would short-circuit on the second call's already-
 // seen fingerprint and leave the second family's cache cold.
 // We verify by:
@@ -5172,11 +5168,11 @@ TEST_F(TestPrepackInt8WarmDtypeFamily, FingerprintTrioDistinct) {
                 /*compute_dtype=*/cmp);
     };
 
-    prepack::prepack_for_algo_3(make_params(
+    prepack::prepack_n_tile(make_params(
             data_type_t::bf16, false, data_type_t::none, wei_ptrs_bf16));
-    prepack::prepack_for_algo_3(
+    prepack::prepack_n_tile(
             make_params(data_type_t::s8, true, data_type_t::s8, wei_ptrs_s8));
-    prepack::prepack_for_algo_3(
+    prepack::prepack_n_tile(
             make_params(data_type_t::s8, true, data_type_t::u8, wei_ptrs_s8));
 
     // Probe the bf16 family — must hit (warmed by call #1).

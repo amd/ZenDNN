@@ -1429,7 +1429,7 @@ TEST(TestGroupDynamicQuant, FallbackSkipsInactiveExperts) {
 // fire.  The grouped pre-pass rewrites ONLY active experts to the s8 +
 // per-token-src_scale family, so `params[0]` is NOT representative of the
 // call's quant mode.  The N-tile routing
-// (group_matmul_n_tile.cpp::flat_n_tile) must therefore classify from the
+// (group_matmul_n_tile.cpp::n_tile_execute) must therefore classify from the
 // FIRST ACTIVE expert; this test pins the precondition that fix relies on
 // — the first active expert (index 1) carries the s8 dtype + a non-null
 // src_scale that the representative scan will find, while the leading
@@ -1457,7 +1457,7 @@ TEST(TestGroupDynamicQuant, LeadingInactiveExpertFirstActiveIsRepresentative) {
 
     // The FIRST ACTIVE expert (index 1) is the valid representative: s8 src,
     // dynamic_quant cleared, and a non-null per-token src_scale — exactly
-    // what flat_n_tile's first-active scan keys the DQ-INT8 routing off.
+    // what n_tile_execute's first-active scan keys the DQ-INT8 routing off.
     size_t rep = pr.params.size();
     for (size_t e = 0; e < pr.M.size(); ++e) {
         if (pr.M[e] > 0) {

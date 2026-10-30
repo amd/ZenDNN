@@ -28,7 +28,7 @@
 #include <omp.h>
 
 #include "lowoha_operators/matmul/group_matmul/common/group_matmul_parallel_common.hpp"
-#include "lowoha_operators/matmul/group_matmul/common/per_thread_scratch.hpp" // PerThreadScratch + grow_scratch
+#include "lowoha_operators/matmul/group_matmul/common/per_thread_scratch.hpp" // AlignedTileScratch + grow_scratch
 #include "lowoha_operators/matmul/group_matmul/executors/m_tile/group_matmul_m_tile.hpp"
 #include "lowoha_operators/matmul/group_matmul/executors/m_tile/m_tile_internal.hpp"
 #include "lowoha_operators/matmul/group_matmul/prepack/prepack.hpp"
@@ -220,7 +220,7 @@ inline void dqint8_compact_and_requant_slice(
 //
 // ═══════════════════════════════════════════════════════════════════════
 //
-// ── C.1  flat_m_tile_pipeline_bf16 (BF16 / WOQ-INT4 / DQ-INT8) ─────────
+// ── C.1  try_fused_m_tile_core (BF16 / WOQ-INT4 / DQ-INT8) ─────────
 //
 // Single OMP region that fuses (W13 matmul → gated activation → W2
 // matmul) over row-disjoint M-tile slices.  Each thread runs all three
@@ -246,7 +246,7 @@ inline void dqint8_compact_and_requant_slice(
 //               dst_w13 in spill mode) holds the final result.
 //   * `false` — pipeline DID NOT engage (any of: empty inputs,
 //               round-based regime, multi-tier would have engaged,
-//               wide-N fallback signaled, scratch budget insufficient,
+//               shallow-M fallback signaled, scratch budget insufficient,
 //               per-thread allocation failed, DQ-INT8 pre-OMP hoist
 //               failed).  Caller falls back to the legacy two-pass.
 //               IMPORTANT correctness contract: the `false`-path
@@ -258,7 +258,7 @@ inline void dqint8_compact_and_requant_slice(
 //               the OMP region opens.
 //
 // REGIME SCOPE — the executor's caller-side eligibility wrapper
-// (`try_flat_m_tile_pipeline_bf16`) must verify that BOTH halves
+// (`try_fused_m_tile`) must verify that BOTH halves
 // agree on ONE of these regimes:
 //
 //   (A) BF16 end-to-end — `dtypes.{src,wei,dst} = bf16` and
@@ -302,7 +302,7 @@ inline void dqint8_compact_and_requant_slice(
 //       every `~reorder_quant_buffers_t` frees its `src_buf /
 //       scale_buf / zp_buf` deterministically.  No per-slice
 //       mallocs and no `thread_local` persistence (DQ-INT8 does
-//       NOT extend the `thread_local PerThreadScratch` that holds
+//       NOT extend the `thread_local AlignedTileScratch` that holds
 //       the bf16 intermediate; it allocates fresh-per-call RAII
 //       buffers instead).
 //
@@ -318,7 +318,7 @@ inline void dqint8_compact_and_requant_slice(
 // Memory contract (relevant to "what gets freed"):
 //
 //   * BF16 staging (`sc`): function-local `static thread_local
-//     PerThreadScratch` that owns its buffer via aligned malloc and
+//     AlignedTileScratch` that owns its buffer via aligned malloc and
 //     grows monotonically to each OMP worker's high-water slice
 //     footprint.  Freed ONLY on the owning OMP worker thread's
 //     exit; NOT released by `clear_fused_moe_scratch()` (that API
@@ -372,7 +372,7 @@ inline void dqint8_compact_and_requant_slice(
 // arena is never read after the pipeline returns, so writing it is
 // pure overhead.  This is the "auto-pick" semantics requested by the
 // vertical-fusion design.
-bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
+bool try_fused_m_tile_core(const std::vector<char> &layout,
         const std::vector<bool> &transA, // Op1 src transposition
         const std::vector<bool> &transA_w2, // Op2 src transposition (must
         // be all-`false` — Op2 reads
@@ -407,9 +407,9 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
     // ── Regime detection (tri-state: BF16 / WOQ / DQ-INT8) ──
     //
     // Probed ONCE from `params_w13[0]` because the eligibility wrapper
-    // (`try_flat_m_tile_pipeline_bf16`) guarantees both halves agree on
+    // (`try_fused_m_tile`) guarantees both halves agree on
     // the same regime AND cross-expert dtype uniformity within each
-    // half (via `check_m_tile_safe`).  Used by the budget gate, the
+    // half (via `m_tile_supported`).  Used by the budget gate, the
     // tag store, the pre-OMP hoist branch, and the per-stage overlays
     // inside the OMP region.
     enum RegimeTag { kRegBF16 = 0, kRegWOQ = 1, kRegDQINT8 = 2 };
@@ -426,22 +426,22 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
     // call it here for both passes BEFORE the OMP region so the inner
     // BRGEMM / oneDNN kernels see warm packed weights from the very
     // first slice; legacy two-pass already does this implicitly by
-    // calling `flat_m_tile` twice, once per pass.
-    group_matmul_prepack::prepack_for_algo_2(
+    // calling `m_tile_execute` twice, once per pass.
+    group_matmul_prepack::prepack_m_tile(
             group_matmul_prepack::build_prepack_params(weight_w13, K_in, N_w13,
                     ldb_w13, transB, is_weights_const, params_w13, M,
-                    grp_matmul_custom_kernel_effective(
+                    group_matmul_custom_kernel_candidate(
                             params_w13, M, N_w13, fused_act),
                     num_threads,
-                    algo3_decode_nr_align(
+                    n_tile_decode_nr_align(
                             M, N_w13, ldc_w13, fused_act, params_w13),
                     fused_act, act_dtype,
                     /*transA=*/&transA, /*alpha=*/&alpha_w13,
                     /*beta=*/&beta_w13));
-    group_matmul_prepack::prepack_for_algo_2(
+    group_matmul_prepack::prepack_m_tile(
             group_matmul_prepack::build_prepack_params(weight_w2, K_w2, N_w2,
                     ldb_w2, transB, is_weights_const, params_w2, M,
-                    grp_matmul_custom_kernel_effective(
+                    group_matmul_custom_kernel_candidate(
                             params_w2, M, N_w2, grp_matmul_gated_act_t::none),
                     num_threads, /*nr_align=*/0,
                     /*fused_act=*/grp_matmul_gated_act_t::none,
@@ -449,7 +449,7 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
                     /*transA=*/&transA_w2, /*alpha=*/&alpha_w2,
                     /*beta=*/&beta_w2));
 
-    matmul_algo_t algo = resolve_kernel();
+    matmul_algo_t algo = resolve_matmul_backend();
 
     // Element sizes.  `inter_elem` is the scratch element size — by
     // contract (see PHASE 1 SCOPE above) this is `size_of(bf16) = 2`.
@@ -470,7 +470,7 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
     if (active_ops == 0) return true; // claim success: nothing to do
 
     // Round-based regime is the `active_ops > num_threads` branch in
-    // `flat_m_tile` — every thread runs at most one whole expert with
+    // `m_tile_execute` — every thread runs at most one whole expert with
     // `team=1`.  Vertical fusion at M-tile granularity has no slicing
     // win there (each thread already owns its expert end-to-end) and
     // would just double the per-expert scratch footprint.  Bail to
@@ -486,12 +486,12 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
         }
     }
 
-    // ── CCD topology (mirrors `flat_m_tile`) ──
+    // ── CCD topology (mirrors `m_tile_execute`) ──
     const int cores_per_ccd = std::min(8, num_threads);
     const int num_ccds
             = std::max(1, (num_threads + cores_per_ccd - 1) / cores_per_ccd);
 
-    // ── Multi-tier hybrid prediction (mirrors `flat_m_tile`) ──
+    // ── Multi-tier hybrid prediction (mirrors `m_tile_execute`) ──
     //
     // Vertical fusion phase 1 only covers the single-tier mapping.
     // Multi-tier hybrid (engaged on skewed-many-expert Qwen3-class
@@ -502,7 +502,7 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
     // engaged multi-tier on the Op1 shape, bail to legacy two-pass.
     //
     // The prediction is a literal copy of the gating logic in
-    // `flat_m_tile` (search "Multi-tier hybrid" above) so the decision
+    // `m_tile_execute` (search "Multi-tier hybrid" above) so the decision
     // stays in sync — any future tuning of the multi-tier gates will
     // re-route those workloads back through the legacy path
     // automatically.  Heavy-underfill perf guard (`ht_assigned_final *
@@ -550,24 +550,24 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
             if (n_light > 0 && n_light >= min_lights && n_heavy > 0
                     && heavy_M_sum > 0 && candidate_light_pool < num_threads
                     && candidate_heavy_pool >= n_heavy) {
-                // Multi-tier would have engaged in `flat_m_tile`.  Bail.
+                // Multi-tier would have engaged in `m_tile_execute`.  Bail.
                 return false;
             }
         }
     }
 
-    // ── Single-tier Phase-1b/2/3 plan (shared with `flat_m_tile`) ──
-    // Pass short_circuit_on_wide_n=true: this executor bails to the legacy
-    // two-pass on the wide-N signal (just below) and never reads the tid
-    // mapping, so let the planner skip the throwaway Phase-2/3 work on wide-N.
-    const auto plan = plan_m_tile_single_tier_assignment(M, active_pos, num_ops,
+    // ── Single-tier Phase-1b/2/3 plan (shared with `m_tile_execute`) ──
+    // Pass short_circuit_on_shallow_m=true: this executor bails to the legacy
+    // two-pass on the shallow-M signal (just below) and never reads the tid
+    // mapping, so let the planner skip the throwaway Phase-2/3 work.
+    const auto plan = make_m_tile_single_tier_plan(M, active_pos, num_ops,
             num_threads, active_ops, kSliceTarget, cores_per_ccd, num_ccds,
-            /*short_circuit_on_wide_n=*/true);
+            /*short_circuit_on_shallow_m=*/true);
 
-    // Wide-N fallback bails out: full-team-per-expert sequential GEMM
+    // Shallow-M fallback bails out: full-team-per-expert sequential GEMM
     // doesn't fuse vertically at M-tile granularity (no row-disjoint
     // slice plan inside a single expert).  Legacy two-pass handles it.
-    if (plan.wide_n_fallback) return false;
+    if (plan.shallow_m_fallback) return false;
 
     // ── Per-thread scratch sizing + budget gate ──
     //
@@ -665,8 +665,8 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
     // (no partial writes — see the contract in the OMP body), and the
     // function returns `false`.  The dispatcher in
     // `group_matmul_fused_moe.cpp` then falls back to the legacy
-    // two-pass, which itself routes through `flat_m_tile` and OVERWRITES
-    // this tag with one of {kRoundBased, kMultiTier, kWideNFallback,
+    // two-pass, which itself routes through `m_tile_execute` and OVERWRITES
+    // this tag with one of {kRoundBased, kMultiTier, kShallowMFallback,
     // kPhase2Single}.
     //
     // Therefore the transient `kVerticalFusion* + return=false` state
@@ -683,7 +683,7 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
     // the legacy executor's branch tag.
     //
     // Dtype-specific tag selection — the eligibility wrapper
-    // `try_flat_m_tile_pipeline_bf16` guarantees both halves share the
+    // `try_fused_m_tile` guarantees both halves share the
     // same regime, so the locally-cached `regime` enum above is
     // sufficient to discriminate; we do NOT need to re-probe params
     // here.  The three tags differ only in (a) which AOCL DLP kernel
@@ -703,7 +703,7 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
     //
     // ONLY runs in the `kRegDQINT8` regime; both vectors stay default-
     // constructed (empty) and are no-ops at destruction in the other
-    // regimes.  See the doc-block on `flat_m_tile_pipeline_bf16` above
+    // regimes.  See the doc-block on `try_fused_m_tile_core` above
     // (REGIME SCOPE / Memory contract) for the lifetime argument.
     //
     // `hoist_buffers_w13[e].src_buf` owns the per-expert s8 quantized
@@ -731,7 +731,7 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
             // The caller's vector is shared with the legacy fallback path,
             // so we MUST NOT touch it; per-thread overlay below copies
             // from caller params_w13[e] and then layers the hoisted state
-            // on top, matching the N-tile do_tile pattern at
+            // on top, matching the N-tile execute_tile pattern at
             // `group_matmul_n_tile.cpp:443-454`.
             matmul_params shadow = params_w13[e];
             const void *src_e = src[e];
@@ -753,7 +753,7 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
                 // dst_w2 have NOT been touched yet (OMP region is below),
                 // so the legacy fallback can overwrite them cleanly.
                 log_error(
-                        "flat_m_tile_pipeline_bf16 (DQ-INT8): pre-OMP src "
+                        "try_fused_m_tile_core (DQ-INT8): pre-OMP src "
                         "hoist failed for expert ",
                         e, "; falling back to legacy two-pass.");
                 return false;
@@ -803,7 +803,7 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
             if ((cb > 0 && !pt.src_buf) || (ib > 0 && !pt.scale_buf)
                     || (sb > 0 && !pt.zp_buf)) {
                 log_error(
-                        "flat_m_tile_pipeline_bf16 (DQ-INT8): per-thread "
+                        "try_fused_m_tile_core (DQ-INT8): per-thread "
                         "Stage 2b alloc failed for tid ",
                         tid, " (compact=", cb, " int8=", ib, " scale=", sb,
                         "); falling back to legacy two-pass.");
@@ -826,7 +826,7 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
         const int tid = omp_get_thread_num();
         const int e = plan.tid_to_expert[tid];
         const size_t need = per_thread_bytes[tid];
-        static thread_local PerThreadScratch sc;
+        static thread_local AlignedTileScratch sc;
         if (e >= 0 && need > 0) {
             if (!grow_scratch(sc, need)) {
                 alloc_fail.store(true, std::memory_order_relaxed);
@@ -885,7 +885,7 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
             // When regime is DQ-INT8 and the pre-OMP hoist produced a
             // valid s8 src for this expert, substitute the shared s8
             // buffer + its full-M src_scale / src_zp dims into
-            // `w13_local`.  Mirrors the N-tile `do_tile()` substitution
+            // `w13_local`.  Mirrors the N-tile `execute_tile()` substitution
             // at `group_matmul_n_tile.cpp:443-454` so the per-thread
             // reorder wrapper inside `execute_expert_slice` sees
             // `dtypes.src == s8` and short-circuits (avoids racing on
@@ -937,7 +937,7 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
                     N_w13[e], K_in[e], alpha_w13[e], src_slice, lda_for_w13,
                     weight_w13[e], ldb_w13[e], bias_w13[e], beta_w13[e], sc.buf,
                     /*ldc=*/N_w13[e], is_weights_const[e], /*num_thr=*/1,
-                    w13_local, resolve_expert_kernel(2, algo, w13_local));
+                    w13_local, resolve_expert_backend(2, algo, w13_local));
 
             // ── STAGE 2: in-place gated activation on scratch (2I → I) ──
             if (fused_act != grp_matmul_gated_act_t::none) {
@@ -1100,7 +1100,7 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
             // The per-thread `reorder_quantization_wrapper` inside
             // `execute_expert_slice` will see `dtypes.src == s8` and
             // short-circuit (same self-disabling contract as N-tile
-            // do_tile's hoisted-state substitution).  The kernel
+            // execute_tile's hoisted-state substitution).  The kernel
             // dispatch then routes to the AOCL DLP s8s8 → bf16 path.
             const void *src_for_w2 = sc.buf;
             int lda_for_w2 = N_w13[e];
@@ -1137,13 +1137,13 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
                     N_w2[e], K_w2[e], alpha_w2[e], src_for_w2, lda_for_w2,
                     weight_w2[e], ldb_w2[e], bias_w2[e], beta_w2[e],
                     dst_w2_slice, ldc_w2[e], is_weights_const[e], /*num_thr=*/1,
-                    w2_local, resolve_expert_kernel(2, algo, w2_local));
+                    w2_local, resolve_expert_backend(2, algo, w2_local));
         }
     } // end #pragma omp parallel
 
     if (alloc_fail.load(std::memory_order_relaxed)) {
         log_error(
-                "flat_m_tile_pipeline_bf16: per-thread scratch alloc "
+                "try_fused_m_tile_core: per-thread scratch alloc "
                 "failed; falling back to legacy two-pass.");
         return false;
     }
@@ -1153,7 +1153,7 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
 // ── C.3  flat_m_tile_pipeline_int8 (phase 2 — TODO) ────────────────────
 //
 // PHASE 2 (dynamic INT8 vertical fusion) lands as a separate executor
-// next to `flat_m_tile_pipeline_bf16` above.  Sketch:
+// next to `try_fused_m_tile_core` above.  Sketch:
 //
 //   * Same per-thread slice plan as Section C.1.
 //   * Pre-OMP hoist (analogous to N-tile, see
@@ -1172,7 +1172,7 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
 //                     allocated up front.
 //   * Stage 3: same `aocl_gemm_s8s8s32obf16_sym_quant` for W2.
 //
-// Eligibility gate (in `try_flat_m_tile_pipeline_bf16` above) will
+// Eligibility gate (in `try_fused_m_tile` above) will
 // be extended with a third regime for dynamic-int8 dtypes; the
 // current gate explicitly rejects `dynamic_quant=true`.  No
 // phase-2 code in this commit.
@@ -1181,13 +1181,13 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
 // Section C.2 — Eligibility-gated wrapper around the pipeline executor.
 // ─────────────────────────────────────────────────────────────────────
 //
-// `try_flat_m_tile_pipeline_bf16` bundles the M-tile-pipeline-specific
+// `try_fused_m_tile` bundles the M-tile-pipeline-specific
 // eligibility gate (env knob, dtype-regime check on both halves —
 // BF16 end-to-end OR WOQ-INT4 OR DQ-INT8 per-token-symmetric,
-// supported activation set, `check_m_tile_safe` on Op1 + synthesized
+// supported activation set, `m_tile_supported` on Op1 + synthesized
 // Op2, WOQ-only `is_weights_const[*] == true` requirement, and
 // DQ-INT8-only per-token-symmetric structural checks) with the
-// actual `flat_m_tile_pipeline_bf16` invocation.
+// actual `try_fused_m_tile_core` invocation.
 //
 // Lives next to the executor (rather than at the caller in
 // `group_matmul_fused_moe.cpp`) so the engagement contract — which
@@ -1195,7 +1195,7 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
 // as the executor's bail-out contract.  Future tightening of the gate
 // (asymmetric DQ-INT8 u8 support, additional activation set, etc.) is
 // a one-file diff.
-bool try_flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
+bool try_fused_m_tile(const std::vector<char> &layout,
         const std::vector<bool> &transA, const std::vector<bool> &transA_w2,
         const std::vector<bool> &transB, const std::vector<int> &M,
         const std::vector<int> &N_w13, const std::vector<int> &K_in,
@@ -1224,7 +1224,7 @@ bool try_flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
     // Phase 1 eligibility — accept ONE of three dtype regimes per
     // matmul half (both halves must share the same regime by way of
     // the AOCL-DLP path they each route to; the predicate below is
-    // applied symmetrically and `check_m_tile_safe` further enforces
+    // applied symmetrically and `m_tile_supported` further enforces
     // cross-expert dtype uniformity within each half):
     //
     //   (A) BF16 end-to-end — `dtypes.{src,wei,dst} = bf16` and
@@ -1247,7 +1247,7 @@ bool try_flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
     //       `dtypes.compute = s8`, `dynamic_quant == true`,
     //       per-token src quant granularity
     //       (`quant_params.src_scale.dims == {M[i], 1}`, `dt = f32`)
-    //       — already enforced for Op1 by `check_m_tile_safe`'s
+    //       — already enforced for Op1 by `m_tile_supported`'s
     //       row-locality predicate and re-asserted symmetrically
     //       for Op2 here.  Per-channel wei quant is permitted; the
     //       AOCL DLP s8s8 → bf16 kernel reads `wei_scale` from
@@ -1261,7 +1261,7 @@ bool try_flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
     // scratch model only fits when both halves share the same
     // bf16-element staging tile + the same Stage 2b plumbing
     // (present in DQ-INT8 only).  Probing only [0] on each side is
-    // correct: `check_m_tile_safe` below enforces cross-expert dtype
+    // correct: `m_tile_supported` below enforces cross-expert dtype
     // uniformity within each half.
     if (params_w13.empty() || params_w2.empty()) return false;
 
@@ -1296,7 +1296,7 @@ bool try_flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
         if (p.dtypes.wei == data_type_t::s8) {
             // DQ-INT8: require symmetric dynamic quant on the src side, in either
             // per-token {M,1} or per-group {M,G>1} granularity.
-            // `check_m_tile_safe` already enforces row-locality
+            // `m_tile_supported` already enforces row-locality
             // (`src_scale.dims[0] == M[i]`) for Op1; we replay the
             // structural shape check here so Op2 (which `check_m_tile_
             // safe` will also visit below) is held to the same
@@ -1326,7 +1326,7 @@ bool try_flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
             // compute-dtype check above.
             if (p.quant_params.wei_scale.buff == nullptr) return kRegimeNone;
             // Sanity guard: the caller's full-M src_scale.dims[0] must
-            // match this half's M[i] when `check_m_tile_safe` will
+            // match this half's M[i] when `m_tile_supported` will
             // accept it.  Replayed here so the regime classification
             // cannot succeed on a malformed [0]-only sample where
             // `M[0] == 0` (round-based bail handles it but the regime
@@ -1350,7 +1350,7 @@ bool try_flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
     // (BF16, WOQ), (BF16, DQ-INT8), or (WOQ, DQ-INT8) call would
     // require per-stage scratch element-size + Stage 2b plumbing
     // differentiation (today's `inter_elem = dtypes.dst` is read
-    // once at the top of `flat_m_tile_pipeline_bf16`, and Stage 2b
+    // once at the top of `try_fused_m_tile_core`, and Stage 2b
     // only runs in the DQ-INT8 arm); mixed-regime workloads are not
     // produced by today's MoE call sites.
     if (regime_w13 != regime_w2) return false;
@@ -1377,10 +1377,10 @@ bool try_flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
             || (fused_act == grp_matmul_gated_act_t::swiglu_oai_mul);
     if (!act_supported) return false;
 
-    if (!check_m_tile_safe(layout, M, params_w13, num_ops_int)) return false;
-    if (!check_m_tile_safe(layout, M, params_w2, num_ops_int)) return false;
+    if (!m_tile_supported(layout, M, params_w13, num_ops_int)) return false;
+    if (!m_tile_supported(layout, M, params_w2, num_ops_int)) return false;
     // A weight an earlier in-place custom-kernel pack rewrote is still marked
-    // 'n', so `check_m_tile_safe` cannot see it.  Declining sends the call to
+    // 'n', so `m_tile_supported` cannot see it.  Declining sends the call to
     // the two-pass, whose dispatcher fails it closed.
     if (custom_kernel::any_weight_packed_in_place(weight_w13, M)
             || custom_kernel::any_weight_packed_in_place(weight_w2, M)) {
@@ -1394,7 +1394,7 @@ bool try_flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
     // the call would silently degrade.  Reject early so the caller
     // falls back to the legacy two-pass which validates this itself.
     // BF16 end-to-end (regime A) and DQ-INT8 (regime C) place no
-    // such constraint — the existing `flat_m_tile` accepts non-const
+    // such constraint — the existing `m_tile_execute` accepts non-const
     // weights for both and the pipeline executor inherits that
     // behaviour.  (DQ-INT8 in fact has its OWN constant-weight cache
     // via the AOCL DLP s8s8→bf16 prepack, but does not require
@@ -1413,12 +1413,11 @@ bool try_flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
     // also spilled to `dst_w13[]` for downstream readers; when the
     // library owns it, the spill is skipped (Op1's library arena would
     // be a write-and-immediately-discard path).
-    return flat_m_tile_pipeline_bf16(layout, transA, transA_w2, transB, M,
-            N_w13, K_in, alpha_w13, src, lda, weight_w13, ldb_w13, bias_w13,
-            beta_w13, dst_w13, ldc_w13, dst_w13_is_caller_alloc, N_w2, K_w2,
-            alpha_w2, weight_w2, ldb_w2, bias_w2, beta_w2, dst_w2, ldc_w2,
-            fused_act, act_dtype, is_weights_const, params_w13, params_w2,
-            num_threads);
+    return try_fused_m_tile_core(layout, transA, transA_w2, transB, M, N_w13,
+            K_in, alpha_w13, src, lda, weight_w13, ldb_w13, bias_w13, beta_w13,
+            dst_w13, ldc_w13, dst_w13_is_caller_alloc, N_w2, K_w2, alpha_w2,
+            weight_w2, ldb_w2, bias_w2, beta_w2, dst_w2, ldc_w2, fused_act,
+            act_dtype, is_weights_const, params_w13, params_w2, num_threads);
 }
 
 } // namespace matmul

@@ -16,12 +16,12 @@
 
 /// Library-internal helpers shared by the generic scheduling-ALGO paths.
 ///
-/// Each ALGO implementation (`sequential_experts`, `flat_m_tile`,
-/// `flat_n_tile`, `parallel_multilevel`, `parallel_per_expert`) is
+/// Each ALGO implementation (`sequential_execute`, `m_tile_execute`,
+/// `n_tile_execute`, `hierarchical_execute`, `expert_parallel_execute`) is
 /// split into its own translation unit so the files stay small and
 /// ownership is clear.  This header hosts the bits they all need:
 ///   - env-driven feature flags
-///   - the `resolve_kernel()` / `execute_expert_slice()` primitives
+///   - the `resolve_matmul_backend()` / `execute_expert_slice()` primitives
 ///   - tile-size constants referenced by ALGO 0 auto-select
 ///   - forward declarations of the per-strategy entry points
 ///

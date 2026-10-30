@@ -23,7 +23,7 @@
 ///     this table being right.
 ///   * Pinning the existing supported rows catches any accidental
 ///     regression on them when other dtype combinations are added.
-///   * `dispatch_supported()` is irrelevant — this is a pure switch
+///   * `bf16_isa_supported()` is irrelevant — this is a pure switch
 ///     over POD enums, runs identically on every host.
 ///
 /// Coverage strategy: enumerate every value declared in
@@ -399,7 +399,7 @@ TEST(CkResolveVariantS4, RejectsTuplesOutsideW4A8) {
 TEST(CkResolveVariantS4, PredicatesAgreeWithVariant) {
     const auto v = ck::resolve_variant(data_type_t::s8, data_type_t::s4,
             data_type_t::bf16, false, data_type_t::s8);
-    EXPECT_TRUE(ck::is_s4_variant(v));
+    EXPECT_TRUE(ck::is_w4a8_variant(v));
     EXPECT_FALSE(ck::is_int8_variant(v));
     EXPECT_FALSE(ck::is_f16_variant(v));
     // W4A8 shares DQ-INT8's per-token s8 source hoist.

@@ -29,7 +29,7 @@
  *
  *   - The symbols declared in THIS header (`group_matmul_moe_act_execute`,
  *     `apply_gated_act_inplace`, `apply_swiglu_oai_tile_rows`,
- *     `apply_swiglu_oai_tile_rows_oop`, `group_matmul_fused_moe_execute`
+ *     `apply_swiglu_oai_tile_rows_out_of_place`, `group_matmul_fused_moe_execute`
  *     [both overloads], `validate_group_matmul_moe_postop`,
  *     `group_matmul_moe_postop_execute`, and the internal dispatch /
  *     planner plumbing) are LIBRARY-INTERNAL: they are split across
@@ -256,9 +256,9 @@ void apply_gated_act_inplace(grp_matmul_gated_act_t act, void *dst,
  * fallback — but it is NOT called from inside
  * `group_matmul_moe_act_execute`.)  For the TIGHT caller layout the
  * fused-CK kernel handles all three gated kinds; when CK refuses on
- * silu / gelu (e.g. +bias), `flat_n_tile` routes the call to the
+ * silu / gelu (e.g. +bias), `n_tile_execute` routes the call to the
  * Sequential strategy fallback (see the `TIGHT_SPLIT_HALVES_FALLBACK`
- * comment in `flat_n_tile`).
+ * comment in `n_tile_execute`).
  *
  * @param dst_buf    Expert output buffer (base pointer to row 0, col 0).
  * @param M          Number of rows in the expert's output.
@@ -293,7 +293,7 @@ void apply_swiglu_oai_tile_rows(void *dst_buf, int M, int col_start, int pairs,
  * @param pairs         Number of (g, u) pairs to process (= dst cols written).
  * @param dtype         Buffer element type (f32, bf16, or f16).
  */
-void apply_swiglu_oai_tile_rows_oop(const void *src_buf, int src_ldc,
+void apply_swiglu_oai_tile_rows_out_of_place(const void *src_buf, int src_ldc,
         int src_col_start, void *dst_buf, int dst_ldc, int dst_col_start, int M,
         int pairs, data_type_t dtype);
 
@@ -365,17 +365,21 @@ bool apply_gated_act_inplace_dlp(grp_matmul_gated_act_t act, void *dst,
  * When provided to group_matmul_direct, the entire MoE block is executed
  * as a single API call.
  *
- * Current implementation — three possible paths, in priority order:
- *   1. Fused per-expert pipeline (ALGO 5 only, default ON via
+ * Current implementation — four possible outcomes, in dispatch order:
+ *   1. Fused M-tile pipeline (ALGO 2): `try_fused_m_tile` executes
+ *      Op1 → activation → Op2 per row slice for an eligible BF16,
+ *      WOQ-INT4, or DQ-INT8 layer. It declines without writes.
+ *   2. Fused per-expert pipeline (ALGO 5 only, default ON via
  *      ZENDNNL_GRP_MATMUL_ALGO5_VERTICAL_FUSION): Op1 → activation →
  *      Op2 for each expert in a single OMP region, so the W13
  *      intermediate stays cache-resident.  Engaged by
- *      try_expert_parallel_pipeline; declines to path 2 if ineligible.
- *   2. Two-pass via group_matmul_run_parallel_dispatch: Pass 1 runs
+ *      try_fused_expert_parallel; a clean decline continues to path 3,
+ *      while a failure after writes is terminal.
+ *   3. Two-pass via group_matmul_execute: Pass 1 runs
  *      Op1 + gated activation (fused into the epilogue on ALGO 1/2/5/6,
  *      separate sub-pass on ALGO 3); Pass 2 runs Op2.  Both passes
  *      honour ZENDNNL_GRP_MATMUL_ALGO.
- *   3. Error — the call returns status_t::failure (e.g. prepacked
+ *   4. Error — the call returns status_t::failure (e.g. prepacked
  *      custom-kernel weight on a non-ALGO-3 path).
  *
  * The weighted-reduce (moe_postop) always runs in a separate pass after
@@ -578,7 +582,7 @@ struct grp_matmul_fused_moe_params {
     //       Memory-lifetime note for mode (2):
     //         - The library does NOT call `free()` on the scratch at
     //           end-of-call.  Instead, Op1 scratch is allocated from a
-    //           `static thread_local` arena (see `FusedMoEArena` in
+    //           `static thread_local` arena (see `FusedMoEIntermediateArena` in
     //           group_matmul_fused_moe.cpp) that grows on demand to
     //           the largest sizeof(M * N * dst_elem) seen on THIS
     //           thread across all calls, and is retained for the
@@ -586,7 +590,7 @@ struct grp_matmul_fused_moe_params {
     //           destructor when the thread exits).
     //         - Similarly, the Op1 setup-side scratch (dst-ptr arrays,
     //           per-expert ldc vectors, etc.) lives in a thread-local
-    //           `FusedMoEScratch` whose std::vectors keep their
+    //           `FusedMoEDispatchScratch` whose std::vectors keep their
     //           allocated capacity across calls.
     //         - Net per-call allocator traffic in steady state is
     //           O(num_ops) field writes — no malloc/free on the hot
@@ -641,9 +645,9 @@ struct grp_matmul_fused_moe_params {
  * @brief Execute fused MoE: Op1(gate+up) → activation → Op2(down_proj)
  *        → optional MoE post-op (weighted reduce).
  *
- * Attempts the fused per-expert pipeline (try_expert_parallel_pipeline)
+ * Attempts the fused per-expert pipeline (try_fused_expert_parallel)
  * first when eligible; otherwise falls back to two passes of
- * group_matmul_run_parallel_dispatch, both honouring
+ * group_matmul_execute, both honouring
  * ZENDNNL_GRP_MATMUL_ALGO.  See grp_matmul_fused_moe_params (above)
  * for the full design note.
  *
@@ -654,7 +658,7 @@ struct grp_matmul_fused_moe_params {
  * caller can read the per-expert Op2 outputs from `fused.dst_down[]`
  * and run their own gather elsewhere.
  *
- * @param gemm_mode_out If non-null, receives a string literal for logging.
+ * @param execution_path_out If non-null, receives a string literal for logging.
  */
 // Primary signature: takes optional moe_postop for the integrated
 // weighted-reduce post-op.  No default on moe_postop so the older
@@ -671,7 +675,7 @@ status_t group_matmul_fused_moe_execute(
         const std::vector<void *> &dst, const std::vector<int> &ldc,
         const std::vector<bool> &is_weights_const,
         std::vector<matmul_params> &params, int num_threads,
-        const char **gemm_mode_out,
+        const char **execution_path_out,
         const group_matmul_moe_postop_params *moe_postop);
 
 // Legacy ABI-preserving overload: same as the original (pre-postop)
@@ -679,7 +683,7 @@ status_t group_matmul_fused_moe_execute(
 // against the older library version continue to find their mangled
 // name; internally forwards to the primary overload with
 // moe_postop = nullptr.  Source-level callers that previously relied
-// on `gemm_mode_out`'s default get the same default here.
+// on `execution_path_out`'s default get the same default here.
 status_t group_matmul_fused_moe_execute(
         const grp_matmul_fused_moe_params &fused, grp_matmul_gated_act_t act,
         data_type_t act_dtype, const std::vector<char> &layout,
@@ -692,7 +696,7 @@ status_t group_matmul_fused_moe_execute(
         const std::vector<void *> &dst, const std::vector<int> &ldc,
         const std::vector<bool> &is_weights_const,
         std::vector<matmul_params> &params, int num_threads,
-        const char **gemm_mode_out = nullptr);
+        const char **execution_path_out = nullptr);
 
 /**
  * @brief Release all fused-MoE thread-local scratch held by the
@@ -727,7 +731,7 @@ status_t group_matmul_fused_moe_execute(
  *
  * LIMITATION: the per-thread scratches inside the M-tile vertical
  * fusion executor and the N-tile tight-fused-epilogue path (both
- * `PerThreadScratch` instances) are FUNCTION-local statics inside
+ * `AlignedTileScratch` instances) are FUNCTION-local statics inside
  * OMP regions and CANNOT be reached from outside the executor without
  * re-entering it.  They are NOT released by this API; they remain
  * live until OMP thread exit.  For an absolute scratch reset, also
@@ -749,8 +753,8 @@ void clear_fused_moe_scratch();
 /**
  * @brief Run independent expert GEMMs (parallel group matmul path).
  *
- * @param gemm_mode_out  If non-null, receives a static string literal for logging
- *                       ("sequential_experts", "flat_m_tile", "flat_n_tile",
+ * @param execution_path_out  If non-null, receives a static string literal for logging
+ *                       ("sequential_execute", "m_tile_execute", "n_tile_execute",
  *                       "multilevel", or "per_expert").
  */
 /**
@@ -780,13 +784,13 @@ void clear_fused_moe_scratch();
  * AOCL layouts must stay out-of-place and its custom-kernel pack may use
  * in-place storage where that family supports it (BF16 and FP16).
  */
-bool prepare_grouped_auto_weight_cache(std::vector<matmul_params> &params,
+bool prepare_auto_weight_cache(std::vector<matmul_params> &params,
         bool custom_kernel_effective,
         std::vector<matmul_params> *secondary_params = nullptr,
         bool auto_algo3_layer = false, bool *ck_inplace_licence = nullptr,
         bool strict_stable_decode_plan = false);
 
-bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
+bool group_matmul_execute(const std::vector<char> &layout,
         const std::vector<bool> &transA, const std::vector<bool> &transB,
         const std::vector<int> &M, const std::vector<int> &N,
         const std::vector<int> &K, const std::vector<float> &alpha,
@@ -796,7 +800,7 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
         const std::vector<void *> &dst, const std::vector<int> &ldc,
         const std::vector<bool> &is_weights_const,
         std::vector<matmul_params> &params, int num_threads,
-        const char **gemm_mode_out,
+        const char **execution_path_out,
         grp_matmul_gated_act_t fused_act = grp_matmul_gated_act_t::none,
         data_type_t act_dtype = data_type_t::none);
 

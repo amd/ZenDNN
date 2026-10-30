@@ -21,14 +21,14 @@ namespace lowoha {
 namespace matmul {
 namespace custom_kernel {
 
-QwenBf16DecodeRoute apply_qwen_bf16_decode_policy(CallContext &ctx,
+Bf16DecodeRoute apply_bf16_decode_policy(CallContext &ctx,
         grp_matmul_gated_act_t act, const std::vector<int> &M,
         const std::vector<int> &N, const std::vector<int> &K) {
     if (!ctx.enabled || ctx.variant != KernelVariant::kBF16_BF16_BF16
             || ctx.NV != 2 || ctx.bias_kind != BiasKind::none || M.size() != 1
             || N.size() != 1 || K.size() != 1 || M[0] <= 0
             || M[0] > kDecodeMaxM) {
-        return QwenBf16DecodeRoute::none;
+        return Bf16DecodeRoute::none;
     }
 
     const int n = N[0];
@@ -48,22 +48,23 @@ QwenBf16DecodeRoute apply_qwen_bf16_decode_policy(CallContext &ctx,
     if (wide_silu_gated) {
         bool complete = true;
         for (int mr = 9; mr <= 12; ++mr) {
-            ctx.kfn_table[mr] = decode_specialized::select_gated_bf16_one_panel(
-                    mr, ctx.act_kind);
-            complete = complete && ctx.kfn_table[mr] != nullptr;
+            ctx.kernel_table[mr]
+                    = decode_specialized::select_gated_bf16_one_panel(
+                            mr, ctx.act_kind);
+            complete = complete && ctx.kernel_table[mr] != nullptr;
         }
         if (complete) { ctx.max_mr = 12; }
-        return QwenBf16DecodeRoute::none;
+        return Bf16DecodeRoute::none;
     }
     if (qwen35_w2) {
         const int max_mr = ctx.max_mr;
         const int n_calls = (M[0] + max_mr - 1) / max_mr;
         const int mr_small = M[0] / n_calls;
         const int mr_big = mr_small + ((M[0] % n_calls) != 0 ? 1 : 0);
-        const auto initial_small
-                = select_ukernel(mr_small, ctx.NV, ActKind::none, DstDt::kF32);
-        const auto initial_big
-                = select_ukernel(mr_big, ctx.NV, ActKind::none, DstDt::kF32);
+        const auto initial_small = select_bf16_ukernel(
+                mr_small, ctx.NV, ActivationKind::none, OutputType::kF32);
+        const auto initial_big = select_bf16_ukernel(
+                mr_big, ctx.NV, ActivationKind::none, OutputType::kF32);
         const auto accumulate_small
                 = decode_specialized::select_plain_bf16_f32_accumulate(
                         mr_small, ctx.NV);
@@ -72,36 +73,36 @@ QwenBf16DecodeRoute apply_qwen_bf16_decode_policy(CallContext &ctx,
                         mr_big, ctx.NV);
         if (initial_small != nullptr && initial_big != nullptr
                 && accumulate_small != nullptr && accumulate_big != nullptr) {
-            return QwenBf16DecodeRoute::qwen35_w2_resume;
+            return Bf16DecodeRoute::qwen35_w2_resume;
         }
-        return QwenBf16DecodeRoute::none;
+        return Bf16DecodeRoute::none;
     }
     if (qwen35_plain) {
         bool complete = true;
         for (int mr = 9; mr <= 12; ++mr) {
-            ctx.kfn_table[mr]
+            ctx.kernel_table[mr]
                     = decode_specialized::select_plain_bf16_one_panel(mr);
-            complete = complete && ctx.kfn_table[mr] != nullptr;
+            complete = complete && ctx.kernel_table[mr] != nullptr;
         }
         if (complete) ctx.max_mr = 12;
-        return QwenBf16DecodeRoute::none;
+        return Bf16DecodeRoute::none;
     }
     if (qwen36_plain) {
         bool complete = true;
         for (int mr = 8; mr <= 12; ++mr) {
-            ctx.kfn_table[mr]
+            ctx.kernel_table[mr]
                     = decode_specialized::select_plain_bf16_fixed_k(mr, k);
-            complete = complete && ctx.kfn_table[mr] != nullptr;
+            complete = complete && ctx.kernel_table[mr] != nullptr;
         }
         if (complete) ctx.max_mr = 12;
     }
-    return QwenBf16DecodeRoute::none;
+    return Bf16DecodeRoute::none;
 }
 
-bool dispatch_qwen_bf16_decode_tile(QwenBf16DecodeRoute route,
+bool dispatch_bf16_decode_specialization(Bf16DecodeRoute route,
         const CallContext &ctx, int expert_idx, int M, int K, int n_tile,
         int col_start, const void *src, int lda, void *dst, int ldc) {
-    if (route != QwenBf16DecodeRoute::qwen35_w2_resume) return false;
+    if (route != Bf16DecodeRoute::qwen35_w2_resume) return false;
 
     assert(ctx.enabled && ctx.variant == KernelVariant::kBF16_BF16_BF16);
     assert(ctx.pack_nr == 32 && ctx.NV == 2 && ctx.bias_kind == BiasKind::none);
@@ -120,15 +121,16 @@ bool dispatch_qwen_bf16_decode_tile(QwenBf16DecodeRoute route,
     const int n_big = M - mr_small * n_calls;
     const int mr_big = mr_small + (n_big > 0 ? 1 : 0);
 
-    const ukernel_fn_t initial_small
-            = select_ukernel(mr_small, ctx.NV, ActKind::none, DstDt::kF32);
-    const ukernel_fn_t initial_big = (n_big > 0)
-            ? select_ukernel(mr_big, ctx.NV, ActKind::none, DstDt::kF32)
+    const bf16_ukernel_fn_t initial_small = select_bf16_ukernel(
+            mr_small, ctx.NV, ActivationKind::none, OutputType::kF32);
+    const bf16_ukernel_fn_t initial_big = (n_big > 0)
+            ? select_bf16_ukernel(
+                      mr_big, ctx.NV, ActivationKind::none, OutputType::kF32)
             : initial_small;
-    const ukernel_fn_t accumulate_small
+    const bf16_ukernel_fn_t accumulate_small
             = decode_specialized::select_plain_bf16_f32_accumulate(
                     mr_small, ctx.NV);
-    const ukernel_fn_t accumulate_big = (n_big > 0)
+    const bf16_ukernel_fn_t accumulate_big = (n_big > 0)
             ? decode_specialized::select_plain_bf16_f32_accumulate(
                       mr_big, ctx.NV)
             : accumulate_small;
@@ -158,7 +160,7 @@ bool dispatch_qwen_bf16_decode_tile(QwenBf16DecodeRoute route,
             for (int call = 0; call < n_calls; ++call) {
                 const bool big = call < n_big;
                 const int mr = big ? mr_big : mr_small;
-                const ukernel_fn_t kernel = resume
+                const bf16_ukernel_fn_t kernel = resume
                         ? (big ? accumulate_big : accumulate_small)
                         : (big ? initial_big : initial_small);
                 const bfloat16_t *A_chunk

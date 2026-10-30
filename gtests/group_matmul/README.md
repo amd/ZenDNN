@@ -118,7 +118,7 @@ gtests/group_matmul/
     ck_test_helpers.hpp             shared CK gtest scaffolding + ISA gates
     route_test_utils.hpp            ScalarRouteConfigGuard (shared with
                                     single_expert/test_single_expert_route.cpp)
-    test_dispatch_supported.cpp     dispatch_supported() BF16 gate + FP16 ISA-symmetry
+    test_dispatch_supported.cpp     bf16_isa_supported() BF16 gate + FP16 ISA-symmetry
     test_resolve_variant.cpp        (src,wei,dst) -> KernelVariant truth table (BF16/INT8/F16)
     test_prepare_for_call.cpp       per-call gating matrix (CkPrepareForCall{,Int8,F16})
     test_features.cpp               resolved CallContext fields (act/bias kind, subtile,
@@ -195,11 +195,11 @@ Most suites use this entry point; `routed_moe/` also tests
 
 ```cpp
 zendnnl::lowoha::matmul::group_matmul_prepack::
-    prepack_for_algo_1(p); // likewise 2, 3, 5, and 6
+    prepack_sequential(p); // likewise 2, 3, 5, and 6
 zendnnl::lowoha::matmul::group_matmul_prepack::aocl_dlp::
-    warm_pack_all_aocl_dlp_experts(...);
+    warm_aocl_weight_cache(...);
 zendnnl::lowoha::matmul::group_matmul_prepack::aocl_dlp::
-    warm_pack_all_aocl_dlp_experts_n_tile(...);
+    warm_aocl_weight_cache_n_tile(...);
 zendnnl::lowoha::matmul::group_matmul_prepack::custom_kernel::
     warm_pack_all_custom_kernel_experts(...);
 zendnnl::lowoha::matmul::group_matmul_prepack::
@@ -275,12 +275,12 @@ Compatibility tests and deployments that pin multilevel must therefore use 6.
 The value is not interpreted by dtype, so an ineligible W8A8 request has one
 deterministic fallback policy.
 
-- 1 `sequential_experts`            — covered by `[7]` and `[8]` in `test_algos.cpp`
-- 2 `flat_m_tile`                   — covered by `[7]` and `[8]`
-- 3 `flat_n_tile`                   — covered by `[7]`, `[8]`, `[18]`-`[28]` (the prepack module's hot path is ALGO 3)
+- 1 `sequential_execute`            — covered by `[7]` and `[8]` in `test_algos.cpp`
+- 2 `m_tile_execute`                   — covered by `[7]` and `[8]`
+- 3 `n_tile_execute`                   — covered by `[7]`, `[8]`, `[18]`-`[28]` (the prepack module's hot path is ALGO 3)
 - 4 W8A8 fused-MoE interceptor      — covered by `multi_expert/ntile_flat_parallel/test_ntile_flat_parallel.cpp` and `TestGroupMatmulAutoPhaseEnv`; includes global/phase precedence, max-M 32/33 classification, BF16-dynamic and caller-prequantized S8 numerics, signed-vs-biased microkernel equivalence, required same-backing S8/BF16 fast-path destinations, separate/padded/unsafe fast-path destination rejection, scale/ownership/row-pointer rejection, and BF16/direct-S8 fallback to main's generic fused-MoE implementation
-- 5 `parallel_per_expert`           — covered by `[7]` and `[8]`
-- 6 `parallel_multilevel`           — covered by `[7]` and `[8]`
+- 5 `expert_parallel_execute`           — covered by `[7]` and `[8]`
+- 6 `hierarchical_execute`           — covered by `[7]` and `[8]`
 
 The env-knob matrix in `test_prepack.cpp` `[26]`-`[28]` runs each ALGO
 in its own subprocess for full coverage of the `static const`-cached
@@ -298,7 +298,7 @@ sibling file; see §2).  Each per-tile suite passes CK-compliant inputs
 (`is_weights_const=true`, `alpha=1`, `beta=0`, `transA=false`, `N % pack_nr == 0`),
 forces `ALGO=3` + the CK override, and validates the kernel output against an
 **inline scalar FP32 reference** (no library reference kernel), asserting the
-`_custom` gemm_mode actually fired:
+`_custom` execution_path actually fired:
 
 | Surface | BF16 | DQ-INT8 | FP16 |
 |---|---|---|---|
@@ -373,7 +373,7 @@ per-element comparison on `0 == 0`.
 | Backend warmer (AOCL DLP, per-tile) | `[18]` AoclDlpNTile* |
 | K_down synthesis (all gated_acts)| `[20]` parameterised over 4 acts |
 | Fingerprint cache + `clear_fingerprint_cache_for_test()` | `[22]` |
-| `clear_custom_kernel_pack_cache()` | `[22]` (regression test for the size_t-underflow BLOCKER) |
+| `clear_custom_kernel_pack_cache_bf16()` | `[22]` (regression test for the size_t-underflow BLOCKER) |
 | Result invariance (cold->warm, ALGO 1<->3) | `[21]` |
 | Variable-N per-expert            | `[24]` |
 | Stress (E=64 multi-iter, E=256 boundary) | `[25]` |
@@ -533,7 +533,7 @@ invariants:
 | B1 | `K_down_synth` derived half-K from `swiglu_oai_mul` only (BLOCKER) | `[20]` TestPrepackKDownSynthesisAllActs (24 cases) |
 | B2 | `scratch.K_down` sized to `num_ops` not `N.size()` (BLOCKER) | `[19]` TestPrepackFusedMoEEndToEnd |
 | B3 | `scratch.params_down` not propagating active/total (BLOCKER) | `[19]` |
-| B4 | `clear_custom_kernel_pack_cache()` size_t underflow (BLOCKER) | `[22]` CustomKernelCacheClearEvictsEntries |
+| B4 | `clear_custom_kernel_pack_cache_bf16()` size_t underflow (BLOCKER) | `[22]` CustomKernelCacheClearEvictsEntries |
 | B5 | AOCL warmer ignored `is_weights_const` (MEDIUM) | `[18]` AoclDlpNTileSkipsNonConstExperts (per-tile), `[23]` SkipsNonConstExperts (full-weight) |
 | B6 | AOCL warmer ignored `WEIGHT_CACHE=0` (HIGH) | `[28]` algo3_weight_cache_off_custom_on (subprocess) |
 | B7 | Per-call warm overhead (HIGH) | `[12]` TestFusedMoEWarmPackPipeline + `[25]` E64MultiIter |

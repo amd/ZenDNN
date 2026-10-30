@@ -33,7 +33,7 @@ files are listed in `CMakeLists.txt`, with paths relative to
   the `matmul_direct` route. The hooks include the single-expert adaptive
   N-tile sizer that ALGO 3 calls.
 - `multi_expert/` holds the MoE-only policy (`multi_expert_policy.hpp`: the
-  AUTO ALGO 3 layer test, the DecodeDynamic knobs and gate, and the CCD-fill
+  AUTO ALGO 3 layer test, the CcdExpertWaves knobs and gate, and the CCD-fill
   knob) and the MoE-only algorithms:
   `ntile_flat_parallel/` (ALGO 4), `expert_parallel/` (ALGO 5) and
   `multilevel/` (ALGO 6).

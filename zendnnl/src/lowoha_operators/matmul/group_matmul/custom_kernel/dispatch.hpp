@@ -23,11 +23,11 @@
 /// is the single source of truth for which (src, wei, dst, …) tuples
 /// each family serves.
 ///
-/// Consumed through a single caller: `flat_n_tile` (ALGO 3).  That
+/// Consumed through a single caller: `n_tile_execute` (ALGO 3).  That
 /// executor serves both non-fused group_matmul (act=none) and the
 /// fused-MoE Op1 (act=swiglu_oai_mul) / Op2 (act=none) paths — the
 /// fused-MoE entry routes through the parallel dispatcher, which
-/// forwards to flat_n_tile when ALGO 3 is selected, so the dispatcher
+/// forwards to n_tile_execute when ALGO 3 is selected, so the dispatcher
 /// below sees only one consumer.
 ///
 /// The caller sees just two entry points and one opaque context:
@@ -113,7 +113,7 @@
 ///   * (act = gelu_and_mul,   dst = f32) — same as `silu_and_mul`.
 ///   * (silu/gelu, dst = bf16, +bias) — CK refuses
 ///       (`split_halves_act_with_bias_not_fused`).  Caller falls
-///       back through `flat_n_tile`'s tight_split_halves Sequential
+///       back through `n_tile_execute`'s tight_split_halves Sequential
 ///       path (wide [M, N] scratch + apply_gated_act_inplace +
 ///       memcpy into the tight [M, I] dst).
 ///
@@ -179,7 +179,7 @@ using zendnnl::lowoha::matmul::grp_matmul_gated_act_t;
 /// per-variant ISA gate lives in `prepare_for_call` (bf16 → BF16,
 /// int8 → VNNI, f16 → FP16), so a false here does not preclude the
 /// FP16 fast path.
-bool dispatch_supported();
+bool bf16_isa_supported();
 
 // ────────────────────────────────────────────────────────────────────
 // Kernel variant — which (src, wei, dst) tuple the dispatcher routes to
@@ -218,14 +218,14 @@ enum class KernelVariant : uint8_t {
 
 /// Is this variant in the W4A8 (s4) family?  One member today:
 /// `is_w4a8_config` pins compute to s8 and dst to bf16.
-inline bool is_s4_variant(KernelVariant v) noexcept {
+inline bool is_w4a8_variant(KernelVariant v) noexcept {
     return v == KernelVariant::kS8_S4_BF16_SYM;
 }
 
 /// Predicate: is this variant in the INT8 family?
 ///
 /// Useful at call sites that branch on bf16 vs DQ-INT8 ahead of the
-/// `dispatch_tile()` call (e.g. the N-tile `do_tile()` body in
+/// `dispatch_tile()` call (e.g. the N-tile `execute_tile()` body in
 /// `group_matmul_n_tile.cpp` that builds the per-tile `src_scale` /
 /// `src_zp` / `wei_scale` pointer triple only for the int8 path,
 /// leaving them `nullptr` on the bf16 path).  Kept `noexcept` so the
@@ -254,33 +254,33 @@ inline bool is_f16_variant(KernelVariant v) noexcept {
 /// INT8 and W4A8 variant, including static U8 input that needs scalar metadata
 /// but no source conversion.
 inline bool needs_quantized_src_setup(KernelVariant v) noexcept {
-    return is_int8_variant(v) || is_s4_variant(v);
+    return is_int8_variant(v) || is_w4a8_variant(v);
 }
 
-/// Kernel-store dtype of a resolved variant.  `fill_kfn_table`,
+/// Kernel-store dtype of a resolved variant.  `fill_kernel_table`,
 /// `dispatch_tile` and the prompt tile executor share this table, so they
-/// agree with `resolve_variant` on the variant → DstDt mapping.
-inline DstDt dst_dt_for_variant(KernelVariant v) noexcept {
+/// agree with `resolve_variant` on the variant → OutputType mapping.
+inline OutputType dst_dt_for_variant(KernelVariant v) noexcept {
     switch (v) {
-        case KernelVariant::kBF16_BF16_BF16: return DstDt::kBf16;
-        case KernelVariant::kBF16_BF16_F32: return DstDt::kF32;
-        case KernelVariant::kS8_S8_BF16_SYM: return DstDt::kBf16;
-        case KernelVariant::kU8_S8_BF16_ASYM: return DstDt::kBf16;
-        case KernelVariant::kS8_S8_F32_SYM: return DstDt::kF32;
-        case KernelVariant::kU8_S8_F32_ASYM: return DstDt::kF32;
-        case KernelVariant::kU8_S8_U8_ASYM: return DstDt::kU8;
-        case KernelVariant::kF16_F16_F16: return DstDt::kF16;
-        case KernelVariant::kF16_F16_F32: return DstDt::kF32;
-        case KernelVariant::kS8_S4_BF16_SYM: return DstDt::kBf16;
-        default: return DstDt::kBf16; // unreachable on the success path
+        case KernelVariant::kBF16_BF16_BF16: return OutputType::kBf16;
+        case KernelVariant::kBF16_BF16_F32: return OutputType::kF32;
+        case KernelVariant::kS8_S8_BF16_SYM: return OutputType::kBf16;
+        case KernelVariant::kU8_S8_BF16_ASYM: return OutputType::kBf16;
+        case KernelVariant::kS8_S8_F32_SYM: return OutputType::kF32;
+        case KernelVariant::kU8_S8_F32_ASYM: return OutputType::kF32;
+        case KernelVariant::kU8_S8_U8_ASYM: return OutputType::kU8;
+        case KernelVariant::kF16_F16_F16: return OutputType::kF16;
+        case KernelVariant::kF16_F16_F32: return OutputType::kF32;
+        case KernelVariant::kS8_S4_BF16_SYM: return OutputType::kBf16;
+        default: return OutputType::kBf16; // unreachable on the success path
     }
 }
 
 /// Bytes per destination element of a resolved variant.
 inline size_t dst_elem_bytes(KernelVariant v) noexcept {
     switch (dst_dt_for_variant(v)) {
-        case DstDt::kF32: return 4;
-        case DstDt::kU8: return 1;
+        case OutputType::kF32: return 4;
+        case OutputType::kU8: return 1;
         default: return 2;
     }
 }
@@ -422,12 +422,12 @@ struct CallContext {
     // output; the actual per-expert values live in `subtile_cols_per_expert`
     // below.  Dispatch reads per-expert, not this field.
     int subtile_cols = 0;
-    ActKind act_kind = ActKind::none;
+    ActivationKind act_kind = ActivationKind::none;
     BiasKind bias_kind = BiasKind::none; // resolved from bias_dtype
     /// DQ-INT8 quant flavour — set by `prepare_for_call()` to
     /// `kU8_Asym` for the asymmetric variants (bf16- or f32-dst) and
     /// `kS8_Sym` otherwise; ignored on the bf16 path.  Baked into the
-    /// single `kfn_table_int8` per-MR table by `fill_kfn_table_int8`
+    /// single `kernel_table_int8` per-MR table by `fill_kernel_table_int8`
     /// (there is one table, not separate sym/asym tables), so the
     /// inner loop does not re-touch the variant discriminator.
     IntCompute compute_int = IntCompute::kS8_Sym;
@@ -445,39 +445,39 @@ struct CallContext {
     // update in `ukernel/bf16_microkernel.hpp`.
     //
     // Three per-family tables, one per served ISA family:
-    //   * BF16 family    → `kfn_table`.
-    //   * DQ-INT8 family → `kfn_table_int8` (one entry per MR, already
+    //   * BF16 family    → `kernel_table`.
+    //   * DQ-INT8 family → `kernel_table_int8` (one entry per MR, already
     //       specialised on `compute_int` + `act_kind` at
     //       `prepare_for_call` time).
-    //   * FP16 family    → `kfn_table_f16`.
+    //   * FP16 family    → `kernel_table_f16`.
     // Only ONE of the three tables is populated per call (the other two
     // stay zero-initialised); `dispatch_tile()` reads the right table
     // off `variant`.
-    ukernel_fn_t kfn_table[kMaxMR + 1] = {};
-    int8_ukernel_fn_t kfn_table_int8[kMaxMR + 1] = {};
+    bf16_ukernel_fn_t kernel_table[kMaxMR + 1] = {};
+    int8_ukernel_fn_t kernel_table_int8[kMaxMR + 1] = {};
     /// FP16 family per-MR table.  Populated only when the variant is
     /// `kF16_F16_F16` / `kF16_F16_F32`; stays zero otherwise.
     /// `dispatch_tile()` reads it off `is_f16_variant(variant)`.
-    f16_ukernel_fn_t kfn_table_f16[kMaxMR + 1] = {};
+    f16_ukernel_fn_t kernel_table_f16[kMaxMR + 1] = {};
     /// Bias-free act-none FP16 partial-K kernels. Used only by the native
     /// deep-K blocking path; zero for every other family.
-    f16_kblock_ukernel_fn_t kfn_table_f16_kblock[kMaxMR + 1] = {};
+    f16_kblock_ukernel_fn_t kernel_table_f16_kblock[kMaxMR + 1] = {};
     /// Single-expert FP16 prompt call: `dispatch_tile()` runs it on
-    /// `kfn_table_f16_prompt` (`[NB - 1][MR]`, MR up to `max_mr`) and
-    /// leaves `kfn_table_f16` unused.
+    /// `kernel_table_f16_prompt` (`[NB - 1][MR]`, MR up to `max_mr`) and
+    /// leaves `kernel_table_f16` unused.
     bool f16_prompt = false;
-    f16_prompt_ukernel_fn_t kfn_table_f16_prompt[kF16PromptNb]
-                                                [kMaxF16PromptMr + 1]
+    f16_prompt_ukernel_fn_t kernel_table_f16_prompt[kF16PromptNb]
+                                                   [kMaxF16PromptMr + 1]
             = {};
     /// FP32-destination act=none prompt kernels an F16-destination call's K
     /// chunks accumulate with (`prompt_kc_eligible` F16 variant only).
-    f16_prompt_ukernel_fn_t kfn_table_f16_prompt_f32[kF16PromptNb]
-                                                    [kMaxF16PromptMr + 1]
+    f16_prompt_ukernel_fn_t kernel_table_f16_prompt_f32[kF16PromptNb]
+                                                       [kMaxF16PromptMr + 1]
             = {};
     /// W4A8 per-MR table; zero for every other variant.  Valid MR
     /// range is `1..max_mr_for_nv_s4(NV)`, tighter than the int8
     /// table's.
-    s4_ukernel_fn_t kfn_table_s4[kMaxMR + 1] = {};
+    w4a8_ukernel_fn_t kernel_table_s4[kMaxMR + 1] = {};
 
     /// W4A8 K-group size, 0 for other variants.  `prepare_for_call()`
     /// validates it as a positive multiple of `kS4Octet` dividing K.
@@ -496,7 +496,8 @@ struct CallContext {
     /// leases here prevents eviction or explicit clear from freeing a pack
     /// while a CK tile uses it. AOCL sym-quant S8 is excluded because it has no
     /// unreorder API.
-    std::array<std::shared_ptr<void>, kMaxExperts> aocl_ck_weight_leases {};
+    std::array<std::shared_ptr<void>, kMaxExperts>
+            aocl_custom_kernel_weight_leases {};
     std::array<const bfloat16_t *, kMaxExperts> packed_ptrs {};
     /// DQ-INT8 packed-weight pointers (signed `int8_t *`).  Populated
     /// when the variant is `kS8_S8_BF16_SYM` / `kU8_S8_BF16_ASYM`;
@@ -646,7 +647,7 @@ struct CallContext {
 ///   do so will trip the `ctx.variant != kUnsupported` debug assert
 ///   in `dispatch_tile()`.
 ///
-/// `act_dtype` is consulted only when `act != ActKind::none`; for
+/// `act_dtype` is consulted only when `act != ActivationKind::none`; for
 /// `act = none` the dispatcher skips the act-dtype check so callers
 /// that pass `act_dtype = none` (plain GEMM, no activation) are
 /// accepted transparently.  When a fused activation IS present the
@@ -687,7 +688,7 @@ struct CallContext {
 ///         execute`).
 ///       * `bias_dtype != none` (bias-into-init under the
 ///         prepack-permuted layout is a planned follow-up) →
-///         `flat_n_tile` routes to the Sequential tight_split_
+///         `n_tile_execute` routes to the Sequential tight_split_
 ///         halves fallback.
 ///
 /// `is_weights_const` is the framework's per-expert constancy hint
@@ -805,13 +806,13 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
 /// Block-level pieces for executors that partition a call themselves
 /// (`single_expert/single_expert_executor`).  A block is one `ctx.pack_nr`
 /// wide column block of the expert's packed weight.
-///   * `block_accum` writes the partial sums of K range [`k_begin`, `k_end`)
+///   * `accumulate_block` writes the partial sums of K range [`k_begin`, `k_end`)
 ///     of `block` for `M` rows (`src` points at the first row) to `acc`
 ///     (`M` x `ctx.pack_nr`, row stride `ctx.pack_nr`): s32 for DQ-INT8, f32
 ///     for BF16.  `add` accumulates onto `acc`.  `mr_cap` (0: the context's
 ///     `max_mr`) bounds the rows per microkernel call.  The range bounds are
 ///     multiples of `block_k_step`.
-///   * `block_finish` turns full-K sums into the destination block at column
+///   * `finish_block` turns full-K sums into the destination block at column
 ///     `block * pack_nr` of `dst` (`dst` and `src_scale` point at the first
 ///     row; `wei_scale` at column 0).
 /// Supported: symmetric DQ-INT8 (s8 compute, BF16 dst, per-token src and
@@ -823,10 +824,10 @@ bool block_api_supported(const CallContext &ctx, const void *bias,
 int block_k_step(const CallContext &ctx);
 size_t block_dst_elem_bytes(const CallContext &ctx);
 size_t block_scale_elem_bytes(const CallContext &ctx);
-void block_accum(const CallContext &ctx, int expert_idx, int M, int K,
+void accumulate_block(const CallContext &ctx, int expert_idx, int M, int K,
         int block, int k_begin, int k_end, const void *src, int lda, void *acc,
         bool add, int mr_cap);
-void block_finish(const CallContext &ctx, int expert_idx, int M, int K,
+void finish_block(const CallContext &ctx, int expert_idx, int M, int K,
         int block, const void *acc, const void *src_scale,
         const void *wei_scale, void *dst, int ldc);
 

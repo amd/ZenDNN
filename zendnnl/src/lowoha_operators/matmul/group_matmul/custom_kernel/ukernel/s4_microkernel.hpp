@@ -16,7 +16,7 @@
 
 /// W4A8 custom microkernel — per-group s4 weights × per-token s8 source.
 /// Sibling of `bf16_microkernel` / `int8_microkernel`, engaged from
-/// `flat_n_tile` for the `kS8_S4_BF16_SYM` variant.
+/// `n_tile_execute` for the `kS8_S4_BF16_SYM` variant.
 ///
 /// Dequant math:
 ///
@@ -42,7 +42,7 @@
 #include <cstdint>
 
 #include "../pack.hpp"
-#include "bf16_microkernel.hpp" // ActKind, BiasKind, kMaxMR
+#include "bf16_microkernel.hpp" // ActivationKind, BiasKind, kMaxMR
 #include "common/bfloat16.hpp"
 #include "int8_microkernel.hpp" // ScaleKind, avx512vnni_available
 
@@ -73,7 +73,7 @@ enum class S4OutputKind : uint8_t { kBf16 = 0, kF32 = 1 };
 ///   * `wei_scale_grp_stride` — the CALLER'S FULL N, not the tile
 ///     width: an N-tile slices columns out of a `{G, N}` scale buffer
 ///     without repacking it.
-using s4_ukernel_fn_t = void (*)(const uint8_t *A, int lda,
+using w4a8_ukernel_fn_t = void (*)(const uint8_t *A, int lda,
         const int8_t *Bpacked, const void *src_scale, const void *wei_scale,
         ScaleKind scale_kind, const void *bias, BiasKind bias_kind, void *Cout,
         int ldc, void *Cout_tight, int ldc_tight, int K, int group_size,
@@ -88,7 +88,7 @@ inline int max_mr_for_nv_s4(int NV) {
 /// Returns the specialization for `(MR ∈ 1..max_mr_for_nv_s4(NV),
 /// NV ∈ {2, 4}, Act, source, output)`, or nullptr when not instantiated.
 /// Gated activations intentionally support BF16 output only.
-s4_ukernel_fn_t select_s4_ukernel(int MR, int NV, ActKind act,
+w4a8_ukernel_fn_t select_w4a8_ukernel(int MR, int NV, ActivationKind act,
         S4SourceKind source = S4SourceKind::kS8,
         S4OutputKind output = S4OutputKind::kBf16);
 

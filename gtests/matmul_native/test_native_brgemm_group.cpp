@@ -550,7 +550,7 @@ TEST(NativeBrgemmGroupScope, ExpertSliceRunsTheUnsetKernel) {
     const char *env = std::getenv("ZENDNNL_MATMUL_ALGO");
     if (env != nullptr && env[0] != '\0' && std::strcmp(env, "11") != 0)
         GTEST_SKIP() << "the process starts with ZENDNNL_MATMUL_ALGO=" << env;
-    EXPECT_EQ(static_cast<int>(mm::resolve_kernel()),
+    EXPECT_EQ(static_cast<int>(mm::resolve_matmul_backend()),
             static_cast<int>(unset_kernel()));
     mm::clear_matmul_weight_caches();
     alive_t alive;
@@ -572,8 +572,8 @@ TEST(NativeBrgemmGroupScope, ExpertSliceRunsTheUnsetKernel) {
                               c.M, c.N, c.K, 1.0f, e.src.get(), e.lda(),
                               e.wei.get(), e.ldb(), e.bias.get(), 0.0f,
                               e.dst.get(), c.N, true, all_threads(), p,
-                              mm::resolve_expert_kernel(
-                                      5, mm::resolve_kernel(), p)),
+                              mm::resolve_expert_backend(
+                                      5, mm::resolve_matmul_backend(), p)),
                     status_t::success);
             EXPECT_EQ(nbt::native_layouts(e.wei.get()), 0u) << mode_name(mode);
             runs.push_back(std::move(e));

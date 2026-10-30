@@ -694,15 +694,15 @@ ZENDNNL_ALWAYS_INLINE inline void gate_up_block(const exec_ctx_t &c,
         const float *As, uint16_t *C, int64_t rows, int64_t ldc) {
     const int8_t *base
             = c.packed_gate_up + weight_expert * c.gate_up_expert_stride;
-    const int8_t *B0 = base + nb * block_n * c.gate_up_oc_stride;
+    const int8_t *B0 = base + nb * kBlockN * c.gate_up_oc_stride;
     const int8_t *B1
-            = base + (nb + c.nb_gate_up) * block_n * c.gate_up_oc_stride;
+            = base + (nb + c.nb_gate_up) * kBlockN * c.gate_up_oc_stride;
     const float *scale = c.gate_up_scale + scale_slot * c.gate_up_oc;
-    tinygemm_gate_up<SignedA>(A, B0, B1, C + nb * block_n, As,
-            scale + nb * block_n, scale + (nb + c.nb_gate_up) * block_n,
-            reinterpret_cast<const int32_t *>(B0 + block_n * c.hidden),
-            reinterpret_cast<const int32_t *>(B1 + block_n * c.hidden), rows,
-            c.hidden, c.hidden, block_n, ldc);
+    tinygemm_gate_up<SignedA>(A, B0, B1, C + nb * kBlockN, As,
+            scale + nb * kBlockN, scale + (nb + c.nb_gate_up) * kBlockN,
+            reinterpret_cast<const int32_t *>(B0 + kBlockN * c.hidden),
+            reinterpret_cast<const int32_t *>(B1 + kBlockN * c.hidden), rows,
+            c.hidden, c.hidden, kBlockN, ldc);
 }
 
 /// Down projection for one output-channel block, written as bf16 straight to
@@ -711,11 +711,11 @@ ZENDNNL_ALWAYS_INLINE inline void down_block(const exec_ctx_t &c,
         int64_t weight_expert, int64_t scale_slot, int64_t nb, const uint8_t *A,
         const float *As, uint16_t *C, int64_t rows, int64_t ldc) {
     const int8_t *B = c.packed_down + weight_expert * c.down_expert_stride
-            + nb * block_n * c.down_oc_stride;
-    tinygemm_down(A, B, C + nb * block_n, As,
-            c.down_scale + scale_slot * c.down_oc + nb * block_n,
-            reinterpret_cast<const int32_t *>(B + block_n * c.inter), rows,
-            c.inter, c.inter, block_n, ldc);
+            + nb * kBlockN * c.down_oc_stride;
+    tinygemm_down(A, B, C + nb * kBlockN, As,
+            c.down_scale + scale_slot * c.down_oc + nb * kBlockN,
+            reinterpret_cast<const int32_t *>(B + kBlockN * c.inter), rows,
+            c.inter, c.inter, kBlockN, ldc);
 }
 
 #endif // ZENDNNL_NTILE_FLAT_PARALLEL_KERNELS_COMPILED
@@ -924,9 +924,9 @@ status_t try_execute(const std::vector<char> &layout,
     // The gate/up reduction is `hidden`, the down reduction is `inter`.
     // BF16 W13 input and the BF16 intermediate feed `quantize_row_u8` (32
     // lanes per step); direct S8 W13 input bypasses that first quantizer. Both
-    // GEMMs index N blocks of `block_n`. `down_oc` is the post-op row width.
-    if (hidden % block_n != 0 || inter % block_n != 0
-            || down_oc % block_n != 0) {
+    // GEMMs index N blocks of `kBlockN`. `down_oc` is the post-op row width.
+    if (hidden % kBlockN != 0 || inter % kBlockN != 0
+            || down_oc % kBlockN != 0) {
         return status_t::unimplemented;
     }
     if (hidden > max_gemm_reduction || inter > max_gemm_reduction) {
@@ -1267,8 +1267,8 @@ status_t try_execute(const std::vector<char> &layout,
         ctx.down_oc_stride = packed_bytes_per_oc(inter);
         ctx.gate_up_expert_stride = gate_up_oc * ctx.gate_up_oc_stride;
         ctx.down_expert_stride = down_oc * ctx.down_oc_stride;
-        ctx.nb_gate_up = inter / block_n;
-        ctx.nb_down = down_oc / block_n;
+        ctx.nb_gate_up = inter / kBlockN;
+        ctx.nb_down = down_oc / kBlockN;
         ctx.packed_gate_up = pw_gate_up->quants;
         ctx.packed_down = pw_down->quants;
         ctx.gate_up_scale = gate_up_scales;

@@ -15,7 +15,7 @@
  *******************************************************************************/
 
 /// Group-matmul constants: ALGO ids, phase classification, tile and
-/// expert-count thresholds, abort sentinels and gemm_mode decoding.
+/// expert-count thresholds, abort sentinels and execution_path decoding.
 
 #ifndef ZENDNNL_GRP_MATMUL_CONSTANTS_HPP
 #define ZENDNNL_GRP_MATMUL_CONSTANTS_HPP
@@ -54,7 +54,7 @@ inline constexpr int kGrpMatmulAlgoNTileFlatParallel = 4;
 inline constexpr int kGrpMatmulAlgoExpertParallel = 5;
 
 // Team size for the short passes around the grouped GEMMs (gated activation,
-// weighted reduce, tight-dst copy, DecodeD, ALGO 5): a region opens either
+// weighted reduce, tight-dst copy, StaticExpertTeams, ALGO 5): a region opens either
 // the caller's whole team or a serialized region, never a team in between.
 // A serialized region leaves the pool alone, while any other size makes the
 // runtime rebuild the pool there and again at the next GEMM region.
@@ -95,7 +95,7 @@ inline constexpr bool is_grp_matmul_requested_algo(int algo) {
 }
 
 // Short string renderer for `grp_matmul_gated_act_t` — used by APILOG
-// lines and gemm_mode_out strings; keeps activation names consistent
+// lines and execution_path_out strings; keeps activation names consistent
 // across executors.
 inline const char *act_name(grp_matmul_gated_act_t a) {
     switch (a) {
@@ -164,7 +164,7 @@ inline constexpr int kMinNTileInt8 = 512;
 // the public N-tile header `executors/n_tile/group_matmul_n_tile.hpp`) with
 // the rest of the N-tile-specific constants.  Consumers (dispatcher,
 // N-tile executor, custom-kernel dispatch, gtests) include the
-// public N-tile header anyway to reach `flat_n_tile()`, so the
+// public N-tile header anyway to reach `n_tile_execute()`, so the
 // symbol remains visible to them transparently.
 //
 // NOTE: `kMediumWeight` (64 MB / expert, "referenced by N-tile
@@ -207,11 +207,11 @@ inline constexpr int kFewExpertsDecodeThreshold = 8;
 /// clamp differs per dtype.
 inline constexpr int kDecodeNTileThreadFactor = 4;
 
-// ── Abort-class gemm_mode sentinels ─────────────────────────────────────
+// ── Abort-class execution_path sentinels ─────────────────────────────────────
 // The group_matmul executors are void and the surrounding API is noexcept, so
 // a condition that leaves the caller's dst wrong is reported by writing one of
-// these strings through `gemm_mode_out`.  `group_matmul_direct` and the
-// fused-MoE dispatcher turn any mode matching `gemm_mode_is_error` into
+// these strings through `execution_path_out`.  `group_matmul_direct` and the
+// fused-MoE dispatcher turn any mode matching `execution_path_is_error` into
 // `status_t::failure`, so the caller never consumes a dst the library knows is
 // bad.
 //
@@ -233,7 +233,7 @@ inline constexpr const char *kGrpMatmulErrPackedInPlaceNoCk
 inline constexpr const char *kGrpMatmulErrWc2PhaseSplitUnsupported
         = "error_wc2_global_phase_split_unsupported";
 /// ALGO 3 could not leave dst defined: a per-thread scratch allocation failed,
-/// or a fused-epilogue layout invariant was violated.  `flat_n_tile` logs the
+/// or a fused-epilogue layout invariant was violated.  `n_tile_execute` logs the
 /// specific reason; the sentinel only has to fail the call.
 inline constexpr const char *kGrpNTileErrUndefinedDst
         = "error_ntile_undefined_dst";
@@ -258,15 +258,15 @@ inline constexpr const char *kGrpMatmulErrMutatedWeightMiss
 inline constexpr const char *kGrpMatmulErrW4a8NonConst
         = "error_w4a8_nonconst_weight";
 
-inline bool gemm_mode_is_error(const char *mode) {
+inline bool execution_path_is_error(const char *mode) {
     return mode != nullptr
             && std::strncmp(mode, kGrpMatmulErrPrefix,
                        std::strlen(kGrpMatmulErrPrefix))
             == 0;
 }
 
-// ── Executed-ALGO from gemm_mode ────────────────────────────────────────
-// Maps the executor-written `gemm_mode` string (the authoritative record of
+// ── Executed-ALGO from execution_path ────────────────────────────────────────
+// Maps the executor-written `execution_path` string (the authoritative record of
 // what ACTUALLY ran) to the ALGO that actually executed ({1,2,3,5,6}), so the
 // post-exec `[GRP_MATMUL.CALL]` line can surface `exec_algo=` alongside
 // `mode=`.  Together with the pre-exec `[GRP_MATMUL.ALGO] chosen=` selection
@@ -280,11 +280,11 @@ inline bool gemm_mode_is_error(const char *mode) {
 // So `exec_algo=0` means "no GEMM ran or mode not understood", NOT "ALGO 0".
 // ORDER MATTERS: the `flat_m_tile_seq_clamp` special case (ALGO-1 behaviour
 // wearing an ALGO-2 mode prefix) and the `*_skip` markers must be checked
-// before the generic `flat_m_tile` / `multilevel` / `fused_moe` prefixes
-// they share.  Fused composites
+// before the generic `flat_m_tile` / `m_tile_execute` / `multilevel` /
+// `fused_moe` prefixes they share.  Fused composites
 // (`fused_moe_*(op1=..,op2=..)`) derive the algo from the Op1 sub-mode; the
 // full per-op detail stays in the `mode=` string itself.
-inline int executed_algo_from_gemm_mode(const char *mode) {
+inline int executed_algo_from_execution_path(const char *mode) {
     if (mode == nullptr) return 0;
     auto starts = [&](const char *p) {
         return std::strncmp(mode, p, std::strlen(p)) == 0;
@@ -292,7 +292,7 @@ inline int executed_algo_from_gemm_mode(const char *mode) {
     // Abort-class sentinels: the call is being failed, so no ALGO produced a
     // usable result.  Checked first — an `error_` mode must never be reported
     // as a successful execution of the path that raised it.
-    if (gemm_mode_is_error(mode)) return 0;
+    if (execution_path_is_error(mode)) return 0;
     // No-op / nothing-executed markers map to 0 (must precede the generic
     // prefixes they share, e.g. "flat_m_tile_skip" before "flat_m_tile").
     if (starts("skip")) return 0; // whole-call no-op (all M<=0)
@@ -301,21 +301,24 @@ inline int executed_algo_from_gemm_mode(const char *mode) {
     if (starts("fused_moe_skip")) return 0;
     if (starts("flat_m_tile_seq_clamp")) return 1; // sequential full-team
     if (starts("sequential")) return 1; // "sequential" / "..._experts"
-    if (starts("flat_m_tile")) return 2;
+    // Keep accepting the legacy flat_* execution-path vocabulary while
+    // producers migrate independently to the executor-oriented names.
+    if (starts("m_tile_execute") || starts("flat_m_tile")) return 2;
     // Must precede the generic `vertical_fusion` arm, which would otherwise
     // claim it by prefix and report an ALGO 5 execution as ALGO 2.
     if (starts("vertical_fusion_expert_parallel")) {
         return kGrpMatmulAlgoExpertParallel;
     }
     if (starts("vertical_fusion")) return 2; // M-tile fused pipeline
-    if (starts("flat_n_tile")) return 3;
+    if (starts("n_tile_execute") || starts("flat_n_tile")) return 3;
     if (starts("ntile_flat_parallel")) return kGrpMatmulAlgoNTileFlatParallel;
     if (starts("multilevel")) return kGrpMatmulAlgoMultilevel;
     if (starts("per_expert")) return kGrpMatmulAlgoExpertParallel;
     if (starts("fused_moe")) {
         // Composite: derive from the Op1 executor sub-mode.
         const char *op1 = std::strstr(mode, "op1=");
-        return (op1 != nullptr) ? executed_algo_from_gemm_mode(op1 + 4) : 0;
+        return (op1 != nullptr) ? executed_algo_from_execution_path(op1 + 4)
+                                : 0;
     }
     return 0;
 }
@@ -327,7 +330,7 @@ inline int executed_algo_from_gemm_mode(const char *mode) {
 // other N-tile-specific constants.  The auto-selector still reads it
 // for its rule-0 capacity exit to ALGO 1, which an ALGO-3 MoE layer
 // skips because ALGO 3 slices such a call; the dispatcher
-// includes the public N-tile header directly to call `flat_n_tile()`,
+// includes the public N-tile header directly to call `n_tile_execute()`,
 // so the symbol remains visible unchanged.
 
 // Op2's K-dimension as a function of the fused activation.  Gated
@@ -349,14 +352,14 @@ inline int op2_k_for_act(int n_op1, grp_matmul_gated_act_t act) {
     return (act == grp_matmul_gated_act_t::none) ? n_op1 : (n_op1 / 2);
 }
 
-// NOTE: `check_m_tile_safe` (M-tile ALGO 2 structural eligibility
+// NOTE: `m_tile_supported` (M-tile ALGO 2 structural eligibility
 // predicate) moved to `executors/m_tile/group_matmul_m_tile.hpp` (Section H.5)
 // so the M-tile-only gate sits next to the M-tile executor it
 // protects.  Both callers — the legacy dispatcher
-// (`group_matmul_run_parallel_dispatch`) and the MoE vertical-fusion
+// (`group_matmul_execute`) and the MoE vertical-fusion
 // dispatcher fork (`group_matmul_fused_moe_execute`) — already
-// include `executors/m_tile/group_matmul_m_tile.hpp` to reach `flat_m_tile()`
-// / `flat_m_tile_pipeline_bf16()`, so they see the predicate
+// include `executors/m_tile/group_matmul_m_tile.hpp` to reach `m_tile_execute()`
+// / `try_fused_m_tile_core()`, so they see the predicate
 // unchanged.
 
 /// True when ALGO 3 can fuse `act` into the per-thread epilogue.
@@ -384,7 +387,7 @@ inline int op2_k_for_act(int n_op1, grp_matmul_gated_act_t act) {
 /// Standard-backend silu / gelu tile helpers are a planned follow-up;
 /// until then, callers with CK off fall back to the separate-pass
 /// path (`act_fused = false`) by way of this gate returning `false`.
-inline bool a3_can_fuse_act(
+inline bool n_tile_can_fuse_activation(
         grp_matmul_gated_act_t act, bool use_custom_kernel) {
     if (act == grp_matmul_gated_act_t::swiglu_oai_mul) return true;
     if (act == grp_matmul_gated_act_t::silu_and_mul) return use_custom_kernel;

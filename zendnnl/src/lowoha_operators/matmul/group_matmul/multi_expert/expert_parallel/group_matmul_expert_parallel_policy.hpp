@@ -80,9 +80,9 @@ inline std::atomic<int> &test_api_algo5_vertical_fusion_override() {
 
 // ZENDNNL_GRP_MATMUL_ALGO5_VERTICAL_FUSION = { 0, 1 } — cached, default 1 (ON).
 //   Enables the fused per-expert MoE FFN pipeline: one OMP region running
-//   W13 -> gated act -> W2 per expert, instead of two `parallel_per_expert`
+//   W13 -> gated act -> W2 per expert, instead of two `expert_parallel_execute`
 //   passes separated by a fork/join and a second dispatcher prologue.  See
-//   `try_expert_parallel_pipeline()` in `group_matmul_expert_parallel.hpp`.
+//   `try_fused_expert_parallel()` in `group_matmul_expert_parallel.hpp`.
 //
 //   Boolean, unlike the tri-state ALGO 2 sibling
 //   (`ZENDNNL_GRP_MATMUL_M_TILE_VERTICAL_FUSION`): that one needs a FORCED
@@ -226,7 +226,7 @@ struct algo5_pin_verdict {
 algo5_pin_verdict decide_algo5_pin(
         const grp_matmul_auto_phase_setting &phase_setting, bool is_decode,
         const std::vector<int> &M, const std::vector<matmul_params> &params,
-        int active_ops, int num_threads, auto_algo_trace *trace);
+        int active_ops, int num_threads, GroupMatmulAlgoTrace *trace);
 
 } // namespace matmul
 } // namespace lowoha

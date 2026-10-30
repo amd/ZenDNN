@@ -27,7 +27,7 @@
 /// `../m_tile/group_matmul_m_tile_planner.hpp`.
 ///
 /// "Planning" for ALGO 3 = picking, per-call, **which execution
-/// strategy** runs (Sequential / DecodeD / FewExperts / ManyExperts),
+/// strategy** runs (Sequential / StaticExpertTeams / ProportionalRounds / FixedTeamRounds),
 /// **how many threads per expert** in each round, **the round batch
 /// size**, **the expert-ordering permutation**, and a small bag of
 /// strategy-specific knobs (tight-fused-epilogue switch, AOCL strict-
@@ -48,12 +48,12 @@
 ///   * New test-only diagnostic snapshots beyond `PhaseBSnapshot`
 ///     (use the same one-shot capture pattern).
 ///
-/// The runtime side — the executors `flat_n_tile`,
+/// The runtime side — the executors `n_tile_execute`,
 /// `execute_sequential` / `execute_decode_d` / `execute_rounds` and
-/// the lower-level `GroupNTileContext::do_tile` — consumes the plan
+/// the lower-level `GroupNTileContext::execute_tile` — consumes the plan
 /// fields directly.  When a new planner output is added here, only
 /// the consumers in `group_matmul_n_tile.cpp` need to learn about it
-/// — no caller-side change to `flat_n_tile`'s public signature.
+/// — no caller-side change to `n_tile_execute`'s public signature.
 ///
 /// =====================================================================
 /// FILE LAYOUT
@@ -75,7 +75,7 @@
 ///   Section P.4  Round-scheduler types (`RoundCandidates`, `RoundPick`).
 ///                Used by `pick_round_strategy()` and `apply_round_pick()`
 ///                in `group_matmul_n_tile.cpp` to pick between Single /
-///                Multi / Balanced round shapes for the ManyExperts
+///                Multi / Balanced round shapes for the FixedTeamRounds
 ///                executor.
 ///
 ///   Section P.5  Test-only Phase-B snapshot (`test_api::PhaseBSnapshot`
@@ -166,12 +166,12 @@ inline constexpr int kDecodeNTileInt8 = 256;
 /// Maximum number of experts the ALGO 3 (N-tile) planner can
 /// represent.  Mirrored on `GroupNTilePlan::kMaxExperts` so the
 /// planner's stack-allocated fixed-size arrays (`expert_order`,
-/// `stable_n_thr_per_expert`) stay heap-free on the hot path.  Also
+/// `expert_thread_counts`) stay heap-free on the hot path.  Also
 /// used to size the heap-free temporaries in the expert-ordering
 /// helpers (`fill_ntile_expert_order`) and the round-info stack
 /// array in `execute_rounds` (group_matmul_n_tile.cpp).
 ///
-/// `flat_n_tile` runs an ALGO-3 MoE call, or one whose weights only the
+/// `n_tile_execute` runs an ALGO-3 MoE call, or one whose weights only the
 /// custom kernel can read, with more experts as consecutive slices of at
 /// most this many, so neither the planner nor the custom kernel (whose
 /// `CallContext::kMaxExperts` must be at least this) sees a larger count
@@ -183,8 +183,8 @@ inline constexpr int kNTilePlanMaxExperts = 256;
 // Section P.1 — Strategy enum
 // =====================================================================
 //
-// Execution patterns the planner can pick.  Only DecodeD, FewExperts,
-// and ManyExperts run the actual N-tile per-tile dispatch (and route
+// Execution patterns the planner can pick.  Only StaticExpertTeams, ProportionalRounds,
+// and FixedTeamRounds run the actual N-tile per-tile dispatch (and route
 // through the BF16 custom kernel when its gate accepts the call) —
 // those are the strategies callers running ALGO 3 are typically here
 // for.  Sequential is the fallback for shapes where the N-tile path
@@ -196,10 +196,10 @@ inline constexpr int kNTilePlanMaxExperts = 256;
 //   * AUTO-MIRROR      — `auto_select_algo` (env=0) would have picked
 //                        ALGO 1 for this shape.  Forced env=3 mirrors
 //                        that decision so the strategy choice matches
-//                        what auto-pick does, with the gemm_mode
+//                        what auto-pick does, with the execution_path
 //                        label distinguishing the path for telemetry
 //                        (`flat_n_tile_sequential` vs
-//                        `sequential_experts`).  Skipped under
+//                        `sequential_execute`).  Skipped under
 //                        `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=1` or
 //                        `=2`; `=2` is the production default, so
 //                        the auto-mirror gate is normally inactive
@@ -218,10 +218,10 @@ inline constexpr int kNTilePlanMaxExperts = 256;
 // `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY` (auto / decode / rounds) drives
 // three things:
 //   (1) whether the auto-mirror gate fires (only under value 0);
-//   (2) whether DecodeD's perf-eligibility heuristic is consulted
+//   (2) whether StaticExpertTeams's perf-eligibility heuristic is consulted
 //       (only under value 0) or bypassed in favour of a structural-
 //       floor-only force path (under value 1);
-//   (3) whether DecodeD is attempted at all (under values 0 and 1)
+//   (3) whether StaticExpertTeams is attempted at all (under values 0 and 1)
 //       or skipped entirely (under value 2 → straight to Rounds).
 // Structural gates (`!ntile_viable`, R3, F3) always fire regardless
 // of the knob.  See `get_grp_n_tile_strategy()` in
@@ -243,11 +243,11 @@ enum class GroupNTileStrategy {
     //      each expert gets an equal CCD-sized team and all experts
     //      run concurrently with no internal barriers.  Skipped when
     //      the env knob is set to "rounds".
-    DecodeD,
+    StaticExpertTeams,
 
     // (E)  Decode dynamic (CCD-cohesive) — small max_M, num_ops > num_ccds
     //      (also valid when num_ops > num_threads: experts run in per-CCD
-    //      waves).  Generalises DecodeD past the `num_ops ≤ num_ccds`
+    //      waves).  Generalises StaticExpertTeams past the `num_ops ≤ num_ccds`
     //      + skew gates.  Each active expert is owned by exactly one CCD
     //      (M-descending sort, then round-robin onto CCDs), and that CCD's
     //      lanes cooperatively N-split it, so an expert's weight stays
@@ -260,17 +260,17 @@ enum class GroupNTileStrategy {
     //      use_custom DQ-INT8 fused call is also served by default; set
     //      ZENDNNL_GRP_MATMUL_DECDYN_CK_INT8_FUSED=0 to fall it back to
     //      Rounds.
-    DecodeDynamic,
+    CcdExpertWaves,
 
     // (A)  Few experts (num_ops ≤ num_ccds, non-decode):
     //      L3-aware batches, proportional thr_per_expert per round.
     //      Routes through `execute_rounds`.
-    FewExperts,
+    ProportionalRounds,
 
     // (B)  Many experts (num_ops > num_ccds):
     //      L3-aware barrier-synchronized rounds, fixed n_thr/expert.
     //      Routes through `execute_rounds`.
-    ManyExperts,
+    FixedTeamRounds,
 };
 
 // =====================================================================
@@ -317,23 +317,23 @@ struct GroupNTilePlan {
     bool fused_epilogue = false;
 
     // Per-thread N-slice floor (== `min_n_tile` argument of
-    // ctx.do_tile).  Set for DecodeD / FewExperts / ManyExperts.
+    // ctx.execute_tile).  Set for StaticExpertTeams / ProportionalRounds / FixedTeamRounds.
     int min_n_tile = 1;
 
-    // (D) DecodeD parameters
+    // (D) StaticExpertTeams parameters
     int decode_thr_per_expert = 0;
     int decode_total_threads = 0;
 
-    // (A) FewExperts / (B) ManyExperts shared "rounds" parameters.
+    // (A) ProportionalRounds / (B) FixedTeamRounds shared "rounds" parameters.
     // Threads per expert in a round is `n_thr_fixed` if non-zero
-    // (ManyExperts), else min(num_threads / round_size, max_n_thr)
-    // (FewExperts — proportional to round_size, capped by N-tile count).
+    // (FixedTeamRounds), else min(num_threads / round_size, max_n_thr)
+    // (ProportionalRounds — proportional to round_size, capped by N-tile count).
     int batch_size = 0;
     int n_thr_fixed = 0;
     int max_n_thr = 0;
 
-    // Optional permutation of expert indices used by FewExperts /
-    // ManyExperts when assigning experts to rounds.  When
+    // Optional permutation of expert indices used by ProportionalRounds /
+    // FixedTeamRounds when assigning experts to rounds.  When
     // `expert_order_size == 0` callers use input order; when > 0 the
     // first `expert_order_size` slots of `expert_order` hold the
     // sorted permutation.  Populated by `fill_sorted_expert_order()`
@@ -355,13 +355,13 @@ struct GroupNTilePlan {
 
     // ── Per-expert thread count override (dual-use) ────────────────────
     // The array is populated by ONE of two disjoint producers, and
-    // consumed by `execute_rounds` (via `per_expert_remainder` below)
-    // and `participating_n_thr` (via the strict-stable safety branch).
+    // consumed by `execute_rounds` (via `variable_expert_teams` below)
+    // and `tile_thread_count` (via the strict-stable safety branch).
     //
     // Producer 1 — AOCL strict-stable plan (`!use_custom &&
     //              get_grp_matmul_aocl_stable_ntile()`)
     //   `plan_group_n_tile` writes
-    //     stable_n_thr_per_expert[e] = aocl_stable_n_thr(num_threads)
+    //     expert_thread_counts[e] = aocl_stable_n_thr(num_threads)
     //   for every active expert.  Implementation in
     //   `group_matmul_parallel_common.hpp::aocl_stable_n_thr` ignores
     //   its `N` parameter and returns a value derived solely from
@@ -371,7 +371,7 @@ struct GroupNTilePlan {
     //   gating, strategy, batch size, or phase (prompt vs decode) —
     //   exactly what the AOCL reorder cache key (col_start, n_tile)
     //   needs to stay byte-identical across calls.  All entries are
-    //   uniform (== stable); `per_expert_remainder` is left FALSE so
+    //   uniform (== stable); `variable_expert_teams` is left FALSE so
     //   `execute_rounds` takes its O(1) `tid / tpe` mapping.
     //
     // Producer 2 — CK Single-round remainder-distribute (Phase B /
@@ -388,22 +388,22 @@ struct GroupNTilePlan {
     //   team instead of leaving `num_threads % num_ops` slots idle on
     //   uniform-N workloads, while preventing the surplus from landing
     //   on threads that cannot use it on non-uniform-N workloads.
-    //   `per_expert_remainder` is set TRUE so the executor switches
+    //   `variable_expert_teams` is set TRUE so the executor switches
     //   to the per-round prefix-sum thread→expert mapping.  Safe for
     //   CK because the pack cache is shape-keyed (full-N pack per
     //   expert), so per-expert thread variation does not destabilise
     //   the cache key.
     //
     // Consumer A — `execute_rounds`
-    //   Reads `plan.per_expert_remainder` (not the array directly) to
+    //   Reads `plan.variable_expert_teams` (not the array directly) to
     //   decide between uniform O(1) mapping and per-round prefix-sum
     //   scan.  Producer-2's flag triggers the scan; Producer-1 leaves
     //   the flag false and keeps the uniform fast path.
     //
-    // Consumer B — `participating_n_thr`
+    // Consumer B — `tile_thread_count`
     //   On the non-custom path (`!use_custom`), the safety-clamp
-    //   branch fires when `stable_n_thr_per_expert[e] > 0` and returns
-    //   `min({stable_n_thr_per_expert[e], N[e]/nr_align, team_size})`.
+    //   branch fires when `expert_thread_counts[e] > 0` and returns
+    //   `min({expert_thread_counts[e], N[e]/nr_align, team_size})`.
     //
     //   Producer 1 uses `plan.nr_align` (backend-determined and
     //   phase-independent) rather than `min_n_tile` (planner-derived
@@ -421,13 +421,13 @@ struct GroupNTilePlan {
     //
     //   On the custom path (`use_custom`), this branch is unreachable
     //   regardless of the array state — Producer 2's values flow into
-    //   `participating_n_thr` via the dynamic-tile branch with
-    //   `team_size = stable_n_thr_per_expert[e]` set by
+    //   `tile_thread_count` via the dynamic-tile branch with
+    //   `team_size = expert_thread_counts[e]` set by
     //   `execute_rounds`' prefix-sum scan.
     //
     // Sentinel: an all-zero array means "no producer ran" — both
     // consumers take their respective default fast paths.
-    std::array<int16_t, kMaxExperts> stable_n_thr_per_expert {};
+    std::array<int16_t, kMaxExperts> expert_thread_counts {};
 
     // When the env `ZENDNNL_GRP_MATMUL_N_ORDER` is 0 (auto), the picker
     // resolves a concrete sub-mode and stashes it here for APILOG
@@ -435,21 +435,21 @@ struct GroupNTilePlan {
     // (no auto-resolution performed).
     int auto_resolved_order = -1;
 
-    // Tight-dst fused-epilogue switch.  Set to true at `flat_n_tile`
+    // Tight-dst fused-epilogue switch.  Set to true at `n_tile_execute`
     // entry when `fused_epilogue=swiglu` AND the caller's dst is a
     // tight [M, I]-layout buffer (ldc[0] < N[0]).  Triggers the
-    // per-thread-scratch + out-of-place swiglu flow inside `do_tile`;
+    // per-thread-scratch + out-of-place swiglu flow inside `execute_tile`;
     // when false, the classic matmul-then-in-place-compact wide flow
     // runs.
     //
     // Contract when true: all experts have `ldc[e] == N[e] / 2`
     // (the fused-MoE caller allocates a uniform-stride arena).
     // `execute_*` skip the barrier + `apply_swiglu_oai()` pass because
-    // the activation is already fused into `do_tile`.
+    // the activation is already fused into `execute_tile`.
     bool tight_fused_epilogue = false;
 
     // True iff the Phase B / T4-simple remainder-distribute populated
-    // `stable_n_thr_per_expert[]` with NON-uniform per-expert values on
+    // `expert_thread_counts[]` with NON-uniform per-expert values on
     // the CK Single-round path (the M-heaviest *eligible* experts —
     // those whose per-expert `N / ab_min_tile >= base + 1` — get
     // `base + 1`, the rest get `base`).
@@ -457,17 +457,17 @@ struct GroupNTilePlan {
     // Source of truth for `execute_rounds`'s thread→expert mapping
     // decision: `execute_rounds` checks THIS flag (and only this
     // flag) to switch between the per-round prefix-sum scan
-    // (`per_expert_remainder == true`) and the O(1)
-    // `tid / thr_per_expert` div/mod (`per_expert_remainder == false`).
+    // (`variable_expert_teams == true`) and the O(1)
+    // `tid / thr_per_expert` div/mod (`variable_expert_teams == false`).
     // An earlier sentinel approach inferred "non-uniform allocation"
-    // from `stable_n_thr_per_expert[0] > 0`, which is incorrect because
+    // from `expert_thread_counts[0] > 0`, which is incorrect because
     // the strict-stable AOCL plan also populates that array (uniformly,
     // with `stable`).  Do NOT add new code that infers the mode from
     // the array contents — extend the explicit flag instead.
     //
     // Why not infer from the array: the strict-stable AOCL plan also
-    // populates `stable_n_thr_per_expert[]` (uniformly, with `stable`)
-    // so `participating_n_thr` can take its safety-clamp branch.  The
+    // populates `expert_thread_counts[]` (uniformly, with `stable`)
+    // so `tile_thread_count` can take its safety-clamp branch.  The
     // executor must NOT take the prefix-sum scan on that uniform plan
     // — it would walk `O(round_size)` per thread per round instead of
     // the O(1) div/mod path, all while every per-expert value equals
@@ -486,14 +486,14 @@ struct GroupNTilePlan {
     //     falls back to the uniform-`base` allocation; the flag stays
     //     false and the executor takes the O(1) `tid / thr_per_expert`
     //     mapping (bit-for-bit identical to pre-Phase-B behaviour).
-    bool per_expert_remainder = false;
+    bool variable_expert_teams = false;
 };
 
 // =====================================================================
 // Section P.4 — Round-scheduler cost-model types
 // =====================================================================
 //
-// Cost-model candidate parameters for the (B) ManyExperts round
+// Cost-model candidate parameters for the (B) FixedTeamRounds round
 // scheduler.  Three competing shapes — Single / Multi / Balanced —
 // share derivations (max_tiles, capped_batch) and each carry their
 // own n_thr / batch / round count + an estimated wall time the
@@ -520,7 +520,7 @@ struct RoundCandidates {
 
 // Round-scheduler choice picked from `RoundCandidates` by either the
 // auto cost model or the `ZENDNNL_GRP_MATMUL_N_ROUNDS` env knob.
-enum class RoundPick { Single, Multi, Balanced };
+enum class RoundPick { SingleRound, MultiRound, BalancedRounds };
 
 // =====================================================================
 // Section P.5 — Test-only snapshot of the planner's Phase B output
@@ -530,11 +530,11 @@ enum class RoundPick { Single, Multi, Balanced };
 // `apply_round_pick`'s Phase B body: the end-to-end correctness test
 // in `test_algos.cpp` cannot directly observe per-expert thread
 // assignments, so the snapshot below captures the relevant subset of
-// the plan on the next `flat_n_tile()` call when capture is armed.
+// the plan on the next `n_tile_execute()` call when capture is armed.
 //
 // Tests arm capture by storing `true` to `s_capture_phase_b`, then
 // invoke `group_matmul_direct` with shapes that route to ALGO 3.
-// `flat_n_tile` checks the flag right after the planner returns and,
+// `n_tile_execute` checks the flag right after the planner returns and,
 // if armed, atomically swaps it back to false (one-shot capture) and
 // copies the relevant plan fields into `s_last_phase_b_snapshot`.
 //
@@ -545,14 +545,14 @@ namespace test_api {
 
 struct PhaseBSnapshot {
     bool valid = false;
-    bool per_expert_remainder = false;
+    bool variable_expert_teams = false;
     GroupNTileStrategy strategy = GroupNTileStrategy::Sequential;
     int batch_size = 0;
     int n_thr_fixed = 0;
     // Per-expert thread counts at indices [0, num_ops_active);
     // remaining slots stay zero.
     int num_ops_active = 0;
-    std::array<int16_t, GroupNTilePlan::kMaxExperts> stable_n_thr_per_expert {};
+    std::array<int16_t, GroupNTilePlan::kMaxExperts> expert_thread_counts {};
 };
 
 inline std::atomic<bool> s_capture_phase_b {false};

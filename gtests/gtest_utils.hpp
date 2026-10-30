@@ -999,7 +999,7 @@ void clear_matmul_test_caches();
  *  @brief Clear every cache the `group_matmul` operator stack can populate.
  *
  *  Clears, in order:
- *    1. Custom-kernel pack arenas — BF16 (`clear_custom_kernel_pack_cache()`),
+ *    1. Custom-kernel pack arenas — BF16 (`clear_custom_kernel_pack_cache_bf16()`),
  *       DQ-INT8 (`clear_custom_kernel_pack_cache_int8()`), FP16
  *       (`clear_custom_kernel_pack_cache_f16()`), and W4A8
  *       (`clear_custom_kernel_pack_cache_s4()`); each is a disjoint singleton.

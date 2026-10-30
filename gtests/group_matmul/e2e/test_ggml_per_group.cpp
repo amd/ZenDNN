@@ -79,7 +79,7 @@ void run_ggml_per_group_scenario(const std::string &label,
     // can reuse a freed address and hit a stale entry.  Real frameworks keep
     // weights resident (no reuse), so reset ALL caches per scenario.  This must
     // clear more than the GGML unpack cache: the raw-s8 (N-tile) path hands an
-    // un-reordered s8 weight that `do_tile` reorders per N-tile into the AOCL
+    // un-reordered s8 weight that `execute_tile` reorders per N-tile into the AOCL
     // sym-quant LRU keyed by THAT raw-s8 pointer — a GGML-only clear would leave
     // stale AOCL reorder entries a reused raw-s8 address could alias.
     reset_grp_matmul_caches();
@@ -410,14 +410,14 @@ TEST(GroupMatmulGgmlPerGroup, FifteenExpertsNoneActiveBF16) {
     run_ggml_per_group_scenario("15/0 none active bf16", rows, 128, 64, true);
 }
 
-// ── N-tile (ALGO 3) engagement: GGML per-group must route to flat_n_tile ───
+// ── N-tile (ALGO 3) engagement: GGML per-group must route to n_tile_execute ───
 // With the raw-s8 unpack, a GGML per-group call handed un-reordered weights
-// is accepted by `check_n_tile_extra` (per-group + mem_format 'n') and runs
-// on ALGO 3 (flat_n_tile), where `do_tile` reorders each weight per N-tile
+// is accepted by `n_tile_supported` (per-group + mem_format 'n') and runs
+// on ALGO 3 (n_tile_execute), where `execute_tile` reorders each weight per N-tile
 // into the AOCL DLP sym-quant GEMM.  Before this change GGML pre-reordered
-// ('r'), which `check_n_tile_extra` rejects → the call fell back to ALGO 1.
+// ('r'), which `n_tile_supported` rejects → the call fell back to ALGO 1.
 // Pin ALGO 3 and capture the prepack invocation to assert the call actually
-// reached flat_n_tile (scheduling_algo == 3), not the ALGO-1 fallback.
+// reached n_tile_execute (group_schedule == 3), not the ALGO-1 fallback.
 TEST(GroupMatmulGgmlPerGroup, NtileDlpEngagesBF16) {
     namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
     moe_test_utils::AlgoEnvGuard algo3(3);
@@ -433,13 +433,14 @@ TEST(GroupMatmulGgmlPerGroup, NtileDlpEngagesBF16) {
 
     auto stats = prepack::test_api::get_last_invocation_stats();
     ASSERT_TRUE(stats.valid)
-            << "prepack_for_algo_3 must run for the GGML per-group call";
-    EXPECT_EQ(stats.scheduling_algo, 3)
-            << "GGML per-group + ALGO 3 must route to flat_n_tile (N-tile DLP) "
+            << "prepack_n_tile must run for the GGML per-group call";
+    EXPECT_EQ(stats.group_schedule, 3)
+            << "GGML per-group + ALGO 3 must route to n_tile_execute (N-tile "
+               "DLP) "
                "on "
                "the raw-s8 weight — a fallback to ALGO 1 means the raw-s8 "
                "unpack "
-               "regressed (check_n_tile_extra rejected a reordered weight)";
+               "regressed (n_tile_supported rejected a reordered weight)";
 }
 
 // ── N-tile (ALGO 3) that ACTUALLY splits each expert's N ───────────────────
@@ -447,7 +448,7 @@ TEST(GroupMatmulGgmlPerGroup, NtileDlpEngagesBF16) {
 // planner's F3_narrow_N_escape (`stable > max_N / nr_align`) and runs the
 // Sequential fallback (one full-weight reorder per expert), so it proves
 // ALGO-3 *engagement* but never a real per-tile split.  To exercise the
-// strict-stable ManyExperts split we must instead satisfy
+// strict-stable FixedTeamRounds split we must instead satisfy
 // `stable <= max_N / nr_align`, where `stable = aocl_stable_n_thr(num_threads)`
 // (= num_threads / ZENDNNL_GRP_MATMUL_AOCL_TARGET_SLOTS) and `nr_align = 32`
 // (the s8 sym-quant AOCL N-block).  `stable` is thread-count-derived and the
@@ -472,7 +473,7 @@ TEST(GroupMatmulGgmlPerGroup, NtileDlpActuallyTilesNBF16) {
     const int stable
             = zendnnl::lowoha::matmul::aocl_stable_n_thr(num_threads, /*N=*/0);
     if (stable < 2) {
-        GTEST_SKIP() << "flat_n_tile strict-stable split needs stable >= 2 "
+        GTEST_SKIP() << "n_tile_execute strict-stable split needs stable >= 2 "
                         "(num_threads="
                      << num_threads << " -> stable=" << stable
                      << "); too few threads to N-tile a single expert, the "
@@ -494,17 +495,17 @@ TEST(GroupMatmulGgmlPerGroup, NtileDlpActuallyTilesNBF16) {
     prepack::test_api::clear_last_invocation_stats();
 
     std::vector<int> rows(E, 16); // all experts active -> clean per-tile count
-    moe_test_utils::GemmModeCaptureGuard gemm_mode_capture;
+    moe_test_utils::ExecutionPathCaptureGuard execution_path_capture;
     run_ggml_per_group_scenario("15 all-active N-tile split", rows, K, N,
             /*bf16=*/true);
 
     auto stats = prepack::test_api::get_last_invocation_stats();
     ASSERT_TRUE(stats.valid)
-            << "prepack_for_algo_3 must run for the GGML per-group call";
-    EXPECT_EQ(stats.scheduling_algo, 3);
+            << "prepack_n_tile must run for the GGML per-group call";
+    EXPECT_EQ(stats.group_schedule, 3);
     if (moe_test_utils::k_grp_matmul_aocl_dlp_compiled) {
         // total_attempted > num_experts means the sym-quant cache was warmed per
-        // N-tile (num_experts * stable), i.e. flat_n_tile actually split N — not the
+        // N-tile (num_experts * stable), i.e. n_tile_execute actually split N — not the
         // Sequential fallback's one-full-weight-reorder-per-expert (== num_experts).
         EXPECT_GT(stats.aocl.total_attempted, E)
                 << "planner took the Sequential fallback (no real N-tile "
@@ -516,21 +517,22 @@ TEST(GroupMatmulGgmlPerGroup, NtileDlpActuallyTilesNBF16) {
         EXPECT_NE(stats.cross_warm_regime, prepack::CrossWarmRegime::none)
                 << "cross-warm did not fire under AUTO (env_algo=0)";
     } else {
-        // Without AOCL-DLP, `resolve_kernel()` returns reference so the AOCL
+        // Without AOCL-DLP, `resolve_matmul_backend()` returns reference so the AOCL
         // prepack warmers are not invoked (see test_prepack.cpp).  The planner
         // and executor still run ALGO 3 — verify a real N-tile split via the
-        // published gemm_mode rather than AOCL probe counters.
-        const char *mode = zendnnl::lowoha::matmul::test_api::
-                                   s_last_group_matmul_direct_gemm_mode.load(
-                                           std::memory_order_relaxed);
+        // published execution_path rather than AOCL probe counters.
+        const char *mode
+                = zendnnl::lowoha::matmul::test_api::
+                          s_last_group_matmul_direct_execution_path.load(
+                                  std::memory_order_relaxed);
         ASSERT_NE(mode, nullptr)
-                << "group_matmul_direct must publish gemm_mode for ALGO 3";
+                << "group_matmul_direct must publish execution_path for ALGO 3";
         EXPECT_STRNE(mode, "flat_n_tile_sequential")
                 << "planner took the Sequential fallback (no real N-tile "
                    "split): "
                    "stable="
                 << stable << " N=" << N << " num_threads=" << num_threads
-                << " gemm_mode=" << mode;
+                << " execution_path=" << mode;
         // cross_warm is gated on the AOCL-DLP inner kernel; wiring is covered
         // in TestPrepackCrossWarmRegimes under ZENDNNL_DEPENDS_AOCLDLP=ON builds.
         EXPECT_EQ(stats.cross_warm_regime, prepack::CrossWarmRegime::none)
@@ -573,10 +575,10 @@ TEST(GroupMatmulGgmlQ4, SuperblockQ4MatchesUnpackedReference) {
 // matmul_direct unpacks before that check, so the predicate sees raw s8.
 // This shape is too narrow to take the group route after unpack.
 TEST(GroupMatmulGgmlQ4, PackedQ4PredicateRejectsUntilUnpacked) {
-    using zendnnl::lowoha::matmul::custom_kernel_routable;
     using zendnnl::lowoha::matmul::matmul_params;
+    using zendnnl::lowoha::matmul::single_matmul_group_routable;
     using zendnnl::lowoha::matmul::test_api::
-            s_last_group_matmul_direct_gemm_mode;
+            s_last_group_matmul_direct_execution_path;
 
     SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
     if (!zendnnl::lowoha::matmul::custom_kernel::avx512vnni_available()) {
@@ -622,7 +624,8 @@ TEST(GroupMatmulGgmlQ4, PackedQ4PredicateRejectsUntilUnpacked) {
         unpacked.quant_params.wei_scale.dims = {K / 32, N};
 
         auto route = [&](const matmul_params &p) {
-            return custom_kernel_routable('r', M, N, K, /*num_threads=*/32,
+            return single_matmul_group_routable('r', M, N, K,
+                    /*num_threads=*/32,
                     /*batch_count=*/1, /*transA=*/false, /*transB=*/true, 1.0f,
                     0.0f, /*bias=*/nullptr, /*ldb=*/K,
                     /*is_weights_const=*/true, p);
@@ -646,7 +649,7 @@ TEST(GroupMatmulGgmlQ4, PackedQ4PredicateRejectsUntilUnpacked) {
 
     // matmul_direct Q4_0 must still match the unpacked reference. N=16 is not
     // a group-route width, so this call stays on matmul_direct after unpack.
-    moe_test_utils::GemmModeCaptureGuard capture;
+    moe_test_utils::ExecutionPathCaptureGuard capture;
 
     const uint64_t n = 16;
     const uint64_t k = 64;
@@ -706,7 +709,7 @@ TEST(GroupMatmulGgmlQ4, PackedQ4PredicateRejectsUntilUnpacked) {
     compare_tensor_2D_matrix(got, ref, m, n, k, rtol_bf16, 18.0f * epsilon_bf16,
             ok, false, 1.0f);
     EXPECT_TRUE(ok);
-    EXPECT_EQ(s_last_group_matmul_direct_gemm_mode.load(
+    EXPECT_EQ(s_last_group_matmul_direct_execution_path.load(
                       std::memory_order_relaxed),
             nullptr)
             << "matmul_direct Q4_0 published a group_matmul gemm mode";

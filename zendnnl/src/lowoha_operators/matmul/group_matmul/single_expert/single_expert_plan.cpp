@@ -43,8 +43,8 @@ bool parse_positive(const std::string &v, int *out) {
 } // namespace
 
 bool parse_single_expert_block(
-        const char *value, se_block_knob_t *knob, std::string *error) {
-    se_block_knob_t k;
+        const char *value, SingleExpertBlockConfig *knob, std::string *error) {
+    SingleExpertBlockConfig k;
     std::string s(value != nullptr ? value : "");
     for (char &c : s) {
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -62,11 +62,11 @@ bool parse_single_expert_block(
         bool ok = true;
         if (key == "split") {
             if (val == "legacy")
-                k.split = se_split_t::legacy;
+                k.split = SingleExpertSplit::n_tile_default;
             else if (val == "remainder")
-                k.split = se_split_t::remainder;
+                k.split = SingleExpertSplit::n_remainder_k_split;
             else if (val == "grid")
-                k.split = se_split_t::grid;
+                k.split = SingleExpertSplit::mnk_grid;
             else
                 ok = false;
         } else if (key == "mparts") {
@@ -81,9 +81,9 @@ bool parse_single_expert_block(
             ok = parse_positive(val, &k.mr) && k.mr <= 12;
         } else if (key == "order") {
             if (val == "n")
-                k.order = se_order_t::n_outer;
+                k.order = SingleExpertLoopOrder::n_outer;
             else if (val == "k")
-                k.order = se_order_t::k_outer;
+                k.order = SingleExpertLoopOrder::k_outer;
             else
                 ok = false;
         } else {
@@ -99,19 +99,20 @@ bool parse_single_expert_block(
     return true;
 }
 
-const se_block_knob_t &get_single_expert_block_knob() {
-    const se_block_knob_t *ovr = test_api::s_single_expert_block_override.load(
-            std::memory_order_relaxed);
+const SingleExpertBlockConfig &get_single_expert_block_knob() {
+    const SingleExpertBlockConfig *ovr
+            = test_api::s_single_expert_block_override.load(
+                    std::memory_order_relaxed);
     if (ovr != nullptr) return *ovr;
-    static const se_block_knob_t v = []() {
-        se_block_knob_t k;
+    static const SingleExpertBlockConfig v = []() {
+        SingleExpertBlockConfig k;
         const char *e = std::getenv("ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_BLOCK");
         if (e == nullptr) return k;
         std::string error;
         if (!parse_single_expert_block(e, &k, &error)) {
             apilog_warning("ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_BLOCK: ignoring '",
                     e, "' (bad token '", error, "'); keeping the legacy plan");
-            return se_block_knob_t {};
+            return SingleExpertBlockConfig {};
         }
         return k;
     }();
@@ -131,31 +132,33 @@ bool get_grp_matmul_single_expert_ksplit() {
     return v;
 }
 
-bool se_block_plan_enabled() {
-    const se_block_knob_t &knob = get_single_expert_block_knob();
-    return knob.given ? knob.split != se_split_t::legacy
+bool single_expert_plan_enabled() {
+    const SingleExpertBlockConfig &knob = get_single_expert_block_knob();
+    return knob.given ? knob.split != SingleExpertSplit::n_tile_default
                       : get_grp_matmul_single_expert_ksplit();
 }
 
-se_block_plan_t se_block_plan(int num_ops, int M, int N, int K, int pack_nr,
-        int k_step, int num_threads) {
-    se_block_plan_t p;
+SingleExpertBlockPlan make_single_expert_plan(int num_ops, int M, int N, int K,
+        int pack_nr, int k_step, int num_threads) {
+    SingleExpertBlockPlan p;
     if (!is_dense_ffn_decode(num_ops, M) || M <= 0 || pack_nr <= 0
             || k_step <= 0 || num_threads < 2 || N % pack_nr != 0
             || K % k_step != 0)
         return p;
-    const se_block_knob_t &knob = get_single_expert_block_knob();
-    if (!se_block_plan_enabled()) return p;
+    const SingleExpertBlockConfig &knob = get_single_expert_block_knob();
+    if (!single_expert_plan_enabled()) return p;
     const bool explicit_plan = knob.given;
-    const se_split_t split = explicit_plan ? knob.split : se_split_t::remainder;
+    const SingleExpertSplit split = explicit_plan
+            ? knob.split
+            : SingleExpertSplit::n_remainder_k_split;
     const int blocks = N / pack_nr;
 
-    se_block_plan_t q;
+    SingleExpertBlockPlan q;
     q.split = split;
     q.kc = knob.kc > 0 ? std::max(k_step, knob.kc / k_step * k_step) : 0;
     q.mr = knob.mr;
     q.order = knob.order;
-    if (split == se_split_t::remainder) {
+    if (split == SingleExpertSplit::n_remainder_k_split) {
         const int rem = blocks % num_threads;
         if (rem == 0) return p;
         int parts = num_threads / rem;
@@ -176,21 +179,21 @@ se_block_plan_t se_block_plan(int num_ops, int M, int N, int K, int pack_nr,
     return q;
 }
 
-std::string se_block_plan_label(const se_block_plan_t &plan) {
+std::string se_block_plan_label(const SingleExpertBlockPlan &plan) {
     std::ostringstream ss;
     switch (plan.split) {
-        case se_split_t::legacy: ss << "legacy"; break;
-        case se_split_t::remainder:
+        case SingleExpertSplit::n_tile_default: ss << "legacy"; break;
+        case SingleExpertSplit::n_remainder_k_split:
             ss << "remainder whole" << plan.whole_blocks << " split"
                << plan.split_blocks << " k" << plan.k_parts;
             break;
-        case se_split_t::grid:
+        case SingleExpertSplit::mnk_grid:
             ss << "grid m" << plan.m_parts << " n" << plan.n_parts << " k"
                << plan.k_parts;
             break;
     }
-    ss << " kc" << plan.kc << " mr" << plan.mr
-       << " order=" << (plan.order == se_order_t::k_outer ? 'k' : 'n');
+    ss << " kc" << plan.kc << " mr" << plan.mr << " order="
+       << (plan.order == SingleExpertLoopOrder::k_outer ? 'k' : 'n');
     return ss.str();
 }
 

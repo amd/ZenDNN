@@ -15,7 +15,7 @@
  *******************************************************************************/
 
 /// BF16 custom kernel — adaptive weight pack and per-process pack cache.
-/// Shared by both non-fused flat_n_tile (ALGO 3) and the fused-MoE
+/// Shared by both non-fused n_tile_execute (ALGO 3) and the fused-MoE
 /// tight-arena path.
 ///
 /// PACK LAYOUT (BF16, VDPBF16PS-friendly, "VNNI" style — same as
@@ -48,7 +48,7 @@
 /// into `CallContext.packed_ptrs[]` and read by OMP workers outside
 /// the cache mutex, so any eviction during in-flight dispatch would
 /// be a use-after-free.  The cache is reset only by an explicit
-/// call to `clear_custom_kernel_pack_cache()` in a quiescent window
+/// call to `clear_custom_kernel_pack_cache_bf16()` in a quiescent window
 /// (see safety contract on that function).
 
 #ifndef ZENDNNL_GROUP_MATMUL_CUSTOM_KERNEL_PACK_HPP
@@ -137,7 +137,7 @@ inline constexpr int kNRMax = 64;
 ///
 /// On success `*out_packed` points into cache-owned storage that is
 /// retained for the lifetime of the process (or until
-/// `clear_custom_kernel_pack_cache()` is called during a quiescent
+/// `clear_custom_kernel_pack_cache_bf16()` is called during a quiescent
 /// window).  The cache never evicts during regular operation so raw
 /// pointers held in `CallContext.packed_ptrs[]` across an OMP region
 /// cannot be freed underneath the microkernel.  Returns failure on
@@ -243,7 +243,7 @@ bool any_weight_packed_in_place(
 /// `nullptr`.  Use ONLY for caller-owned buffers obtained from
 /// disable-cache mode — cached pointers are owned by the LRU and
 /// MUST NOT be passed here (would double-free on
-/// `clear_custom_kernel_pack_cache()`).  The CallContext
+/// `clear_custom_kernel_pack_cache_bf16()`).  The CallContext
 /// destructor in `dispatch.hpp` routes every entry it owns
 /// through this helper, so application code typically never
 /// calls it directly.
@@ -445,7 +445,7 @@ status_t prepack_weight_into_s4(const int8_t *weight, int K, int N, int ldb,
         int pack_nr, bool transB, bool interleave_split_halves, int group_size,
         void *dst);
 
-/// S4 counterpart of `clear_custom_kernel_pack_cache()`, with the same
+/// S4 counterpart of `clear_custom_kernel_pack_cache_bf16()`, with the same
 /// quiescence contract: no in-flight W4A8 CK dispatch on any thread.
 void clear_custom_kernel_pack_cache_s4();
 
@@ -527,17 +527,17 @@ status_t prepack_weight_into_f16(const float16_t *weight, int K, int N, int ldb,
 /// `get_or_pack_weight_bf16()` pay the repack cost on first miss.  The
 /// record of in-place rewritten buffers is dropped too, so a buffer still
 /// holding an in-place image must not be passed again after a clear.
-void clear_custom_kernel_pack_cache();
+void clear_custom_kernel_pack_cache_bf16();
 
 /// Release every cached packed INT8 weight and reset the cache to
-/// empty.  Mirror of `clear_custom_kernel_pack_cache()` for the
+/// empty.  Mirror of `clear_custom_kernel_pack_cache_bf16()` for the
 /// disjoint INT8 LRU singleton.  See the warning above — same
 /// quiescence contract applies (no in-flight INT8 CK dispatch on
 /// any thread).
 void clear_custom_kernel_pack_cache_int8();
 
 /// Release every cached packed FP16 weight and reset the cache to
-/// empty.  Mirror of `clear_custom_kernel_pack_cache()` for the
+/// empty.  Mirror of `clear_custom_kernel_pack_cache_bf16()` for the
 /// disjoint FP16 LRU singleton.  See the warning on the bf16
 /// sibling — the same quiescence contract applies (no in-flight
 /// FP16 CK dispatch on any thread), and an in-place FP16 image must

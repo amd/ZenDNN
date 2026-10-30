@@ -37,7 +37,7 @@ namespace matmul {
 
 // ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL = { "0", "1" } — cached, default ON.
 //   Master switch for the hand-rolled AVX-512-BF16 microkernel
-//   (custom_kernel/).  ON: ALGO 3 flat_n_tile dispatches per-tile
+//   (custom_kernel/).  ON: ALGO 3 n_tile_execute dispatches per-tile
 //   GEMM through VDPBF16PS, with swiglu_oai_mul applied in-register
 //   (writes activated I cols at caller's ldc — covers both wide and
 //   tight fused-MoE layouts in one path).  OFF: per-tile GEMM goes
@@ -223,8 +223,8 @@ custom_kernel::KernelVariant grp_matmul_ck_weight_variant(data_type_t src,
 /// with the family sub-toggle and the per-group disqualifier.
 ///
 /// This exists because `get_grp_matmul_custom_kernel` reads the master
-/// knob alone, while `engage_ntile_custom_kernel` additionally honours
-/// `..._INT8` / `..._F16`, and `flat_n_tile` additionally refuses a per-group
+/// knob alone, while `prepare_n_tile_custom_kernel` additionally honours
+/// `..._INT8` / `..._F16`, and `n_tile_execute` additionally refuses a per-group
 /// `{G, N}` weight scale.  Any decision that has to AGREE with the kernel's
 /// real engagement must use this, not the master knob.
 ///
@@ -238,7 +238,7 @@ custom_kernel::KernelVariant grp_matmul_ck_weight_variant(data_type_t src,
 /// A representative ACTIVE expert is used: slot 0 may be an inactive padding
 /// placeholder whose dtypes were never filled in.
 template <typename ParamsVec>
-inline bool grp_matmul_custom_kernel_effective(const ParamsVec &params,
+inline bool group_matmul_custom_kernel_candidate(const ParamsVec &params,
         const std::vector<int> &M, const std::vector<int> &N,
         grp_matmul_gated_act_t fused_act) {
     size_t rep = params.size();
@@ -280,7 +280,7 @@ inline bool grp_matmul_custom_kernel_effective(const ParamsVec &params,
         // The static U8xS8 epilogue and a gated activation cannot both run:
         // the custom kernel has one epilogue slot and would otherwise drop
         // one operation. Keep this shared verdict aligned with
-        // check_n_tile_extra so arena, cache, and execution policy agree.
+        // n_tile_supported so arena, cache, and execution policy agree.
         if (fused_act != grp_matmul_gated_act_t::none
                 && !params[i].postop_.empty()) {
             return false;
@@ -307,12 +307,12 @@ inline bool grp_matmul_custom_kernel_effective(const ParamsVec &params,
 /// observed stride -- correct for a caller that owns its destination and
 /// keeps one layout across prompt and decode.
 template <typename ParamsVec>
-inline int algo3_decode_nr_align(const std::vector<int> &M,
+inline int n_tile_decode_nr_align(const std::vector<int> &M,
         const std::vector<int> &N, const std::vector<int> &ldc,
         grp_matmul_gated_act_t act, const ParamsVec &params) {
     // Classify from the first ACTIVE expert, not slot 0.  An inactive slot
     // carries arbitrary placeholder strides, and both the dispatcher and
-    // `flat_n_tile` pick their representative the same way -- reading slot 0
+    // `n_tile_execute` pick their representative the same way -- reading slot 0
     // here instead could call a wide arena tight, warm alignment-2 keys, and
     // leave decode querying alignment-1 keys.  That reinstates the very
     // first-call reorder this alignment agreement exists to remove.
@@ -329,8 +329,8 @@ inline int algo3_decode_nr_align(const std::vector<int> &M,
     const bool observed_tight = have_rep && ldc[rep] < N[rep];
     const bool tight
             = tls_decode_arena_known ? tls_decode_arena_tight : observed_tight;
-    return algo3_decode_nr_align(
-            act, grp_matmul_custom_kernel_effective(params, M, N, act), tight);
+    return n_tile_decode_nr_align(act,
+            group_matmul_custom_kernel_candidate(params, M, N, act), tight);
 }
 
 } // namespace matmul

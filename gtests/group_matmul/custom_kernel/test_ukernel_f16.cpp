@@ -70,10 +70,10 @@
 #include "moe_test_utils.hpp"
 
 // For the CK-engagement assertion: `group_matmul_direct` publishes the
-// resolved `gemm_mode` static literal to a test-only atomic in
-// `test_api::s_last_group_matmul_direct_gemm_mode`.  Reading that after
+// resolved `execution_path` static literal to a test-only atomic in
+// `test_api::s_last_group_matmul_direct_execution_path`.  Reading that after
 // the call is the reliable signal that the custom kernel actually ran.
-// The gemm_mode label does not encode the dtype family -- the FP16 CK
+// The execution_path label does not encode the dtype family -- the FP16 CK
 // path emits the same `_custom`-suffixed labels as the bf16 path
 // (`flat_n_tile_custom`, `flat_n_tile_fused_silu_and_mul_tight_custom`,
 // ...), so the `_custom` substring check is family-agnostic.
@@ -221,9 +221,9 @@ inline std::string mk_label(int M, int K, int N, grp_matmul_gated_act_t act,
 }
 
 // Suite-level CK-engagement counters.  Each parameterised case reads
-// `s_last_group_matmul_direct_gemm_mode` after `group_matmul_direct`
+// `s_last_group_matmul_direct_execution_path` after `group_matmul_direct`
 // returns and increments the appropriate counter (engaged when the
-// resolved gemm_mode carries the `_custom` suffix; bypassed
+// resolved execution_path carries the `_custom` suffix; bypassed
 // otherwise).  `TearDownTestSuite` asserts the suite engaged the FP16
 // microkernel on a non-zero number of cases -- the regression net that
 // distinguishes a healthy run from a silent fall-through to AOCL DLP
@@ -248,12 +248,14 @@ protected:
         ASSERT_GT(engaged, 0)
                 << "CkF16UkernelCorrectness: ran " << total
                 << " parameterised cases but the FP16 microkernel never "
-                   "engaged on any (no '_custom' gemm_mode observed).  Either "
+                   "engaged on any (no '_custom' execution_path observed).  "
+                   "Either "
                    "every case took the AOCL DLP path or the test "
                    "instrumentation "
                    "is broken -- inspect "
                    "`zendnnl::lowoha::matmul::test_api"
-                   "::s_last_group_matmul_direct_gemm_mode` to debug.  See "
+                   "::s_last_group_matmul_direct_execution_path` to debug.  "
+                   "See "
                    "`CkF16UkernelEngages.OnCanonicalShape` for the strict "
                    "single-shape engagement gate.";
         std::cout << "[CkF16UkernelCorrectness] FP16 microkernel engaged on "
@@ -298,7 +300,7 @@ TEST_P(CkF16UkernelCorrectness, MatchesScalarRef) {
 
     // Four experts so plan_group_n_tile keeps the call on the ntile path
     // (same rationale as the bf16 sibling): the planner builds a real
-    // ntile plan that exercises `do_tile` / `dispatch_tile`.
+    // ntile plan that exercises `execute_tile` / `dispatch_tile`.
     constexpr int kNumOps = 4;
 
     // Per-expert src + weight buffers (FP16).
@@ -380,7 +382,7 @@ TEST_P(CkF16UkernelCorrectness, MatchesScalarRef) {
     zendnnl::lowoha::matmul::grp_matmul_gated_act_params act_params {};
     act_params.act = c.act;
 
-    moe_test_utils::GemmModeCaptureGuard gemm_mode_guard;
+    moe_test_utils::ExecutionPathCaptureGuard execution_path_guard;
 
     const auto status = group_matmul_direct(layout, transA, transB, Ms, Ns, Ks,
             alpha, src_ptrs, lda, wei_ptrs, ldb, bias_ptrs, beta, dst_ptrs, ldc,
@@ -392,13 +394,13 @@ TEST_P(CkF16UkernelCorrectness, MatchesScalarRef) {
 
     // Track which executor path actually ran.  The `_custom` suffix is
     // the FP16 microkernel signature (same labels as the bf16 path; the
-    // dtype family is not encoded in the gemm_mode string).
+    // dtype family is not encoded in the execution_path string).
     const char *mode = zendnnl::lowoha::matmul::test_api ::
-                               s_last_group_matmul_direct_gemm_mode.load(
+                               s_last_group_matmul_direct_execution_path.load(
                                        std::memory_order_relaxed);
     ASSERT_NE(mode, nullptr)
             << "case '" << c.label
-            << "': group_matmul_direct did not publish a gemm_mode";
+            << "': group_matmul_direct did not publish a execution_path";
     s_total_cases.fetch_add(1, std::memory_order_relaxed);
     if (std::strstr(mode, "_custom") != nullptr) {
         s_ck_engaged_cases.fetch_add(1, std::memory_order_relaxed);
@@ -479,7 +481,7 @@ void run_deep_k_m32_k8192(bool all_positive) {
     ASSERT_TRUE(ctx.enabled);
     ASSERT_TRUE(ctx.single_expert);
     ASSERT_EQ(ctx.variant, ck::KernelVariant::kF16_F16_F16);
-    ASSERT_EQ(ctx.act_kind, ck::ActKind::none);
+    ASSERT_EQ(ctx.act_kind, ck::ActivationKind::none);
     ASSERT_EQ(ctx.bias_kind, ck::BiasKind::none);
     ASSERT_EQ(ctx.pack_nr, 32);
 
@@ -669,7 +671,7 @@ INSTANTIATE_TEST_SUITE_P(ShapeMatrix, CkF16UkernelCorrectness,
 // Strict single-shape engagement gate -- the regression net for "did
 // the FP16 CK actually run?".  Pins a shape known to engage
 // `dispatch_tile` at any reasonable thread count and asserts the
-// resolved gemm_mode carries the `_custom` suffix.  Sibling of the
+// resolved execution_path carries the `_custom` suffix.  Sibling of the
 // bf16 `CkUkernelEngages.OnCanonicalShape`.
 // ------------------------------------------------------------------
 TEST(CkF16UkernelEngages, OnCanonicalShape) {
@@ -718,7 +720,7 @@ TEST(CkF16UkernelEngages, OnCanonicalShape) {
         p.num_threads = kCkTestThreads;
     }
 
-    moe_test_utils::GemmModeCaptureGuard gemm_mode_guard;
+    moe_test_utils::ExecutionPathCaptureGuard execution_path_guard;
 
     const auto status = group_matmul_direct(layout, transA, transB, Ms, Ns, Ks,
             alpha, src_ptrs, lda, wei_ptrs, ldb, bias_ptrs, beta, dst_ptrs, ldc,
@@ -727,10 +729,10 @@ TEST(CkF16UkernelEngages, OnCanonicalShape) {
     ASSERT_EQ(status, status_t::success);
 
     const char *mode = zendnnl::lowoha::matmul::test_api ::
-                               s_last_group_matmul_direct_gemm_mode.load(
+                               s_last_group_matmul_direct_execution_path.load(
                                        std::memory_order_relaxed);
     ASSERT_NE(mode, nullptr)
-            << "group_matmul_direct did not publish a gemm_mode";
+            << "group_matmul_direct did not publish a execution_path";
     ASSERT_NE(std::strstr(mode, "_custom"), nullptr)
             << "Canonical engagement shape (M=4 x K=1024 x N=2048, 4 experts) "
                "ran on '"
@@ -745,7 +747,7 @@ TEST(CkF16UkernelEngages, OnCanonicalShape) {
 // ------------------------------------------------------------------
 // Strict engagement gate -- silu_and_mul on the canonical fused-CK
 // shape.  Sibling of the bf16 `OnCanonicalShapeSiluFused`.  Expected
-// gemm_mode: `flat_n_tile_fused_silu_and_mul_tight_custom`.
+// execution_path: `flat_n_tile_fused_silu_and_mul_tight_custom`.
 // ------------------------------------------------------------------
 TEST(CkF16UkernelEngages, OnCanonicalShapeSiluFused) {
     CK_SKIP_IF_NO_F16_ISA();
@@ -798,7 +800,7 @@ TEST(CkF16UkernelEngages, OnCanonicalShapeSiluFused) {
     zendnnl::lowoha::matmul::grp_matmul_gated_act_params act_params {};
     act_params.act = grp_matmul_gated_act_t::silu_and_mul;
 
-    moe_test_utils::GemmModeCaptureGuard gemm_mode_guard;
+    moe_test_utils::ExecutionPathCaptureGuard execution_path_guard;
 
     const auto status = group_matmul_direct(layout, transA, transB, Ms, Ns, Ks,
             alpha, src_ptrs, lda, wei_ptrs, ldb, bias_ptrs, beta, dst_ptrs, ldc,
@@ -807,20 +809,21 @@ TEST(CkF16UkernelEngages, OnCanonicalShapeSiluFused) {
     ASSERT_EQ(status, status_t::success);
 
     const char *mode = zendnnl::lowoha::matmul::test_api ::
-                               s_last_group_matmul_direct_gemm_mode.load(
+                               s_last_group_matmul_direct_execution_path.load(
                                        std::memory_order_relaxed);
     ASSERT_NE(mode, nullptr)
-            << "group_matmul_direct did not publish a gemm_mode for the "
+            << "group_matmul_direct did not publish a execution_path for the "
                "silu_and_mul fused-CK engagement check.";
     EXPECT_NE(std::strstr(mode, "_custom"), nullptr)
             << "silu_and_mul + tight dst ran on '" << mode
             << "' instead of the FP16 microkernel.  Either prepack rejected "
                "the interleave, the dispatcher's silu acceptance gate "
-               "refused, the planner's a3_can_fuse_act stopped advertising "
+               "refused, the planner's n_tile_can_fuse_activation stopped "
+               "advertising "
                "silu fused, or the canonical shape moved out of the per-tile "
                "dispatch envelope.  Investigate.";
     EXPECT_NE(std::strstr(mode, "silu_and_mul"), nullptr)
-            << "fused silu_and_mul ran but `gemm_mode` lacks the "
+            << "fused silu_and_mul ran but `execution_path` lacks the "
                "`silu_and_mul` label fragment (`"
             << mode << "`).";
 }
@@ -828,7 +831,7 @@ TEST(CkF16UkernelEngages, OnCanonicalShapeSiluFused) {
 // ------------------------------------------------------------------
 // Strict engagement gate -- gelu_and_mul on the canonical fused-CK
 // shape.  Sibling of the bf16 `OnCanonicalShapeGeluFused`.  Expected
-// gemm_mode: `flat_n_tile_fused_gelu_and_mul_tight_custom`.
+// execution_path: `flat_n_tile_fused_gelu_and_mul_tight_custom`.
 // ------------------------------------------------------------------
 TEST(CkF16UkernelEngages, OnCanonicalShapeGeluFused) {
     CK_SKIP_IF_NO_F16_ISA();
@@ -881,7 +884,7 @@ TEST(CkF16UkernelEngages, OnCanonicalShapeGeluFused) {
     zendnnl::lowoha::matmul::grp_matmul_gated_act_params act_params {};
     act_params.act = grp_matmul_gated_act_t::gelu_and_mul;
 
-    moe_test_utils::GemmModeCaptureGuard gemm_mode_guard;
+    moe_test_utils::ExecutionPathCaptureGuard execution_path_guard;
 
     const auto status = group_matmul_direct(layout, transA, transB, Ms, Ns, Ks,
             alpha, src_ptrs, lda, wei_ptrs, ldb, bias_ptrs, beta, dst_ptrs, ldc,
@@ -890,18 +893,19 @@ TEST(CkF16UkernelEngages, OnCanonicalShapeGeluFused) {
     ASSERT_EQ(status, status_t::success);
 
     const char *mode = zendnnl::lowoha::matmul::test_api ::
-                               s_last_group_matmul_direct_gemm_mode.load(
+                               s_last_group_matmul_direct_execution_path.load(
                                        std::memory_order_relaxed);
     ASSERT_NE(mode, nullptr)
-            << "group_matmul_direct did not publish a gemm_mode for the "
+            << "group_matmul_direct did not publish a execution_path for the "
                "gelu_and_mul fused-CK engagement check.";
     EXPECT_NE(std::strstr(mode, "_custom"), nullptr)
             << "gelu_and_mul + tight dst ran on '" << mode
             << "' instead of the FP16 microkernel.  Investigate (prepack "
-               "interleave, gelu acceptance gate, a3_can_fuse_act, or the "
+               "interleave, gelu acceptance gate, n_tile_can_fuse_activation, "
+               "or the "
                "per-tile dispatch envelope).";
     EXPECT_NE(std::strstr(mode, "gelu_and_mul"), nullptr)
-            << "fused gelu_and_mul ran but `gemm_mode` lacks the "
+            << "fused gelu_and_mul ran but `execution_path` lacks the "
                "`gelu_and_mul` label fragment (`"
             << mode << "`).";
 }
@@ -910,7 +914,7 @@ TEST(CkF16UkernelEngages, OnCanonicalShapeGeluFused) {
 // CK-REFUSAL TIGHT FALLBACK regression -- silu_and_mul / gelu_and_mul.
 // Sibling of the bf16 `CkUkernelFallback.Tight*WithBiasRoutesToSequential`.
 // When a caller passes tight dst (ldc < N) with a gated split-halves
-// activation AND a refusal trigger (+bias), `flat_n_tile` MUST reroute
+// activation AND a refusal trigger (+bias), `n_tile_execute` MUST reroute
 // to the Sequential strategy (matmul wide -> apply_gated_act_inplace
 // (f16) -> memcpy I cols into tight dst), NOT silently apply swiglu
 // math to silu/gelu data.
@@ -971,7 +975,7 @@ void RunTightCkRefusalTest(grp_matmul_gated_act_t act, const char *case_label) {
     zendnnl::lowoha::matmul::grp_matmul_gated_act_params act_params {};
     act_params.act = act;
 
-    moe_test_utils::GemmModeCaptureGuard gemm_mode_guard;
+    moe_test_utils::ExecutionPathCaptureGuard execution_path_guard;
 
     const auto status = group_matmul_direct(layout, transA, transB, Ms, Ns, Ks,
             alpha, src_ptrs, lda, wei_ptrs, ldb, bias_ptrs, beta, dst_ptrs, ldc,
@@ -983,11 +987,11 @@ void RunTightCkRefusalTest(grp_matmul_gated_act_t act, const char *case_label) {
                "a hard refusal).";
 
     const char *mode = zendnnl::lowoha::matmul::test_api ::
-                               s_last_group_matmul_direct_gemm_mode.load(
+                               s_last_group_matmul_direct_execution_path.load(
                                        std::memory_order_relaxed);
     ASSERT_NE(mode, nullptr) << case_label
                              << ": group_matmul_direct did not publish a "
-                                "gemm_mode.";
+                                "execution_path.";
     EXPECT_NE(std::strstr(mode, "sequential"), nullptr)
             << case_label << ": tight + " << case_label << " + bias ran on '"
             << mode
@@ -1158,14 +1162,15 @@ TEST(CkF16UkernelLongK, BlocksAccumulateInFp32) {
             p.dtypes.dst = data_type_t::f32;
             p.num_threads = kCkTestThreads;
         }
-        moe_test_utils::GemmModeCaptureGuard gemm_mode_guard;
+        moe_test_utils::ExecutionPathCaptureGuard execution_path_guard;
         ASSERT_EQ(group_matmul_direct(layout, transA, transB, Ms, Ns, Ks, alpha,
                           srcs, lda, weis, ldb, biases, beta, dsts, ldc, is_wc,
                           params),
                 status_t::success);
-        const char *mode = zendnnl::lowoha::matmul::test_api ::
-                                   s_last_group_matmul_direct_gemm_mode.load(
-                                           std::memory_order_relaxed);
+        const char *mode
+                = zendnnl::lowoha::matmul::test_api ::
+                          s_last_group_matmul_direct_execution_path.load(
+                                  std::memory_order_relaxed);
         ASSERT_NE(mode, nullptr);
         ASSERT_NE(std::strstr(mode, "_custom"), nullptr) << mode;
         double worst = 0.0;

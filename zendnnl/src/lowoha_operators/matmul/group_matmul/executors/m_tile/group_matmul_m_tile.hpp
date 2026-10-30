@@ -48,7 +48,7 @@
 ///   Section H.2  test_api::s_capture_m_tile_path / s_last_m_tile_path
 ///                capture machinery.  Tests arm the capture and read
 ///                the tag after a dispatcher call to assert which
-///                `flat_m_tile` (or `flat_m_tile_pipeline_bf16`)
+///                `m_tile_execute` (or `try_fused_m_tile_core`)
 ///                branch fired.  The `m_tile_path_tag::*` named
 ///                constants themselves live in the companion planner
 ///                header `group_matmul_m_tile_planner.hpp` (Section
@@ -61,20 +61,20 @@
 ///                env parsing convention.
 ///
 ///   Section H.4  Forward declarations for the two M-tile executors:
-///                * `flat_m_tile`               (legacy single matmul,
+///                * `m_tile_execute`               (legacy single matmul,
 ///                                               Section B of the .cpp)
-///                * `flat_m_tile_pipeline_bf16` (vertical-fusion
+///                * `try_fused_m_tile_core` (vertical-fusion
 ///                                               W13→act→W2, Section C
 ///                                               of the .cpp)
 ///
 ///   Section H.5  M-tile shared eligibility predicate
-///                (`check_m_tile_safe`).  Previously lived in
+///                (`m_tile_supported`).  Previously lived in
 ///                `../group_matmul_parallel_common.hpp`; moved here
 ///                (PR follow-up) so the M-tile-only structural gate
 ///                sits next to the M-tile executor it protects.  Both
 ///                the dispatcher and the fused-MoE entry point call
 ///                it — they include this header anyway to reach
-///                `flat_m_tile()` / `flat_m_tile_pipeline_bf16()`.
+///                `m_tile_execute()` / `try_fused_m_tile_core()`.
 ///
 /// What stays in `group_matmul_m_tile.cpp`:
 ///   * Per-thread slice executors and inline runtime helpers
@@ -83,8 +83,8 @@
 ///
 /// What moved to `group_matmul_m_tile_planner.hpp` (companion header):
 ///   * `m_tile_path_tag::*` named constants (one per executor branch).
-///   * `m_tile_single_tier_plan_t` planner output struct.
-///   * `plan_m_tile_single_tier_assignment` (Phase 1b/2/3 planner).
+///   * `MTileSingleTierPlan` planner output struct.
+///   * `make_m_tile_single_tier_plan` (Phase 1b/2/3 planner).
 ///
 /// This header re-includes the planner header so any translation unit
 /// that includes the public M-tile interface transitively gets the
@@ -204,7 +204,7 @@ inline std::atomic<int> s_grp_matmul_m_tile_hybrid_lights_per_thread_override {
 //                  of eligibility.  Used by tests to capture the
 //                  pre-fusion baseline.
 //    0 AUTO     — engage vertical fusion when ALL eligibility gates
-//                  in `try_flat_m_tile_pipeline_bf16` pass (one of:
+//                  in `try_fused_m_tile` pass (one of:
 //                  bf16 end-to-end OR WOQ-INT4 s4/u4 on BOTH halves;
 //                  supported gated activation; single-tier planner
 //                  outcome; scratch budget admits slice_M ≥ 1 for
@@ -282,16 +282,16 @@ inline std::atomic<int> s_grp_matmul_m_tile_pipeline_scratch_kb_override {
 //
 // ── M-tile (ALGO 2) branch-tag capture hook ─────────────────────────────
 //
-// `flat_m_tile` dispatches between four internal branches based on
+// `m_tile_execute` dispatches between four internal branches based on
 // workload shape:
 //   round-based            (active_ops > num_threads)
 //   multi-tier hybrid      (skewed many-expert Qwen3-class gate)
-//   wide-N memory-bound    (total_need * 2 ≤ num_threads, max_M > 1)
+//   shallow-M fallback     (total_need * 2 ≤ num_threads, max_M > 1)
 //   phase-2 single-tier    (default M-weighted fallthrough)
 //
 // Three additional tags, `kVerticalFusionBF16`, `kVerticalFusionWOQ`,
 // and `kVerticalFusionDQINT8`, are set by the vertical-fusion executor
-// `flat_m_tile_pipeline_bf16` when it commits to the fused
+// `try_fused_m_tile_core` when it commits to the fused
 // W13→gated-act→W2 path (engaged by the
 // `group_matmul_fused_moe_execute` dispatcher when its eligibility
 // gate passes and `ZENDNNL_GRP_MATMUL_M_TILE_VERTICAL_FUSION ∈ {0,1}`).
@@ -311,13 +311,13 @@ inline std::atomic<int> s_grp_matmul_m_tile_pipeline_scratch_kb_override {
 //                               scope — no per-slice mallocs.
 // Tests use these tags to assert vertical fusion actually engaged on
 // shapes it was designed for, and that it fell back to legacy
-// two-pass (any of the four `flat_m_tile` tags) on shapes where the
+// two-pass (any of the four `m_tile_execute` tags) on shapes where the
 // gate fails.
 //
 // Tests need to assert *which* branch fired on a given shape so the
 // gating heuristic can evolve without silently regressing the
 // out-of-the-box auto policy.  This is the same capture-gated atomic
-// pattern as `s_capture_gemm_mode` / `s_last_group_matmul_direct_*`
+// pattern as `s_capture_execution_path` / `s_last_group_matmul_direct_*`
 // in `group_matmul_parallel_common.hpp`: tests arm the flag via
 // `MTilePathCaptureGuard` in `moe_test_utils.hpp` and read the tag
 // after the dispatcher call.
@@ -467,15 +467,15 @@ inline int get_grp_matmul_m_tile_slice_target() {
 }
 
 // ── ALGO 2 (M-tile) regime classifier ──────────────────────────────────
-// ALGO 2 (`flat_m_tile`) is a PURE M-tile executor (multi-tier hybrid +
+// ALGO 2 (`m_tile_execute`) is a PURE M-tile executor (multi-tier hybrid +
 // Phase-2 single-tier).  The two non-M-tile regimes it historically
-// handled via internal fallbacks — the wide-N memory-bound fallback
+// handled via internal fallbacks — the shallow-M fallback
 // (sequential full-team, ALGO-1-equivalent) and the experts-exceed-threads
 // regime (per-expert, ALGO-5-equivalent) — are no longer chosen inside
-// flat_m_tile for AUTO.  This classifier lets `auto_select_algo` (ALGO 0)
+// m_tile_execute for AUTO.  This classifier lets `auto_select_algo` (ALGO 0)
 // detect those regimes at SELECTION time and route them to the dedicated
-// algos (ALGO 1 / ALGO 3) so AUTO reproduces the executor flat_m_tile used
-// to pick internally.  The gates mirror flat_m_tile's old internal gates
+// algos (ALGO 1 / ALGO 3) so AUTO reproduces the executor m_tile_execute used
+// to pick internally.  The gates mirror m_tile_execute's old internal gates
 // EXACTLY (same kSliceTarget, same total_need / max_M math) so the routing
 // is parity-preserving, not coincidental:
 //   * kManyExperts — `active_ops > num_threads`.  M-tile cannot give
@@ -483,14 +483,14 @@ inline int get_grp_matmul_m_tile_slice_target() {
 //                    N-tile executor (ALGO 3), which parallelises within
 //                    each expert by column-slicing instead of row-slicing.
 //                    Falls to ALGO 1 when the shape is not N-tile-safe.
-//   * kWideN       — `max_M > 1 && total_need*2 <= num_threads`, where
+//   * kShallowM       — `max_M > 1 && total_need*2 <= num_threads`, where
 //                    `total_need = Σ_active min(M[i], ceil(M[i]/kSliceTarget))`.
 //                    M is too shallow to feed the slicer; AUTO routes to
 //                    ALGO 1 (sequential full-team).
 //   * kMTile       — everything else (multi-tier or single-tier M-tile).
-enum class m_tile_regime { kMTile, kWideN, kManyExperts };
+enum class MTileRegime { kMTile, kShallowM, kManyExperts };
 
-inline m_tile_regime classify_m_tile_regime(
+inline MTileRegime classify_m_tile_regime(
         const std::vector<int> &M, int num_threads) {
     const int kSliceTarget = get_grp_matmul_m_tile_slice_target();
     int active_ops = 0;
@@ -505,10 +505,10 @@ inline m_tile_regime classify_m_tile_regime(
                         (static_cast<int64_t>(m) + kSliceTarget - 1)
                                 / kSliceTarget));
     }
-    if (active_ops > num_threads) return m_tile_regime::kManyExperts;
+    if (active_ops > num_threads) return MTileRegime::kManyExperts;
     if (max_M > 1 && total_need * 2 <= static_cast<int64_t>(num_threads))
-        return m_tile_regime::kWideN;
-    return m_tile_regime::kMTile;
+        return MTileRegime::kShallowM;
+    return MTileRegime::kMTile;
 }
 
 inline int get_grp_matmul_m_tile_hybrid_min_max_m() {
@@ -633,26 +633,26 @@ inline int get_grp_matmul_m_tile_pipeline_scratch_kb() {
 // Section H.4 — M-tile executor forward declarations
 // =====================================================================
 //
-// `flat_m_tile` is defined in `group_matmul_m_tile.cpp` (Section B) and
-// `flat_m_tile_pipeline_bf16` in `fused_moe/vertical_fusion_pipeline.cpp`.
+// `m_tile_execute` is defined in `group_matmul_m_tile.cpp` (Section B) and
+// `try_fused_m_tile_core` in `fused_moe/vertical_fusion_pipeline.cpp`.
 // They are called from:
-//   * `group_matmul_dispatch.cpp` — dispatcher invokes `flat_m_tile`
+//   * `group_matmul_dispatch.cpp` — dispatcher invokes `m_tile_execute`
 //     when ALGO 2 wins the per-call route.
 //   * `group_matmul_fused_moe.cpp` — `try_run_fused_moe_m_tile_
-//     pipeline_bf16` invokes `flat_m_tile_pipeline_bf16` when the
+//     pipeline_bf16` invokes `try_fused_m_tile_core` when the
 //     vertical fusion eligibility gate passes.
 
 /// ALGO 2 — M-tile parallel GEMM (legacy single-matmul executor).
 /// Defined in `group_matmul_m_tile.cpp` (Section B).
 ///
-/// `gemm_mode_out` (optional): the executor writes the concrete branch it
+/// `execution_path_out` (optional): the executor writes the concrete branch it
 /// actually ran — one of `"flat_m_tile_multitier"`, `"flat_m_tile_single_tier"`,
 /// `"flat_m_tile_seq_clamp"` (the many-experts sequential-full-team clamp,
 /// which is ALGO-1 behaviour), or `"flat_m_tile_skip"` (no-op early return:
 /// empty call, `num_threads <= 0`, or no active expert — nothing executed;
 /// maps to `exec_algo=0`) — so the post-exec `[GRP_MATMUL.CALL]` line and
-/// benchdnn/profiler output reveal the real path (mirrors `flat_n_tile`).
-void flat_m_tile(const std::vector<char> &layout,
+/// benchdnn/profiler output reveal the real path (mirrors `n_tile_execute`).
+void m_tile_execute(const std::vector<char> &layout,
         const std::vector<bool> &transA, const std::vector<bool> &transB,
         const std::vector<int> &M, const std::vector<int> &N,
         const std::vector<int> &K, const std::vector<float> &alpha,
@@ -663,9 +663,9 @@ void flat_m_tile(const std::vector<char> &layout,
         grp_matmul_gated_act_t fused_act, data_type_t act_dtype,
         const std::vector<bool> &is_weights_const,
         std::vector<matmul_params> &params, int num_threads,
-        const char **gemm_mode_out = nullptr);
+        const char **execution_path_out = nullptr);
 
-// NOTE: `flat_m_tile_pipeline_bf16` and `try_flat_m_tile_pipeline_bf16`,
+// NOTE: `try_fused_m_tile_core` and `try_fused_m_tile`,
 // the fused-MoE vertical-fusion pipeline, are declared in
 // `fused_moe/vertical_fusion_pipeline.hpp`.
 
@@ -685,7 +685,7 @@ void flat_m_tile(const std::vector<char> &layout,
 //
 // Previously a private static helper in `group_matmul_dispatch.cpp`;
 // hoisted to inline in `group_matmul_parallel_common.hpp` so BOTH the
-// legacy dispatcher (`group_matmul_run_parallel_dispatch`) AND the
+// legacy dispatcher (`group_matmul_execute`) AND the
 // MoE vertical-fusion dispatcher fork
 // (`group_matmul_fused_moe_execute`) could use the same predicate
 // for engaging an M-tile-based path on Op1 / Op2.  Now moved here
@@ -714,7 +714,7 @@ void flat_m_tile(const std::vector<char> &layout,
 // N-tile safety (ALGO 3 + custom kernel can consume a prepacked
 // weight); the M-tile path (ALGO 2) always calls with the default
 // false because it has no prepacked-weight consumption path.
-inline bool check_m_tile_safe(const std::vector<char> &layout,
+inline bool m_tile_supported(const std::vector<char> &layout,
         const std::vector<int> &M, const std::vector<matmul_params> &params,
         int num_ops, bool allow_prepacked_b = false) {
     // Dtype-uniformity reference = the FIRST ACTIVE expert, not params[0].
@@ -773,8 +773,8 @@ inline bool check_m_tile_safe(const std::vector<char> &layout,
         // AOCL-DLP-blocked and GGML unpack+reorder outputs, whose physical
         // layout the CK kernel cannot read), so the carve-out ALSO requires
         // lowoha_algo==moe_custom_kernel — matching the CK-VNNI classifier in
-        // flat_n_tile and the CK-only-or-fail guard.  (The N-tile path itself
-        // still re-validates the reordered-weight case in `check_n_tile_extra`,
+        // n_tile_execute and the CK-only-or-fail guard.  (The N-tile path itself
+        // still re-validates the reordered-weight case in `n_tile_supported`,
         // which column-slices the weight.)  Everything else still requires
         // plain row-major ('n') + unpacked (pack_format_b == 0).
         const bool reordered_pergroup_dyn_s8
@@ -803,7 +803,7 @@ inline bool check_m_tile_safe(const std::vector<char> &layout,
         const bool aocl_prepacked_f16 = params[i].dtypes.src == data_type_t::f16
                 && params[i].dtypes.wei == data_type_t::f16
                 && params[i].postop_.empty();
-        // Static U8xS8 post-ops are validated by check_n_tile_extra (which has
+        // Static U8xS8 post-ops are validated by n_tile_supported (which has
         // N) and by the effective CK gate. Do not require an empty chain here:
         // PR #745's supported unary and dense mul+add epilogues must remain
         // routable after an AOCL-prepacked weight is introduced.
@@ -843,10 +843,10 @@ inline bool check_m_tile_safe(const std::vector<char> &layout,
         // M-tile here via `reordered_pergroup_static_s8` above — M-tile consumes
         // the whole weight per expert, so the non-fused GGML path runs ALGO 2
         // instead of demoting to ALGO 1.  N-tile still rejects it: its
-        // `check_n_tile_extra` column-slices the weight, which the 'r' reorder
+        // `n_tile_supported` column-slices the weight, which the 'r' reorder
         // does not permit, so GGML on N-tile takes the full-N ALGO 1 path.)  This
         // stays off the per-token-only custom INT8 microkernel: M-tile never
-        // invokes it, and flat_n_tile forces per-group onto its AOCL do_tile path.
+        // invokes it, and n_tile_execute forces per-group onto its AOCL execute_tile path.
         for (const auto &po : params[i].postop_) {
             if (po.po_type == post_op_type_t::softmax
                     || po.po_type == post_op_type_t::pooling) {

@@ -122,11 +122,11 @@ protected:
         matmul_config_t::instance().set_grp_auto_mixed_inplace(mixed);
     }
 
-    static prepack::aocl_dlp::AoclDlpPackProbeStats warm(
+    static prepack::aocl_dlp::PackStats warm(
             PaddedWeights &w, size_t capacity, bool allow_inplace) {
-        prepack::aocl_dlp::AoclDlpPackProbeStats st;
-        EXPECT_EQ(prepack::aocl_dlp::warm_pack_all_aocl_dlp_experts_sym_quant(
-                          w.ptrs, w.K, w.N, w.ldb, w.transB,
+        prepack::aocl_dlp::PackStats st;
+        EXPECT_EQ(prepack::aocl_dlp::warm_aocl_weight_cache_sym_quant(w.ptrs,
+                          w.K, w.N, w.ldb, w.transB,
                           /*is_weights_const=*/std::vector<bool> {},
                           /*total_count=*/kExperts, data_type_t::s8, st,
                           /*group_size=*/0, capacity, allow_inplace),
@@ -223,7 +223,7 @@ TEST_F(Int8InPlaceWarm, StaticAsymmetricCkMustNotCrossWarmSymQuantInPlace) {
     PaddedWeights w;
     const std::vector<int> M(kExperts, 5);
     const std::vector<bool> iwc(kExperts, true);
-    prepack::PrepackParams pp;
+    prepack::PrepackRequest pp;
     pp.weight = &w.ptrs;
     pp.K = &w.K;
     pp.N = &w.N;
@@ -247,7 +247,7 @@ TEST_F(Int8InPlaceWarm, StaticAsymmetricCkMustNotCrossWarmSymQuantInPlace) {
     moe_test_utils::CustomKernelInt8Override ck_int8(true);
     set_mode(/*wc=*/2, /*mixed=*/true);
 
-    prepack::prepack_for_algo_3(pp);
+    prepack::prepack_n_tile(pp);
 
     EXPECT_FALSE(w.any_mutated())
             << "static asymmetric U8xS8 has no AOCL sym-quant consumer; "
@@ -433,7 +433,7 @@ TEST_F(Int8InPlaceWarm, InPlaceDeclarationMustCoverTheQueriedSize) {
 #if ZENDNNL_DEPENDS_AOCLDLP
 /// ALGO 3 splits each expert's N across the team and hands the AOCL backend a
 /// COLUMN SLICE of the weight: base `weight[e] + col_start * ldb`, `n =
-/// n_tile`, `ldb` unchanged.  `do_tile` re-anchors every other per-tile field
+/// n_tile`, `ldb` unchanged.  `execute_tile` re-anchors every other per-tile field
 /// to that slice (weight scale, bias, dst); the declared capacity has to be
 /// re-anchored too, because it describes the WHOLE expert weight and there is
 /// no capacity that describes a slice.
@@ -633,7 +633,7 @@ TEST_F(Int8InPlaceWarm, EmptyCrossWarmMustNotLicenseTheInPlacePrompt) {
     const std::vector<int> K(kE, kKf), N(kE, kNf), ldb(kE, kNf), M(kE, 4);
     const std::vector<bool> transB(kE, false), iwc(kE, true);
 
-    prepack::PrepackParams pp;
+    prepack::PrepackRequest pp;
     pp.weight = &wptr;
     pp.K = &K;
     pp.N = &N;
@@ -660,7 +660,7 @@ TEST_F(Int8InPlaceWarm, EmptyCrossWarmMustNotLicenseTheInPlacePrompt) {
     reset_grp_matmul_caches();
     set_mode(/*wc=*/2, /*mixed=*/true);
 
-    prepack::prepack_for_algo_1(pp);
+    prepack::prepack_sequential(pp);
 
     EXPECT_EQ(matmul_config_t::instance().get_weight_cache(), 1)
             << "cross-warm packed nothing (no AVX-512-FP16, so the CK warm "

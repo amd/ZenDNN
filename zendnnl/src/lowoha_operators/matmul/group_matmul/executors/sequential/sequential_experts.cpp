@@ -32,7 +32,7 @@ namespace detail {
 
 // ── ALGO=1: sequential — serial over experts ────────────────────────────
 
-void sequential_experts(const std::vector<char> &layout,
+void sequential_execute(const std::vector<char> &layout,
         const std::vector<bool> &transA, const std::vector<bool> &transB,
         const std::vector<int> &M, const std::vector<int> &N,
         const std::vector<int> &K, const std::vector<float> &alpha,
@@ -43,7 +43,7 @@ void sequential_experts(const std::vector<char> &layout,
         const std::vector<bool> &is_weights_const,
         std::vector<matmul_params> &params, int num_threads,
         grp_matmul_gated_act_t fused_act, data_type_t act_dtype,
-        const char **gemm_mode_out) {
+        const char **execution_path_out) {
 
     const size_t num_ops = M.size();
     if (num_ops == 0 || num_threads <= 0) { return; }
@@ -56,7 +56,7 @@ void sequential_experts(const std::vector<char> &layout,
     // (legacy callers, `total = active = M.size()` after
     // `build_prepack_params`) AND the full prepack-extras pool when
     // the framework opted into `total > active`.  The module owns its
-    // own AOCL DLP backend gating via `resolve_kernel()`.
+    // own AOCL DLP backend gating via `resolve_matmul_backend()`.
     //
     // `num_threads` is forwarded so `cross_warm` inside prepack.cpp can
     // compute `stable = aocl_stable_n_thr(num_threads, max_N)` and
@@ -73,16 +73,17 @@ void sequential_experts(const std::vector<char> &layout,
     // correct only for the wide arena; a tight fused swiglu splits on 2.
     // The prompt call has `ldc` and `N` in hand, so resolve it here
     // through the same helper decode uses.
-    group_matmul_prepack::prepack_for_algo_1(
+    group_matmul_prepack::prepack_sequential(
             group_matmul_prepack::build_prepack_params(weight, K, N, ldb,
                     transB, is_weights_const, params, M,
-                    grp_matmul_custom_kernel_effective(params, M, N, fused_act),
+                    group_matmul_custom_kernel_candidate(
+                            params, M, N, fused_act),
                     num_threads,
-                    algo3_decode_nr_align(M, N, ldc, fused_act, params),
+                    n_tile_decode_nr_align(M, N, ldc, fused_act, params),
                     fused_act, act_dtype,
                     /*transA=*/&transA, /*alpha=*/&alpha, /*beta=*/&beta));
 
-    matmul_algo_t algo = resolve_kernel();
+    matmul_algo_t algo = resolve_matmul_backend();
 
     for (size_t i = 0; i < num_ops; ++i) {
         // Inactive experts (M<=0) are padded placeholder slots that may carry
@@ -94,7 +95,7 @@ void sequential_experts(const std::vector<char> &layout,
         execute_expert_slice(layout[i], transA[i], transB[i], M[i], N[i], K[i],
                 alpha[i], src[i], lda[i], weight[i], ldb[i], bias[i], beta[i],
                 dst[i], ldc[i], is_weights_const[i], num_threads, params[i],
-                resolve_expert_kernel(1, algo, params[i]));
+                resolve_expert_backend(1, algo, params[i]));
     }
     // Activation is deferred out of the expert loop rather than applied per
     // expert while dst[i] is still hot.
@@ -117,11 +118,11 @@ void sequential_experts(const std::vector<char> &layout,
                     &act_params, dst, M, N, ldc, act_dtype, num_threads)
                 != status_t::success) {
             // Validation is all-or-nothing across experts, so a refusal here
-            // means NOTHING was activated. `sequential_experts` is void, so
-            // signal through the gemm_mode sentinel the caller already
+            // means NOTHING was activated. `sequential_execute` is void, so
+            // signal through the execution_path sentinel the caller already
             // matches by `error_` prefix.
-            if (gemm_mode_out != nullptr) {
-                *gemm_mode_out = "error_sequential_act_refused";
+            if (execution_path_out != nullptr) {
+                *execution_path_out = "error_sequential_act_refused";
             }
             return;
         }

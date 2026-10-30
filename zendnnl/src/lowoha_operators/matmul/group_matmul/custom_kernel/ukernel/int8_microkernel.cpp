@@ -307,8 +307,8 @@ static inline __m512 load_bias_f32(
 // MR×NV s32 accumulator register footprint; `noinline` prevents the
 // compiler from duplicating the body at every dispatch site.
 // ─────────────────────────────────────────────────────────────────────
-template <int MR, int NV, IntCompute Compute, ActKind Act,
-        DstDt Dst = DstDt::kBf16>
+template <int MR, int NV, IntCompute Compute, ActivationKind Act,
+        OutputType Dst = OutputType::kBf16>
 ZENDNNL_TARGET_NOINLINE("avx512f,avx512vnni,avx512bw,avx512vl,avx512dq,fma")
 static void ukernel_impl(const uint8_t *__restrict A, int lda,
         const int8_t *__restrict Bpacked, const void *__restrict src_scale,
@@ -319,7 +319,7 @@ static void ukernel_impl(const uint8_t *__restrict A, int lda,
         int ldc_tight, int K) {
 
     static_assert(NV == 2 || NV == 4, "NV must be 2 or 4");
-    static_assert(Act == ActKind::none || (NV % 2 == 0),
+    static_assert(Act == ActivationKind::none || (NV % 2 == 0),
             "gated-activation epilogue requires even NV");
     static_assert(
             Compute == IntCompute::kS8_Sym || Compute == IntCompute::kU8_Asym,
@@ -328,9 +328,9 @@ static void ukernel_impl(const uint8_t *__restrict A, int lda,
     // the in-register pair-store helpers — mirror of the bf16 sibling,
     // FP32 dst is only valid for `Act = none`.  `select_int8_ukernel`
     // returns nullptr for any (gated, kF32) tuple so the dispatcher's
-    // `fill_kfn_table_int8` refuses the call cleanly before reaching
+    // `fill_kernel_table_int8` refuses the call cleanly before reaching
     // here; the static_assert is the compile-time backstop.
-    static_assert(Act == ActKind::none || Dst == DstDt::kBf16,
+    static_assert(Act == ActivationKind::none || Dst == OutputType::kBf16,
             "Gated-activation kinds (swiglu_oai_mul, silu_and_mul, "
             "gelu_and_mul) are BF16-dst only");
 
@@ -722,8 +722,9 @@ static void ukernel_impl(const uint8_t *__restrict A, int lda,
     // (not a lambda) so it runs under this function's target attribute,
     // and `src_zp[m]` is read only on the asym branch where the
     // dispatcher guarantees a non-null `src_zp`.
-    if constexpr (Act == ActKind::swiglu_oai_mul || Act == ActKind::silu_and_mul
-            || Act == ActKind::gelu_and_mul) {
+    if constexpr (Act == ActivationKind::swiglu_oai_mul
+            || Act == ActivationKind::silu_and_mul
+            || Act == ActivationKind::gelu_and_mul) {
         // Gated acts always write half-width BF16 to the tight dst
         // (Dst == kBf16 enforced by the static_assert at function head).
         bfloat16_t *__restrict Cout_tight
@@ -760,19 +761,19 @@ static void ukernel_impl(const uint8_t *__restrict A, int lda,
                         bias_hi, has_bias);
                 bfloat16_t *dst = Cout_tight
                         + static_cast<size_t>(m) * ldc_tight + p * 16;
-                if constexpr (Act == ActKind::swiglu_oai_mul) {
+                if constexpr (Act == ActivationKind::swiglu_oai_mul) {
                     swiglu_oai_store_pair_int(lo, hi, dst);
-                } else if constexpr (Act == ActKind::silu_and_mul) {
+                } else if constexpr (Act == ActivationKind::silu_and_mul) {
                     silu_and_mul_store_pair_int(lo, hi, dst);
-                } else { // ActKind::gelu_and_mul
+                } else { // ActivationKind::gelu_and_mul
                     gelu_and_mul_store_pair_int(lo, hi, dst);
                 }
             }
         }
     } else {
-        // Act = none — wide store, BF16 (DstDt::kBf16) or FP32
-        // (DstDt::kF32).  The two differ only in the final narrow/store.
-        static_assert(Act == ActKind::none,
+        // Act = none — wide store, BF16 (OutputType::kBf16) or FP32
+        // (OutputType::kF32).  The two differ only in the final narrow/store.
+        static_assert(Act == ActivationKind::none,
                 "int8 ukernel only supports {none, swiglu, silu, gelu}");
 #pragma GCC unroll 8
         for (int m = 0; m < MR; ++m) {
@@ -795,17 +796,17 @@ static void ukernel_impl(const uint8_t *__restrict A, int lda,
                         _mm512_mul_ps(src_scale_m, wei_scale_v[v]), bias_cur,
                         has_bias);
                 f = apply_int8_postops(f, epilogue, m, v);
-                if constexpr (Dst == DstDt::kBf16) {
+                if constexpr (Dst == OutputType::kBf16) {
                     bfloat16_t *dst = static_cast<bfloat16_t *>(Cout_void)
                             + static_cast<size_t>(m) * ldc + v * 16;
                     _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst),
                             f32_to_bf16x16(f));
-                } else if constexpr (Dst == DstDt::kF32) {
+                } else if constexpr (Dst == OutputType::kF32) {
                     float *dst = static_cast<float *>(Cout_void)
                             + static_cast<size_t>(m) * ldc + v * 16;
                     _mm512_storeu_ps(dst, f);
                 } else {
-                    static_assert(Dst == DstDt::kU8,
+                    static_assert(Dst == OutputType::kU8,
                             "int8 ukernel act=none dst must be bf16, f32, or "
                             "u8");
                     uint8_t *dst = static_cast<uint8_t *>(Cout_void)
@@ -831,7 +832,7 @@ static void ukernel_impl(const uint8_t *__restrict A, int lda,
 #else
 #define ZENDNNL_INT8_NV2_ACC_BARRIER(lo, hi) asm("" : "+v"(lo), "+v"(hi))
 #endif
-template <int MR, ActKind Act, DstDt Dst = DstDt::kBf16>
+template <int MR, ActivationKind Act, OutputType Dst = OutputType::kBf16>
 ZENDNNL_TARGET_NOINLINE("avx512f,avx512vnni,avx512bw,avx512vl,avx512dq,fma")
 static void ukernel_impl_nv2_sym_scalar(const uint8_t *__restrict A, int lda,
         const int8_t *__restrict Bpacked, const void *__restrict src_scale,
@@ -841,7 +842,7 @@ static void ukernel_impl_nv2_sym_scalar(const uint8_t *__restrict A, int lda,
         void *__restrict Cout_void, int ldc, void *__restrict Cout_tight_void,
         int ldc_tight, int K) {
     static_assert(MR >= 1 && MR <= 12, "NV=2 scalar kernel covers MR 1..12");
-    static_assert(Act == ActKind::none || Dst == DstDt::kBf16,
+    static_assert(Act == ActivationKind::none || Dst == OutputType::kBf16,
             "Gated activations are BF16-dst only");
     (void)src_zp; // symmetric path uses the constant 128 compensation.
 
@@ -922,8 +923,9 @@ static void ukernel_impl_nv2_sym_scalar(const uint8_t *__restrict A, int lda,
     const __m512 bias1
             = has_bias ? _mm512_loadu_ps(bias_f32 + 16) : _mm512_setzero_ps();
 
-    if constexpr (Act == ActKind::swiglu_oai_mul || Act == ActKind::silu_and_mul
-            || Act == ActKind::gelu_and_mul) {
+    if constexpr (Act == ActivationKind::swiglu_oai_mul
+            || Act == ActivationKind::silu_and_mul
+            || Act == ActivationKind::gelu_and_mul) {
         auto *Cout_tight = static_cast<bfloat16_t *>(Cout_tight_void);
 #define ZENDNNL_INT8_NV2_SYM_STORE_GATED(r) \
     if constexpr (MR > r) { \
@@ -934,9 +936,9 @@ static void ukernel_impl_nv2_sym_scalar(const uint8_t *__restrict A, int lda,
         const __m512 hi = dequant_finish(c##r##1, comp1, \
                 _mm512_mul_ps(src_scale_m, wei_scale_v[1]), bias1, has_bias); \
         bfloat16_t *dst = Cout_tight + static_cast<size_t>(r) * ldc_tight; \
-        if constexpr (Act == ActKind::swiglu_oai_mul) { \
+        if constexpr (Act == ActivationKind::swiglu_oai_mul) { \
             swiglu_oai_store_pair_int(lo, hi, dst); \
-        } else if constexpr (Act == ActKind::silu_and_mul) { \
+        } else if constexpr (Act == ActivationKind::silu_and_mul) { \
             silu_and_mul_store_pair_int(lo, hi, dst); \
         } else { \
             gelu_and_mul_store_pair_int(lo, hi, dst); \
@@ -956,7 +958,7 @@ static void ukernel_impl_nv2_sym_scalar(const uint8_t *__restrict A, int lda,
         ZENDNNL_INT8_NV2_SYM_STORE_GATED(11)
 #undef ZENDNNL_INT8_NV2_SYM_STORE_GATED
     } else {
-        static_assert(Act == ActKind::none,
+        static_assert(Act == ActivationKind::none,
                 "int8 NV=2 scalar kernel only supports known acts");
 #define ZENDNNL_INT8_NV2_SYM_STORE_NONE(r) \
     if constexpr (MR > r) { \
@@ -966,20 +968,20 @@ static void ukernel_impl_nv2_sym_scalar(const uint8_t *__restrict A, int lda,
                 _mm512_mul_ps(src_scale_m, wei_scale_v[0]), bias0, has_bias); \
         const __m512 hi = dequant_finish(c##r##1, comp1, \
                 _mm512_mul_ps(src_scale_m, wei_scale_v[1]), bias1, has_bias); \
-        if constexpr (Dst == DstDt::kBf16) { \
+        if constexpr (Dst == OutputType::kBf16) { \
             auto *dst = static_cast<bfloat16_t *>(Cout_void) \
                     + static_cast<size_t>(r) * ldc; \
             _mm256_storeu_si256( \
                     reinterpret_cast<__m256i *>(dst), f32_to_bf16x16(lo)); \
             _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst + 16), \
                     f32_to_bf16x16(hi)); \
-        } else if constexpr (Dst == DstDt::kF32) { \
+        } else if constexpr (Dst == OutputType::kF32) { \
             auto *dst = static_cast<float *>(Cout_void) \
                     + static_cast<size_t>(r) * ldc; \
             _mm512_storeu_ps(dst, lo); \
             _mm512_storeu_ps(dst + 16, hi); \
         } else { \
-            static_assert(Dst == DstDt::kU8, \
+            static_assert(Dst == OutputType::kU8, \
                     "int8 NV=2 scalar act=none dst must be bf16, f32, or u8"); \
             auto *dst = static_cast<uint8_t *>(Cout_void) \
                     + static_cast<size_t>(r) * ldc; \
@@ -1108,7 +1110,7 @@ static void ukernel_accum_nv2_sym_scalar(const uint8_t *__restrict A, int lda,
 //   each × Act ∈ {none, swiglu, silu, gelu}
 // Total: (12 + 8 + 6 × 2) × 4 = 128 BF16-dst specializations, all
 // `noinline`.  The `act=none` cells additionally instantiate an
-// FP32-dst variant (`DstDt::kF32`) via `select_none<kF32>`; gated
+// FP32-dst variant (`OutputType::kF32`) via `select_none<kF32>`; gated
 // acts are BF16-dst only (`select_int8_ukernel` returns nullptr for
 // any gated + f32 tuple, mirroring the bf16 sibling).
 
@@ -1122,7 +1124,7 @@ static void ukernel_accum_nv2_sym_scalar(const uint8_t *__restrict A, int lda,
 // easy to audit and keeps the dispatcher independent of any macro
 // expansion subtleties.
 
-template <ActKind Act, DstDt Dst>
+template <ActivationKind Act, OutputType Dst>
 static int8_ukernel_fn_t select_nv2_sym(int MR) {
     switch (MR) {
         case 1: return ukernel_impl_nv2_sym_scalar<1, Act, Dst>;
@@ -1141,7 +1143,7 @@ static int8_ukernel_fn_t select_nv2_sym(int MR) {
     }
 }
 
-template <ActKind Act, DstDt Dst>
+template <ActivationKind Act, OutputType Dst>
 static int8_ukernel_fn_t select_nv2_asym(int MR) {
     switch (MR) {
         case 1: return ukernel_impl<1, 2, IntCompute::kU8_Asym, Act, Dst>;
@@ -1156,7 +1158,7 @@ static int8_ukernel_fn_t select_nv2_asym(int MR) {
     }
 }
 
-template <ActKind Act, DstDt Dst>
+template <ActivationKind Act, OutputType Dst>
 static int8_ukernel_fn_t select_nv4_sym(int MR) {
     switch (MR) {
         case 1: return ukernel_impl<1, 4, IntCompute::kS8_Sym, Act, Dst>;
@@ -1169,7 +1171,7 @@ static int8_ukernel_fn_t select_nv4_sym(int MR) {
     }
 }
 
-template <ActKind Act, DstDt Dst>
+template <ActivationKind Act, OutputType Dst>
 static int8_ukernel_fn_t select_nv4_asym(int MR) {
     switch (MR) {
         case 1: return ukernel_impl<1, 4, IntCompute::kU8_Asym, Act, Dst>;
@@ -1184,17 +1186,17 @@ static int8_ukernel_fn_t select_nv4_asym(int MR) {
 
 // Act=none selector for a given (NV, Compute, Dst).  Only `none`
 // instantiates the FP32-dst axis (gated kinds are BF16-dst only).
-template <DstDt Dst>
+template <OutputType Dst>
 static int8_ukernel_fn_t select_none(int MR, int NV, IntCompute compute) {
     if (NV == 2) {
         return (compute == IntCompute::kS8_Sym)
-                ? select_nv2_sym<ActKind::none, Dst>(MR)
-                : select_nv2_asym<ActKind::none, Dst>(MR);
+                ? select_nv2_sym<ActivationKind::none, Dst>(MR)
+                : select_nv2_asym<ActivationKind::none, Dst>(MR);
     }
     if (NV == 4) {
         return (compute == IntCompute::kS8_Sym)
-                ? select_nv4_sym<ActKind::none, Dst>(MR)
-                : select_nv4_asym<ActKind::none, Dst>(MR);
+                ? select_nv4_sym<ActivationKind::none, Dst>(MR)
+                : select_nv4_asym<ActivationKind::none, Dst>(MR);
     }
     return nullptr;
 }
@@ -1253,32 +1255,35 @@ void finish_int8_accum_nv2_sym_bf16(const int32_t *C, int ldc_c, int M,
     }
 }
 
-int8_ukernel_fn_t select_int8_ukernel(
-        int MR, int NV, IntCompute compute, ActKind act, DstDt dst_dt) {
-    const bool is_gated_act = (act == ActKind::swiglu_oai_mul
-            || act == ActKind::silu_and_mul || act == ActKind::gelu_and_mul);
+int8_ukernel_fn_t select_int8_ukernel(int MR, int NV, IntCompute compute,
+        ActivationKind act, OutputType dst_dt) {
+    const bool is_gated_act = (act == ActivationKind::swiglu_oai_mul
+            || act == ActivationKind::silu_and_mul
+            || act == ActivationKind::gelu_and_mul);
     // Gated activations write half-width BF16 — no FP32-dst counterpart
-    // (mirror of the bf16 sibling's `select_ukernel` guard).  Refuse the
+    // (mirror of the bf16 sibling's `select_bf16_ukernel` guard).  Refuse the
     // (gated, kF32) tuple so the dispatcher falls back cleanly.
-    if (is_gated_act && dst_dt != DstDt::kBf16) { return nullptr; }
+    if (is_gated_act && dst_dt != OutputType::kBf16) { return nullptr; }
 
     // U8 destination exists only for static asymmetric U8xS8. Route directly
     // to the asym selectors so impossible symmetric-U8 specializations are
     // never emitted.
-    if (dst_dt == DstDt::kU8) {
-        if (act != ActKind::none || compute != IntCompute::kU8_Asym)
+    if (dst_dt == OutputType::kU8) {
+        if (act != ActivationKind::none || compute != IntCompute::kU8_Asym)
             return nullptr;
-        if (NV == 2) return select_nv2_asym<ActKind::none, DstDt::kU8>(MR);
-        if (NV == 4) return select_nv4_asym<ActKind::none, DstDt::kU8>(MR);
+        if (NV == 2)
+            return select_nv2_asym<ActivationKind::none, OutputType::kU8>(MR);
+        if (NV == 4)
+            return select_nv4_asym<ActivationKind::none, OutputType::kU8>(MR);
         return nullptr;
     }
 
     // Act = none — branch on dst dtype for the store epilogue.
-    if (act == ActKind::none) {
-        if (dst_dt == DstDt::kF32)
-            return select_none<DstDt::kF32>(MR, NV, compute);
-        if (dst_dt == DstDt::kBf16)
-            return select_none<DstDt::kBf16>(MR, NV, compute);
+    if (act == ActivationKind::none) {
+        if (dst_dt == OutputType::kF32)
+            return select_none<OutputType::kF32>(MR, NV, compute);
+        if (dst_dt == OutputType::kBf16)
+            return select_none<OutputType::kBf16>(MR, NV, compute);
         return nullptr;
     }
 
@@ -1286,52 +1291,56 @@ int8_ukernel_fn_t select_int8_ukernel(
     if (NV == 2) {
         if (compute == IntCompute::kS8_Sym) {
             switch (act) {
-                case ActKind::swiglu_oai_mul:
-                    return select_nv2_sym<ActKind::swiglu_oai_mul,
-                            DstDt::kBf16>(MR);
-                case ActKind::silu_and_mul:
-                    return select_nv2_sym<ActKind::silu_and_mul, DstDt::kBf16>(
-                            MR);
-                case ActKind::gelu_and_mul:
-                    return select_nv2_sym<ActKind::gelu_and_mul, DstDt::kBf16>(
-                            MR);
+                case ActivationKind::swiglu_oai_mul:
+                    return select_nv2_sym<ActivationKind::swiglu_oai_mul,
+                            OutputType::kBf16>(MR);
+                case ActivationKind::silu_and_mul:
+                    return select_nv2_sym<ActivationKind::silu_and_mul,
+                            OutputType::kBf16>(MR);
+                case ActivationKind::gelu_and_mul:
+                    return select_nv2_sym<ActivationKind::gelu_and_mul,
+                            OutputType::kBf16>(MR);
                 default: return nullptr;
             }
         }
         switch (act) {
-            case ActKind::swiglu_oai_mul:
-                return select_nv2_asym<ActKind::swiglu_oai_mul, DstDt::kBf16>(
-                        MR);
-            case ActKind::silu_and_mul:
-                return select_nv2_asym<ActKind::silu_and_mul, DstDt::kBf16>(MR);
-            case ActKind::gelu_and_mul:
-                return select_nv2_asym<ActKind::gelu_and_mul, DstDt::kBf16>(MR);
+            case ActivationKind::swiglu_oai_mul:
+                return select_nv2_asym<ActivationKind::swiglu_oai_mul,
+                        OutputType::kBf16>(MR);
+            case ActivationKind::silu_and_mul:
+                return select_nv2_asym<ActivationKind::silu_and_mul,
+                        OutputType::kBf16>(MR);
+            case ActivationKind::gelu_and_mul:
+                return select_nv2_asym<ActivationKind::gelu_and_mul,
+                        OutputType::kBf16>(MR);
             default: return nullptr;
         }
     }
     if (NV == 4) {
         if (compute == IntCompute::kS8_Sym) {
             switch (act) {
-                case ActKind::swiglu_oai_mul:
-                    return select_nv4_sym<ActKind::swiglu_oai_mul,
-                            DstDt::kBf16>(MR);
-                case ActKind::silu_and_mul:
-                    return select_nv4_sym<ActKind::silu_and_mul, DstDt::kBf16>(
-                            MR);
-                case ActKind::gelu_and_mul:
-                    return select_nv4_sym<ActKind::gelu_and_mul, DstDt::kBf16>(
-                            MR);
+                case ActivationKind::swiglu_oai_mul:
+                    return select_nv4_sym<ActivationKind::swiglu_oai_mul,
+                            OutputType::kBf16>(MR);
+                case ActivationKind::silu_and_mul:
+                    return select_nv4_sym<ActivationKind::silu_and_mul,
+                            OutputType::kBf16>(MR);
+                case ActivationKind::gelu_and_mul:
+                    return select_nv4_sym<ActivationKind::gelu_and_mul,
+                            OutputType::kBf16>(MR);
                 default: return nullptr;
             }
         }
         switch (act) {
-            case ActKind::swiglu_oai_mul:
-                return select_nv4_asym<ActKind::swiglu_oai_mul, DstDt::kBf16>(
-                        MR);
-            case ActKind::silu_and_mul:
-                return select_nv4_asym<ActKind::silu_and_mul, DstDt::kBf16>(MR);
-            case ActKind::gelu_and_mul:
-                return select_nv4_asym<ActKind::gelu_and_mul, DstDt::kBf16>(MR);
+            case ActivationKind::swiglu_oai_mul:
+                return select_nv4_asym<ActivationKind::swiglu_oai_mul,
+                        OutputType::kBf16>(MR);
+            case ActivationKind::silu_and_mul:
+                return select_nv4_asym<ActivationKind::silu_and_mul,
+                        OutputType::kBf16>(MR);
+            case ActivationKind::gelu_and_mul:
+                return select_nv4_asym<ActivationKind::gelu_and_mul,
+                        OutputType::kBf16>(MR);
             default: return nullptr;
         }
     }

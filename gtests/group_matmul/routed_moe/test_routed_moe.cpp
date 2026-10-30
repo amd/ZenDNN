@@ -494,9 +494,9 @@ struct da8w8_call {
 /// Records whether a call reached the vector group_matmul_direct surface.
 struct grouped_call_probe {
     std::atomic<bool> &capture
-            = zendnnl::lowoha::matmul::test_api::s_capture_gemm_mode;
+            = zendnnl::lowoha::matmul::test_api::s_capture_execution_path;
     std::atomic<const char *> &last_mode = zendnnl::lowoha::matmul::test_api::
-            s_last_group_matmul_direct_gemm_mode;
+            s_last_group_matmul_direct_execution_path;
 
     grouped_call_probe() { arm(); }
     ~grouped_call_probe() { capture.store(false, std::memory_order_relaxed); }
@@ -1659,9 +1659,9 @@ TEST_F(RoutedMoESuperset, DA8W8DecodeUsesExplicitContract) {
     } env_guard;
     ASSERT_EQ(setenv("ZENDNNL_ENABLE_ROUTED_MOE", "0", 1), 0);
 
-    auto &capture = zendnnl::lowoha::matmul::test_api::s_capture_gemm_mode;
+    auto &capture = zendnnl::lowoha::matmul::test_api::s_capture_execution_path;
     auto &last_mode = zendnnl::lowoha::matmul::test_api::
-            s_last_group_matmul_direct_gemm_mode;
+            s_last_group_matmul_direct_execution_path;
     struct capture_guard_t {
         std::atomic<bool> &capture;
         ~capture_guard_t() { capture.store(false, std::memory_order_relaxed); }
@@ -2365,9 +2365,9 @@ TEST_F(RoutedMoESuperset, UnsupportedSwigluOaiBiasUsesGroupedFallback) {
     zendnnl::lowoha::matmul::grp_matmul_gated_act_params act;
     act.act = zendnnl::lowoha::matmul::grp_matmul_gated_act_t::swiglu_oai_mul;
 
-    auto &capture = zendnnl::lowoha::matmul::test_api::s_capture_gemm_mode;
+    auto &capture = zendnnl::lowoha::matmul::test_api::s_capture_execution_path;
     auto &last_mode = zendnnl::lowoha::matmul::test_api::
-            s_last_group_matmul_direct_gemm_mode;
+            s_last_group_matmul_direct_execution_path;
     struct capture_guard_t {
         std::atomic<bool> &capture;
         ~capture_guard_t() { capture.store(false, std::memory_order_relaxed); }
@@ -2589,7 +2589,7 @@ TEST_F(RoutedMoEGeneric, F32GatedTwoProjectionPipeline) {
 // BF16 MoE layer into the caller's buffers, a second call reads it, and the
 // output matches an out-of-place run bit for bit.
 TEST_F(RoutedMoEGeneric, Bf16FallbackKeepsTheWeightCacheMode) {
-    if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
+    if (!zendnnl::lowoha::matmul::custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "the BF16 custom kernel needs AVX-512 BF16";
     }
     constexpr int M = 8;

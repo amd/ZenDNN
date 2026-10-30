@@ -17,8 +17,8 @@
 /// ALGO 3 — N-tile parallel GEMM, public interface header.
 ///
 /// This header carries the planner-shaped data types AND the public
-/// surface (env override atoms, env getters, `flat_n_tile()` forward
-/// declaration) that the `flat_n_tile()` translation unit, planner
+/// surface (env override atoms, env getters, `n_tile_execute()` forward
+/// declaration) that the `n_tile_execute()` translation unit, planner
 /// gtests, and the top-level dispatcher need to share.  It is
 /// library-internal: not part of the public ZenDNN API and not meant
 /// for inclusion outside `src/lowoha_operators/matmul/group_matmul/`
@@ -35,8 +35,8 @@
 ///   N-tile consumer (executor, dispatcher, gtests) sees them through
 ///   `n_tile/group_matmul_n_tile.hpp`.
 ///
-///   Section A.0  PerThreadScratch — per-thread aligned heap buffer
-///                used by the tight-fused-epilogue path of `do_tile()`.
+///   Section A.0  AlignedTileScratch — per-thread aligned heap buffer
+///                used by the tight-fused-epilogue path of `execute_tile()`.
 ///                Lives here so a future memory-audit gtest can
 ///                exercise `grow_scratch()` directly.
 ///
@@ -67,8 +67,8 @@
 ///                env parsing convention.
 ///
 ///   Section A.5  N-tile shared utilities (`sort_indices_by_m`,
-///                `engage_ntile_custom_kernel`,
-///                `ntile_effective_nr_align`, `auto_pick_n_order`,
+///                `prepare_n_tile_custom_kernel`,
+///                `n_tile_nr_align`, `auto_pick_n_order`,
 ///                `fill_ntile_expert_order`) — free functions at
 ///                namespace scope (NOT in `test_api`) consumed by
 ///                `group_matmul_n_tile.cpp` and any future additional
@@ -76,7 +76,7 @@
 ///                `group_matmul_parallel_common.hpp`.
 ///
 ///   Section A.6  Forward declaration for the N-tile executor
-///                `flat_n_tile()`.  Defined in
+///                `n_tile_execute()`.  Defined in
 ///                `group_matmul_n_tile.cpp`.
 ///
 /// What stays in `group_matmul_n_tile.cpp`:
@@ -85,7 +85,7 @@
 ///                            of one OMP region.
 ///   * Planner functions    — pure decision logic on the structs above.
 ///   * Strategy executors   — OMP-parallel matmul drivers.
-///   * `flat_n_tile()`      — body of the public entry declared in
+///   * `n_tile_execute()`      — body of the public entry declared in
 ///                            Section A.5 above.
 ///
 /// Dependency direction:
@@ -115,7 +115,7 @@
 #include "common/op_config.hpp" // matmul_algo_t
 // `group_matmul_parallel_common.hpp` provides:
 //   * `parse_env_int_strict`            — strict env parsing helper
-//   * `matmul_params` / `data_type_t`   — used by `flat_n_tile()` decl
+//   * `matmul_params` / `data_type_t`   — used by `n_tile_execute()` decl
 //   * `grp_matmul_gated_act_t`          — fused-act argument type
 //   * the inline `using namespace zendnnl::common;` declaration
 //
@@ -161,7 +161,7 @@ using zendnnl::common::matmul_algo_t;
 // gtests, fused-MoE) still observes the constants through
 // `n_tile/group_matmul_n_tile.hpp`.
 
-// NOTE: Section A.0 (`PerThreadScratch`, `grow_scratch`) moved to
+// NOTE: Section A.0 (`AlignedTileScratch`, `grow_scratch`) moved to
 // `common/per_thread_scratch.hpp`, included above.
 
 // =====================================================================
@@ -199,7 +199,7 @@ using zendnnl::common::matmul_algo_t;
 // `group_matmul_parallel_common.hpp` together with the env knobs they
 // read (`get_grp_matmul_n_order` for `fill_ntile_expert_order`,
 // `get_grp_matmul_custom_kernel` (which stays in parallel_common.hpp)
-// for `engage_ntile_custom_kernel`).
+// for `prepare_n_tile_custom_kernel`).
 
 /// Sort `indices[0..n)` by `M[idx]` (asc or desc).  Heap-free; caller
 /// owns the buffer and guarantees `indices.size() >= n` and `M.size() >= n`.
@@ -217,7 +217,7 @@ inline void sort_indices_by_m(
 /// Covers BOTH compute regimes:
 ///
 ///   * BF16 (`dynamic_quant=false`, default): bf16×bf16→bf16 (or
-///     bf16×bf16→f32) — the original `engage_ntile_custom_kernel`
+///     bf16×bf16→f32) — the original `prepare_n_tile_custom_kernel`
 ///     contract.
 ///   * DQ-INT8 (`dynamic_quant=true`, `compute_dtype∈{s8,u8}`):
 ///     hoist-quantised src(s8 or u8) × pre-packed wei(s8) → bf16,
@@ -243,7 +243,7 @@ inline void sort_indices_by_m(
 /// Supported `act`: none, swiglu_oai_mul (fused gate+up → halved out),
 /// silu_and_mul, gelu_and_mul (canonical split-halves; CK arena
 /// pack-permuted at prepack time).
-inline void engage_ntile_custom_kernel(grp_matmul_gated_act_t act,
+inline void prepare_n_tile_custom_kernel(grp_matmul_gated_act_t act,
         data_type_t src_dtype, data_type_t wei_dtype, data_type_t dst_dtype,
         data_type_t act_dtype, data_type_t bias_dtype,
         const std::vector<bool> &transA, const std::vector<bool> &transB,
@@ -313,7 +313,7 @@ inline void engage_ntile_custom_kernel(grp_matmul_gated_act_t act,
 /// and the coarser split produced a per-tile cache key set that no warmer
 /// builds, so every tile missed on the first decode call.  Keying on
 /// `use_custom` makes the split, the warm and the backend agree.
-inline int ntile_effective_nr_align(int backend_nr,
+inline int n_tile_nr_align(int backend_nr,
         const custom_kernel::CallContext &kctx, bool pair_aligned,
         bool ck_will_run) {
     int a = backend_nr;
@@ -458,31 +458,31 @@ inline void fill_ntile_expert_order(int *out, int &out_size, int max_size,
 }
 
 // =====================================================================
-// Section A.6 — flat_n_tile() forward declaration
+// Section A.6 — n_tile_execute() forward declaration
 // =====================================================================
 
 /// ALGO 3 — N-tile parallel GEMM, with optional fused-swiglu-oai
 /// epilogue.  Defined in group_matmul_n_tile.cpp.
 ///
-/// `gemm_mode_out` (optional) receives a static string naming the
-/// concrete path that ran: `"flat_n_tile"`, `"flat_n_tile_custom"`,
+/// `execution_path_out` (optional) receives a static string naming the
+/// concrete path that ran: `"n_tile_execute"`, `"flat_n_tile_custom"`,
 /// `"flat_n_tile_fused_swiglu_oai"`, or `"flat_n_tile_fused_swiglu_oai_custom"`.
 /// The caller is expected to thread this through to its own
-/// gemm_mode_out so benchdnn / profiler output reveals whether the
+/// execution_path_out so benchdnn / profiler output reveals whether the
 /// custom microkernel engaged.
 ///
 /// An ALGO-3 MoE call, or one whose weights only the custom kernel can
 /// read, with more than `kNTilePlanMaxExperts` experts runs as consecutive
-/// expert slices of at most that many; `gemm_mode_out` then names the last
+/// expert slices of at most that many; `execution_path_out` then names the last
 /// slice's path, or the first failing slice's `error_` sentinel, after which
 /// no further slice runs.
 ///
 /// `route` carries the dispatcher's per-call verdicts
 /// (`grp_matmul_call_route`): the MoE family, the custom-kernel weight-cache
 /// mode, and the licence to write that pack in place while AUTO mixed
-/// in-place mode is active (`prepare_grouped_auto_weight_cache`).  Without
+/// in-place mode is active (`prepare_auto_weight_cache`).  Without
 /// one, the executor classifies the call itself and grants no licence.
-void flat_n_tile(const std::vector<char> &layout,
+void n_tile_execute(const std::vector<char> &layout,
         const std::vector<bool> &transA, const std::vector<bool> &transB,
         const std::vector<int> &M, const std::vector<int> &N,
         const std::vector<int> &K, const std::vector<float> &alpha,
@@ -494,7 +494,7 @@ void flat_n_tile(const std::vector<char> &layout,
         std::vector<matmul_params> &params, int num_threads,
         grp_matmul_gated_act_t fused_act = grp_matmul_gated_act_t::none,
         data_type_t act_dtype = data_type_t::none,
-        const char **gemm_mode_out = nullptr,
+        const char **execution_path_out = nullptr,
         const std::vector<void *> *w4a8_s8_weights = nullptr,
         const grp_matmul_call_route *route = nullptr);
 
@@ -505,15 +505,15 @@ void flat_n_tile(const std::vector<char> &layout,
 /// whose address is recycled would otherwise hit a stale entry.  Tests
 /// call this via `reset_grp_matmul_caches()`; a server rotating weights
 /// can call it in a quiescent window.  Not safe to call concurrently with
-/// an in-flight `flat_n_tile`.
+/// an in-flight `n_tile_execute`.
 ///
 /// Named without a `_for_test` suffix deliberately, matching
-/// `clear_custom_kernel_pack_cache()`: the hazard it clears is a
+/// `clear_custom_kernel_pack_cache_bf16()`: the hazard it clears is a
 /// production one (framework allocators recycle weight addresses across
 /// model reload / adapter rotation), and a framework integration has no
 /// other way to invalidate the memo while
 /// `ZENDNNL_MATMUL_WEIGHT_CACHE` is at its default of 1.
-void clear_grp_wei_scale_f32_cache();
+void clear_weight_scale_f32_cache();
 
 } // namespace matmul
 } // namespace lowoha

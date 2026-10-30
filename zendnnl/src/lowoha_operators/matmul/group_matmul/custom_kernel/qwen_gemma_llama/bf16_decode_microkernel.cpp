@@ -34,7 +34,7 @@
 /// before the previous pair's FMAs retire.  Same trick used by
 /// `bf16_brgemm_ukernel.cpp`.
 ///
-/// EPILOGUE FOR ActKind::swiglu_oai_mul (in-register fusion):
+/// EPILOGUE FOR ActivationKind::swiglu_oai_mul (in-register fusion):
 ///
 ///   For each row, the (acc[m][2p], acc[m][2p+1]) pair is
 ///   deinterleaved into 16 gates and 16 ups via vpermt2ps; swiglu_oai
@@ -263,7 +263,7 @@ static inline void silu_and_mul_store_pair(
 // MR×NV register footprint; `noinline` prevents the compiler from
 // duplicating the body at every dispatch site.
 // ─────────────────────────────────────────────────────────────────────
-template <int MR, int NV, ActKind Act, typename DstT,
+template <int MR, int NV, ActivationKind Act, typename DstT,
         bool AccumulateF32 = false>
 ZENDNNL_TARGET_NOINLINE("avx512f,avx512bf16,avx512bw,avx512vl,fma")
 static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
@@ -272,7 +272,7 @@ static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
         void *__restrict Cout_tight_void, int ldc_tight, int K) {
 
     static_assert(NV == 2 || NV == 4, "NV must be 2 or 4");
-    static_assert(Act == ActKind::none || (NV % 2 == 0),
+    static_assert(Act == ActivationKind::none || (NV % 2 == 0),
             "gated-activation epilogue requires even NV");
     static_assert(std::is_same<DstT, bfloat16_t>::value
                     || std::is_same<DstT, float>::value,
@@ -283,15 +283,16 @@ static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
     // pair via `_mm256_storeu_si256` — no FP32 counterpart today, and
     // the downstream consumer (Op2 src in fused MoE) reads BF16.
     // Refusing the (gated_act, FP32) tuple at compile time keeps
-    // `select_ukernel` from accidentally returning a mis-typed
+    // `select_bf16_ukernel` from accidentally returning a mis-typed
     // instantiation; runtime dispatch refuses earlier still (see
-    // `select_ukernel` in this file + the prepare_for_call gate).
-    static_assert(Act == ActKind::none || std::is_same<DstT, bfloat16_t>::value,
+    // `select_bf16_ukernel` in this file + the prepare_for_call gate).
+    static_assert(Act == ActivationKind::none
+                    || std::is_same<DstT, bfloat16_t>::value,
             "Gated-activation kinds (swiglu_oai_mul, silu_and_mul, "
             "gelu_and_mul) are BF16-dst only");
     static_assert(!AccumulateF32
-                    || (Act == ActKind::none && std::is_same<DstT, float>::value
-                            && MR >= 4),
+                    || (Act == ActivationKind::none
+                            && std::is_same<DstT, float>::value && MR >= 4),
             "FP32 accumulation requires Act=none, FP32 dst and one buffer");
 
     // Reinterpret the dispatcher's `void *` outputs as the templated
@@ -615,8 +616,9 @@ static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
     // (g, u) accumulator pair.  Same loop structure, same dst pointer
     // arithmetic, same BF16-dst constraint (enforced by the
     // static_assert above).
-    if constexpr (Act == ActKind::swiglu_oai_mul || Act == ActKind::silu_and_mul
-            || Act == ActKind::gelu_and_mul) {
+    if constexpr (Act == ActivationKind::swiglu_oai_mul
+            || Act == ActivationKind::silu_and_mul
+            || Act == ActivationKind::gelu_and_mul) {
         constexpr int n_pairs = NV / 2; // 1 for NV=2, 2 for NV=4
 #pragma GCC unroll 8
         for (int m = 0; m < MR; ++m) {
@@ -624,13 +626,13 @@ static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
             for (int p = 0; p < n_pairs; ++p) {
                 bfloat16_t *dst = Cout_tight
                         + static_cast<size_t>(m) * ldc_tight + p * 16;
-                if constexpr (Act == ActKind::swiglu_oai_mul) {
+                if constexpr (Act == ActivationKind::swiglu_oai_mul) {
                     swiglu_oai_store_pair(
                             acc[0][m][2 * p], acc[0][m][2 * p + 1], dst);
-                } else if constexpr (Act == ActKind::silu_and_mul) {
+                } else if constexpr (Act == ActivationKind::silu_and_mul) {
                     silu_and_mul_store_pair(
                             acc[0][m][2 * p], acc[0][m][2 * p + 1], dst);
-                } else { // ActKind::gelu_and_mul
+                } else { // ActivationKind::gelu_and_mul
                     gelu_and_mul_store_pair(
                             acc[0][m][2 * p], acc[0][m][2 * p + 1], dst);
                 }
@@ -877,7 +879,7 @@ static void ukernel_silu_bf16_nr32_large_mr(const bfloat16_t *__restrict A,
 
 // ── Function-pointer table dispatch (mirrors select_bf16_brgemm_kernel) ─
 //
-// One entry per supported (MR, NV, Act, DstDt) tuple.  Instantiation set:
+// One entry per supported (MR, NV, Act, OutputType) tuple.  Instantiation set:
 //   NV=2 (NR=32): MR ∈ {1..8} for all families, plus one-B-panel
 //                  plain-BF16 kernels at MR ∈ {9..14}.
 //   NV=4 (NR=64): MR ∈ {1..6} × {(none, BF16), (none, F32), (swiglu, BF16),
@@ -887,126 +889,129 @@ static void ukernel_silu_bf16_nr32_large_mr(const bfloat16_t *__restrict A,
 // Any (gated_act, FP32) tuple is intentionally NOT instantiated — the
 // in-register pair-pack store helpers write BF16 only, and downstream
 // Op2 in fused MoE reads BF16.  The dispatcher refuses those tuples at
-// `prepare_for_call` time (see the `select_ukernel` early-out below
+// `prepare_for_call` time (see the `select_bf16_ukernel` early-out below
 // returning nullptr for that case).
-ukernel_fn_t select_ukernel(int MR, int NV, ActKind act, DstDt dst_dt) {
-    if (dst_dt != DstDt::kBf16 && dst_dt != DstDt::kF32) return nullptr;
+bf16_ukernel_fn_t select_bf16_ukernel(
+        int MR, int NV, ActivationKind act, OutputType dst_dt) {
+    if (dst_dt != OutputType::kBf16 && dst_dt != OutputType::kF32)
+        return nullptr;
     // Refuse the structurally-impossible (gated_act, FP32) combinations
     // before the per-(MR, NV) switch so callers see a clean nullptr.
-    const bool is_gated_act = (act == ActKind::swiglu_oai_mul
-            || act == ActKind::silu_and_mul || act == ActKind::gelu_and_mul);
-    if (is_gated_act && dst_dt != DstDt::kBf16) { return nullptr; }
+    const bool is_gated_act = (act == ActivationKind::swiglu_oai_mul
+            || act == ActivationKind::silu_and_mul
+            || act == ActivationKind::gelu_and_mul);
+    if (is_gated_act && dst_dt != OutputType::kBf16) { return nullptr; }
     if (NV == 2) {
-        if (act == ActKind::swiglu_oai_mul) {
+        if (act == ActivationKind::swiglu_oai_mul) {
             switch (MR) {
                 case 1:
-                    return ukernel_impl<1, 2, ActKind::swiglu_oai_mul,
+                    return ukernel_impl<1, 2, ActivationKind::swiglu_oai_mul,
                             bfloat16_t>;
                 case 2:
-                    return ukernel_impl<2, 2, ActKind::swiglu_oai_mul,
+                    return ukernel_impl<2, 2, ActivationKind::swiglu_oai_mul,
                             bfloat16_t>;
                 case 3:
-                    return ukernel_impl<3, 2, ActKind::swiglu_oai_mul,
+                    return ukernel_impl<3, 2, ActivationKind::swiglu_oai_mul,
                             bfloat16_t>;
                 case 4:
-                    return ukernel_impl<4, 2, ActKind::swiglu_oai_mul,
+                    return ukernel_impl<4, 2, ActivationKind::swiglu_oai_mul,
                             bfloat16_t>;
                 case 5:
-                    return ukernel_impl<5, 2, ActKind::swiglu_oai_mul,
+                    return ukernel_impl<5, 2, ActivationKind::swiglu_oai_mul,
                             bfloat16_t>;
                 case 6:
-                    return ukernel_impl<6, 2, ActKind::swiglu_oai_mul,
+                    return ukernel_impl<6, 2, ActivationKind::swiglu_oai_mul,
                             bfloat16_t>;
                 case 7:
-                    return ukernel_impl<7, 2, ActKind::swiglu_oai_mul,
+                    return ukernel_impl<7, 2, ActivationKind::swiglu_oai_mul,
                             bfloat16_t>;
                 case 8:
-                    return ukernel_impl<8, 2, ActKind::swiglu_oai_mul,
+                    return ukernel_impl<8, 2, ActivationKind::swiglu_oai_mul,
                             bfloat16_t>;
                 default: return nullptr;
             }
         }
-        if (act == ActKind::silu_and_mul) {
+        if (act == ActivationKind::silu_and_mul) {
             switch (MR) {
                 case 1:
-                    return ukernel_impl<1, 2, ActKind::silu_and_mul,
+                    return ukernel_impl<1, 2, ActivationKind::silu_and_mul,
                             bfloat16_t>;
                 case 2:
-                    return ukernel_impl<2, 2, ActKind::silu_and_mul,
+                    return ukernel_impl<2, 2, ActivationKind::silu_and_mul,
                             bfloat16_t>;
                 case 3:
-                    return ukernel_impl<3, 2, ActKind::silu_and_mul,
+                    return ukernel_impl<3, 2, ActivationKind::silu_and_mul,
                             bfloat16_t>;
                 case 4:
-                    return ukernel_impl<4, 2, ActKind::silu_and_mul,
+                    return ukernel_impl<4, 2, ActivationKind::silu_and_mul,
                             bfloat16_t>;
                 case 5:
-                    return ukernel_impl<5, 2, ActKind::silu_and_mul,
+                    return ukernel_impl<5, 2, ActivationKind::silu_and_mul,
                             bfloat16_t>;
                 case 6:
-                    return ukernel_impl<6, 2, ActKind::silu_and_mul,
+                    return ukernel_impl<6, 2, ActivationKind::silu_and_mul,
                             bfloat16_t>;
                 case 7:
-                    return ukernel_impl<7, 2, ActKind::silu_and_mul,
+                    return ukernel_impl<7, 2, ActivationKind::silu_and_mul,
                             bfloat16_t>;
                 case 8:
-                    return ukernel_impl<8, 2, ActKind::silu_and_mul,
+                    return ukernel_impl<8, 2, ActivationKind::silu_and_mul,
                             bfloat16_t>;
                 default: return nullptr;
             }
         }
-        if (act == ActKind::gelu_and_mul) {
+        if (act == ActivationKind::gelu_and_mul) {
             switch (MR) {
                 case 1:
-                    return ukernel_impl<1, 2, ActKind::gelu_and_mul,
+                    return ukernel_impl<1, 2, ActivationKind::gelu_and_mul,
                             bfloat16_t>;
                 case 2:
-                    return ukernel_impl<2, 2, ActKind::gelu_and_mul,
+                    return ukernel_impl<2, 2, ActivationKind::gelu_and_mul,
                             bfloat16_t>;
                 case 3:
-                    return ukernel_impl<3, 2, ActKind::gelu_and_mul,
+                    return ukernel_impl<3, 2, ActivationKind::gelu_and_mul,
                             bfloat16_t>;
                 case 4:
-                    return ukernel_impl<4, 2, ActKind::gelu_and_mul,
+                    return ukernel_impl<4, 2, ActivationKind::gelu_and_mul,
                             bfloat16_t>;
                 case 5:
-                    return ukernel_impl<5, 2, ActKind::gelu_and_mul,
+                    return ukernel_impl<5, 2, ActivationKind::gelu_and_mul,
                             bfloat16_t>;
                 case 6:
-                    return ukernel_impl<6, 2, ActKind::gelu_and_mul,
+                    return ukernel_impl<6, 2, ActivationKind::gelu_and_mul,
                             bfloat16_t>;
                 case 7:
-                    return ukernel_impl<7, 2, ActKind::gelu_and_mul,
+                    return ukernel_impl<7, 2, ActivationKind::gelu_and_mul,
                             bfloat16_t>;
                 case 8:
-                    return ukernel_impl<8, 2, ActKind::gelu_and_mul,
+                    return ukernel_impl<8, 2, ActivationKind::gelu_and_mul,
                             bfloat16_t>;
                 default: return nullptr;
             }
         }
-        // act == ActKind::none — branch on DstDt for the store epilogue.
-        if (dst_dt == DstDt::kF32) {
+        // act == ActivationKind::none — branch on OutputType for the store epilogue.
+        if (dst_dt == OutputType::kF32) {
             switch (MR) {
-                case 1: return ukernel_impl<1, 2, ActKind::none, float>;
-                case 2: return ukernel_impl<2, 2, ActKind::none, float>;
-                case 3: return ukernel_impl<3, 2, ActKind::none, float>;
-                case 4: return ukernel_impl<4, 2, ActKind::none, float>;
-                case 5: return ukernel_impl<5, 2, ActKind::none, float>;
-                case 6: return ukernel_impl<6, 2, ActKind::none, float>;
-                case 7: return ukernel_impl<7, 2, ActKind::none, float>;
-                case 8: return ukernel_impl<8, 2, ActKind::none, float>;
+                case 1: return ukernel_impl<1, 2, ActivationKind::none, float>;
+                case 2: return ukernel_impl<2, 2, ActivationKind::none, float>;
+                case 3: return ukernel_impl<3, 2, ActivationKind::none, float>;
+                case 4: return ukernel_impl<4, 2, ActivationKind::none, float>;
+                case 5: return ukernel_impl<5, 2, ActivationKind::none, float>;
+                case 6: return ukernel_impl<6, 2, ActivationKind::none, float>;
+                case 7: return ukernel_impl<7, 2, ActivationKind::none, float>;
+                case 8: return ukernel_impl<8, 2, ActivationKind::none, float>;
                 default: return nullptr;
             }
         }
         switch (MR) {
-            case 1: return ukernel_impl<1, 2, ActKind::none, bfloat16_t>;
-            case 2: return ukernel_impl<2, 2, ActKind::none, bfloat16_t>;
-            case 3: return ukernel_impl<3, 2, ActKind::none, bfloat16_t>;
-            case 4: return ukernel_impl<4, 2, ActKind::none, bfloat16_t>;
-            case 5: return ukernel_impl<5, 2, ActKind::none, bfloat16_t>;
-            case 6: return ukernel_impl<6, 2, ActKind::none, bfloat16_t>;
-            case 7: return ukernel_impl<7, 2, ActKind::none, bfloat16_t>;
-            case 8: return ukernel_impl<8, 2, ActKind::none, bfloat16_t>;
+            case 1: return ukernel_impl<1, 2, ActivationKind::none, bfloat16_t>;
+            case 2: return ukernel_impl<2, 2, ActivationKind::none, bfloat16_t>;
+            case 3: return ukernel_impl<3, 2, ActivationKind::none, bfloat16_t>;
+            case 4: return ukernel_impl<4, 2, ActivationKind::none, bfloat16_t>;
+            case 5: return ukernel_impl<5, 2, ActivationKind::none, bfloat16_t>;
+            case 6: return ukernel_impl<6, 2, ActivationKind::none, bfloat16_t>;
+            case 7: return ukernel_impl<7, 2, ActivationKind::none, bfloat16_t>;
+            case 8: return ukernel_impl<8, 2, ActivationKind::none, bfloat16_t>;
             case 9: return ukernel_plain_bf16_nr32_large_mr<9>;
             case 10: return ukernel_plain_bf16_nr32_large_mr<10>;
             case 11: return ukernel_plain_bf16_nr32_large_mr<11>;
@@ -1015,101 +1020,101 @@ ukernel_fn_t select_ukernel(int MR, int NV, ActKind act, DstDt dst_dt) {
         }
     }
     if (NV == 4) {
-        if (act == ActKind::swiglu_oai_mul) {
+        if (act == ActivationKind::swiglu_oai_mul) {
             switch (MR) {
                 case 1:
-                    return ukernel_impl<1, 4, ActKind::swiglu_oai_mul,
+                    return ukernel_impl<1, 4, ActivationKind::swiglu_oai_mul,
                             bfloat16_t>;
                 case 2:
-                    return ukernel_impl<2, 4, ActKind::swiglu_oai_mul,
+                    return ukernel_impl<2, 4, ActivationKind::swiglu_oai_mul,
                             bfloat16_t>;
                 case 3:
-                    return ukernel_impl<3, 4, ActKind::swiglu_oai_mul,
+                    return ukernel_impl<3, 4, ActivationKind::swiglu_oai_mul,
                             bfloat16_t>;
                 case 4:
-                    return ukernel_impl<4, 4, ActKind::swiglu_oai_mul,
+                    return ukernel_impl<4, 4, ActivationKind::swiglu_oai_mul,
                             bfloat16_t>;
                 case 5:
-                    return ukernel_impl<5, 4, ActKind::swiglu_oai_mul,
+                    return ukernel_impl<5, 4, ActivationKind::swiglu_oai_mul,
                             bfloat16_t>;
                 case 6:
-                    return ukernel_impl<6, 4, ActKind::swiglu_oai_mul,
+                    return ukernel_impl<6, 4, ActivationKind::swiglu_oai_mul,
                             bfloat16_t>;
                 default: return nullptr;
             }
         }
-        if (act == ActKind::silu_and_mul) {
+        if (act == ActivationKind::silu_and_mul) {
             switch (MR) {
                 case 1:
-                    return ukernel_impl<1, 4, ActKind::silu_and_mul,
+                    return ukernel_impl<1, 4, ActivationKind::silu_and_mul,
                             bfloat16_t>;
                 case 2:
-                    return ukernel_impl<2, 4, ActKind::silu_and_mul,
+                    return ukernel_impl<2, 4, ActivationKind::silu_and_mul,
                             bfloat16_t>;
                 case 3:
-                    return ukernel_impl<3, 4, ActKind::silu_and_mul,
+                    return ukernel_impl<3, 4, ActivationKind::silu_and_mul,
                             bfloat16_t>;
                 case 4:
-                    return ukernel_impl<4, 4, ActKind::silu_and_mul,
+                    return ukernel_impl<4, 4, ActivationKind::silu_and_mul,
                             bfloat16_t>;
                 case 5:
-                    return ukernel_impl<5, 4, ActKind::silu_and_mul,
+                    return ukernel_impl<5, 4, ActivationKind::silu_and_mul,
                             bfloat16_t>;
                 case 6:
-                    return ukernel_impl<6, 4, ActKind::silu_and_mul,
+                    return ukernel_impl<6, 4, ActivationKind::silu_and_mul,
                             bfloat16_t>;
                 default: return nullptr;
             }
         }
-        if (act == ActKind::gelu_and_mul) {
+        if (act == ActivationKind::gelu_and_mul) {
             switch (MR) {
                 case 1:
-                    return ukernel_impl<1, 4, ActKind::gelu_and_mul,
+                    return ukernel_impl<1, 4, ActivationKind::gelu_and_mul,
                             bfloat16_t>;
                 case 2:
-                    return ukernel_impl<2, 4, ActKind::gelu_and_mul,
+                    return ukernel_impl<2, 4, ActivationKind::gelu_and_mul,
                             bfloat16_t>;
                 case 3:
-                    return ukernel_impl<3, 4, ActKind::gelu_and_mul,
+                    return ukernel_impl<3, 4, ActivationKind::gelu_and_mul,
                             bfloat16_t>;
                 case 4:
-                    return ukernel_impl<4, 4, ActKind::gelu_and_mul,
+                    return ukernel_impl<4, 4, ActivationKind::gelu_and_mul,
                             bfloat16_t>;
                 case 5:
-                    return ukernel_impl<5, 4, ActKind::gelu_and_mul,
+                    return ukernel_impl<5, 4, ActivationKind::gelu_and_mul,
                             bfloat16_t>;
                 case 6:
-                    return ukernel_impl<6, 4, ActKind::gelu_and_mul,
+                    return ukernel_impl<6, 4, ActivationKind::gelu_and_mul,
                             bfloat16_t>;
                 default: return nullptr;
             }
         }
-        // act == ActKind::none — branch on DstDt for the store epilogue.
-        if (dst_dt == DstDt::kF32) {
+        // act == ActivationKind::none — branch on OutputType for the store epilogue.
+        if (dst_dt == OutputType::kF32) {
             switch (MR) {
-                case 1: return ukernel_impl<1, 4, ActKind::none, float>;
-                case 2: return ukernel_impl<2, 4, ActKind::none, float>;
-                case 3: return ukernel_impl<3, 4, ActKind::none, float>;
-                case 4: return ukernel_impl<4, 4, ActKind::none, float>;
-                case 5: return ukernel_impl<5, 4, ActKind::none, float>;
-                case 6: return ukernel_impl<6, 4, ActKind::none, float>;
+                case 1: return ukernel_impl<1, 4, ActivationKind::none, float>;
+                case 2: return ukernel_impl<2, 4, ActivationKind::none, float>;
+                case 3: return ukernel_impl<3, 4, ActivationKind::none, float>;
+                case 4: return ukernel_impl<4, 4, ActivationKind::none, float>;
+                case 5: return ukernel_impl<5, 4, ActivationKind::none, float>;
+                case 6: return ukernel_impl<6, 4, ActivationKind::none, float>;
                 default: return nullptr;
             }
         }
         switch (MR) {
-            case 1: return ukernel_impl<1, 4, ActKind::none, bfloat16_t>;
-            case 2: return ukernel_impl<2, 4, ActKind::none, bfloat16_t>;
-            case 3: return ukernel_impl<3, 4, ActKind::none, bfloat16_t>;
-            case 4: return ukernel_impl<4, 4, ActKind::none, bfloat16_t>;
-            case 5: return ukernel_impl<5, 4, ActKind::none, bfloat16_t>;
-            case 6: return ukernel_impl<6, 4, ActKind::none, bfloat16_t>;
+            case 1: return ukernel_impl<1, 4, ActivationKind::none, bfloat16_t>;
+            case 2: return ukernel_impl<2, 4, ActivationKind::none, bfloat16_t>;
+            case 3: return ukernel_impl<3, 4, ActivationKind::none, bfloat16_t>;
+            case 4: return ukernel_impl<4, 4, ActivationKind::none, bfloat16_t>;
+            case 5: return ukernel_impl<5, 4, ActivationKind::none, bfloat16_t>;
+            case 6: return ukernel_impl<6, 4, ActivationKind::none, bfloat16_t>;
             default: return nullptr;
         }
     }
     return nullptr;
 }
 
-ukernel_fn_t select_plain_bf16_one_panel(int MR) {
+bf16_ukernel_fn_t select_plain_bf16_one_panel(int MR) {
     switch (MR) {
         case 8: return ukernel_plain_bf16_nr32_large_mr<8>;
         case 9: return ukernel_plain_bf16_nr32_large_mr<9>;
@@ -1120,7 +1125,7 @@ ukernel_fn_t select_plain_bf16_one_panel(int MR) {
     }
 }
 
-ukernel_fn_t select_plain_bf16_fixed_k(int MR, int K) {
+bf16_ukernel_fn_t select_plain_bf16_fixed_k(int MR, int K) {
 #define ZENDNNL_FIXED_K_CASE(MR_VALUE) \
     case MR_VALUE: \
         return K == 2048 ? ukernel_plain_bf16_nr32_large_mr<MR_VALUE, 0, 2048> \
@@ -1138,8 +1143,8 @@ ukernel_fn_t select_plain_bf16_fixed_k(int MR, int K) {
 #undef ZENDNNL_FIXED_K_CASE
 }
 
-ukernel_fn_t select_gated_bf16_one_panel(int MR, ActKind act) {
-    if (act != ActKind::silu_and_mul) return nullptr;
+bf16_ukernel_fn_t select_gated_bf16_one_panel(int MR, ActivationKind act) {
+    if (act != ActivationKind::silu_and_mul) return nullptr;
     switch (MR) {
         case 9: return ukernel_silu_bf16_nr32_large_mr<9>;
         case 10: return ukernel_silu_bf16_nr32_large_mr<10>;
@@ -1149,14 +1154,14 @@ ukernel_fn_t select_gated_bf16_one_panel(int MR, ActKind act) {
     }
 }
 
-ukernel_fn_t select_plain_bf16_f32_accumulate(int MR, int NV) {
+bf16_ukernel_fn_t select_plain_bf16_f32_accumulate(int MR, int NV) {
     if (NV != 2) return nullptr;
     switch (MR) {
-        case 4: return ukernel_impl<4, 2, ActKind::none, float, true>;
-        case 5: return ukernel_impl<5, 2, ActKind::none, float, true>;
-        case 6: return ukernel_impl<6, 2, ActKind::none, float, true>;
-        case 7: return ukernel_impl<7, 2, ActKind::none, float, true>;
-        case 8: return ukernel_impl<8, 2, ActKind::none, float, true>;
+        case 4: return ukernel_impl<4, 2, ActivationKind::none, float, true>;
+        case 5: return ukernel_impl<5, 2, ActivationKind::none, float, true>;
+        case 6: return ukernel_impl<6, 2, ActivationKind::none, float, true>;
+        case 7: return ukernel_impl<7, 2, ActivationKind::none, float, true>;
+        case 8: return ukernel_impl<8, 2, ActivationKind::none, float, true>;
         default: return nullptr;
     }
 }

@@ -20,22 +20,16 @@
 /// `fused_moe/vertical_fusion_pipeline.cpp`; the slice helper both use is
 /// in `m_tile_internal.hpp`.
 ///
-/// Self-contained translation unit.  This file owns **two** related
-/// but independent OMP executors plus the shared planner that drives
-/// both:
-///
-///   1. `flat_m_tile`               (legacy single-matmul M-tile)
-///   2. `flat_m_tile_pipeline_bf16` (vertical-fusion W13→act→W2;
-///                                   bf16-scratch executor — accepts
-///                                   BF16 end-to-end, WOQ-INT4, AND
-///                                   DQ-INT8 per-token-symmetric)
+/// This file owns the single-projection M-tile executor
+/// `m_tile_execute`.  The vertical-fusion executor
+/// `try_fused_m_tile_core` (W13→act→W2) and its wrapper
+/// `try_fused_m_tile` share the planner in
+/// `group_matmul_m_tile_planner.hpp` but live in
+/// `fused_moe/vertical_fusion_pipeline.cpp`.
 ///
 /// Both are exposed to higher layers via the public M-tile interface
-/// header `m_tile/group_matmul_m_tile.hpp` (which `group_matmul_parallel
-/// _common.hpp` no longer re-declares — the executors moved out of
-/// the common header alongside the planner refactor); the planner
-/// / inner-slice helpers stay private to this translation unit
-/// (anonymous namespace).
+/// header `m_tile/group_matmul_m_tile.hpp`; the inner-slice helpers
+/// stay private to this translation unit (anonymous namespace).
 ///
 /// File layout (search for the banners below to jump):
 ///
@@ -43,37 +37,26 @@
 ///   │  Section A — Shared M-tile runtime helpers                  │
 ///   │    A.1  offset_quant_by_row                                 │
 ///   │    A.2  execute_m_tile / execute_m_tile_act                 │
-///   │    A.3 / A.4  m_tile_single_tier_plan_t + planner —        │
+///   │    A.3 / A.4  MTileSingleTierPlan + planner —              │
 ///   │               MOVED to `group_matmul_m_tile_planner.hpp`    │
 ///   │               (Sections P.2 / P.3).  Re-included via the    │
-///   │               public header so both executors below keep    │
-///   │               using `plan_m_tile_single_tier_assignment`    │
-///   │               unchanged.                                    │
+///   │               public header for                             │
+///   │               `make_m_tile_single_tier_plan`.               │
 ///   │    A.5  execute_light_expert (multi-tier light pool)       │
 ///   │    A.6  DQ-INT8 hoist primitives (HoistedSrcQuant_mtile +  │
 ///   │           dqint8_compact_and_requant_slice)                │
 ///   ├────────────────────────────────────────────────────────────┤
 ///   │  Section B — Legacy single-matmul M-tile executor          │
-///   │    B.1  flat_m_tile (round-based / multi-tier / wide-N /   │
+///   │    B.1  m_tile_execute (round-based / multi-tier / shallow-M /│
 ///   │           Phase-2 single-tier)                             │
-///   ├────────────────────────────────────────────────────────────┤
-///   │  Section C — Vertical-fusion pipeline M-tile executor      │
-///   │    C.1  flat_m_tile_pipeline_bf16 — phase 1 tri-regime     │
-///   │           (BF16 end-to-end, WOQ-INT4 s4/u4 weights, AND    │
-///   │           DQ-INT8 per-token symmetric);  bf16-scratch      │
-///   │           staging element size for all three regimes.      │
-///   │           DQ-INT8 adds (i) pre-OMP per-expert Op1 src      │
-///   │           hoist and (ii) per-thread Stage 2b re-quant      │
-///   │           scratch — both RAII-owned at dispatcher scope.   │
-///   │    C.2  Eligibility-gated wrapper                          │
 ///   └────────────────────────────────────────────────────────────┘
 ///
-/// The dispatch fork between B and C lives one level up, inside
-/// `group_matmul_fused_moe_execute` in `group_matmul_fused_moe.cpp`.
-/// The eligibility gate there decides whether to call Section C
-/// directly (when the dtype regime matches A, B, or DQ-INT8 above +
-/// supported activation + M-tile safe + env knob allows) or to run
-/// the legacy two-pass which calls Section B twice (Op1 then Op2).
+/// The fused-MoE dispatch lives one level up, inside
+/// `group_matmul_fused_moe_execute` in `group_matmul_fused_moe.cpp`:
+/// it tries the M-tile pipeline (`try_fused_m_tile`, ALGO 2) or the
+/// expert-parallel pipeline (`try_fused_expert_parallel`, ALGO 5), and
+/// otherwise runs the two-pass (`fused_moe_two_pass_execute`), whose
+/// Op1 and Op2 each go through `group_matmul_execute`.
 
 #include <algorithm>
 #include <atomic>
@@ -98,8 +81,8 @@ namespace matmul {
 // ═══════════════════════════════════════════════════════════════════════
 //
 // Private (anonymous namespace) helpers used by BOTH the legacy
-// executor (Section B, `flat_m_tile`) and the vertical-fusion
-// pipeline executor (Section C, `flat_m_tile_pipeline_bf16`).
+// executor (Section B, `m_tile_execute`) and the vertical-fusion
+// pipeline executor (Section C, `try_fused_m_tile_core`).
 //
 // What stays here:  per-thread slice executors and post-op / quant
 //                   row-offset helpers (`offset_quant_by_row`,
@@ -109,8 +92,8 @@ namespace matmul {
 //                   runtime work, not planning.
 //
 // What moved out:   the planner itself (Sections A.3 / A.4 in the
-//                   pre-refactor layout).  `m_tile_single_tier_plan_t`
-//                   and `plan_m_tile_single_tier_assignment` live in
+//                   pre-refactor layout).  `MTileSingleTierPlan`
+//                   and `make_m_tile_single_tier_plan` live in
 //                   `group_matmul_m_tile_planner.hpp` (Sections P.2 /
 //                   P.3) so future planner optimizations get a single
 //                   home and can be unit-tested in isolation from the
@@ -202,7 +185,7 @@ inline void execute_m_tile(int e, int local_tid, int team_size,
     execute_expert_slice(layout[e], transA[e], transB[e], slice_M, N[e], K[e],
             alpha[e], s, lda[e], weight[e], ldb[e], bias[e], beta[e], d, ldc[e],
             is_weights_const[e], 1, slice_params,
-            resolve_expert_kernel(2, algo, slice_params));
+            resolve_expert_backend(2, algo, slice_params));
 }
 
 // M-tile with fused activation: apply immediately after GEMM while
@@ -238,15 +221,15 @@ inline void execute_m_tile_act(int e, int local_tid, int team_size,
 
 // ── A.3 / A.4  PLANNER — moved to `group_matmul_m_tile_planner.hpp` ────
 //
-// `m_tile_single_tier_plan_t` (Section P.2) and the planner function
-// `plan_m_tile_single_tier_assignment` (Section P.3) live in the
+// `MTileSingleTierPlan` (Section P.2) and the planner function
+// `make_m_tile_single_tier_plan` (Section P.3) live in the
 // companion header so the planner has a single, isolated optimization
-// surface — future surplus heuristics, alternative wide-N gates, NUMA
+// surface — future surplus heuristics, alternative shallow-M gates, NUMA
 // / CCD affinity refinements all land there, not here.
 //
 // `group_matmul_m_tile.hpp` re-includes the planner header, so both
 // symbols stay available to the executors below (Section B's
-// `flat_m_tile`, Section C's `flat_m_tile_pipeline_bf16`) and to
+// `m_tile_execute`, Section C's `try_fused_m_tile_core`) and to
 // gtests with no caller-side change.
 
 // ── A.5  execute_light_expert (multi-tier light pool) ──────────────────
@@ -254,17 +237,17 @@ inline void execute_m_tile_act(int e, int local_tid, int team_size,
 // Multi-tier "light pool" helper.  Each light-pool thread processes a
 // strided slice of light experts sequentially with `team=1` (full M,
 // no slicing).  Memory-traffic pattern is essentially identical to
-// ALGO 1's sequential_experts on these tiny experts — light expert
+// ALGO 1's sequential_execute on these tiny experts — light expert
 // work is dominated by the per-call activation kernel-launch
 // overhead, not per-thread arithmetic, so extra threads on the same
 // light expert would idle on the OMP barrier rather than speed it up.
 // Pulling them out of the standard t_assign pool is the whole point.
 //
-// Used from the multi-tier branch in `flat_m_tile` (Section B) when
+// Used from the multi-tier branch in `m_tile_execute` (Section B) when
 // the AUTO gating engages.  See `get_grp_matmul_m_tile_hybrid()` for
 // the gating heuristic.  NOT used by the vertical-fusion executor
 // (Section C) — phase 1 explicitly bails out of multi-tier shapes;
-// see `flat_m_tile_pipeline_bf16`'s multi-tier-prediction guard.
+// see `try_fused_m_tile_core`'s multi-tier-prediction guard.
 inline void execute_light_expert(int e, const std::vector<char> &layout,
         const std::vector<bool> &transA, const std::vector<bool> &transB,
         const std::vector<int> &M, const std::vector<int> &N,
@@ -282,7 +265,7 @@ inline void execute_light_expert(int e, const std::vector<char> &layout,
     execute_expert_slice(layout[e], transA[e], transB[e], M[e], N[e], K[e],
             alpha[e], src[e], lda[e], weight[e], ldb[e], bias[e], beta[e],
             dst[e], ldc[e], is_weights_const[e], 1, local_params,
-            resolve_expert_kernel(2, algo, local_params));
+            resolve_expert_backend(2, algo, local_params));
     if (fused_act != grp_matmul_gated_act_t::none) {
         apply_gated_act_inplace(
                 fused_act, dst[e], 0, M[e], N[e], ldc[e], act_dtype);
@@ -298,7 +281,7 @@ inline void execute_light_expert(int e, const std::vector<char> &layout,
 // SECTION B — Legacy single-matmul M-tile executor
 // ═══════════════════════════════════════════════════════════════════════
 //
-// `flat_m_tile` is the legacy (pre-vertical-fusion) M-tile executor.
+// `m_tile_execute` is the legacy (pre-vertical-fusion) M-tile executor.
 // Runs a SINGLE matmul over a grouped expert batch with optional
 // fused gated activation (silu / gelu / swiglu_oai).  The MoE FFN
 // uses two of these calls back-to-back today (Op1 = W13 + activation,
@@ -314,7 +297,7 @@ inline void execute_light_expert(int e, const std::vector<char> &layout,
 //                        pools (see `execute_light_expert`).
 //   2. Phase-2 single-tier(`kPhase2Single` = 3) — default M-weighted
 //                        CCD-striped slice plan (see Section A.4).
-//   *  ManyExperts clamp (`kManyExpertsSeqFallback` = 7) — `active_ops >
+//   *  FixedTeamRounds clamp (`kManyExpertsSeqFallback` = 7) — `active_ops >
 //                        num_threads` makes a pure M-tile plan infeasible
 //                        (< 1 thread/expert).  AUTO never reaches it
 //                        (`auto_select_algo` routes that regime to ALGO 5);
@@ -328,7 +311,7 @@ inline void execute_light_expert(int e, const std::vector<char> &layout,
 //
 // ═══════════════════════════════════════════════════════════════════════
 //
-// ── B.1  flat_m_tile (legacy single-matmul M-tile executor) ────────────
+// ── B.1  m_tile_execute (legacy single-matmul M-tile executor) ────────────
 //
 // ALGO=2: planned M-tile — work-balanced, CCD-spread row-parallel.
 //
@@ -375,9 +358,9 @@ inline void execute_light_expert(int e, const std::vector<char> &layout,
 // Tunable via `ZENDNNL_GRP_MATMUL_M_TILE_SLICE_TARGET`
 // (see `get_grp_matmul_m_tile_slice_target` in
 // `group_matmul_parallel_common.hpp`).  Defaulted to 16 to match
-// AOCL-DLP's BRGEMM row-block quantum; cached at flat_m_tile entry.
+// AOCL-DLP's BRGEMM row-block quantum; cached at m_tile_execute entry.
 
-void flat_m_tile(const std::vector<char> &layout,
+void m_tile_execute(const std::vector<char> &layout,
         const std::vector<bool> &transA, const std::vector<bool> &transB,
         const std::vector<int> &M, const std::vector<int> &N,
         const std::vector<int> &K, const std::vector<float> &alpha,
@@ -388,14 +371,14 @@ void flat_m_tile(const std::vector<char> &layout,
         grp_matmul_gated_act_t fused_act, data_type_t act_dtype,
         const std::vector<bool> &is_weights_const,
         std::vector<matmul_params> &params, int num_threads,
-        const char **gemm_mode_out) {
+        const char **execution_path_out) {
 
-    // The executor OWNS its gemm_mode: each branch below writes the concrete
-    // path it ran into `*gemm_mode_out` (mirrors `flat_n_tile`), so the
+    // The executor OWNS its execution_path: each branch below writes the concrete
+    // path it ran into `*execution_path_out` (mirrors `n_tile_execute`), so the
     // post-exec [GRP_MATMUL.CALL] line reports the real M-tile branch rather
-    // than a generic "flat_m_tile".  No-op when the caller passes nullptr.
+    // than a generic "m_tile_execute".  No-op when the caller passes nullptr.
     auto set_mtile_mode = [&](const char *s) {
-        if (gemm_mode_out != nullptr) *gemm_mode_out = s;
+        if (execution_path_out != nullptr) *execution_path_out = s;
     };
     // Default to a SKIP mode so a no-op early return (empty call,
     // num_threads<=0, or no active expert) reports that nothing executed
@@ -407,21 +390,22 @@ void flat_m_tile(const std::vector<char> &layout,
     if (num_ops == 0 || num_threads <= 0) return;
 
     // Generic ahead-of-time weight pre-pack for ALGO 2.  See
-    // sequential_experts in group_matmul_dispatch.cpp for the full
+    // sequential_execute in group_matmul_dispatch.cpp for the full
     // contract; identical short-circuits here.  `num_threads` is
     // forwarded so cross_warm can prefill regime 2 for the upcoming
     // ALGO 3 decode path when CUSTOM_KERNEL=0 (see the comment on the
     // ALGO 1 call site for the full rationale).
-    group_matmul_prepack::prepack_for_algo_2(
+    group_matmul_prepack::prepack_m_tile(
             group_matmul_prepack::build_prepack_params(weight, K, N, ldb,
                     transB, is_weights_const, params, M,
-                    grp_matmul_custom_kernel_effective(params, M, N, fused_act),
+                    group_matmul_custom_kernel_candidate(
+                            params, M, N, fused_act),
                     num_threads,
-                    algo3_decode_nr_align(M, N, ldc, fused_act, params),
+                    n_tile_decode_nr_align(M, N, ldc, fused_act, params),
                     fused_act, act_dtype,
                     /*transA=*/&transA, /*alpha=*/&alpha, /*beta=*/&beta));
 
-    matmul_algo_t algo = resolve_kernel();
+    matmul_algo_t algo = resolve_matmul_backend();
 
     // Element sizes must come from an expert that actually runs.  Grouped
     // quantisation leaves an inactive slot at the caller's default dtype —
@@ -472,7 +456,7 @@ void flat_m_tile(const std::vector<char> &layout,
         }
     }
 
-    // F1 — One-time HINT when flat_m_tile is pinned on a decode-class
+    // F1 — One-time HINT when m_tile_execute is pinned on a decode-class
     // call (max_M == 1) AND the active count is so small that most of
     // `num_threads` will sit on the Phase-2 join barrier (e.g. 8 active
     // experts on 128t leaves most threads idle; the single-thread-per-
@@ -522,7 +506,8 @@ void flat_m_tile(const std::vector<char> &layout,
                     const int idle_pct
                             = (num_threads - active_ops) * 100 / num_threads;
                     apilog_info(
-                            "[GRP_MATMUL.HINT] ALGO_2 (flat_m_tile) invoked on "
+                            "[GRP_MATMUL.HINT] ALGO_2 (m_tile_execute) invoked "
+                            "on "
                             "a "
                             "decode-class call (max_M=1, active_ops=",
                             active_ops, ", num_threads=", num_threads,
@@ -557,7 +542,7 @@ void flat_m_tile(const std::vector<char> &layout,
     const int cores_per_ccd = std::min(8, num_threads);
     const int num_ccds
             = std::max(1, (num_threads + cores_per_ccd - 1) / cores_per_ccd);
-    // CCD capacity is needed by both `plan_m_tile_single_tier_assignment`
+    // CCD capacity is needed by both `make_m_tile_single_tier_plan`
     // (Phase-2 cap_at_ccd checks + Phase-3 striped placement) and by
     // future pipeline executors.  Both compute it from `num_threads` /
     // `cores_per_ccd` internally so no shared lambda is needed at this
@@ -1112,7 +1097,7 @@ void flat_m_tile(const std::vector<char> &layout,
         static std::atomic<bool> s_warned {false};
         if (s_warn && !s_warned.exchange(true, std::memory_order_relaxed)) {
             apilog_warning(
-                    "[GRP_MATMUL.ALGO WARN] env_algo=2 (flat_m_tile) on a "
+                    "[GRP_MATMUL.ALGO WARN] env_algo=2 (m_tile_execute) on a "
                     "shape with active_ops > num_threads that the multi-tier "
                     "hybrid declined: single-tier M-tile is infeasible "
                     "(cannot give < 1 thread per active expert).  CLAMP to "
@@ -1131,7 +1116,8 @@ void flat_m_tile(const std::vector<char> &layout,
             execute_expert_slice(layout[e], transA[e], transB[e], M[e], N[e],
                     K[e], alpha[e], src[e], lda[e], weight[e], ldb[e], bias[e],
                     beta[e], dst[e], ldc[e], is_weights_const[e], num_threads,
-                    local_params, resolve_expert_kernel(2, algo, local_params));
+                    local_params,
+                    resolve_expert_backend(2, algo, local_params));
             if (fused_act != grp_matmul_gated_act_t::none) {
                 apply_gated_act_inplace(
                         fused_act, dst[e], 0, M[e], N[e], ldc[e], act_dtype);
@@ -1144,31 +1130,30 @@ void flat_m_tile(const std::vector<char> &layout,
     //
     // The shared helper computes the Phase-1b `t_assign` totals + the
     // Phase-3 CCD-striped tid mapping in one call, AND emits the
-    // wide-N fallback signal so the legacy wide-N branch below stays
-    // structurally identical to the pre-refactor inline form.  Pure
+    // shallow-M fallback signal used by vertical-fusion eligibility.  Pure
     // refactor (no behaviour change) — every shape produces an
     // identical mapping to the previous inline planner.  The pipeline
-    // executor (`flat_m_tile_pipeline_bf16`) reuses the same helper so
+    // executor (`try_fused_m_tile_core`) reuses the same helper so
     // its slice plan is bit-identical to this one for every workload
     // that reaches Phase 2 single-tier.
-    const auto plan = plan_m_tile_single_tier_assignment(M, active_pos, num_ops,
+    const auto plan = make_m_tile_single_tier_plan(M, active_pos, num_ops,
             num_threads, active_ops, kSliceTarget, cores_per_ccd, num_ccds);
 
-    // ── Wide-N regime: no sequential fallback (ALGO 2 is pure M-tile) ──
+    // ── Shallow-M regime: no sequential fallback (ALGO 2 is pure M-tile) ──
     //
-    // The wide-N memory-bound regime — few actives × shallow M × large N,
+    // The shallow-M regime — few actives × shallow M,
     // i.e. `max_M > 1 && total_need*2 ≤ num_threads` — runs the M-tile plan
     // like any other shape.  AUTO never selects ALGO 2; calls reaching this
     // executor come from an explicit global or phase pin.
     //
-    // A FORCED `ZENDNNL_GRP_MATMUL_ALGO=2` on a wide-N shape therefore runs
+    // A FORCED `ZENDNNL_GRP_MATMUL_ALGO=2` on a shallow-M shape therefore runs
     // the single-tier M-tile plan below: this is CORRECT (the regime is
     // M-tile-feasible — `total_need ≤ num_threads/2 < num_threads`, so the
     // planner's Phase-2/3 mapping covers every active expert), just less
     // memory-optimal than ALGO 1 would be.  The planner still computes
-    // `plan.wide_n_fallback` because the vertical-fusion pipeline
-    // (`flat_m_tile_pipeline_bf16`) consults it to bail to the legacy
-    // two-pass; `flat_m_tile` itself no longer branches on it.
+    // `plan.shallow_m_fallback` because the vertical-fusion pipeline
+    // (`try_fused_m_tile_core`) consults it to bail to the legacy
+    // two-pass; `m_tile_execute` itself no longer branches on it.
 
     // Capture-gated branch tag — Phase 2 single-tier is the default
     // fallthrough when none of the earlier branches commit.  See
@@ -1186,7 +1171,7 @@ void flat_m_tile(const std::vector<char> &layout,
     // ensures consistent physical thread placement across CCDs regardless
     // of how many threads are actively doing work.  The tid → (expert,
     // local_tid, team_size) mapping was filled in by
-    // `plan_m_tile_single_tier_assignment` above (Phase 2 fit + Phase 3
+    // `make_m_tile_single_tier_plan` above (Phase 2 fit + Phase 3
     // CCD-striped placement).
     bool mt_short_team = false;
 #pragma omp parallel num_threads(num_threads)

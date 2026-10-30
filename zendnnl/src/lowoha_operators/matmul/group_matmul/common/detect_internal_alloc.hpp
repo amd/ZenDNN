@@ -46,11 +46,11 @@
 ///
 /// Modes:
 ///
-///   * `internal_alloc_mode::quick_o1` — single-slot probe at `v[0]`.
+///   * `internal_alloc_mode::first_slot` — single-slot probe at `v[0]`.
 ///     Used by the production inline guard.  Never reports mixed
 ///     state: the diagnostic full sweep catches that.  Cost: O(1).
 ///
-///   * `internal_alloc_mode::sweep_active` — iterates
+///   * `internal_alloc_mode::active_range` — iterates
 ///     `[0, min(num_ops, v.size()))` and reports `status_t::failure`
 ///     when the active range is mixed null/non-null (a hard caller-
 ///     contract break).  Used by both diagnostic call sites.
@@ -84,12 +84,12 @@ enum class internal_alloc_mode {
     /// nullptr` (when fused_moe_present) as internal.  Never reports
     /// mixed state; assumes a sibling diagnostic-mode call catches
     /// caller-contract breaks.  Used by the production inline guard.
-    quick_o1,
+    first_slot,
 
     /// O(num_ops) sweep of `[0, min(num_ops, v.size()))`.  Detects mixed
     /// null/non-null active ranges and returns `status_t::failure` so
     /// the caller can `log_error` with its own prefix.
-    sweep_active,
+    active_range,
 };
 
 /// Detect whether `v` signals internal-alloc for one fused-MoE side.
@@ -97,7 +97,7 @@ enum class internal_alloc_mode {
 /// @param v                 dst[] (Op1) or fused.dst_down[] (Op2) vector
 /// @param num_ops           active matmul count (firing experts)
 /// @param fused_moe_present caller knows fused-MoE is engaged
-/// @param mode              `quick_o1` (production) or `sweep_active`
+/// @param mode              `first_slot` (production) or `active_range`
 ///                          (diagnostic).  See enum doc.
 /// @param out_internal      [out] true iff library-managed for this side
 ///
@@ -117,12 +117,12 @@ inline status_t detect_internal_alloc(const std::vector<void *> &v,
         *out_internal = true;
         return status_t::success;
     }
-    if (mode == internal_alloc_mode::quick_o1) {
+    if (mode == internal_alloc_mode::first_slot) {
         *out_internal = (v[0] == nullptr);
         return status_t::success;
     }
 
-    // sweep_active
+    // active_range
     bool any_null = false;
     bool any_nonnull = false;
     const size_t sweep = std::min<size_t>(num_ops, v.size());

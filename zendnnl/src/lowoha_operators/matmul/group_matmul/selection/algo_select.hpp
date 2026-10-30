@@ -15,7 +15,7 @@
  *******************************************************************************/
 
 /// AUTO algorithm selection: per-phase settings, WC=2 and cross-warm
-/// phase checks, the W8A8 request resolver and `select_grp_matmul_algo`.
+/// phase checks, the W8A8 request resolver and `group_matmul_algo_select`.
 
 #ifndef ZENDNNL_GROUP_MATMUL_ALGO_SELECT_HPP
 #define ZENDNNL_GROUP_MATMUL_ALGO_SELECT_HPP
@@ -43,7 +43,7 @@ namespace matmul {
 //
 //   AUTO_PROMPT_ALGO inherited value = 2 for compatibility; Rule 0.7 sends
 //   every unpinned prompt to ALGO 1. ALGO 2 therefore remains explicit-only.
-//   AUTO_DECODE_ALGO default = 3 (flat_n_tile and its default refinements).
+//   AUTO_DECODE_ALGO default = 3 (n_tile_execute and its default refinements).
 //
 // An ALGO-3 MoE layer (`grp_matmul_auto_algo3_layer`: at least two experts
 // in a custom-kernel family) runs ALGO 3 in both phases instead while its
@@ -259,7 +259,7 @@ inline bool grp_matmul_wc2_global_phase_split_unsupported_for_call(
 /// PROVABLE, not a heuristic — callers rely on it to skip a warm even
 /// while the prompt reorder mutates weights in place.
 /// Tracing every route a pinned phase can take through
-/// `select_grp_matmul_algo`:
+/// `group_matmul_algo_select`:
 ///
 ///   * pinned 1        -- honoured;
 ///   * pinned 2        -- honoured, or clamped to 1 when !m_tile_safe;
@@ -363,7 +363,7 @@ enum class grp_matmul_ntile_flat_parallel_request_source {
 /// Resolve whether this call should attempt the W8A8 whole-call interceptor.
 ///
 /// PRECEDENCE — the per-phase knob for THIS phase outranks the global
-/// selector, matching `select_grp_matmul_algo`.  So:
+/// selector, matching `group_matmul_algo_select`.  So:
 ///   * phase knob `=4`            → attempt W8A8 for this phase, even when a
 ///                                  global generic pin is set.
 ///   * phase knob explicitly set
@@ -411,7 +411,7 @@ inline constexpr const char *grp_matmul_ntile_flat_parallel_request_source_name(
 
 // NOTE: the single-expert policy — the Rule 0.45 knob, the single-expert
 // custom-kernel knobs, `grp_matmul_single_expert_ck` and
-// `ck_serves_single_expert_epilogue` — moved to
+// `single_expert_ck_epilogue_supported` — moved to
 // `single_expert/single_expert_policy.hpp`.
 
 // NOTE: `get_grp_matmul_{decode,prompt}_algo5_gate()` moved to
@@ -427,14 +427,14 @@ inline constexpr const char *grp_matmul_ntile_flat_parallel_request_source_name(
 // dispatcher in group_matmul_dispatch.cpp forwards to these.
 // ──────────────────────────────────────────────────────────────────────
 
-// NOTE: The M-tile executor forward declarations (`flat_m_tile`
-// and `flat_m_tile_pipeline_bf16`) moved to
+// NOTE: The M-tile executor forward declarations (`m_tile_execute`
+// and `try_fused_m_tile_core`) moved to
 // `group_matmul_m_tile.hpp` (Section H.4).  Include that header to
 // call them — the dispatcher in `group_matmul_dispatch.cpp` and
 // the vertical-fusion entry in `group_matmul_fused_moe.cpp` both
 // do this.
 
-// NOTE: The N-tile executor forward declaration (`flat_n_tile`)
+// NOTE: The N-tile executor forward declaration (`n_tile_execute`)
 // moved to `group_matmul_n_tile.hpp` (Section A.5) together with the
 // rest of the N-tile public surface.  Include that header to call
 // it — the dispatcher in `group_matmul_dispatch.cpp` and the
@@ -453,7 +453,7 @@ inline constexpr const char *grp_matmul_ntile_flat_parallel_request_source_name(
 // `unclamped` is what the matched rule answered before the m_tile_safe /
 // n_tile_safe correctness clamps, so the log can tell a deliberate pick from
 // a safety downgrade.
-struct auto_algo_trace {
+struct GroupMatmulAlgoTrace {
     const char *reason = nullptr;
     int unclamped = 0;
     // Set true when Rule 0.6a's qualifier HONOURED a decode `AUTO_DECODE_ALGO=5`
@@ -475,14 +475,14 @@ struct auto_algo_trace {
 };
 
 /// `single_expert_epilogue_ok` is false when the custom kernel would refuse a
-/// single expert's epilogue (see `ck_serves_single_expert_epilogue`); the
+/// single expert's epilogue (see `single_expert_ck_epilogue_supported`); the
 /// selector sees none of those terms itself.  `route`, when given, carries
 /// the dispatcher's single-expert and MoE verdicts for these inputs, so the
 /// call is classified once.
-int select_grp_matmul_algo(const std::vector<char> &layout,
+int group_matmul_algo_select(const std::vector<char> &layout,
         const std::vector<int> &M, const std::vector<int> &N,
         const std::vector<int> &K, const std::vector<matmul_params> &params,
-        int num_threads, auto_algo_trace *trace = nullptr,
+        int num_threads, GroupMatmulAlgoTrace *trace = nullptr,
         grp_matmul_gated_act_t fused_act = grp_matmul_gated_act_t::none,
         bool single_expert_epilogue_ok = true,
         const grp_matmul_call_route *route = nullptr);

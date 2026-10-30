@@ -41,7 +41,7 @@ namespace detail {
 // (B) Few experts + small M, or many experts: round-based, 1 CCD each.
 // Uses nested OMP (scoped_active_levels(2)).
 
-void parallel_multilevel(const std::vector<char> &layout,
+void hierarchical_execute(const std::vector<char> &layout,
         const std::vector<bool> &transA, const std::vector<bool> &transB,
         const std::vector<int> &M, const std::vector<int> &N,
         const std::vector<int> &K, const std::vector<float> &alpha,
@@ -52,13 +52,13 @@ void parallel_multilevel(const std::vector<char> &layout,
         const std::vector<bool> &is_weights_const,
         std::vector<matmul_params> &params, int num_threads,
         grp_matmul_gated_act_t fused_act, data_type_t act_dtype,
-        const char **gemm_mode_out) {
+        const char **execution_path_out) {
 
-    // The executor owns its gemm_mode and writes the concrete regime it ran
+    // The executor owns its execution_path and writes the concrete regime it ran
     // ("multilevel_concurrent" vs "multilevel_rounds") so the post-exec
     // [GRP_MATMUL.CALL] line reflects the real path.  No-op when nullptr.
     auto set_ml_mode = [&](const char *s) {
-        if (gemm_mode_out != nullptr) { *gemm_mode_out = s; }
+        if (execution_path_out != nullptr) { *execution_path_out = s; }
     };
     // Default to SKIP so a no-op early return (empty call / num_threads<=0)
     // reports exec_algo=0 rather than a real ALGO-6 run; the two regime
@@ -69,29 +69,30 @@ void parallel_multilevel(const std::vector<char> &layout,
     if (num_ops == 0 || num_threads <= 0) { return; }
 
     // NOTE: the all-inactive (every M<=0) call is short-circuited to a "skip"
-    // mode by the dispatcher (group_matmul_run_parallel_dispatch) before this
+    // mode by the dispatcher (group_matmul_execute) before this
     // executor is ever entered, so no per-regime all-inactive guard is needed
     // here.  The per-slot M<=0 guards below still cover the mixed case.
 
     // Generic ahead-of-time weight pre-pack for ALGO 6.
-    // See sequential_experts above for the contract; identical short-
+    // See sequential_execute above for the contract; identical short-
     // circuits, only the scheduling-algo tag differs.  `num_threads`
     // is forwarded so cross_warm can prefill regime 2 for the upcoming
     // ALGO 3 decode path when CUSTOM_KERNEL=0 (see the comment on the
     // ALGO 1 call site for the full rationale).
-    group_matmul_prepack::prepack_for_algo_6(
+    group_matmul_prepack::prepack_hierarchical(
             group_matmul_prepack::build_prepack_params(weight, K, N, ldb,
                     transB, is_weights_const, params, M,
-                    grp_matmul_custom_kernel_effective(params, M, N, fused_act),
+                    group_matmul_custom_kernel_candidate(
+                            params, M, N, fused_act),
                     num_threads,
-                    algo3_decode_nr_align(M, N, ldc, fused_act, params),
+                    n_tile_decode_nr_align(M, N, ldc, fused_act, params),
                     fused_act, act_dtype,
                     /*transA=*/&transA, /*alpha=*/&alpha, /*beta=*/&beta));
 
-    matmul_algo_t algo = resolve_kernel();
+    matmul_algo_t algo = resolve_matmul_backend();
 
     const int ccd_size = std::min(8, num_threads);
-    // Ceiling to match flat_m_tile / flat_n_tile: partial last CCD counts as one.
+    // Ceiling to match m_tile_execute / n_tile_execute: partial last CCD counts as one.
     const int num_ccds = std::max(1, (num_threads + ccd_size - 1) / ccd_size);
     const int max_M = *std::max_element(M.begin(), M.end());
 
@@ -134,7 +135,7 @@ void parallel_multilevel(const std::vector<char> &layout,
             // it.  This regime maps expert := tid, so a short team never
             // reaches the high experts and leaves their dst holding whatever
             // it held, with the call still reporting success.  ALGO 3's
-            // DecodeD/Rounds fail closed on exactly this; match them rather
+            // StaticExpertTeams/Rounds fail closed on exactly this; match them rather
             // than letting one deployment get a hard error on decode-shaped
             // calls and silent garbage on prompt-shaped ones.
             if (omp_get_num_threads() < num_ops) {
@@ -151,7 +152,7 @@ void parallel_multilevel(const std::vector<char> &layout,
                             N[i], K[i], alpha[i], src[i], lda[i], weight[i],
                             ldb[i], bias[i], beta[i], dst[i], ldc[i],
                             is_weights_const[i], thr_per_op[i], params[i],
-                            resolve_expert_kernel(6, algo, params[i]));
+                            resolve_expert_backend(6, algo, params[i]));
                     if (fused_act != grp_matmul_gated_act_t::none) {
                         // The GEMM above ran on `thr_per_op[i]` nested threads;
                         // leaving the activation at the single-thread default
@@ -197,7 +198,7 @@ void parallel_multilevel(const std::vector<char> &layout,
                                 weight[e], ldb[e], bias[e], beta[e], dst[e],
                                 ldc[e], is_weights_const[e], ccd_size,
                                 params[e],
-                                resolve_expert_kernel(6, algo, params[e]));
+                                resolve_expert_backend(6, algo, params[e]));
                         if (fused_act != grp_matmul_gated_act_t::none) {
                             apply_gated_act_inplace(fused_act, dst[e], 0, M[e],
                                     N[e], ldc[e], act_dtype);

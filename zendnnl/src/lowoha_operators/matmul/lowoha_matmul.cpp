@@ -448,9 +448,9 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
     // group_matmul_direct's own pre-pass. GGML weights have already been
     // unpacked above.
     if (run_gated_act
-            || custom_kernel_routable(layout, M, N, K, num_threads, batch_count,
-                    transA, transB, alpha, beta, bias, ldb, is_weights_const,
-                    exec_params)) {
+            || single_matmul_group_routable(layout, M, N, K, num_threads,
+                    batch_count, transA, transB, alpha, beta, bias, ldb,
+                    is_weights_const, exec_params)) {
         matmul_params grp_param = exec_params;
         grp_param.num_threads = num_threads;
         const bool aocl_prepacked = is_aocl_prepacked_weight(exec_params);
@@ -709,12 +709,12 @@ ZENDNNL_API void clear_matmul_onednn_weight_caches() {
 
 ZENDNNL_API void clear_grp_matmul_weight_caches() {
     clear_aocl_ck_weight_cache();
-    custom_kernel::clear_custom_kernel_pack_cache();
+    custom_kernel::clear_custom_kernel_pack_cache_bf16();
     custom_kernel::clear_custom_kernel_pack_cache_int8();
     custom_kernel::clear_custom_kernel_pack_cache_f16();
     custom_kernel::clear_custom_kernel_pack_cache_s4();
     group_matmul_prepack::clear_fingerprint_cache_for_test();
-    clear_grp_wei_scale_f32_cache();
+    clear_weight_scale_f32_cache();
 }
 
 ZENDNNL_API void clear_matmul_weight_caches() {

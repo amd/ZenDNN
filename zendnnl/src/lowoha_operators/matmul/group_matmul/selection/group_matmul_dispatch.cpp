@@ -17,10 +17,10 @@
 /// Top-level dispatch entry-point for `group_matmul_direct`.
 ///
 /// This translation unit owns the routing: the grouped-AUTO in-place
-/// weight-cache policy and `group_matmul_run_parallel_dispatch` itself.
+/// weight-cache policy and `group_matmul_execute` itself.
 ///
-/// ALGO 2 (M-tile, `flat_m_tile` + `flat_m_tile_pipeline_bf16`) and
-/// ALGO 3 (N-tile, `flat_n_tile`) live in their own folder-scoped
+/// ALGO 2 (M-tile, `m_tile_execute` + `try_fused_m_tile_core`) and
+/// ALGO 3 (N-tile, `n_tile_execute`) live in their own folder-scoped
 /// translation units (`executors/m_tile/group_matmul_m_tile.cpp`,
 /// `executors/n_tile/group_matmul_n_tile.cpp`) and are called through forward
 /// declarations re-included by `executors/m_tile/group_matmul_m_tile.hpp` and
@@ -43,10 +43,10 @@
 
 #include "../common/group_matmul_parallel_common.hpp"
 #include "../custom_kernel/dispatch.hpp"
-#include "../executors/m_tile/group_matmul_m_tile.hpp" // flat_m_tile + M-tile env knobs
-#include "../executors/n_tile/group_matmul_n_tile.hpp" // flat_n_tile + N-tile env knobs
+#include "../executors/m_tile/group_matmul_m_tile.hpp" // m_tile_execute + M-tile env knobs
+#include "../executors/n_tile/group_matmul_n_tile.hpp" // n_tile_execute + N-tile env knobs
 #include "../executors/n_tile/prompt_tile/prompt_tile_tunables.hpp"
-#include "../multi_expert/expert_parallel/group_matmul_expert_parallel.hpp" // parallel_per_expert
+#include "../multi_expert/expert_parallel/group_matmul_expert_parallel.hpp" // expert_parallel_execute
 #include "../multi_expert/expert_parallel/group_matmul_expert_parallel_policy.hpp" // ALGO 5 pin gate
 #include "../prepack/prepack.hpp"
 #include "../single_expert/single_expert_policy.hpp"
@@ -58,21 +58,21 @@ namespace zendnnl {
 namespace lowoha {
 namespace matmul {
 
-using detail::parallel_multilevel;
-using detail::sequential_experts;
+using detail::hierarchical_execute;
+using detail::sequential_execute;
 
-// NOTE: ALGO 1 `sequential_experts` moved to
+// NOTE: ALGO 1 `sequential_execute` moved to
 // `executors/sequential/sequential_experts.cpp`, ALGO 6
-// `parallel_multilevel` to `multi_expert/multilevel/parallel_multilevel.cpp`,
-// the ALGO 3 admission check `check_n_tile_extra` to
+// `hierarchical_execute` to `multi_expert/multilevel/parallel_multilevel.cpp`,
+// the ALGO 3 admission check `n_tile_supported` to
 // `executors/n_tile/n_tile_admission.cpp`, and `auto_select_algo` /
-// `select_grp_matmul_algo` to `selection/algo_select.cpp`.
+// `group_matmul_algo_select` to `selection/algo_select.cpp`.
 
 // ALGO 5 (per-expert parallel) moved to
 // `multi_expert/expert_parallel/group_matmul_expert_parallel.cpp`.
 
 // M-tile (ALGO 2) safety predicate hoisted to
-// `group_matmul_parallel_common.hpp` as `check_m_tile_safe` (inline).
+// `group_matmul_parallel_common.hpp` as `m_tile_supported` (inline).
 // Both the legacy dispatcher in this TU and the MoE vertical-fusion
 // dispatcher fork in `group_matmul_fused_moe.cpp` use the same
 // predicate, so it lives next to `op2_k_for_act` in the common
@@ -82,7 +82,7 @@ using detail::sequential_experts;
 
 // ── Grouped-AUTO in-place cache policy ─────────────────────────────────
 
-bool prepare_grouped_auto_weight_cache(std::vector<matmul_params> &params,
+bool prepare_auto_weight_cache(std::vector<matmul_params> &params,
         bool custom_kernel_effective,
         std::vector<matmul_params> *secondary_params, bool auto_algo3_layer,
         bool *ck_inplace_licence, bool strict_stable_decode_plan) {
@@ -154,8 +154,8 @@ bool prepare_grouped_auto_weight_cache(std::vector<matmul_params> &params,
     // planner is the exception: it fixes that split from `num_threads` for
     // every active expert, and cross-warm prepopulates those exact decode
     // entries before ALGO 1 rewrites the full weight into the caller's
-    // buffer.  DecodeDynamic and forced DecodeD would ask for a different
-    // split; once this licence is on, flat_n_tile retargets those plans
+    // buffer.  CcdExpertWaves and forced StaticExpertTeams would ask for a different
+    // split; once this licence is on, n_tile_execute retargets those plans
     // onto the warmed split instead of allocating a second prompt copy.
     const bool strict_stable_dlp_decode
             = !custom_kernel_effective && strict_stable_decode_plan;
@@ -229,7 +229,7 @@ bool prepare_grouped_auto_weight_cache(std::vector<matmul_params> &params,
 
 // ── Dispatch ────────────────────────────────────────────────────────────
 
-bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
+bool group_matmul_execute(const std::vector<char> &layout,
         const std::vector<bool> &transA, const std::vector<bool> &transB,
         const std::vector<int> &M, const std::vector<int> &N,
         const std::vector<int> &K, const std::vector<float> &alpha,
@@ -239,7 +239,7 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
         const std::vector<void *> &dst, const std::vector<int> &ldc,
         const std::vector<bool> &is_weights_const,
         std::vector<matmul_params> &params, const int num_threads,
-        const char **gemm_mode_out, grp_matmul_gated_act_t fused_act,
+        const char **execution_path_out, grp_matmul_gated_act_t fused_act,
         data_type_t act_dtype) {
 
     scoped_grp_auto_mutation_tracking mutation_tracking;
@@ -251,7 +251,7 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
     // routinely an inactive padding slot whose dtypes are unset) says "CK
     // will fuse" for calls the kernel then refuses -- and the tight
     // split-halves path answers that refusal by demoting the layer to serial
-    // Sequential.  `grp_matmul_custom_kernel_effective` folds the family
+    // Sequential.  `group_matmul_custom_kernel_candidate` folds the family
     // sub-toggles and the per-group disqualifier, and picks its
     // representative from the first ACTIVE expert.
     // Must be the EFFECTIVE verdict, not the master knob: this feeds
@@ -261,7 +261,7 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
     // tight split-halves path answers that refusal by demoting the layer to
     // serial Sequential.
     const bool custom_kernel_en
-            = grp_matmul_custom_kernel_effective(params, M, N, fused_act);
+            = group_matmul_custom_kernel_candidate(params, M, N, fused_act);
 
     // ── WEIGHT_CACHE=2 (in-place) safety downgrade for grouped matmul ─────
     // In-place reorder/pack mutates the caller's weight buffer into a
@@ -305,7 +305,7 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
     //     mutates the weight (see prepare_for_call +
     //     get_or_pack_weight_bf16).
     const bool single_expert_epilogue_ok = M.size() != 1
-            || ck_serves_single_expert_epilogue(alpha[0], beta[0], bias[0],
+            || single_expert_ck_epilogue_supported(alpha[0], beta[0], bias[0],
                     /*tight=*/ldc[0] == N[0] / 2, fused_act, act_dtype);
     // The call's verdicts, classified once for the licence, the selector,
     // the executor and prepack (`grp_matmul_call_route`).
@@ -339,8 +339,8 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
                 "capacity-declared INT8) prompt/decode layout ownership is "
                 "unsupported. Use WEIGHT_CACHE=1, remove "
                 "the phase override, or set ZENDNNL_GRP_MATMUL_ALGO=0.");
-        if (gemm_mode_out != nullptr) {
-            *gemm_mode_out = kGrpMatmulErrWc2PhaseSplitUnsupported;
+        if (execution_path_out != nullptr) {
+            *execution_path_out = kGrpMatmulErrWc2PhaseSplitUnsupported;
         }
         return false;
     }
@@ -350,7 +350,7 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
             = params.empty() ? 1 : size_of(params.front().dtypes.wei);
     const bool strict_stable_decode_plan = aocl_strict_stable_decode_plan(
             &M, &N, &K, num_threads, stable_wei_elem);
-    track_grouped_inplace_mutation = prepare_grouped_auto_weight_cache(params,
+    track_grouped_inplace_mutation = prepare_auto_weight_cache(params,
             custom_kernel_en, nullptr, auto_algo3_layer, &ck_inplace_licence,
             strict_stable_decode_plan);
     // Without the licence, a process downgraded to WEIGHT_CACHE=1 just now
@@ -362,9 +362,9 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
 
     mutation_tracking.set(track_grouped_inplace_mutation);
 
-    auto_algo_trace algo_trace;
+    GroupMatmulAlgoTrace algo_trace;
     const int use_algo
-            = select_grp_matmul_algo(layout, M, N, K, params, num_threads,
+            = group_matmul_algo_select(layout, M, N, K, params, num_threads,
                     &algo_trace, fused_act, single_expert_epilogue_ok, &route);
 
     // A call ALGO 3 cannot serve follows the mixed policy.  `params` is a
@@ -405,7 +405,7 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
     // slot is a padding placeholder whose stride is arbitrary, and the
     // caller-boundary uniformity check deliberately skips those, so slot 0
     // could classify a uniformly wide active set as tight or the reverse.
-    // `flat_n_tile` infers the same property the same way; the two must agree
+    // `n_tile_execute` infers the same property the same way; the two must agree
     // or the executor plans a layout the dispatcher did not authorise.
     size_t layout_rep = 0;
     for (size_t i = 0; i < M.size(); ++i) {
@@ -420,7 +420,7 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
     // backend's `apply_swiglu_oai_tile_rows`; that helper handles
     // swiglu_oai_mul only.  silu_and_mul and gelu_and_mul have no
     // wide-helper siblings yet, so they can only fuse on the tight
-    // layout (CK path).  `a3_can_fuse_act` already gates silu/gelu
+    // layout (CK path).  `n_tile_can_fuse_activation` already gates silu/gelu
     // on `use_custom_kernel=true` — combined with this tight-only
     // gate, the silu/gelu fused path engages exclusively when
     // (CK-on AND tight caller).  Wide non-CK silu/gelu falls through
@@ -429,7 +429,7 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
             = (fused_act == grp_matmul_gated_act_t::swiglu_oai_mul)
             && get_grp_n_tile_fused_act();
     const bool a3_fuses = (use_algo == 3)
-            && a3_can_fuse_act(fused_act, custom_kernel_en)
+            && n_tile_can_fuse_activation(fused_act, custom_kernel_en)
             && (caller_layout_tight || wide_fuse_supported);
     const bool act_fused = a3_fuses
             || ((use_algo != 3) && (fused_act != grp_matmul_gated_act_t::none));
@@ -459,7 +459,7 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
         // dynamic_quant + per-token src_scale.  Reading params[0] blindly
         // would mislabel the log (ck_family=none / dynamic_quant=no) even when
         // CK int8 runs on every active tile.  Pick the first ACTIVE expert
-        // (mirrors flat_n_tile's routing classifier); fall back to 0 when all
+        // (mirrors n_tile_execute's routing classifier); fall back to 0 when all
         // inactive.  wei dtype is uniform across active/inactive, so the
         // wei/expert(MB) telemetry below is unaffected by the choice.
         size_t rep = 0;
@@ -633,7 +633,7 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
     }
 
     auto set_mode = [&](const char *s) {
-        if (gemm_mode_out != nullptr) { *gemm_mode_out = s; }
+        if (execution_path_out != nullptr) { *execution_path_out = s; }
     };
 
     // Whole-call no-op short-circuit.  When no expert fires (every M[i] <= 0,
@@ -657,13 +657,13 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
 
     // CK-only-or-fail: a caller-prepacked CUSTOM-KERNEL VNNI weight is
     // consumable ONLY by the custom kernel, which runs exclusively on
-    // ALGO 3 (flat_n_tile).  If the call routed to any other ALGO, the
+    // ALGO 3 (n_tile_execute).  If the call routed to any other ALGO, the
     // executor would read the packed bytes as a raw weight → silent
-    // corruption.  Signal failure via the gemm_mode sentinel (group_matmul
+    // corruption.  Signal failure via the execution_path sentinel (group_matmul
     // _direct returns status_t::failure on this value).  ALGO 3 itself
-    // re-checks CK engagement and raises the same sentinel from flat_n_tile.
+    // re-checks CK engagement and raises the same sentinel from n_tile_execute.
     //
-    // Detection MUST match the CK-VNNI classifier in flat_n_tile:
+    // Detection MUST match the CK-VNNI classifier in n_tile_execute:
     // `mem_format_b == 'r'` is ambiguous (it also marks AOCL-DLP-blocked
     // and GGML unpack+reorder outputs), so gate on
     // `lowoha_algo == moe_custom_kernel`.  An AOCL-blocked / GGML-reordered
@@ -748,7 +748,7 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
     //     the n_tile_safe clamp in either phase, so a tight caller that is
     //     correct on ALGO 3 (fused) silently corrupts there -- for every
     //     activation family, custom kernel on or off.
-    //   * With the custom kernel off, `a3_can_fuse_act` declines silu/gelu, so
+    //   * With the custom kernel off, `n_tile_can_fuse_activation` declines silu/gelu, so
     //     those lose the tight writer at decode as well.
     //
     // `use_algo` and `a3_fuses` are both resolved by this point, so this is
@@ -776,8 +776,8 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
     const int dispatch_num_ops = static_cast<int>(M.size());
     static thread_local std::vector<void *> w4a8_s8_ptrs;
     bool any_w4a8 = false;
-    const bool w4a8_algo3_simulated
-            = w4a8_runtime_algo(/*scheduling_algo=*/3, resolve_kernel())
+    const bool w4a8_algo3_simulated = resolve_w4a8_backend(/*group_schedule=*/3,
+                                              resolve_matmul_backend())
             == matmul_algo_t::aocl_dlp;
     if ((use_algo == 3 || use_algo == 0) && w4a8_algo3_simulated) {
         if (!w4a8_populate_plain_s8_cache(weight, K, N, ldb, transB, params,
@@ -805,56 +805,57 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
 
     switch (use_algo) {
         case 1:
-            set_mode("sequential_experts");
-            sequential_experts(layout, transA, transB, M, N, K, alpha, src, lda,
+            set_mode("sequential_execute");
+            sequential_execute(layout, transA, transB, M, N, K, alpha, src, lda,
                     weight, ldb, bias, beta, dst, ldc, is_weights_const, params,
-                    num_threads, fused_act, act_dtype, gemm_mode_out);
+                    num_threads, fused_act, act_dtype, execution_path_out);
             break;
         case 2:
-            // flat_m_tile owns its gemm_mode — it writes the concrete branch it ran
-            // (flat_m_tile_multitier / _single_tier / _seq_clamp) into gemm_mode_out,
-            // like flat_n_tile does, so the post-exec [GRP_MATMUL.CALL] line reflects
-            // the real M-tile path rather than a generic "flat_m_tile".
-            flat_m_tile(layout, transA, transB, M, N, K, alpha, src, lda,
+            // m_tile_execute owns its execution_path — it writes the concrete branch it ran
+            // (flat_m_tile_multitier / _single_tier / _seq_clamp) into execution_path_out,
+            // like n_tile_execute does, so the post-exec [GRP_MATMUL.CALL] line reflects
+            // the real M-tile path rather than a generic "m_tile_execute".
+            m_tile_execute(layout, transA, transB, M, N, K, alpha, src, lda,
                     weight, ldb, bias, beta, dst, ldc, fused_act, act_dtype,
-                    is_weights_const, params, num_threads, gemm_mode_out);
+                    is_weights_const, params, num_threads, execution_path_out);
             break;
         case 3:
-            // flat_n_tile handles both the legacy non-fused path and the fused
+            // n_tile_execute handles both the legacy non-fused path and the fused
             // epilogue.  Pass fused_act when a3_fuses; pass `none` otherwise so
             // the legacy path runs (and the caller does the separate activation).
             //
-            // The executor writes the concrete path name to `gemm_mode_out`
-            // itself — one of `"flat_n_tile"`, `"flat_n_tile_custom"`,
+            // The executor writes the concrete path name to `execution_path_out`
+            // itself — one of `"n_tile_execute"`, `"flat_n_tile_custom"`,
             // `"flat_n_tile_fused_swiglu_oai"`, or
             // `"flat_n_tile_fused_swiglu_oai_custom"` — so benchdnn /
             // profiler output reveals whether the custom BF16 microkernel
             // engaged for this call without needing APILOG enabled.
-            flat_n_tile(layout, transA, transB, M, N, K, alpha, src, lda,
+            n_tile_execute(layout, transA, transB, M, N, K, alpha, src, lda,
                     weight, ldb, bias, beta, dst, ldc, is_weights_const, params,
                     num_threads,
                     a3_fuses ? fused_act : grp_matmul_gated_act_t::none,
-                    act_dtype, gemm_mode_out,
+                    act_dtype, execution_path_out,
                     any_w4a8 ? &w4a8_s8_ptrs : nullptr, &route);
             break;
         case kGrpMatmulAlgoMultilevel:
-            // parallel_multilevel owns its gemm_mode (multilevel_concurrent /
-            // multilevel_rounds), written into gemm_mode_out.
-            parallel_multilevel(layout, transA, transB, M, N, K, alpha, src,
+            // hierarchical_execute owns its execution_path (multilevel_concurrent /
+            // multilevel_rounds), written into execution_path_out.
+            hierarchical_execute(layout, transA, transB, M, N, K, alpha, src,
                     lda, weight, ldb, bias, beta, dst, ldc, is_weights_const,
-                    params, num_threads, fused_act, act_dtype, gemm_mode_out);
+                    params, num_threads, fused_act, act_dtype,
+                    execution_path_out);
             break;
         case 5:
             set_mode("per_expert");
-            parallel_per_expert(layout, transA, transB, M, N, K, alpha, src,
+            expert_parallel_execute(layout, transA, transB, M, N, K, alpha, src,
                     lda, weight, ldb, bias, beta, dst, ldc, is_weights_const,
                     params, num_threads, fused_act, act_dtype);
             break;
         default:
-            set_mode("sequential_experts");
-            sequential_experts(layout, transA, transB, M, N, K, alpha, src, lda,
+            set_mode("sequential_execute");
+            sequential_execute(layout, transA, transB, M, N, K, alpha, src, lda,
                     weight, ldb, bias, beta, dst, ldc, is_weights_const, params,
-                    num_threads, fused_act, act_dtype, gemm_mode_out);
+                    num_threads, fused_act, act_dtype, execution_path_out);
             break;
     }
 

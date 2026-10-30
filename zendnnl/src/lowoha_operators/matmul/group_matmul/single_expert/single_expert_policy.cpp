@@ -56,20 +56,20 @@ single_expert_ck_t grp_matmul_single_expert_ck(data_type_t src, data_type_t wei,
     const KernelVariant v = grp_matmul_ck_weight_variant(src, wei, dst,
             dynamic_quant, compute, static_u8s8, aocl_prepacked, K, N);
     if (v == KernelVariant::kUnsupported) return {};
-    prompt_tile::Family fam;
+    prompt_tile::kernel_type_t fam;
     unsigned dt = 0;
     if (custom_kernel::is_int8_variant(v)) {
-        fam = prompt_tile::Family::kInt8;
+        fam = prompt_tile::kernel_type_t::kInt8;
         dt = static_u8s8 ? kSingleExpertU8s8 : kSingleExpertInt8;
-    } else if (custom_kernel::is_s4_variant(v)) {
-        fam = prompt_tile::Family::kW4a8;
+    } else if (custom_kernel::is_w4a8_variant(v)) {
+        fam = prompt_tile::kernel_type_t::kW4a8;
         dt = kSingleExpertW4a8;
     } else if (custom_kernel::is_f16_variant(v)) {
-        fam = prompt_tile::Family::kF16;
+        fam = prompt_tile::kernel_type_t::kF16;
         dt = kSingleExpertF16;
     } else if (v == KernelVariant::kBF16_BF16_BF16
             || v == KernelVariant::kBF16_BF16_F32) {
-        fam = prompt_tile::Family::kBf16;
+        fam = prompt_tile::kernel_type_t::kBf16;
         dt = kSingleExpertBf16;
     } else {
         return {};
@@ -126,7 +126,7 @@ single_expert_ck_t grp_matmul_single_expert_call_ck(const std::vector<int> &M,
     const single_expert_ck_t sck
             = grp_matmul_single_expert_ck(p, K[0], N[0], num_threads);
     if (!sck.any()
-            || !grp_matmul_custom_kernel_effective(params, M, N, fused_act))
+            || !group_matmul_custom_kernel_candidate(params, M, N, fused_act))
         return {};
     return sck;
 }

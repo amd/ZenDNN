@@ -93,7 +93,8 @@ void reset_grp_matmul_caches() {
     // native LRUs are pointer-keyed and process-wide; clearing them
     // here is what unblocks heap-address reuse across tests from
     // returning stale reordered weights (silent wrong-answer bite).
-    zendnnl::lowoha::matmul::custom_kernel::clear_custom_kernel_pack_cache();
+    zendnnl::lowoha::matmul::custom_kernel::
+            clear_custom_kernel_pack_cache_bf16();
     // The INT8 CK pack cache is a SEPARATE singleton from the BF16 one
     // (`pack_cache_singleton_int8`).  It must be cleared too, otherwise
     // its pointer-keyed entries survive across tests and heap-address
@@ -129,7 +130,7 @@ void reset_grp_matmul_caches() {
     // sixth pointer-keyed process-wide cache here, and carry the identical
     // hazard: a fresh scale buffer landing on a freed one's address would
     // hit a stale entry and dequantize with a prior test's scales.
-    zendnnl::lowoha::matmul::clear_grp_wei_scale_f32_cache();
+    zendnnl::lowoha::matmul::clear_weight_scale_f32_cache();
     clear_matmul_test_caches();
 }
 

@@ -14,7 +14,7 @@
  * limitations under the License.
  *******************************************************************************/
 
-/// ALGO 3 admission (`check_n_tile_extra`): whether the N-tile executor has
+/// ALGO 3 admission (`n_tile_supported`): whether the N-tile executor has
 /// a safe column-sliced path for every active expert of a call.
 
 #ifndef ZENDNNL_GROUP_MATMUL_N_TILE_ADMISSION_HPP
@@ -29,7 +29,7 @@ namespace lowoha {
 namespace matmul {
 namespace detail {
 
-bool check_n_tile_extra(const std::vector<int> &M, const std::vector<int> &N,
+bool n_tile_supported(const std::vector<int> &M, const std::vector<int> &N,
         const std::vector<matmul_params> &params, int num_ops,
         grp_matmul_gated_act_t fused_act);
 

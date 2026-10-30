@@ -43,7 +43,7 @@ namespace matmul {
 /// falling back to AOCL DLP blocked (or reference when AOCL is absent)
 /// when the config is unset/invalid.  ALGO 11 selects the native BRGEMM of
 /// matmul_direct only: group matmul resolves it as unset.
-inline matmul_algo_t resolve_kernel() {
+inline matmul_algo_t resolve_matmul_backend() {
     static const matmul_algo_t algo = []() {
         int32_t a = matmul_config_t::instance().get_algo();
         matmul_algo_t kernel;
@@ -84,11 +84,11 @@ inline matmul_algo_t grp_matmul_lowoha_algo(const matmul_params &params) {
 /// W4A8 matmul policy:
 ///   * group AUTO: ALGO 3 is native s4; every other scheduler is simulated;
 ///   * pinned group ALGO: preserve the inner-kernel choice.
-inline matmul_algo_t w4a8_runtime_algo(
-        int scheduling_algo, matmul_algo_t inner_kernel) {
+inline matmul_algo_t resolve_w4a8_backend(
+        int group_schedule, matmul_algo_t inner_kernel) {
     if (get_grp_matmul_algo() == kGrpMatmulAlgoAuto) {
-        return scheduling_algo == 3 ? matmul_algo_t::aocl_dlp_blocked
-                                    : matmul_algo_t::aocl_dlp;
+        return group_schedule == 3 ? matmul_algo_t::aocl_dlp_blocked
+                                   : matmul_algo_t::aocl_dlp;
     }
     return inner_kernel == matmul_algo_t::aocl_dlp_blocked
             ? matmul_algo_t::aocl_dlp_blocked
@@ -99,7 +99,7 @@ inline matmul_algo_t w4a8_runtime_algo(
 /// group-matmul scheduler.  Most dtype families preserve `inner_kernel`;
 /// scheduler-specific policies (currently W4A8 native-vs-simulated routing)
 /// are centralized here so individual executors do not encode dtype policy.
-inline matmul_algo_t resolve_expert_kernel(int scheduling_algo,
+inline matmul_algo_t resolve_expert_backend(int group_schedule,
         matmul_algo_t inner_kernel, const matmul_params &params) {
     // A reordered weight with AOCL (or legacy unset) provenance must remain
     // on AOCL even when the process-wide backend resolves differently.
@@ -110,7 +110,7 @@ inline matmul_algo_t resolve_expert_kernel(int scheduling_algo,
         return matmul_algo_t::aocl_dlp_blocked;
     }
     return is_w4a8_config(params)
-            ? w4a8_runtime_algo(scheduling_algo, inner_kernel)
+            ? resolve_w4a8_backend(group_schedule, inner_kernel)
             : inner_kernel;
 }
 
@@ -118,7 +118,7 @@ inline matmul_algo_t resolve_expert_kernel(int scheduling_algo,
 /// through.  Pooled because the per-expert executors (ALGO 1 / 5 / 6) reach it
 /// once per expert inside the parallel region, where a stack instance would
 /// cost a malloc/free pair each time.  Named rather than function-local so
-/// `reset_thread_local_fused_moe_state()` can `release()` it, as with
+/// `clear_fused_moe_thread_state()` can `release()` it, as with
 /// `ntile_flat_parallel::reset_thread_local_scratch()`.
 inline reorder_quant_buffers_t &get_thread_local_quant_buffers() {
     static thread_local reorder_quant_buffers_t buffers;
@@ -240,7 +240,7 @@ inline bool get_grp_matmul_enable_group_dq() {
 }
 
 // NOTE: The N-tile shared utilities — `sort_indices_by_m`,
-// `engage_ntile_custom_kernel`, `ntile_effective_nr_align`,
+// `prepare_n_tile_custom_kernel`, `n_tile_nr_align`,
 // `auto_pick_n_order`, `fill_ntile_expert_order` — moved to
 // `group_matmul_n_tile.hpp` (Section A.5) so they live alongside
 // the N-tile env knobs they read.  Include that header to call

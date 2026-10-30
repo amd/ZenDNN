@@ -332,7 +332,7 @@ void unpack_f16_simple(const float16_t *packed, int K, int N, int ldb,
 
 // ── Shared per-process cache state (see doc-block below) ────────────
 // Pulled out of `get_or_pack_weight_bf16()` so
-// `clear_custom_kernel_pack_cache()` can reach the same singleton.
+// `clear_custom_kernel_pack_cache_bf16()` can reach the same singleton.
 // The outer anonymous namespace keeps everything invisible to other
 // translation units.
 //
@@ -365,7 +365,7 @@ void unpack_f16_simple(const float16_t *packed, int K, int N, int ldb,
 // cycles) will see the cache footprint grow by one entry per
 // distinct (weight pointer, N, K, pack_nr) tuple observed. For those
 // deployments call
-// `clear_custom_kernel_pack_cache()` during a known quiescent
+// `clear_custom_kernel_pack_cache_bf16()` during a known quiescent
 // window between workload phases (see the safety note in pack.hpp).
 struct aligned_pack_deleter {
     void operator()(void *ptr) const noexcept {
@@ -1350,7 +1350,7 @@ bool any_weight_packed_in_place(
 //
 // MUST NOT be called on cache-served pointers (`disable_cache=false`
 // path) — those are owned by the LRU singleton and freed by
-// `clear_custom_kernel_pack_cache()`.  The CallContext in
+// `clear_custom_kernel_pack_cache_bf16()`.  The CallContext in
 // `dispatch.hpp` is the single authority on which array (`packed_ptrs`
 // vs `owned_packed_ptrs`) carries cache-served vs caller-owned
 // pointers, so application code never has to make this distinction
@@ -1362,7 +1362,7 @@ void free_owned_packed_weight(const bfloat16_t *packed) {
 
 // ── FP16 pack get / free / clear (mirror of BF16 trio) ────────────
 // Same shape as `get_or_pack_weight_bf16` / `free_owned_packed_weight`
-// / `clear_custom_kernel_pack_cache`.  Differences vs the bf16
+// / `clear_custom_kernel_pack_cache_bf16`.  Differences vs the bf16
 // sibling are isolated and tagged below:
 //   * Cache singleton + mutex: SEPARATE instances
 //     (`pack_cache_singleton_f16` / `pack_mutex_singleton_f16`).
@@ -1622,7 +1622,7 @@ void clear_custom_kernel_pack_cache_f16() {
 // `size > capacity_ - n` wraps to `size > UINT_MAX - n + 1` and is
 // therefore always false), so the old form silently left every
 // entry in place.  Using `clear()` directly sidesteps the bug.
-void clear_custom_kernel_pack_cache() {
+void clear_custom_kernel_pack_cache_bf16() {
     std::lock_guard<std::mutex> lock(pack_mutex_singleton());
     auto &pack_cache = pack_cache_singleton();
     pack_cache.clear();
@@ -1638,7 +1638,7 @@ void clear_custom_kernel_pack_cache() {
 
 // ── INT8 pack get / free / clear (mirror of BF16 trio) ────────────
 // Same shape as `get_or_pack_weight_bf16` / `free_owned_packed_weight`
-// / `clear_custom_kernel_pack_cache`.  Differences vs the bf16
+// / `clear_custom_kernel_pack_cache_bf16`.  Differences vs the bf16
 // sibling are isolated and tagged below:
 //   * Cache singleton + mutex: SEPARATE instances
 //     (`pack_cache_singleton_int8` / `pack_mutex_singleton_int8`).

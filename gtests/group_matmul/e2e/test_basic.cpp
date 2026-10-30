@@ -1218,17 +1218,17 @@ TEST(TestChunkedPostPasses, WeightedReduceEdgesMatchSerial) {
 // sequential — routing it to parallel would drop the chaining semantics and
 // index `src[i]` out of bounds.
 //
-// The routing decision is observed via the `gemm_mode` string the
-// dispatcher publishes (captured with `GemmModeCaptureGuard`): the
+// The routing decision is observed via the `execution_path` string the
+// dispatcher publishes (captured with `ExecutionPathCaptureGuard`): the
 // sequential path writes "sequential", every parallel executor writes a
-// different tag ("sequential_experts", "per_expert", "flat_m_tile_*", …).
+// different tag ("sequential_execute", "per_expert", "flat_m_tile_*", …).
 // ???????????????????????????????????????????????????????????????????????????????
 
 namespace {
-// gemm_mode string published by the most recent group_matmul_direct call.
-inline const char *last_group_matmul_gemm_mode() {
+// execution_path string published by the most recent group_matmul_direct call.
+inline const char *last_group_matmul_execution_path() {
     return zendnnl::lowoha::matmul::test_api ::
-            s_last_group_matmul_direct_gemm_mode.load(
+            s_last_group_matmul_direct_execution_path.load(
                     std::memory_order_relaxed);
 }
 } // namespace
@@ -1256,13 +1256,13 @@ TEST(TestSingleExpertParallelRouting, SingleExpertRoutesToParallel) {
 
     const char *mode = nullptr;
     {
-        GemmModeCaptureGuard guard;
+        ExecutionPathCaptureGuard guard;
         ASSERT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms,
                           gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb,
                           biases, gv.beta, dsts, gv.ldc, gv.is_wc, params,
                           nullptr, nullptr),
                 status_t::success);
-        mode = last_group_matmul_gemm_mode();
+        mode = last_group_matmul_execution_path();
     }
 
     ASSERT_NE(mode, nullptr);
@@ -1318,13 +1318,13 @@ TEST(TestSingleExpertParallelRouting, MultiOpChainStaysSequential) {
 
     const char *mode = nullptr;
     {
-        GemmModeCaptureGuard guard;
+        ExecutionPathCaptureGuard guard;
         ASSERT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms,
                           gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb,
                           biases, gv.beta, dsts, gv.ldc, gv.is_wc, params,
                           nullptr, nullptr),
                 status_t::success);
-        mode = last_group_matmul_gemm_mode();
+        mode = last_group_matmul_execution_path();
     }
 
     ASSERT_NE(mode, nullptr);
@@ -1499,7 +1499,7 @@ TEST(TestFusedMoEPipeline, SingleExpertOp1ActOp2) {
 
     const char *mode = nullptr;
     {
-        GemmModeCaptureGuard guard;
+        ExecutionPathCaptureGuard guard;
         ASSERT_EQ(
                 group_matmul_direct(gv1.layout, gv1.transA, gv1.transB, gv1.Ms,
                         gv1.Ns, gv1.Ks, gv1.alpha, srcs, gv1.lda, wei1, gv1.ldb,
@@ -1509,7 +1509,7 @@ TEST(TestFusedMoEPipeline, SingleExpertOp1ActOp2) {
                 status_t::success)
                 << "single-expert fused pipeline (Op1 + activation + Op2) was "
                    "rejected or failed";
-        mode = last_group_matmul_gemm_mode();
+        mode = last_group_matmul_execution_path();
     }
 
     // Must route through the PARALLEL fused dispatch, not the sequential chain.
@@ -1556,7 +1556,7 @@ TEST(TestFusedMoEPipeline, SingleExpertOp1ActOp2) {
 //        * `detect_internal_alloc` (lifted from 3 open-coded copies in
 //          group_matmul_direct.cpp:192 + 710-714 + group_matmul_fused_moe
 //          .cpp:315 to a single header at group_matmul/detect_internal_
-//          alloc.hpp).  The helper has 2 modes (`quick_o1`, `sweep_active`)
+//          alloc.hpp).  The helper has 2 modes (`first_slot`, `active_range`)
 //          and the 4 v-states (empty / all-null / all-non-null / mixed
 //          null+non-null) so we cover the full 8-cell matrix plus the
 //          `fused_moe_present == false` short-circuit and the prepack-
@@ -1600,43 +1600,43 @@ constexpr bool kIsInternalFalse = false;
 
 class TestGroupMatmulHelperParity : public ::testing::Test {};
 
-// ── Cell 1/8: quick_o1 + empty + fused_moe_present ────────────────────────
+// ── Cell 1/8: first_slot + empty + fused_moe_present ────────────────────────
 TEST_F(TestGroupMatmulHelperParity, QuickO1_EmptyFusedPresent_IsInternal) {
     bool out = false;
     const auto v = v_empty();
     ASSERT_EQ(
             detect_internal_alloc(v, /*num_ops=*/4, /*fused_moe_present=*/true,
-                    internal_alloc_mode::quick_o1, &out),
+                    internal_alloc_mode::first_slot, &out),
             status_t::success);
     EXPECT_EQ(out, kIsInternalTrue)
             << "empty vector + fused-MoE engaged = library-managed";
 }
 
-// ── Cell 2/8: quick_o1 + all-null + fused_moe_present ─────────────────────
+// ── Cell 2/8: first_slot + all-null + fused_moe_present ─────────────────────
 TEST_F(TestGroupMatmulHelperParity, QuickO1_AllNullFusedPresent_IsInternal) {
     bool out = false;
     const auto v = v_all_null(4);
     ASSERT_EQ(
             detect_internal_alloc(v, /*num_ops=*/4, /*fused_moe_present=*/true,
-                    internal_alloc_mode::quick_o1, &out),
+                    internal_alloc_mode::first_slot, &out),
             status_t::success);
     EXPECT_EQ(out, kIsInternalTrue) << "v[0]=nullptr -> internal-alloc";
 }
 
-// ── Cell 3/8: quick_o1 + all-non-null + fused_moe_present ─────────────────
+// ── Cell 3/8: first_slot + all-non-null + fused_moe_present ─────────────────
 TEST_F(TestGroupMatmulHelperParity,
         QuickO1_AllNonNullFusedPresent_NotInternal) {
     bool out = true;
     const auto v = v_all_nonnull(4);
     ASSERT_EQ(
             detect_internal_alloc(v, /*num_ops=*/4, /*fused_moe_present=*/true,
-                    internal_alloc_mode::quick_o1, &out),
+                    internal_alloc_mode::first_slot, &out),
             status_t::success);
     EXPECT_EQ(out, kIsInternalFalse) << "v[0]!=nullptr -> caller-allocated";
 }
 
-// ── Cell 4/8: quick_o1 + mixed (null at [0]) + fused_moe_present ──────────
-//   quick_o1 SAMPLES v[0] only.  When v[0]==nullptr it reports internal,
+// ── Cell 4/8: first_slot + mixed (null at [0]) + fused_moe_present ──────────
+//   first_slot SAMPLES v[0] only.  When v[0]==nullptr it reports internal,
 //   even if downstream slots are non-null — the diagnostic sweep
 //   path is responsible for catching the mixed state.
 TEST_F(TestGroupMatmulHelperParity,
@@ -1646,47 +1646,47 @@ TEST_F(TestGroupMatmulHelperParity,
     v[0] = nullptr; // mixed: only [0] is null
     ASSERT_EQ(
             detect_internal_alloc(v, /*num_ops=*/4, /*fused_moe_present=*/true,
-                    internal_alloc_mode::quick_o1, &out),
+                    internal_alloc_mode::first_slot, &out),
             status_t::success)
-            << "quick_o1 must NOT report failure on mixed-state — that's the "
-               "sweep_active path's job; quick_o1 is a fast production check";
+            << "first_slot must NOT report failure on mixed-state — that's the "
+               "active_range path's job; first_slot is a fast production check";
     EXPECT_EQ(out, kIsInternalTrue);
 }
 
-// ── Cell 5/8: sweep_active + empty + fused_moe_present ────────────────────
+// ── Cell 5/8: active_range + empty + fused_moe_present ────────────────────
 TEST_F(TestGroupMatmulHelperParity, Sweep_EmptyFusedPresent_IsInternal) {
     bool out = false;
     const auto v = v_empty();
     ASSERT_EQ(
             detect_internal_alloc(v, /*num_ops=*/4, /*fused_moe_present=*/true,
-                    internal_alloc_mode::sweep_active, &out),
+                    internal_alloc_mode::active_range, &out),
             status_t::success);
     EXPECT_EQ(out, kIsInternalTrue);
 }
 
-// ── Cell 6/8: sweep_active + all-null + fused_moe_present ─────────────────
+// ── Cell 6/8: active_range + all-null + fused_moe_present ─────────────────
 TEST_F(TestGroupMatmulHelperParity, Sweep_AllNullFusedPresent_IsInternal) {
     bool out = false;
     const auto v = v_all_null(4);
     ASSERT_EQ(
             detect_internal_alloc(v, /*num_ops=*/4, /*fused_moe_present=*/true,
-                    internal_alloc_mode::sweep_active, &out),
+                    internal_alloc_mode::active_range, &out),
             status_t::success);
     EXPECT_EQ(out, kIsInternalTrue);
 }
 
-// ── Cell 7/8: sweep_active + all-non-null + fused_moe_present ─────────────
+// ── Cell 7/8: active_range + all-non-null + fused_moe_present ─────────────
 TEST_F(TestGroupMatmulHelperParity, Sweep_AllNonNullFusedPresent_NotInternal) {
     bool out = true;
     const auto v = v_all_nonnull(4);
     ASSERT_EQ(
             detect_internal_alloc(v, /*num_ops=*/4, /*fused_moe_present=*/true,
-                    internal_alloc_mode::sweep_active, &out),
+                    internal_alloc_mode::active_range, &out),
             status_t::success);
     EXPECT_EQ(out, kIsInternalFalse);
 }
 
-// ── Cell 8/8: sweep_active + mixed null+non-null in active range ──────────
+// ── Cell 8/8: active_range + mixed null+non-null in active range ──────────
 //   The hard contract break: sweep MUST report failure so the caller
 //   can `log_error` and reject.
 TEST_F(TestGroupMatmulHelperParity, Sweep_MixedFusedPresent_ReturnsFailure) {
@@ -1694,9 +1694,9 @@ TEST_F(TestGroupMatmulHelperParity, Sweep_MixedFusedPresent_ReturnsFailure) {
     const auto v = v_mixed_null_at(/*n=*/4, /*null_idx=*/2);
     EXPECT_EQ(
             detect_internal_alloc(v, /*num_ops=*/4, /*fused_moe_present=*/true,
-                    internal_alloc_mode::sweep_active, &out),
+                    internal_alloc_mode::active_range, &out),
             status_t::failure)
-            << "sweep_active must report failure on mixed null/non-null active "
+            << "active_range must report failure on mixed null/non-null active "
                "range";
 }
 
@@ -1707,14 +1707,14 @@ TEST_F(TestGroupMatmulHelperParity, NotFused_AllPathsFalse) {
     const auto v_null = v_all_null(4);
     ASSERT_EQ(detect_internal_alloc(v_null, /*num_ops=*/4,
                       /*fused_moe_present=*/false,
-                      internal_alloc_mode::quick_o1, &out),
+                      internal_alloc_mode::first_slot, &out),
             status_t::success);
     EXPECT_EQ(out, kIsInternalFalse);
 
     out = true;
     ASSERT_EQ(detect_internal_alloc(v_null, /*num_ops=*/4,
                       /*fused_moe_present=*/false,
-                      internal_alloc_mode::sweep_active, &out),
+                      internal_alloc_mode::active_range, &out),
             status_t::success);
     EXPECT_EQ(out, kIsInternalFalse);
 
@@ -1723,7 +1723,7 @@ TEST_F(TestGroupMatmulHelperParity, NotFused_AllPathsFalse) {
     const auto v_e = v_empty();
     ASSERT_EQ(detect_internal_alloc(v_e, /*num_ops=*/4,
                       /*fused_moe_present=*/false,
-                      internal_alloc_mode::sweep_active, &out),
+                      internal_alloc_mode::active_range, &out),
             status_t::success);
     EXPECT_EQ(out, kIsInternalFalse);
 }
@@ -1744,7 +1744,7 @@ TEST_F(TestGroupMatmulHelperParity, Sweep_PrepackExtrasTail_NotMixed) {
     }
     ASSERT_EQ(
             detect_internal_alloc(v, /*num_ops=*/4, /*fused_moe_present=*/true,
-                    internal_alloc_mode::sweep_active, &out),
+                    internal_alloc_mode::active_range, &out),
             status_t::success)
             << "sweep must stop at num_ops=4; the [4..8) all-null tail is the "
                "prepack-extras tail and is legitimate";
@@ -1761,15 +1761,15 @@ TEST_F(TestGroupMatmulHelperParity, Sweep_NumOpsExceedsVSize_ClampsSafely) {
     const auto v = v_all_nonnull(2);
     ASSERT_EQ(
             detect_internal_alloc(v, /*num_ops=*/8, /*fused_moe_present=*/true,
-                    internal_alloc_mode::sweep_active, &out),
+                    internal_alloc_mode::active_range, &out),
             status_t::success);
     EXPECT_EQ(out, kIsInternalFalse) << "min(8, 2) = 2 slots, all non-null";
 }
 
-// ── Production-parity: quick_o1 matches the inline guard's predicate ──────
+// ── Production-parity: first_slot matches the inline guard's predicate ──────
 //   The inline guard at group_matmul_direct.cpp:710-714 ran:
 //     (fused_moe != nullptr) && (v.empty() || v[0] == nullptr)
-//   The helper's quick_o1 path must produce identical results across
+//   The helper's first_slot path must produce identical results across
 //   the 2x2 (fused_moe_present, v.empty()/non-empty/null/non-null) grid.
 TEST_F(TestGroupMatmulHelperParity,
         ProductionParity_QuickO1_MatchesOldFormula) {
@@ -1779,7 +1779,7 @@ TEST_F(TestGroupMatmulHelperParity,
     auto run_new = [](const std::vector<void *> &v, bool fmp) -> bool {
         bool out = false;
         detect_internal_alloc(
-                v, /*num_ops=*/4, fmp, internal_alloc_mode::quick_o1, &out);
+                v, /*num_ops=*/4, fmp, internal_alloc_mode::first_slot, &out);
         return out;
     };
     for (bool fmp : {false, true}) {

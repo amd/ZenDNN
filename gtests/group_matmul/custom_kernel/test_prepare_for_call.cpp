@@ -148,9 +148,9 @@ static std::vector<ck_test::PrepCallCase> make_prepare_cases() {
     //      `act != none && act_dtype != bf16` fires first, refusing
     //      with reason `unsupported_act_dtype`.
     //   2. With act_dtype = bf16: the act_dtype gate passes, and
-    //      `fill_kfn_table` then fails because `select_ukernel(MR, NV,
+    //      `fill_kernel_table` then fails because `select_bf16_ukernel(MR, NV,
     //      swiglu_oai_mul, kF32)` returns nullptr — refusal with
-    //      reason `kfn_table_fill_failed`.
+    //      reason `kernel_table_fill_failed`.
     //
     // Both rows must refuse so callers cannot accidentally route a
     // (swiglu, f32-dst) call into the kernel.  The fallback path
@@ -286,7 +286,7 @@ static std::vector<ck_test::PrepCallCase> make_prepare_cases() {
     // Symmetric with the swiglu_oai_mul rejection above — every
     // gated-act pair-pack store helper writes BF16 only.  Same
     // two-gate refusal pattern (act_dtype check vs
-    // kfn_table_fill_failed depending on act_dt) for both gated kinds.
+    // kernel_table_fill_failed depending on act_dt) for both gated kinds.
     for (auto act : {grp_matmul_gated_act_t::silu_and_mul,
                  grp_matmul_gated_act_t::gelu_and_mul}) {
         const char *act_name = (act == grp_matmul_gated_act_t::silu_and_mul)
@@ -337,7 +337,7 @@ INSTANTIATE_TEST_SUITE_P(GatingMatrix, CkPrepareForCallTest,
 //
 // Gate behaviour history:
 //   * Pre-fuse: both silu_and_mul and gelu_and_mul were refused at
-//     the gate; flat_n_tile translated them to `act = none` upstream
+//     the gate; n_tile_execute translated them to `act = none` upstream
 //     and ran the post-activation pass over the wide matmul output.
 //   * silu fused: silu_and_mul accepted; prepack permutes canonical
 //     split-halves W13 into the interleaved CK layout; in-register
@@ -363,14 +363,14 @@ TEST(CkPrepareForCallProperties, SiluGeluAcceptedNoBias) {
 
     struct Row {
         grp_matmul_gated_act_t act;
-        ck::ActKind expect_act_kind;
+        ck::ActivationKind expect_act_kind;
         const char *act_name;
     };
     for (const auto &row : {
                  Row {grp_matmul_gated_act_t::silu_and_mul,
-                         ck::ActKind::silu_and_mul, "silu"},
+                         ck::ActivationKind::silu_and_mul, "silu"},
                  Row {grp_matmul_gated_act_t::gelu_and_mul,
-                         ck::ActKind::gelu_and_mul, "gelu"},
+                         ck::ActivationKind::gelu_and_mul, "gelu"},
          }) {
         // (a) no bias — ACCEPT.
         {
@@ -389,7 +389,8 @@ TEST(CkPrepareForCallProperties, SiluGeluAcceptedNoBias) {
             EXPECT_EQ(kctx.act_kind, row.expect_act_kind)
                     << "Accepted " << row.act_name
                     << "_and_mul calls must map "
-                       "to the matching ActKind (the dispatcher's act_kind "
+                       "to the matching ActivationKind (the dispatcher's "
+                       "act_kind "
                        "field) so dispatch_tile selects the right pair-store "
                        "helper at the runtime branch.";
         }
@@ -693,9 +694,11 @@ TEST(CkPrepareForCallProperties, VariantFieldMatchesResolveVariant) {
 }
 
 TEST(CkPrepareForCallProperties, NonInt8SelectorsRejectU8Destination) {
-    EXPECT_EQ(ck::select_ukernel(1, 2, ck::ActKind::none, ck::DstDt::kU8),
+    EXPECT_EQ(ck::select_bf16_ukernel(
+                      1, 2, ck::ActivationKind::none, ck::OutputType::kU8),
             nullptr);
-    EXPECT_EQ(ck::select_f16_ukernel(1, 2, ck::ActKind::none, ck::DstDt::kU8),
+    EXPECT_EQ(ck::select_f16_ukernel(
+                      1, 2, ck::ActivationKind::none, ck::OutputType::kU8),
             nullptr);
 }
 
@@ -900,16 +903,16 @@ TEST(CkPrepareForCallF16, AcceptsAllGatedActsF16Dst) {
     CK_SKIP_IF_NO_F16_ISA();
     struct Row {
         grp_matmul_gated_act_t act;
-        ck::ActKind expect_act_kind;
+        ck::ActivationKind expect_act_kind;
         const char *name;
     };
     for (const auto &row : {
                  Row {grp_matmul_gated_act_t::swiglu_oai_mul,
-                         ck::ActKind::swiglu_oai_mul, "swiglu"},
+                         ck::ActivationKind::swiglu_oai_mul, "swiglu"},
                  Row {grp_matmul_gated_act_t::silu_and_mul,
-                         ck::ActKind::silu_and_mul, "silu"},
+                         ck::ActivationKind::silu_and_mul, "silu"},
                  Row {grp_matmul_gated_act_t::gelu_and_mul,
-                         ck::ActKind::gelu_and_mul, "gelu"},
+                         ck::ActivationKind::gelu_and_mul, "gelu"},
          }) {
         auto c = f16_baseline(std::string("f16_") + row.name + "_f16dst");
         c.act = row.act;

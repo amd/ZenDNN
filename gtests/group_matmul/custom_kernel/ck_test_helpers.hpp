@@ -63,7 +63,7 @@ using zendnnl::lowoha::matmul::grp_matmul_gated_act_t;
 // ──────────────────────────────────────────────────────────────────
 #define CK_SKIP_IF_NO_BF16_ISA() \
     do { \
-        if (!::ck_test::ck::dispatch_supported()) { \
+        if (!::ck_test::ck::bf16_isa_supported()) { \
             GTEST_SKIP() \
                     << "AVX-512-BF16 not available on this host; the custom " \
                        "kernel cannot run, so any per-tile test would refuse"; \
@@ -96,7 +96,7 @@ using zendnnl::lowoha::matmul::grp_matmul_gated_act_t;
 // the runtime CPUID probe and the compile-time availability into one
 // predicate (returns false when either is missing).  Tests that probe
 // the FP16 end-to-end path call this macro instead of (or in addition
-// to) `CK_SKIP_IF_NO_BF16_ISA`.  Note `dispatch_supported()` only
+// to) `CK_SKIP_IF_NO_BF16_ISA`.  Note `bf16_isa_supported()` only
 // reports the BF16 ISA, so the FP16 suite must gate on this macro
 // rather than `CK_SKIP_IF_NO_BF16_ISA()`.
 #define CK_SKIP_IF_NO_F16_ISA() \

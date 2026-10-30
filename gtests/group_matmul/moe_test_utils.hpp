@@ -1211,7 +1211,7 @@ struct GroupDqOverride {
 // is a bug rather than a tolerance; DA8W8 additionally swaps W2's source
 // quantization from the grouped AVX-512 kernel to the per-token ones driven a
 // row at a time, which match it exactly (see the DA8W8 note on
-// `try_expert_parallel_pipeline`).
+// `try_fused_expert_parallel`).
 struct Algo5VerticalFusionOverride {
     int prev;
     explicit Algo5VerticalFusionOverride(int value) {
@@ -1569,9 +1569,9 @@ struct CustomKernelNTileOverride {
 // state and arms `s_capture_phase_b` on construction.  On scope
 // exit (including on test failure / `ASSERT_*` early-out)
 // disarms the capture flag — without this, a `group_matmul_direct`
-// call that fails or routes away before reaching `flat_n_tile`'s
+// call that fails or routes away before reaching `n_tile_execute`'s
 // exchange would leak `s_capture_phase_b == true` into a later
-// test, where an unrelated `flat_n_tile` invocation would
+// test, where an unrelated `n_tile_execute` invocation would
 // overwrite the snapshot.
 //
 // Note: the destructor does NOT clear `s_last_phase_b_snapshot`
@@ -1594,54 +1594,56 @@ struct PhaseBCaptureGuard {
     PhaseBCaptureGuard &operator=(const PhaseBCaptureGuard &) = delete;
 };
 
-// RAII guard for the `s_last_group_matmul_direct_gemm_mode` test
+// RAII guard for the `s_last_group_matmul_direct_execution_path` test
 // hook.  Resets the published-string atomic to `nullptr` (so a
 // previous test's value cannot leak into the new assertion) and
-// arms the `s_capture_gemm_mode` flag on construction; disarms on
+// arms the `s_capture_execution_path` flag on construction; disarms on
 // scope exit (including `ASSERT_*` early-out) so that subsequent
 // `group_matmul_direct` calls do NOT keep paying the relaxed
 // store + cache-line-Modified penalty.
 //
 // Use this around every block that reads
-// `s_last_group_matmul_direct_gemm_mode` after a dispatcher
+// `s_last_group_matmul_direct_execution_path` after a dispatcher
 // invocation.  Construct BEFORE the call, read AFTER it, let the
 // guard fall out of scope:
 //
 //   {
-//     moe_test_utils::GemmModeCaptureGuard guard;
+//     moe_test_utils::ExecutionPathCaptureGuard guard;
 //     group_matmul_direct(...);
-//     const char *mode = test_api::s_last_group_matmul_direct_gemm_mode
+//     const char *mode = test_api::s_last_group_matmul_direct_execution_path
 //         .load(std::memory_order_relaxed);
 //     ASSERT_NE(mode, nullptr);
 //     // ...
 //   }
 //
 // The reset-on-construct semantic matches what tests previously
-// did by hand via `s_last_group_matmul_direct_gemm_mode.store(
+// did by hand via `s_last_group_matmul_direct_execution_path.store(
 // nullptr, relaxed)`; replacing those manual resets with the
 // guard collapses the test boilerplate AND gives the production
 // store path its cache-line short-circuit (see the doc-block on
-// `s_capture_gemm_mode` in `group_matmul_parallel_common.hpp`).
-struct GemmModeCaptureGuard {
-    GemmModeCaptureGuard() {
-        zendnnl::lowoha::matmul::test_api ::s_last_group_matmul_direct_gemm_mode
-                .store(nullptr, std::memory_order_relaxed);
-        zendnnl::lowoha::matmul::test_api::s_capture_gemm_mode.store(
+// `s_capture_execution_path` in `group_matmul_parallel_common.hpp`).
+struct ExecutionPathCaptureGuard {
+    ExecutionPathCaptureGuard() {
+        zendnnl::lowoha::matmul::test_api ::
+                s_last_group_matmul_direct_execution_path.store(
+                        nullptr, std::memory_order_relaxed);
+        zendnnl::lowoha::matmul::test_api::s_capture_execution_path.store(
                 true, std::memory_order_release);
     }
-    ~GemmModeCaptureGuard() {
-        zendnnl::lowoha::matmul::test_api::s_capture_gemm_mode.store(
+    ~ExecutionPathCaptureGuard() {
+        zendnnl::lowoha::matmul::test_api::s_capture_execution_path.store(
                 false, std::memory_order_release);
     }
-    GemmModeCaptureGuard(const GemmModeCaptureGuard &) = delete;
-    GemmModeCaptureGuard &operator=(const GemmModeCaptureGuard &) = delete;
+    ExecutionPathCaptureGuard(const ExecutionPathCaptureGuard &) = delete;
+    ExecutionPathCaptureGuard &operator=(const ExecutionPathCaptureGuard &)
+            = delete;
 };
 
 // ───────────────────────────────────────────────────────────────────
 // RAII guard for the M-tile (ALGO 2) branch-tag capture hook.
 //
-// Mirrors `GemmModeCaptureGuard` for the four-branch dispatch inside
-// `flat_m_tile` (round-based / multi-tier hybrid / wide-N fallback /
+// Mirrors `ExecutionPathCaptureGuard` for the four-branch dispatch inside
+// `m_tile_execute` (round-based / multi-tier hybrid / shallow-M fallback /
 // Phase 2 single-tier).  Resets `s_last_m_tile_path` to
 // `m_tile_path_tag::kNone` and arms `s_capture_m_tile_path` on
 // construction; disarms on scope exit (including `ASSERT_*` early-out).
@@ -1656,13 +1658,13 @@ struct GemmModeCaptureGuard {
 //     group_matmul_direct(...);   // resolves to ALGO 2
 //     const int tag = test_api::s_last_m_tile_path.load(
 //         std::memory_order_relaxed);
-//     EXPECT_EQ(tag, test_api::m_tile_path_tag::kWideNFallback);
+//     EXPECT_EQ(tag, test_api::m_tile_path_tag::kShallowMFallback);
 //   }
 //
 // See the doc-block on `test_api::s_capture_m_tile_path` in
 // `group_matmul_parallel_common.hpp` for the production-cost rationale
 // (single relaxed-load of a cache-line-shared `false` bool, no
-// coherence traffic — same pattern as `s_capture_gemm_mode`).
+// coherence traffic — same pattern as `s_capture_execution_path`).
 struct MTilePathCaptureGuard {
     MTilePathCaptureGuard() {
         zendnnl::lowoha::matmul::test_api::s_last_m_tile_path.store(
@@ -1682,7 +1684,7 @@ struct MTilePathCaptureGuard {
 // ───────────────────────────────────────────────────────────────────
 // RAII guard for the prepack `LastInvocationStats` capture.
 //
-// Mirror of `GemmModeCaptureGuard` above, but for the prepack module's
+// Mirror of `ExecutionPathCaptureGuard` above, but for the prepack module's
 // `log_pack_probe` stats accumulator (declared in
 // `lowoha_operators/matmul/group_matmul/prepack/prepack.hpp`):
 //

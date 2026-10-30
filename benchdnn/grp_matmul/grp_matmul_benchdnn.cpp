@@ -359,7 +359,7 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
     //   * `params[i].dynamic_quant = true` — flips the
     //     `resolve_variant()` truth table from the bf16 family to
     //     the int8 family; mirrored on the auto-select gate
-    //     (`check_n_tile_extra` in
+    //     (`n_tile_supported` in
     //     `group_matmul_parallel_common.hpp`).
     //   * `params[i].dtypes.compute = s8` (sym) or `u8` (asym),
     //     selected by `cfg.compute_dt`.  Drives the kernel-variant

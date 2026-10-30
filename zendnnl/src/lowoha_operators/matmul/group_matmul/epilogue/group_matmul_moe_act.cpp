@@ -712,8 +712,8 @@ constexpr int64_t kActSerialElems = 8192;
 // Full team or serialized (see the team-size note in
 // group_matmul_parallel_common.hpp).  A lone swiglu_oai row is a single
 // work item, so the team would only idle.
-inline int act_team(grp_matmul_gated_act_t act, int64_t rows, int max_dim,
-        int num_threads) {
+inline int gated_act_team_size(grp_matmul_gated_act_t act, int64_t rows,
+        int max_dim, int num_threads) {
     if (num_threads <= 1) return 1;
     if (rows >= num_threads) return num_threads;
     if ((act == grp_matmul_gated_act_t::swiglu_oai_mul && rows <= 1)
@@ -723,7 +723,7 @@ inline int act_team(grp_matmul_gated_act_t act, int64_t rows, int max_dim,
 }
 
 // swiglu_oai compacts a row in place, so its columns cannot be split.
-inline int act_chunks_per_row(grp_matmul_gated_act_t act, int64_t rows,
+inline int gated_act_chunks_per_row(grp_matmul_gated_act_t act, int64_t rows,
         int max_dim, int num_threads) {
     if (act == grp_matmul_gated_act_t::swiglu_oai_mul) return 1;
     return col_chunks_per_row(rows, max_dim, num_threads);
@@ -736,7 +736,7 @@ void execute_act_items(grp_matmul_gated_act_t act, data_type_t dst_dtype,
     const bool use_avx512 = avx512f_available();
     const size_t elem = size_of(dst_dtype);
     const int chunks
-            = act_chunks_per_row(act, total_rows, max_dim, num_threads);
+            = gated_act_chunks_per_row(act, total_rows, max_dim, num_threads);
     const int64_t items = total_rows * chunks;
 
 #pragma omp parallel for num_threads(num_threads) schedule(static)
@@ -866,7 +866,8 @@ status_t group_matmul_moe_act_execute(
     if (total_rows == 0) return status_t::success;
 
     execute_act_items(act, dst_dtype, dst, row_offsets, N, ldc, total_rows,
-            max_dim, act_team(act, total_rows, max_dim, num_threads));
+            max_dim,
+            gated_act_team_size(act, total_rows, max_dim, num_threads));
 
     return status_t::success;
 }
@@ -908,8 +909,10 @@ void apply_gated_act_inplace(grp_matmul_gated_act_t act, void *dst,
     // already inside an OMP region and pass num_threads == 1, so they never
     // nest a team.  Items are disjoint (row, column) ranges, so no
     // synchronisation is needed.
-    const int nt = act_team(act, row_end - row_start, dim, num_threads);
-    const int chunks = act_chunks_per_row(act, row_end - row_start, dim, nt);
+    const int nt
+            = gated_act_team_size(act, row_end - row_start, dim, num_threads);
+    const int chunks
+            = gated_act_chunks_per_row(act, row_end - row_start, dim, nt);
     const int span = col_chunk_span(dim, chunks);
     const int64_t items = static_cast<int64_t>(row_end - row_start) * chunks;
 #pragma omp parallel for if (nt > 1) num_threads(nt) schedule(static)
@@ -1008,7 +1011,7 @@ void apply_swiglu_oai_tile_rows(void *dst_buf, int M, int col_start, int pairs,
 // Out-of-place per-thread tile activation for the I-only fused MoE path
 // ═══════════════════════════════════════════════════════════════════════
 
-void apply_swiglu_oai_tile_rows_oop(const void *src_buf, int src_ldc,
+void apply_swiglu_oai_tile_rows_out_of_place(const void *src_buf, int src_ldc,
         int src_col_start, void *dst_buf, int dst_ldc, int dst_col_start, int M,
         int pairs, data_type_t dtype) {
     // Preconditions identical to the in-place sibling, plus: src_buf may
@@ -1022,15 +1025,15 @@ void apply_swiglu_oai_tile_rows_oop(const void *src_buf, int src_ldc,
     // As in the in-place sibling: a broken precondition leaves the caller's
     // dst columns never written, so it must be audible rather than silent.
     if (src_buf == nullptr || dst_buf == nullptr) {
-        log_error("apply_swiglu_oai_tile_rows_oop: ",
+        log_error("apply_swiglu_oai_tile_rows_out_of_place: ",
                 (src_buf == nullptr ? "src_buf" : "dst_buf"),
                 " is null; no activation applied and the destination columns "
                 "were never written.");
         return;
     }
     if ((src_col_start & 1) != 0) {
-        log_error(
-                "apply_swiglu_oai_tile_rows_oop: src_col_start=", src_col_start,
+        log_error("apply_swiglu_oai_tile_rows_out_of_place: src_col_start=",
+                src_col_start,
                 " is odd, but the interleaved gate/up layout requires a "
                 "pair-aligned start; no activation applied and the "
                 "destination columns were never written.");
@@ -1039,7 +1042,8 @@ void apply_swiglu_oai_tile_rows_oop(const void *src_buf, int src_ldc,
     if (dtype != data_type_t::f32 && dtype != data_type_t::bf16
             && dtype != data_type_t::f16) {
         log_error(
-                "apply_swiglu_oai_tile_rows_oop: unsupported dtype; expected "
+                "apply_swiglu_oai_tile_rows_out_of_place: unsupported dtype; "
+                "expected "
                 "f32, bf16, or f16.  No activation applied.");
         return;
     }

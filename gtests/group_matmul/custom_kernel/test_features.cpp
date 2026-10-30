@@ -68,9 +68,9 @@ TEST(CkFeatures, ResolvedActKindMatches) {
         ck::CallContext kctx;
         ASSERT_EQ(ck_test::run_prepare(c, storage, kctx), status_t::success);
         if (act == grp_matmul_gated_act_t::swiglu_oai_mul) {
-            EXPECT_EQ(kctx.act_kind, ck::ActKind::swiglu_oai_mul);
+            EXPECT_EQ(kctx.act_kind, ck::ActivationKind::swiglu_oai_mul);
         } else {
-            EXPECT_EQ(kctx.act_kind, ck::ActKind::none);
+            EXPECT_EQ(kctx.act_kind, ck::ActivationKind::none);
         }
     }
 }

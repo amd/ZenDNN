@@ -15,7 +15,7 @@
  *******************************************************************************/
 
 /// AUTO algorithm selection: `auto_select_algo` and
-/// `select_grp_matmul_algo`.
+/// `group_matmul_algo_select`.
 
 #include "lowoha_operators/matmul/group_matmul/selection/algo_select.hpp"
 
@@ -33,7 +33,7 @@ namespace zendnnl {
 namespace lowoha {
 namespace matmul {
 
-using detail::check_n_tile_extra;
+using detail::n_tile_supported;
 
 namespace {
 
@@ -107,7 +107,7 @@ namespace {
 //   0.6. DECODE, active_ops > num_threads → ALGO 3 (N-tile).
 //      `active_ops` counts the experts that actually fire (`M[i] > 0`),
 //      not the padded slot count.  ALGO 3's single round is infeasible
-//      here (it needs one thread per active expert) but DecodeDynamic
+//      here (it needs one thread per active expert) but CcdExpertWaves
 //      has no such ceiling, so the regime stays on ALGO 3 and the
 //      planner picks the strategy.  Yields to an explicit
 //      `AUTO_DECODE_ALGO` pin; prompt is never routed by this rule.
@@ -125,7 +125,7 @@ namespace {
 //                   Rule 0.7 for the unset case)
 //      A generic non-zero value is returned directly with the same
 //      m_tile_safe / n_tile_safe clamps the global ALGO env path applies in
-//      `select_grp_matmul_algo`. Value 4 has already requested W8A8 and, on
+//      `group_matmul_algo_select`. Value 4 has already requested W8A8 and, on
 //      decline, behaves as an unset setting here so the inherited default
 //      refinements still run. When the prompt setting does not pin a generic
 //      policy (unset or a declined `4`), Rule 0.7 sends the prompt to ALGO 1.
@@ -170,7 +170,7 @@ namespace {
 static int auto_select_algo(const std::vector<int> &M,
         const std::vector<int> &N, const std::vector<int> &K,
         const std::vector<matmul_params> &params, int num_threads,
-        bool m_tile_safe, bool n_tile_safe, auto_algo_trace *trace,
+        bool m_tile_safe, bool n_tile_safe, GroupMatmulAlgoTrace *trace,
         grp_matmul_gated_act_t fused_act, bool single_expert_epilogue_ok,
         const grp_matmul_call_route *route) {
     // Every return below goes through this, so the reported rule cannot
@@ -328,9 +328,9 @@ static int auto_select_algo(const std::vector<int> &M,
     // (R0 capacity, tile-safety clamps) still override a pin.
     if (is_decode && !phase_env_pinned) {
         if (active_ops > num_threads) {
-            // ALGO 3, so the CCD-cohesive DecodeDynamic pool can engage in
+            // ALGO 3, so the CCD-cohesive CcdExpertWaves pool can engage in
             // `plan_group_n_tile` (its `active_ops >= 4*num_ccds` gate is
-            // trivially met here).  Unlike the Rounds schedule, DecodeDynamic
+            // trivially met here).  Unlike the Rounds schedule, CcdExpertWaves
             // has no `active_ops <= num_threads` ceiling — it maps whole
             // experts onto CCDs rather than thread-id onto expert.
             // `N_TILE_STRATEGY` does not participate in the ALGO decision; it
@@ -356,7 +356,7 @@ static int auto_select_algo(const std::vector<int> &M,
     // clamps as the global ALGO env path. Non-tile-safe + ALGO 3 falls to
     // ALGO 1; non-m-tile-safe + ALGO 2 falls to ALGO 1. These clamps emit no
     // WARN: the
-    // `[GRP_MATMUL.ALGO WARN]` line belongs to `select_grp_matmul_algo`'s
+    // `[GRP_MATMUL.ALGO WARN]` line belongs to `group_matmul_algo_select`'s
     // global-env branch, which this path does not reach — reaching here
     // means the global ALGO was AUTO.  Operators see the clamp on the
     // `[GRP_MATMUL.ALGO]` line as `chosen=ALGO_X reason=auto_phase_env_clamp`.
@@ -441,17 +441,17 @@ static int auto_select_algo(const std::vector<int> &M,
 // ── ALGO selection ──────────────────────────────────────────────────────
 //
 // Returns a canonical generic ALGO number ({1,2,3,5,6}).  Driven by:
-//   * `check_m_tile_safe` / `check_n_tile_extra` — helper checks that
+//   * `m_tile_supported` / `n_tile_supported` — helper checks that
 //     determine whether the M-tile slicer is safe to use and whether
 //     the extra constraints required by the N-tile path are satisfied
 //     without corrupting packed-B / post-op buffers.
 //   * `auto_select_algo` — cost-model-free heuristic used when the
 //     caller leaves ZENDNNL_GRP_MATMUL_ALGO unset (== 0).
 
-int select_grp_matmul_algo(const std::vector<char> &layout,
+int group_matmul_algo_select(const std::vector<char> &layout,
         const std::vector<int> &M, const std::vector<int> &N,
         const std::vector<int> &K, const std::vector<matmul_params> &params,
-        int num_threads, auto_algo_trace *trace,
+        int num_threads, GroupMatmulAlgoTrace *trace,
         grp_matmul_gated_act_t fused_act, bool single_expert_epilogue_ok,
         const grp_matmul_call_route *route) {
 
@@ -461,11 +461,11 @@ int select_grp_matmul_algo(const std::vector<char> &layout,
     // rather than `params.size()` (which still carries the framework's
     // prepack-extras tail).
     const int num_ops_eff = static_cast<int>(M.size());
-    const bool m_tile_safe = check_m_tile_safe(layout, M, params, num_ops_eff);
+    const bool m_tile_safe = m_tile_supported(layout, M, params, num_ops_eff);
     // ALGO 3 allows CK-VNNI prepacked B; W4A8 native prepack stays on full-N ALGOs.
-    const bool n_tile_safe = check_m_tile_safe(layout, M, params, num_ops_eff,
+    const bool n_tile_safe = m_tile_supported(layout, M, params, num_ops_eff,
                                      /*allow_prepacked_b=*/true)
-            && check_n_tile_extra(M, N, params, num_ops_eff, fused_act);
+            && n_tile_supported(M, N, params, num_ops_eff, fused_act);
 
     // Manual generic override: ZENDNNL_GRP_MATMUL_ALGO={1,2,3,5,6}.
     //   ALGO 2 (M-tile): needs m_tile_safe (row-major, uniform dtypes).
@@ -514,14 +514,14 @@ int select_grp_matmul_algo(const std::vector<char> &layout,
             static const bool s_log = apilog_warning_enabled();
             if (s_log) {
                 apilog_warning(
-                        "[GRP_MATMUL.ALGO WARN] env_algo=2 (flat_m_tile) "
+                        "[GRP_MATMUL.ALGO WARN] env_algo=2 (m_tile_execute) "
                         "REJECTED: m_tile unsafe (non-row-major, per-expert "
                         "dtype "
                         "mismatch, packed B, softmax/pooling post-op, or "
                         "dynamic-quant with non-row-local src granularity — "
                         "src_scale.dims[0] must equal the per-expert M[i], "
                         "including the M[i]=1 decode case `{1, 1}`). "
-                        "FALLBACK algo=1 (sequential_experts).");
+                        "FALLBACK algo=1 (sequential_execute).");
             }
             algo = 1;
         }
@@ -530,7 +530,7 @@ int select_grp_matmul_algo(const std::vector<char> &layout,
             if (s_log) {
                 apilog_warning(
                         "[GRP_MATMUL.ALGO WARN] env_algo=3 "
-                        "(flat_n_tile) "
+                        "(n_tile_execute) "
                         "REJECTED: n_tile unsafe.  Common rejection reasons: "
                         "non-row-major layout, per-expert dtype mismatch, "
                         "buffer post-op, or a quant configuration outside the "
@@ -547,8 +547,8 @@ int select_grp_matmul_algo(const std::vector<char> &layout,
                         "or per-group `{M[i], G}` src.  Static src, per-tensor "
                         "src/wei, pure WOQ, and unsigned u4 stay on ALGO 1.  "
                         "See "
-                        "`check_n_tile_extra` SCOPE NOTE for the full table.  "
-                        "FALLBACK algo=1 (sequential_experts).");
+                        "`n_tile_supported` SCOPE NOTE for the full table.  "
+                        "FALLBACK algo=1 (sequential_execute).");
             }
             algo = 1;
         }

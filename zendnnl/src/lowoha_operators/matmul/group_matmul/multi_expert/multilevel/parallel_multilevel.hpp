@@ -14,7 +14,7 @@
  * limitations under the License.
  *******************************************************************************/
 
-/// ALGO 6 (`parallel_multilevel`): CCD-aware multilevel scheduling of a
+/// ALGO 6 (`hierarchical_execute`): CCD-aware multilevel scheduling of a
 /// grouped MoE call over nested OpenMP teams.
 
 #ifndef ZENDNNL_GROUP_MATMUL_PARALLEL_MULTILEVEL_HPP
@@ -29,7 +29,7 @@ namespace lowoha {
 namespace matmul {
 namespace detail {
 
-void parallel_multilevel(const std::vector<char> &layout,
+void hierarchical_execute(const std::vector<char> &layout,
         const std::vector<bool> &transA, const std::vector<bool> &transB,
         const std::vector<int> &M, const std::vector<int> &N,
         const std::vector<int> &K, const std::vector<float> &alpha,
@@ -40,7 +40,7 @@ void parallel_multilevel(const std::vector<char> &layout,
         const std::vector<bool> &is_weights_const,
         std::vector<matmul_params> &params, int num_threads,
         grp_matmul_gated_act_t fused_act, data_type_t act_dtype,
-        const char **gemm_mode_out);
+        const char **execution_path_out);
 
 } // namespace detail
 } // namespace matmul

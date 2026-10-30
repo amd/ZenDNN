@@ -574,8 +574,8 @@ int ggml_unpack_weight_buffer(const void *weight_data, int ggml_type,
 // wei_buffer_capacity_bytes covering the sym-quant blocked image).  Scales
 // sit past that capacity so the write-back cannot clobber them.  The packed
 // GGML allocation from the caller (often read-only) is never written.
-// flat_n_tile still reorders each N-tile from the raw bytes while the buffer
-// remains unreordered (`do_tile` caps its tile WC to out-of-place).
+// n_tile_execute still reorders each N-tile from the raw bytes while the buffer
+// remains unreordered (`execute_tile` caps its tile WC to out-of-place).
 //
 // Cached under the `native_gemm` key marker.
 static status_t unpack_ggml_raw_s8_and_cache(const void *&weight, int N, int K,
@@ -645,7 +645,7 @@ static status_t unpack_ggml_raw_s8_and_cache(const void *&weight, int N, int K,
     // it per-tile.
     weight = cached_buffer;
     params.mem_format_b = 'n';
-    // Clear the GGML packed flag.  check_m_tile_safe / check_n_tile_extra
+    // Clear the GGML packed flag.  m_tile_supported / n_tile_supported
     // reject pack_format_b != 0 on the mem_format 'n' path, so leaving it set
     // would veto ALGO 3.  Q4_0 keeps dtypes.wei = s4 so the s8×s4 GEMM sees
     // packed nibbles; Q8_0 is s8.  An f32 destination keeps this off the
@@ -670,7 +670,7 @@ static status_t unpack_ggml_raw_s8_and_cache(const void *&weight, int N, int K,
     // compute s8).  Without it the ahead-of-time warmer skips the family and
     // the per-group N-tile reorder is packed lazily.  Per-group is
     // symmetric-only, so s8 (never u8).  The runtime per-group call still
-    // runs on the AOCL do_tile path (`ck_per_group` forces it — the custom
+    // runs on the AOCL execute_tile path (`ck_per_group` forces it — the custom
     // kernel has no per-group support in this path).
     params.dtypes.compute = data_type_t::s8;
 

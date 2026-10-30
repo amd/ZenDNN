@@ -48,7 +48,7 @@
 // bodies.
 #define SKIP_WITHOUT_BF16_CUSTOM_KERNEL() \
     do { \
-        if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) { \
+        if (!zendnnl::lowoha::matmul::custom_kernel::bf16_isa_supported()) { \
             GTEST_SKIP() << "the BF16 custom kernel needs AVX-512 BF16"; \
         } \
     } while (0)
@@ -66,6 +66,7 @@ namespace pt = zendnnl::lowoha::matmul::prompt_tile;
 using moe_test_utils::bfloat16_t;
 using moe_test_utils::data_type_t;
 using moe_test_utils::float16_t;
+using zendnnl::lowoha::matmul::executed_algo_from_execution_path;
 using zendnnl::lowoha::matmul::grp_matmul_gated_act_t;
 
 /// Sets one prompt-tile knob for the scope.
@@ -693,14 +694,14 @@ TEST(PromptTileTunables, KnobTableIsConsistent) {
     }
     // The planner's default config is a BF16 call.
     const pt::PlannerConfig cfg;
-    const pt::FamilyFacts &bf16 = pt::facts(pt::Family::kBf16);
+    const pt::kernel_traits_t &bf16 = pt::facts(pt::kernel_type_t::kBf16);
     EXPECT_EQ(cfg.tun.v, pt::defaults().v);
     EXPECT_EQ(cfg.tun[pt::kEnable], 15);
     EXPECT_EQ(cfg.a_bytes, bf16.a_bytes);
     EXPECT_EQ(cfg.wei_bits, bf16.wei_bits);
     EXPECT_EQ(cfg.min_mr, bf16.min_mr);
     EXPECT_EQ(cfg.row_align, bf16.row_align);
-    const pt::FamilyFacts &f16 = pt::facts(pt::Family::kF16);
+    const pt::kernel_traits_t &f16 = pt::facts(pt::kernel_type_t::kF16);
     EXPECT_EQ(f16.a_bytes, 2);
     EXPECT_EQ(f16.wei_bits, 16);
     EXPECT_EQ(f16.min_mr, 1);
@@ -716,7 +717,7 @@ TEST(PromptTileTunables, ProfileGrammar) {
             &err))
             << err;
     ASSERT_EQ(p.size(), 2u);
-    EXPECT_EQ(p[0].fam, static_cast<int>(pt::Family::kBf16));
+    EXPECT_EQ(p[0].fam, static_cast<int>(pt::kernel_type_t::kBf16));
     EXPECT_EQ(p[0].lo[2], 8192);
     EXPECT_EQ(p[0].hi[2], pt::ProfileEntry::kAny);
     EXPECT_EQ(p[0].set, (1u << pt::kMb) | (1u << pt::kNs));
@@ -729,7 +730,7 @@ TEST(PromptTileTunables, ProfileGrammar) {
 
     ASSERT_TRUE(pt::parse_profile("fam=f16:mb=32", p, &err)) << err;
     ASSERT_EQ(p.size(), 1u);
-    EXPECT_EQ(p[0].fam, static_cast<int>(pt::Family::kF16));
+    EXPECT_EQ(p[0].fam, static_cast<int>(pt::kernel_type_t::kF16));
 
     // Spaces, empty entries, `-hi` and `lo-hi` ranges, and no keys at all.
     ASSERT_TRUE(pt::parse_profile(
@@ -799,7 +800,7 @@ TEST(PromptTileTunables, FirstMatchingEntryWins) {
     EXPECT_EQ(pt::match_profile(p, key), 1);
     key.K = 512;
     EXPECT_EQ(pt::match_profile(p, key), 3);
-    key.fam = pt::Family::kInt8;
+    key.fam = pt::kernel_type_t::kInt8;
     EXPECT_EQ(pt::match_profile(p, key), 0);
     EXPECT_EQ(pt::match_profile(pt::Profile {}, key), -1);
 }
@@ -829,25 +830,26 @@ TEST(PromptTileTunables, PrecedenceRunsDefaultsEnvProfile) {
 }
 
 TEST(PromptTileTunables, FamilyDefaultsSitUnderEnvAndProfile) {
-    for (const pt::Family f : {pt::Family::kBf16, pt::Family::kInt8,
-                 pt::Family::kW4a8, pt::Family::kF16}) {
+    for (const pt::kernel_type_t f :
+            {pt::kernel_type_t::kBf16, pt::kernel_type_t::kInt8,
+                    pt::kernel_type_t::kW4a8, pt::kernel_type_t::kF16}) {
         const pt::Tunables d = pt::defaults(f);
         for (int k = 0; k < pt::kNumKnobs; ++k) {
-            if (f == pt::Family::kW4a8 && k == pt::kMinTiles) continue;
+            if (f == pt::kernel_type_t::kW4a8 && k == pt::kMinTiles) continue;
             EXPECT_EQ(d.v[k], pt::kKnobs[k].def) << pt::kKnobs[k].name;
         }
     }
-    EXPECT_EQ(pt::defaults(pt::Family::kW4a8)[pt::kMinTiles], 32);
+    EXPECT_EQ(pt::defaults(pt::kernel_type_t::kW4a8)[pt::kMinTiles], 32);
 
     pt::ShapeKey key;
-    key.fam = pt::Family::kW4a8;
+    key.fam = pt::kernel_type_t::kW4a8;
     key.K = 2048;
     const pt::ProfileEntry none;
     EXPECT_EQ(pt::resolve_with(key, none, {}).t[pt::kMinTiles], 32);
-    key.fam = pt::Family::kInt8;
+    key.fam = pt::kernel_type_t::kInt8;
     EXPECT_EQ(pt::resolve_with(key, none, {}).t[pt::kMinTiles], 8);
 
-    key.fam = pt::Family::kW4a8;
+    key.fam = pt::kernel_type_t::kW4a8;
     pt::ProfileEntry env;
     env.set = 1u << pt::kMinTiles;
     env.val[pt::kMinTiles] = 4;
@@ -868,17 +870,17 @@ TEST(PromptTileTunables, OverridesWinAndKeepTheFloors) {
         EXPECT_EQ(r.t[pt::kTeam], 3);
         EXPECT_EQ(pt::global_value(pt::kTeam), 3);
         PtOverride mask(pt::kEnable, 2);
-        EXPECT_FALSE(pt::enabled(pt::Family::kBf16));
-        EXPECT_TRUE(pt::enabled(pt::Family::kInt8));
-        EXPECT_FALSE(pt::enabled(pt::Family::kW4a8));
-        EXPECT_FALSE(pt::enabled(pt::Family::kF16));
+        EXPECT_FALSE(pt::enabled(pt::kernel_type_t::kBf16));
+        EXPECT_TRUE(pt::enabled(pt::kernel_type_t::kInt8));
+        EXPECT_FALSE(pt::enabled(pt::kernel_type_t::kW4a8));
+        EXPECT_FALSE(pt::enabled(pt::kernel_type_t::kF16));
     }
     {
         PtOverride mask(pt::kEnable, 8);
-        EXPECT_FALSE(pt::enabled(pt::Family::kBf16));
-        EXPECT_FALSE(pt::enabled(pt::Family::kInt8));
-        EXPECT_FALSE(pt::enabled(pt::Family::kW4a8));
-        EXPECT_TRUE(pt::enabled(pt::Family::kF16));
+        EXPECT_FALSE(pt::enabled(pt::kernel_type_t::kBf16));
+        EXPECT_FALSE(pt::enabled(pt::kernel_type_t::kInt8));
+        EXPECT_FALSE(pt::enabled(pt::kernel_type_t::kW4a8));
+        EXPECT_TRUE(pt::enabled(pt::kernel_type_t::kF16));
     }
     for (int k = 0; k < pt::kNumKnobs; ++k)
         EXPECT_EQ(pt::test_api::s_override[k].load(), 0) << pt::kKnobs[k].name;
@@ -1183,9 +1185,9 @@ RunOut run_case_typed(const Case &c, int prompt_tile, int algo) {
 
     const long served0 = pt::test_api::s_calls_served.load();
     const char *mode = nullptr;
-    group_matmul_run_parallel_dispatch(gv.layout, gv.transA, gv.transB, gv.Ms,
-            gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb, biases, gv.beta,
-            dsts, gv.ldc, gv.is_wc, params, c.threads, &mode, c.act, c.src_dt);
+    group_matmul_execute(gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns, gv.Ks,
+            gv.alpha, srcs, gv.lda, weis, gv.ldb, biases, gv.beta, dsts, gv.ldc,
+            gv.is_wc, params, c.threads, &mode, c.act, c.src_dt);
     out.mode = mode != nullptr ? mode : "";
     out.served = pt::test_api::s_calls_served.load() - served0;
     return out;
@@ -1413,13 +1415,13 @@ TEST(PromptTileExecutor, F16FamilyGate) {
 
     {
         PtOverride f16_on(pt::kEnable, 8);
-        EXPECT_TRUE(pt::should_run(kctx, /*use_custom=*/true,
+        EXPECT_TRUE(pt::should_execute_prompt_tile(kctx, /*use_custom=*/true,
                 /*rounds_strategy=*/true, /*prompt_phase=*/true, M, N,
                 /*single_expert_prompt=*/false));
     }
     {
         PtOverride bf16_only(pt::kEnable, 1);
-        EXPECT_FALSE(pt::should_run(kctx, /*use_custom=*/true,
+        EXPECT_FALSE(pt::should_execute_prompt_tile(kctx, /*use_custom=*/true,
                 /*rounds_strategy=*/true, /*prompt_phase=*/true, M, N,
                 /*single_expert_prompt=*/false));
     }
@@ -1737,7 +1739,7 @@ TEST(PromptTileExecutor, AutoSingleExpertFollowsCkEpilogue) {
         c.bias_dt = data_type_t::bf16;
         SCOPED_TRACE(describe(c));
         const RunOut refused = run_case(c, 1, /*algo=*/0);
-        EXPECT_EQ(refused.mode.find("flat_n_tile"), std::string::npos)
+        EXPECT_NE(executed_algo_from_execution_path(refused.mode.c_str()), 3)
                 << refused.mode;
         EXPECT_EQ(refused.served, 0);
     }
@@ -1796,14 +1798,15 @@ TEST(PromptTileExecutor, AutoSingleExpertFusedFfnBothPasses) {
             fused.ldc_down = {f.H};
             const std::vector<void *> dst_null {nullptr};
             const std::vector<int> ldc_null {0};
-            GemmModeCaptureGuard cap;
+            ExecutionPathCaptureGuard cap;
             ASSERT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB,
                               gv.Ms, gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, wei1,
                               gv.ldb, no_bias, gv.beta, dst_null, ldc_null,
                               gv.is_wc, p, nullptr, &act, &fused),
                     status_t::success);
-            const char *m = test_api::s_last_group_matmul_direct_gemm_mode.load(
-                    std::memory_order_relaxed);
+            const char *m
+                    = test_api::s_last_group_matmul_direct_execution_path.load(
+                            std::memory_order_relaxed);
             mode = m != nullptr ? m : "";
         };
         const auto pass = [](const std::string &mode, const char *tag) {
@@ -1843,7 +1846,8 @@ TEST(PromptTileExecutor, SingleActiveExpertOutsideScopeNeverEngages) {
         c.M = M;
         SCOPED_TRACE(describe(c) + " knob=" + std::to_string(knob));
         const RunOut r = run_case(c, 1);
-        EXPECT_NE(r.mode.find("flat_n_tile"), std::string::npos) << r.mode;
+        EXPECT_EQ(executed_algo_from_execution_path(r.mode.c_str()), 3)
+                << r.mode;
         EXPECT_EQ(r.mode.find("ptile"), std::string::npos) << r.mode;
         EXPECT_EQ(r.served, 0);
     }
@@ -1870,7 +1874,7 @@ TEST(PromptTileExecutor, KnobOffOrNonCustomNeverEngage) {
         const RunOut off = run_case(c, mask);
         EXPECT_EQ(off.mode.find("ptile"), std::string::npos)
                 << "enable=" << mask << " " << off.mode;
-        EXPECT_NE(off.mode.find("flat_n_tile"), std::string::npos)
+        EXPECT_EQ(executed_algo_from_execution_path(off.mode.c_str()), 3)
                 << "enable=" << mask << " " << off.mode;
         EXPECT_EQ(off.served, 0) << "enable=" << mask;
     }
@@ -1914,10 +1918,10 @@ TEST(PromptTileExecutor, CustomKernelOffNeverEngages) {
     reset_grp_matmul_caches();
     const long served0 = pt::test_api::s_calls_served.load();
     const char *mode = nullptr;
-    group_matmul_run_parallel_dispatch(gv.layout, gv.transA, gv.transB, gv.Ms,
-            gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb, biases, gv.beta,
-            dsts, gv.ldc, gv.is_wc, params, 8, &mode,
-            grp_matmul_gated_act_t::none, data_type_t::bf16);
+    group_matmul_execute(gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns, gv.Ks,
+            gv.alpha, srcs, gv.lda, weis, gv.ldb, biases, gv.beta, dsts, gv.ldc,
+            gv.is_wc, params, 8, &mode, grp_matmul_gated_act_t::none,
+            data_type_t::bf16);
     const std::string m = mode != nullptr ? mode : "";
     EXPECT_EQ(m.find("ptile"), std::string::npos) << m;
     EXPECT_EQ(pt::test_api::s_calls_served.load() - served0, 0);
@@ -1958,8 +1962,8 @@ const Pick kShapeRulePrompt {1, "auto_rule07_prompt_seq"};
 /// AUTO's ALGO for `p` and the rule that picked it.
 Pick auto_pick(const Probe &p, int threads = 32) {
     namespace mm = zendnnl::lowoha::matmul;
-    mm::auto_algo_trace trace;
-    const int algo = mm::select_grp_matmul_algo(
+    mm::GroupMatmulAlgoTrace trace;
+    const int algo = mm::group_matmul_algo_select(
             p.layout, p.M, p.N, p.K, p.params, threads, &trace);
     return {algo, trace.reason != nullptr ? trace.reason : "<none>"};
 }
@@ -2116,7 +2120,8 @@ TEST(PromptTileAuto, AutoPromptRunsTheTileExecutor) {
     Case c;
     c.M = ab_dists()[0];
     const RunOut off = run_case(c, 0, /*algo=*/0);
-    EXPECT_NE(off.mode.find("flat_n_tile"), std::string::npos) << off.mode;
+    EXPECT_EQ(executed_algo_from_execution_path(off.mode.c_str()), 3)
+            << off.mode;
     EXPECT_EQ(off.mode.find("ptile"), std::string::npos) << off.mode;
     EXPECT_EQ(off.served, 0);
 }
@@ -2217,7 +2222,7 @@ TEST(PromptTileAuto, Algo3CrossWarmSkipsTheFullWeightUnlessPromptIsPinned) {
             const DirectOut d
                     = run_direct(/*m=*/8, /*num_ops=*/8, /*threads=*/32);
             ASSERT_TRUE(d.stats.valid);
-            EXPECT_EQ(d.stats.scheduling_algo, 3);
+            EXPECT_EQ(d.stats.group_schedule, 3);
             if (prompt_pin < 0) {
                 EXPECT_EQ(d.stats.cross_warm_regime,
                         prepack::CrossWarmRegime::none);
@@ -2257,7 +2262,7 @@ TEST(PromptTileAuto, AutoBf16PromptPacksWeightsInPlaceUnderWc2) {
         EXPECT_TRUE(cfg.get_grp_auto_mixed_inplace());
     }
     ASSERT_TRUE(in_place.stats.valid);
-    EXPECT_EQ(in_place.stats.scheduling_algo, 3);
+    EXPECT_EQ(in_place.stats.group_schedule, 3);
     EXPECT_EQ(in_place.stats.cross_warm_regime, prepack::CrossWarmRegime::none);
     EXPECT_FALSE(ref.weights_mutated);
     EXPECT_TRUE(in_place.weights_mutated);

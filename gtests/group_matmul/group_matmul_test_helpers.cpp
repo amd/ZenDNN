@@ -333,7 +333,7 @@ void expect_prompt_tile_matches_rounds(int mask, int mb, int ns,
     long served[2] = {0, 0};
     for (int run = 0; run < 2; ++run) {
         pt::test_api::ScopedOverride enable(pt::kEnable, run == 0 ? 0 : mask);
-        GemmModeCaptureGuard capture;
+        ExecutionPathCaptureGuard capture;
         reset_grp_matmul_caches();
         for (size_t e = 0; e < outputs.size(); ++e)
             std::memcpy(outputs[e].get_raw_handle_unsafe(), initial[e].data(),
@@ -347,7 +347,7 @@ void expect_prompt_tile_matches_rounds(int mask, int mb, int ns,
                 << "run " << run;
         served[run] = pt::test_api::s_calls_served.load() - served0;
         const char *m = zendnnl::lowoha::matmul::test_api ::
-                                s_last_group_matmul_direct_gemm_mode.load(
+                                s_last_group_matmul_direct_execution_path.load(
                                         std::memory_order_relaxed);
         mode[run] = m != nullptr ? m : "";
         got[run] = output_bytes(outputs);

@@ -76,7 +76,7 @@ namespace ck = zendnnl::lowoha::matmul::custom_kernel;
 //      error)
 //
 // Body lifted verbatim from `custom_kernel/dispatch.cpp` into this
-// file; uses the now-public `ck::dispatch_supported()` and
+// file; uses the now-public `ck::bf16_isa_supported()` and
 // `ck::plan_pack_nr()` plus the `ck::get_or_pack_weight_bf16` API in
 // `pack.hpp`, so no logic was duplicated or changed.
 // ─────────────────────────────────────────────────────────────────────
@@ -119,7 +119,7 @@ status_t warm_pack_all_custom_kernel_experts(
     // VNNI (VPDPBUSD).  On AVX-512-VNNI capable CPUs, VNNI is a superset
     // of BF16, but on
     // broader x86 (Cascade Lake / Ice Lake) VNNI exists WITHOUT BF16, so
-    // gating the int8 warm on `dispatch_supported()` (BF16) would make
+    // gating the int8 warm on `bf16_isa_supported()` (BF16) would make
     // the int8 fast path unreachable on a host that can actually run it.
     // Refuse the whole warm only when the family's own ISA is absent —
     // warming an arena the runtime cannot consume is pure waste, and the
@@ -132,13 +132,13 @@ status_t warm_pack_all_custom_kernel_experts(
         // FP16 family needs native AVX-512-FP16 (and a toolchain that
         // compiled the intrinsics, folded into avx512f16_available()).
         if (!ck::avx512f16_available()) return status_t::success;
-    } else if (!ck::dispatch_supported()) { // bf16 family needs AVX-512 BF16
+    } else if (!ck::bf16_isa_supported()) { // bf16 family needs AVX-512 BF16
         return status_t::success;
     }
 
     // ── Production-cache gate ────────────────────────────────────────
     // Mirrors the AOCL DLP warmer's entry gate
-    // (`prepack_aocl_dlp.cpp::warm_pack_all_aocl_dlp_experts`) and the
+    // (`prepack_aocl_dlp.cpp::warm_aocl_weight_cache`) and the
     // library-wide weight-cache convention: when
     // `matmul_config_t::get_weight_cache()` (driven by the env knob
     // `ZENDNNL_MATMUL_WEIGHT_CACHE`) is 0, no path consults the

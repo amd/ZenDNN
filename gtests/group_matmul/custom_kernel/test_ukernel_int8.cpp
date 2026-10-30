@@ -37,7 +37,7 @@
 ///
 /// `select_int8_ukernel` returning `nullptr` for any (MR, NV, Compute)
 /// tuple where `MR > max_mr_for_nv_int8(NV, Compute)` is asserted in the
-/// negative coverage block (the dispatcher's `kfn_table_int8` filler relies
+/// negative coverage block (the dispatcher's `kernel_table_int8` filler relies
 /// on this contract).
 
 #include <gtest/gtest.h>
@@ -94,7 +94,7 @@ void scalar_ref_dq_int8(int M, int K, int N, const SrcByte *src, int lda,
         const int8_t *wei, int ldb, const float *src_scale,
         const int32_t *src_zp, // nullptr → sym
         const float *wei_scale, const void *bias, ck::BiasKind bias_kind,
-        ck::ActKind act, bfloat16_t *dst, int ldc) {
+        ck::ActivationKind act, bfloat16_t *dst, int ldc) {
     // For sym (`src_zp==nullptr`) the kernel XORs each src byte
     // broadcast with `0x80808080` before the VPDPBUSD reduction,
     // converting the s8 src to u8 by adding +128 modulo 256.  The
@@ -135,7 +135,7 @@ void scalar_ref_dq_int8(int M, int K, int N, const SrcByte *src, int lda,
                     y += reinterpret_cast<const float *>(bias)[v];
                 }
             }
-            (void)act; // ActKind handling below (caller passes act=none
+            (void)act; // ActivationKind handling below (caller passes act=none
                     // for this reference path; gated activations are
                     // applied by `apply_gated_ref` on top of `dst`).
             dst[m * ldc + v] = bfloat16_t(y);
@@ -172,9 +172,9 @@ inline float swiglu_oai(float g, float u) {
     return gc * (1.0f / (1.0f + std::exp(-alpha * gc))) * (uc + 1.0f);
 }
 
-void apply_gated_ref(int M, int N, ck::ActKind act, const bfloat16_t *mm,
+void apply_gated_ref(int M, int N, ck::ActivationKind act, const bfloat16_t *mm,
         int ldmm, bfloat16_t *dst, int ldc) {
-    if (act == ck::ActKind::none) return;
+    if (act == ck::ActivationKind::none) return;
     const int I = N / 2;
     for (int m = 0; m < M; ++m) {
         for (int v = 0; v < I; ++v) {
@@ -182,9 +182,13 @@ void apply_gated_ref(int M, int N, ck::ActKind act, const bfloat16_t *mm,
             const float u = static_cast<float>(mm[m * ldmm + 2 * v + 1]);
             float y = 0.0f;
             switch (act) {
-                case ck::ActKind::swiglu_oai_mul: y = swiglu_oai(g, u); break;
-                case ck::ActKind::silu_and_mul: y = silu(g) * u; break;
-                case ck::ActKind::gelu_and_mul: y = gelu_tanh(g) * u; break;
+                case ck::ActivationKind::swiglu_oai_mul:
+                    y = swiglu_oai(g, u);
+                    break;
+                case ck::ActivationKind::silu_and_mul: y = silu(g) * u; break;
+                case ck::ActivationKind::gelu_and_mul:
+                    y = gelu_tanh(g) * u;
+                    break;
                 default: y = 0.0f;
             }
             dst[m * ldc + v] = bfloat16_t(y);
@@ -202,11 +206,12 @@ TEST(CkInt8UkernelSelect, NonNullForValidTuples) {
         for (auto C : {ck::IntCompute::kS8_Sym, ck::IntCompute::kU8_Asym}) {
             const int max_mr = ck::max_mr_for_nv_int8(NV, C);
             for (int MR = 1; MR <= max_mr; ++MR) {
-                for (auto act : {ck::ActKind::none, ck::ActKind::swiglu_oai_mul,
-                             ck::ActKind::silu_and_mul,
-                             ck::ActKind::gelu_and_mul}) {
+                for (auto act : {ck::ActivationKind::none,
+                             ck::ActivationKind::swiglu_oai_mul,
+                             ck::ActivationKind::silu_and_mul,
+                             ck::ActivationKind::gelu_and_mul}) {
                     auto *fn = ck::select_int8_ukernel(
-                            MR, NV, C, act, ck::DstDt::kBf16);
+                            MR, NV, C, act, ck::OutputType::kBf16);
                     EXPECT_NE(fn, nullptr) << "select_int8_ukernel returned "
                                               "null for valid tuple "
                                               "MR="
@@ -228,16 +233,17 @@ TEST(CkInt8UkernelSelect, F32DstNonNullForNoneNullForGated) {
         for (auto C : {ck::IntCompute::kS8_Sym, ck::IntCompute::kU8_Asym}) {
             const int max_mr = ck::max_mr_for_nv_int8(NV, C);
             for (int MR = 1; MR <= max_mr; ++MR) {
-                EXPECT_NE(ck::select_int8_ukernel(MR, NV, C, ck::ActKind::none,
-                                  ck::DstDt::kF32),
+                EXPECT_NE(
+                        ck::select_int8_ukernel(MR, NV, C,
+                                ck::ActivationKind::none, ck::OutputType::kF32),
                         nullptr)
                         << "f32-dst act=none must be instantiated (MR=" << MR
                         << " NV=" << NV << " C=" << static_cast<int>(C) << ")";
-                for (auto act :
-                        {ck::ActKind::swiglu_oai_mul, ck::ActKind::silu_and_mul,
-                                ck::ActKind::gelu_and_mul}) {
+                for (auto act : {ck::ActivationKind::swiglu_oai_mul,
+                             ck::ActivationKind::silu_and_mul,
+                             ck::ActivationKind::gelu_and_mul}) {
                     EXPECT_EQ(ck::select_int8_ukernel(
-                                      MR, NV, C, act, ck::DstDt::kF32),
+                                      MR, NV, C, act, ck::OutputType::kF32),
                             nullptr)
                             << "gated act + f32-dst must be refused (MR=" << MR
                             << " NV=" << NV << " act=" << static_cast<int>(act)
@@ -255,16 +261,16 @@ TEST(CkInt8UkernelSelect, U8DstNonNullForNoneNullForGated) {
         const int max_mr = ck::max_mr_for_nv_int8(NV, compute);
         for (int MR = 1; MR <= max_mr; ++MR) {
             EXPECT_EQ(ck::select_int8_ukernel(MR, NV, ck::IntCompute::kS8_Sym,
-                              ck::ActKind::none, ck::DstDt::kU8),
+                              ck::ActivationKind::none, ck::OutputType::kU8),
                     nullptr);
             EXPECT_NE(ck::select_int8_ukernel(MR, NV, compute,
-                              ck::ActKind::none, ck::DstDt::kU8),
+                              ck::ActivationKind::none, ck::OutputType::kU8),
                     nullptr);
-            for (auto act :
-                    {ck::ActKind::swiglu_oai_mul, ck::ActKind::silu_and_mul,
-                            ck::ActKind::gelu_and_mul}) {
+            for (auto act : {ck::ActivationKind::swiglu_oai_mul,
+                         ck::ActivationKind::silu_and_mul,
+                         ck::ActivationKind::gelu_and_mul}) {
                 EXPECT_EQ(ck::select_int8_ukernel(
-                                  MR, NV, compute, act, ck::DstDt::kU8),
+                                  MR, NV, compute, act, ck::OutputType::kU8),
                         nullptr);
             }
         }
@@ -276,8 +282,8 @@ TEST(CkInt8UkernelSelect, NullForOutOfRangeMR) {
     for (int NV : {2, 4}) {
         for (auto C : {ck::IntCompute::kS8_Sym, ck::IntCompute::kU8_Asym}) {
             const int max_mr = ck::max_mr_for_nv_int8(NV, C);
-            auto *fn = ck::select_int8_ukernel(
-                    max_mr + 1, NV, C, ck::ActKind::none, ck::DstDt::kBf16);
+            auto *fn = ck::select_int8_ukernel(max_mr + 1, NV, C,
+                    ck::ActivationKind::none, ck::OutputType::kBf16);
             EXPECT_EQ(fn, nullptr)
                     << "select_int8_ukernel must return null for MR > "
                        "max_mr_for_nv_int8(NV, compute)"
@@ -296,7 +302,7 @@ struct Int8UkernelCase {
     int NV;
     int K; // multiple of 4 (kVNNIInt8Quad).
     ck::IntCompute compute;
-    ck::ActKind act;
+    ck::ActivationKind act;
     ck::BiasKind bias;
     std::string label;
     // Source row stride, when the caller's rows are padded wider than K
@@ -399,20 +405,20 @@ TEST_P(CkInt8UkernelTest, MatchesScalarReference) {
     // Kernel output buffer.  For gated activations the kernel writes
     // the halved [MR, NR/2] tight output; for `none` it writes the
     // full [MR, NR] output.
-    const int out_cols = (c.act == ck::ActKind::none) ? NR : (NR / 2);
+    const int out_cols = (c.act == ck::ActivationKind::none) ? NR : (NR / 2);
     std::vector<bfloat16_t> dst(
             static_cast<size_t>(MR) * out_cols, bfloat16_t(0.0f));
 
     // Resolve the kernel function pointer for this case (BF16 dst).
     auto *fn = ck::select_int8_ukernel(
-            MR, NV, c.compute, c.act, ck::DstDt::kBf16);
+            MR, NV, c.compute, c.act, ck::OutputType::kBf16);
     ASSERT_NE(fn, nullptr) << "select_int8_ukernel returned null";
 
     // Both `Cout` and `Cout_tight` are supported routings — the
     // kernel picks one per the activation contract.  For `none` the
     // ukernel writes through `Cout` at `ldc=out_cols`; for gated
     // activations it writes through `Cout_tight` at `ldc_tight=out_cols`.
-    if (c.act == ck::ActKind::none) {
+    if (c.act == ck::ActivationKind::none) {
         fn(/*A=*/src.data(), /*lda=*/lda,
                 /*Bpacked=*/packed_raw,
                 /*src_scale=*/src_scale.data(),
@@ -441,10 +447,10 @@ TEST_P(CkInt8UkernelTest, MatchesScalarReference) {
             static_cast<size_t>(MR) * NR, bfloat16_t(0.0f));
     scalar_ref_dq_int8<uint8_t>(MR, K, NR, src.data(), lda, wei.data(), NR,
             src_scale.data(), src_zp_ptr, wei_scale.data(), bias_ptr, c.bias,
-            ck::ActKind::none, ref_mm.data(), NR);
+            ck::ActivationKind::none, ref_mm.data(), NR);
     std::vector<bfloat16_t> ref(
             static_cast<size_t>(MR) * out_cols, bfloat16_t(0.0f));
-    if (c.act == ck::ActKind::none) {
+    if (c.act == ck::ActivationKind::none) {
         for (int m = 0; m < MR; ++m)
             for (int v = 0; v < NR; ++v)
                 ref[m * out_cols + v] = ref_mm[m * NR + v];
@@ -523,7 +529,7 @@ TEST(CkInt8UkernelBf16Scale, MatchesScalarReference) {
 
     std::vector<bfloat16_t> dst(static_cast<size_t>(MR) * NR, bfloat16_t(0.0f));
     auto *fn = ck::select_int8_ukernel(MR, NV, ck::IntCompute::kS8_Sym,
-            ck::ActKind::none, ck::DstDt::kBf16);
+            ck::ActivationKind::none, ck::OutputType::kBf16);
     ASSERT_NE(fn, nullptr);
     fn(/*A=*/src.data(), /*lda=*/K, /*Bpacked=*/packed_raw,
             /*src_scale=*/src_scale_bf16.data(), /*src_zp=*/nullptr,
@@ -537,8 +543,8 @@ TEST(CkInt8UkernelBf16Scale, MatchesScalarReference) {
     std::vector<bfloat16_t> ref(static_cast<size_t>(MR) * NR, bfloat16_t(0.0f));
     scalar_ref_dq_int8<uint8_t>(MR, K, NR, src.data(), K, wei.data(), NR,
             src_scale_ref.data(), /*src_zp=*/nullptr, wei_scale_ref.data(),
-            /*bias=*/nullptr, ck::BiasKind::none, ck::ActKind::none, ref.data(),
-            NR);
+            /*bias=*/nullptr, ck::BiasKind::none, ck::ActivationKind::none,
+            ref.data(), NR);
 
     const float abs_tol = 0.05f, rel_tol = 0.05f;
     int n_bad = 0;
@@ -566,144 +572,144 @@ INSTANTIATE_TEST_SUITE_P(SymAndAsym, CkInt8UkernelTest,
                 // MR*NV <= 8 boundary that selects between them, with the
                 // gated epilogue as well as act=none.
                 Int8UkernelCase {1, 2, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr1_nv2_K64_lda80_none", 80},
                 Int8UkernelCase {2, 2, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr2_nv2_K64_lda80_none", 80},
                 Int8UkernelCase {3, 2, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr3_nv2_K64_lda80_none", 80},
                 Int8UkernelCase {4, 2, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr4_nv2_K64_lda80_none", 80},
                 Int8UkernelCase {5, 2, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr5_nv2_K64_lda80_none", 80},
                 Int8UkernelCase {8, 2, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr8_nv2_K64_lda80_none", 80},
                 Int8UkernelCase {4, 2, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::swiglu_oai_mul, ck::BiasKind::none,
+                        ck::ActivationKind::swiglu_oai_mul, ck::BiasKind::none,
                         "sym_mr4_nv2_K64_lda80_swiglu", 80},
                 Int8UkernelCase {8, 2, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::swiglu_oai_mul, ck::BiasKind::none,
+                        ck::ActivationKind::swiglu_oai_mul, ck::BiasKind::none,
                         "sym_mr8_nv2_K64_lda80_swiglu", 80},
                 Int8UkernelCase {4, 4, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr4_nv4_K64_lda80_none", 80},
                 Int8UkernelCase {1, 2, 68, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr1_nv2_K68_lda84_ktail1", 84},
                 Int8UkernelCase {4, 2, 64, ck::IntCompute::kU8_Asym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "asym_mr4_nv2_K64_lda80_none", 80},
                 // act=none, both compute flavours, both NVs, span of MRs.
                 Int8UkernelCase {1, 2, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr1_nv2_K64_none"},
                 Int8UkernelCase {4, 2, 128, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::bf16,
+                        ck::ActivationKind::none, ck::BiasKind::bf16,
                         "sym_mr4_nv2_K128_bf16bias"},
                 Int8UkernelCase {8, 2, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::fp32,
+                        ck::ActivationKind::none, ck::BiasKind::fp32,
                         "sym_mr8_nv2_K64_f32bias"},
                 // f16 bias (widened via _mm512_cvtph_ps in the int8
                 // kernel — no AVX-512-FP16 ISA needed); sym + asym coverage.
                 Int8UkernelCase {4, 2, 128, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::f16,
+                        ck::ActivationKind::none, ck::BiasKind::f16,
                         "sym_mr4_nv2_K128_f16bias"},
                 Int8UkernelCase {6, 4, 64, ck::IntCompute::kU8_Asym,
-                        ck::ActKind::none, ck::BiasKind::f16,
+                        ck::ActivationKind::none, ck::BiasKind::f16,
                         "asym_mr6_nv4_K64_f16bias"},
                 Int8UkernelCase {4, 4, 128, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr4_nv4_K128_none"},
                 Int8UkernelCase {6, 4, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::bf16,
+                        ck::ActivationKind::none, ck::BiasKind::bf16,
                         "sym_mr6_nv4_K64_bf16bias"},
                 // C.1 cell #1 — MR fill at NV=2 sym none K=64.
                 Int8UkernelCase {2, 2, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr2_nv2_K64_none"},
                 Int8UkernelCase {3, 2, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr3_nv2_K64_none"},
                 Int8UkernelCase {5, 2, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr5_nv2_K64_none"},
                 Int8UkernelCase {7, 2, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr7_nv2_K64_none"},
                 // C.1 cell #2 — MR fill at NV=4 sym none K=64.
                 Int8UkernelCase {1, 4, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr1_nv4_K64_none"},
                 Int8UkernelCase {3, 4, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr3_nv4_K64_none"},
                 Int8UkernelCase {5, 4, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr5_nv4_K64_none"},
                 // C.1 cell #3 — NV=4 gated activations at MR=4 sym K=64.
                 Int8UkernelCase {4, 4, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::swiglu_oai_mul, ck::BiasKind::none,
+                        ck::ActivationKind::swiglu_oai_mul, ck::BiasKind::none,
                         "sym_mr4_nv4_K64_swiglu"},
                 Int8UkernelCase {4, 4, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::silu_and_mul, ck::BiasKind::none,
+                        ck::ActivationKind::silu_and_mul, ck::BiasKind::none,
                         "sym_mr4_nv4_K64_silu"},
                 Int8UkernelCase {4, 4, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::gelu_and_mul, ck::BiasKind::none,
+                        ck::ActivationKind::gelu_and_mul, ck::BiasKind::none,
                         "sym_mr4_nv4_K64_gelu"},
                 // C.1 cell #4 — large K=1024 sym MR=4 NV=2 (multi-K-block).
                 Int8UkernelCase {4, 2, 1024, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr4_nv2_K1024_none"},
                 // C.1 cell #7 — asym src_zp range (the random uniform [0,96]
                 // already covers the typical case; we also exercise the
                 // upper end via larger MR which bumps the per-row zp count).
                 Int8UkernelCase {6, 2, 128, ck::IntCompute::kU8_Asym,
-                        ck::ActKind::none, ck::BiasKind::bf16,
+                        ck::ActivationKind::none, ck::BiasKind::bf16,
                         "asym_mr6_nv2_K128_bf16bias"},
                 // asym path — exercises non-zero src_zp / VPDPBUSD direct path.
                 Int8UkernelCase {1, 2, 64, ck::IntCompute::kU8_Asym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "asym_mr1_nv2_K64_none"},
                 Int8UkernelCase {4, 2, 128, ck::IntCompute::kU8_Asym,
-                        ck::ActKind::none, ck::BiasKind::fp32,
+                        ck::ActivationKind::none, ck::BiasKind::fp32,
                         "asym_mr4_nv2_K128_f32bias"},
                 Int8UkernelCase {4, 4, 128, ck::IntCompute::kU8_Asym,
-                        ck::ActKind::none, ck::BiasKind::bf16,
+                        ck::ActivationKind::none, ck::BiasKind::bf16,
                         "asym_mr4_nv4_K128_bf16bias"},
                 // gated activations — sym, NV=2 (covers swiglu / silu / gelu
                 // epilogues; their store path is identical across NVs).
                 Int8UkernelCase {4, 2, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::swiglu_oai_mul, ck::BiasKind::none,
+                        ck::ActivationKind::swiglu_oai_mul, ck::BiasKind::none,
                         "sym_mr4_nv2_K64_swiglu"},
                 Int8UkernelCase {4, 2, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::silu_and_mul, ck::BiasKind::none,
+                        ck::ActivationKind::silu_and_mul, ck::BiasKind::none,
                         "sym_mr4_nv2_K64_silu"},
                 Int8UkernelCase {4, 2, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::gelu_and_mul, ck::BiasKind::none,
+                        ck::ActivationKind::gelu_and_mul, ck::BiasKind::none,
                         "sym_mr4_nv2_K64_gelu"},
                 // gated + asym to sanity-check the cross product.
                 Int8UkernelCase {4, 2, 64, ck::IntCompute::kU8_Asym,
-                        ck::ActKind::swiglu_oai_mul, ck::BiasKind::none,
+                        ck::ActivationKind::swiglu_oai_mul, ck::BiasKind::none,
                         "asym_mr4_nv2_K64_swiglu"},
                 // asym + split-halves gated (silu / gelu) — previously only the
                 // sym variants + asym swiglu were covered.  Exercises the asym
                 // src_zp dequant under the split-halves epilogue at NV=2 and NV=4.
                 Int8UkernelCase {4, 2, 64, ck::IntCompute::kU8_Asym,
-                        ck::ActKind::silu_and_mul, ck::BiasKind::none,
+                        ck::ActivationKind::silu_and_mul, ck::BiasKind::none,
                         "asym_mr4_nv2_K64_silu"},
                 Int8UkernelCase {4, 2, 64, ck::IntCompute::kU8_Asym,
-                        ck::ActKind::gelu_and_mul, ck::BiasKind::none,
+                        ck::ActivationKind::gelu_and_mul, ck::BiasKind::none,
                         "asym_mr4_nv2_K64_gelu"},
                 Int8UkernelCase {4, 4, 64, ck::IntCompute::kU8_Asym,
-                        ck::ActKind::silu_and_mul, ck::BiasKind::none,
+                        ck::ActivationKind::silu_and_mul, ck::BiasKind::none,
                         "asym_mr4_nv4_K64_silu"},
                 Int8UkernelCase {4, 4, 64, ck::IntCompute::kU8_Asym,
-                        ck::ActKind::gelu_and_mul, ck::BiasKind::none,
+                        ck::ActivationKind::gelu_and_mul, ck::BiasKind::none,
                         "asym_mr4_nv4_K64_gelu"},
                 // K-quad residual coverage.  The plain (memory-operand)
                 // K-loop consumes `kBuffers` K-quads per iteration and
@@ -717,112 +723,112 @@ INSTANTIATE_TEST_SUITE_P(SymAndAsym, CkInt8UkernelTest,
                 // non-zero remainder for the kBuffers each (MR, NV) gets:
                 // 4 at NV=2 MR=1..3, 3 at NV=2 MR=4, 2 at NV=4 MR=1,2.
                 Int8UkernelCase {1, 2, 68, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr1_nv2_K68_ktail1"},
                 Int8UkernelCase {1, 2, 72, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr1_nv2_K72_ktail2"},
                 Int8UkernelCase {1, 2, 76, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr1_nv2_K76_ktail3"},
                 Int8UkernelCase {2, 2, 68, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr2_nv2_K68_ktail1"},
                 Int8UkernelCase {3, 2, 76, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr3_nv2_K76_ktail3"},
                 Int8UkernelCase {4, 2, 76, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr4_nv2_K76_ktail1"},
                 Int8UkernelCase {4, 2, 68, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr4_nv2_K68_ktail2"},
                 Int8UkernelCase {1, 4, 68, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr1_nv4_K68_ktail1"},
                 Int8UkernelCase {2, 4, 76, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr2_nv4_K76_ktail1"},
                 // Same residual paths on the asym flavour, which skips
                 // the s8→u8 broadcast XOR and corrects by src_zp instead.
                 Int8UkernelCase {1, 2, 68, ck::IntCompute::kU8_Asym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "asym_mr1_nv2_K68_ktail1"},
                 Int8UkernelCase {2, 4, 68, ck::IntCompute::kU8_Asym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "asym_mr2_nv4_K68_ktail1"},
                 // Residual K-quads under a gated epilogue, which reads
                 // the combined buffer 0 through the pair-pack store.
                 Int8UkernelCase {1, 2, 68, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::swiglu_oai_mul, ck::BiasKind::none,
+                        ck::ActivationKind::swiglu_oai_mul, ck::BiasKind::none,
                         "sym_mr1_nv2_K68_swiglu_ktail1"},
                 Int8UkernelCase {3, 2, 76, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::silu_and_mul, ck::BiasKind::none,
+                        ck::ActivationKind::silu_and_mul, ck::BiasKind::none,
                         "sym_mr3_nv2_K76_silu_ktail3"},
                 // The other side of the plain/pipelined boundary
                 // (MR*NV > 8) at the same non-dividing K_quad, so the
                 // staged-B form's own K tail stays covered too.
                 Int8UkernelCase {5, 2, 68, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr5_nv2_K68_ktail"},
                 Int8UkernelCase {3, 4, 68, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr3_nv4_K68_ktail"},
                 // NV=2 sym runs up to MR=12, past every other tuple's
                 // cap of 8, so MR 9..12 need their own cells.
                 Int8UkernelCase {9, 2, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr9_nv2_K64_none"},
                 Int8UkernelCase {10, 2, 128, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::fp32,
+                        ck::ActivationKind::none, ck::BiasKind::fp32,
                         "sym_mr10_nv2_K128_none_biasf32"},
                 Int8UkernelCase {11, 2, 68, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::bf16,
+                        ck::ActivationKind::none, ck::BiasKind::bf16,
                         "sym_mr11_nv2_K68_none_biasbf16_ktail"},
                 Int8UkernelCase {12, 2, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr12_nv2_K64_none"},
                 Int8UkernelCase {12, 2, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::swiglu_oai_mul, ck::BiasKind::none,
+                        ck::ActivationKind::swiglu_oai_mul, ck::BiasKind::none,
                         "sym_mr12_nv2_K64_swiglu"},
                 Int8UkernelCase {12, 2, 128, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::silu_and_mul, ck::BiasKind::bf16,
+                        ck::ActivationKind::silu_and_mul, ck::BiasKind::bf16,
                         "sym_mr12_nv2_K128_silu_biasbf16"},
                 Int8UkernelCase {10, 2, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::gelu_and_mul, ck::BiasKind::none,
+                        ck::ActivationKind::gelu_and_mul, ck::BiasKind::none,
                         "sym_mr10_nv2_K64_gelu"},
                 Int8UkernelCase {12, 2, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::none,
+                        ck::ActivationKind::none, ck::BiasKind::none,
                         "sym_mr12_nv2_K64_lda80_none", 80},
                 Int8UkernelCase {9, 2, 76, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::silu_and_mul, ck::BiasKind::f16,
+                        ck::ActivationKind::silu_and_mul, ck::BiasKind::f16,
                         "sym_mr9_nv2_K76_silu_biasf16_ktail3"},
                 Int8UkernelCase {9, 2, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::swiglu_oai_mul, ck::BiasKind::fp32,
+                        ck::ActivationKind::swiglu_oai_mul, ck::BiasKind::fp32,
                         "sym_mr9_nv2_K64_swiglu_biasf32"},
                 Int8UkernelCase {9, 2, 128, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::gelu_and_mul, ck::BiasKind::none,
+                        ck::ActivationKind::gelu_and_mul, ck::BiasKind::none,
                         "sym_mr9_nv2_K128_gelu"},
                 Int8UkernelCase {10, 2, 76, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::swiglu_oai_mul, ck::BiasKind::f16,
+                        ck::ActivationKind::swiglu_oai_mul, ck::BiasKind::f16,
                         "sym_mr10_nv2_K76_swiglu_biasf16_ktail3"},
                 Int8UkernelCase {10, 2, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::silu_and_mul, ck::BiasKind::none,
+                        ck::ActivationKind::silu_and_mul, ck::BiasKind::none,
                         "sym_mr10_nv2_K64_lda96_silu", 96},
                 Int8UkernelCase {11, 2, 76, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::gelu_and_mul, ck::BiasKind::fp32,
+                        ck::ActivationKind::gelu_and_mul, ck::BiasKind::fp32,
                         "sym_mr11_nv2_K76_gelu_biasf32_ktail3"},
                 Int8UkernelCase {11, 2, 64, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::silu_and_mul, ck::BiasKind::f16,
+                        ck::ActivationKind::silu_and_mul, ck::BiasKind::f16,
                         "sym_mr11_nv2_K64_silu_biasf16"},
                 Int8UkernelCase {11, 2, 128, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::swiglu_oai_mul, ck::BiasKind::bf16,
+                        ck::ActivationKind::swiglu_oai_mul, ck::BiasKind::bf16,
                         "sym_mr11_nv2_K128_swiglu_biasbf16"},
                 Int8UkernelCase {12, 2, 68, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::gelu_and_mul, ck::BiasKind::f16,
+                        ck::ActivationKind::gelu_and_mul, ck::BiasKind::f16,
                         "sym_mr12_nv2_K68_gelu_biasf16_ktail1"},
                 Int8UkernelCase {12, 2, 76, ck::IntCompute::kS8_Sym,
-                        ck::ActKind::none, ck::BiasKind::f16,
+                        ck::ActivationKind::none, ck::BiasKind::f16,
                         "sym_mr12_nv2_K76_none_biasf16_ktail3"}),
         [](const ::testing::TestParamInfo<Int8UkernelCase> &info) {
             return info.param.label;
@@ -875,8 +881,8 @@ TEST(CkInt8UkernelExtremes, ZeroAndMaxValues) {
                               nullptr, /*disable_cache=*/true),
                     status_t::success);
             ASSERT_NE(packed, nullptr);
-            auto *fn = ck::select_int8_ukernel(
-                    MR, NV, compute, ck::ActKind::none, ck::DstDt::kBf16);
+            auto *fn = ck::select_int8_ukernel(MR, NV, compute,
+                    ck::ActivationKind::none, ck::OutputType::kBf16);
             ASSERT_NE(fn, nullptr);
             std::vector<bfloat16_t> dst(
                     static_cast<size_t>(MR) * NR, bfloat16_t(0.0f));
@@ -934,7 +940,7 @@ TEST(CkInt8UkernelExtremes, NegativeScales) {
             status_t::success);
     ASSERT_NE(packed, nullptr);
     auto *fn = ck::select_int8_ukernel(MR, NV, ck::IntCompute::kS8_Sym,
-            ck::ActKind::none, ck::DstDt::kBf16);
+            ck::ActivationKind::none, ck::OutputType::kBf16);
     ASSERT_NE(fn, nullptr);
     std::vector<bfloat16_t> dst(static_cast<size_t>(MR) * NR, bfloat16_t(0.0f));
     fn(src.data(), K, packed, src_scale.data(), /*src_zp=*/nullptr,
@@ -944,8 +950,8 @@ TEST(CkInt8UkernelExtremes, NegativeScales) {
     std::vector<bfloat16_t> ref(static_cast<size_t>(MR) * NR, bfloat16_t(0.0f));
     scalar_ref_dq_int8<uint8_t>(MR, K, NR, src.data(), K, wei.data(), NR,
             src_scale.data(), nullptr, wei_scale.data(),
-            /*bias=*/nullptr, ck::BiasKind::none, ck::ActKind::none, ref.data(),
-            NR);
+            /*bias=*/nullptr, ck::BiasKind::none, ck::ActivationKind::none,
+            ref.data(), NR);
     int n_bad = 0;
     for (size_t i = 0; i < ref.size(); ++i) {
         const float a = static_cast<float>(dst[i]);
@@ -962,7 +968,7 @@ TEST(CkInt8UkernelExtremes, NegativeScales) {
 }
 
 // ──────────────────────────────────────────────────────────────────
-// FP32-dst axis (ukernel_f32dst) — `act=none`, DstDt::kF32.  The
+// FP32-dst axis (ukernel_f32dst) — `act=none`, OutputType::kF32.  The
 // kernel stores the dequantised FP32 accumulator directly via
 // `_mm512_storeu_ps` (no BF16 narrowing), so the reference compares
 // against the exact FP32 dequant with a tight tolerance.  Small-MR
@@ -1036,8 +1042,8 @@ TEST(CkInt8UkernelF32Dst, MatchesScalarF32Reference) {
         for (int v = 0; v < NR; ++v)
             wei_scale[v] = sc(rng);
 
-        auto *fn = ck::select_int8_ukernel(
-                MR, NV, c.compute, ck::ActKind::none, ck::DstDt::kF32);
+        auto *fn = ck::select_int8_ukernel(MR, NV, c.compute,
+                ck::ActivationKind::none, ck::OutputType::kF32);
         ASSERT_NE(fn, nullptr) << "f32-dst kernel must be instantiated";
 
         std::vector<float> dst(static_cast<size_t>(MR) * NR, 0.0f);
@@ -1118,10 +1124,10 @@ TEST(CkInt8UkernelStaticU8S8FloatDst, PerTensorMatchesIndependentOracleAtNr64) {
     ck::Int8EpilogueConfig epilogue;
     epilogue.src_quant_per_tensor = true;
     epilogue.wei_scale_per_tensor = true;
-    const auto run = [&](auto zero, ck::DstDt dst_dt) {
+    const auto run = [&](auto zero, ck::OutputType dst_dt) {
         using Dst = decltype(zero);
-        auto *fn = ck::select_int8_ukernel(
-                MR, NV, ck::IntCompute::kU8_Asym, ck::ActKind::none, dst_dt);
+        auto *fn = ck::select_int8_ukernel(MR, NV, ck::IntCompute::kU8_Asym,
+                ck::ActivationKind::none, dst_dt);
         ASSERT_NE(fn, nullptr);
         std::vector<Dst> dst(static_cast<size_t>(MR) * NR, zero);
         fn(src.data(), K, packed, &src_scale, &src_zp, &wei_scale,
@@ -1151,8 +1157,8 @@ TEST(CkInt8UkernelStaticU8S8FloatDst, PerTensorMatchesIndependentOracleAtNr64) {
             }
         }
     };
-    run(bfloat16_t(0.0f), ck::DstDt::kBf16);
-    run(0.0f, ck::DstDt::kF32);
+    run(bfloat16_t(0.0f), ck::OutputType::kBf16);
+    run(0.0f, ck::OutputType::kF32);
 }
 
 TEST(CkInt8UkernelU8Dst, PerTensorStaticU8S8MatchesScalarReference) {
@@ -1189,7 +1195,7 @@ TEST(CkInt8UkernelU8Dst, PerTensorStaticU8S8MatchesScalarReference) {
     } guard {packed};
 
     auto *fn = ck::select_int8_ukernel(MR, NV, ck::IntCompute::kU8_Asym,
-            ck::ActKind::none, ck::DstDt::kU8);
+            ck::ActivationKind::none, ck::OutputType::kU8);
     ASSERT_NE(fn, nullptr);
     ck::Int8EpilogueConfig epilogue;
     epilogue.src_quant_per_tensor = true;
@@ -1239,7 +1245,7 @@ TEST(CkInt8UkernelU8Dst, MatchesReferenceAtRoundingTiesAndSaturation) {
         ~Guard() { ck::free_owned_packed_weight_int8(ptr); }
     } guard {packed};
     auto *fn = ck::select_int8_ukernel(MR, NV, ck::IntCompute::kU8_Asym,
-            ck::ActKind::none, ck::DstDt::kU8);
+            ck::ActivationKind::none, ck::OutputType::kU8);
     ASSERT_NE(fn, nullptr);
 
     const auto nearest_even_u8 = [](float value) {

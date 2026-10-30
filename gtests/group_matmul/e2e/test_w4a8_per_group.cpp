@@ -274,14 +274,15 @@ void expect_algo3_cache_off_rereads_rewritten_scale(data_type_t src_scale_dt) {
     WeightCacheGuard wc(2);
     reset_grp_matmul_caches();
     const auto run = [&](std::vector<tensor_t> &out) {
-        moe_test_utils::GemmModeCaptureGuard capture;
+        moe_test_utils::ExecutionPathCaptureGuard capture;
         ASSERT_EQ(group_matmul_kernel_test(inp, wt, bias, out, inner, 1.0f,
                           0.0f, nullptr, nullptr, {}, active, data_type_t::s8,
                           /*weight_cache_type=*/0),
                 status_t::success);
-        const char *mode = zendnnl::lowoha::matmul::test_api::
-                                   s_last_group_matmul_direct_gemm_mode.load(
-                                           std::memory_order_relaxed);
+        const char *mode
+                = zendnnl::lowoha::matmul::test_api::
+                          s_last_group_matmul_direct_execution_path.load(
+                                  std::memory_order_relaxed);
         ASSERT_NE(mode, nullptr);
         EXPECT_NE(std::strstr(mode, "custom"), nullptr)
                 << "the call must run the s4 custom kernel; mode=" << mode;
@@ -620,12 +621,12 @@ TEST(GroupMatmulW4A8PerGroup, Algo3PerGroupSourceScaleFallsBackToDlp) {
     {
         moe_test_utils::AlgoEnvGuard algo3(3);
         moe_test_utils::CustomKernelOverride ck_on(true);
-        moe_test_utils::GemmModeCaptureGuard capture;
+        moe_test_utils::ExecutionPathCaptureGuard capture;
         reset_grp_matmul_caches();
         st = group_matmul_kernel_test(inp, wt, bias, out_a3, inner, 1.0f, 0.0f,
                 nullptr, nullptr, {}, active);
         mode = zendnnl::lowoha::matmul::test_api ::
-                       s_last_group_matmul_direct_gemm_mode.load(
+                       s_last_group_matmul_direct_execution_path.load(
                                std::memory_order_relaxed);
     }
     ASSERT_EQ(st, status_t::success) << "ALGO 3 fallback failed";
@@ -701,7 +702,7 @@ TEST(GroupMatmulW4A8PerGroup, PrepackWarmsAllExpertsBF16) {
 
     auto stats = prepack::test_api::get_last_invocation_stats();
     ASSERT_TRUE(stats.valid) << "prepack must fire for the W4A8 per-group call";
-    EXPECT_EQ(stats.scheduling_algo, 3);
+    EXPECT_EQ(stats.group_schedule, 3);
     if (moe_test_utils::k_grp_matmul_aocl_dlp_compiled) {
         EXPECT_EQ(static_cast<int>(stats.cross_warm_regime),
                 static_cast<int>(
@@ -744,7 +745,7 @@ TEST(GroupMatmulW4A8PerGroup, AutoPromptPrepackWarmsDecodeLayout) {
 
     const auto stats = prepack::test_api::get_last_invocation_stats();
     ASSERT_TRUE(stats.valid) << "prepack must fire for the W4A8 prompt";
-    EXPECT_EQ(stats.scheduling_algo, 1);
+    EXPECT_EQ(stats.group_schedule, 1);
     if (moe_test_utils::k_grp_matmul_aocl_dlp_compiled) {
         EXPECT_NE(static_cast<int>(stats.cross_warm_regime),
                 static_cast<int>(prepack::CrossWarmRegime::none))
@@ -764,7 +765,7 @@ TEST(GroupMatmulW4A8PerGroup, AutoPromptPrepackWarmsOnlyTheCustomKernelPack) {
     moe_test_utils::LastInvocationCaptureGuard prepack_capture;
     moe_test_utils::AlgoEnvGuard auto_algo(0);
     moe_test_utils::CustomKernelOverride ck_on(true);
-    moe_test_utils::GemmModeCaptureGuard capture;
+    moe_test_utils::ExecutionPathCaptureGuard capture;
     prepack::clear_fingerprint_cache_for_test();
     prepack::test_api::clear_last_invocation_stats();
 
@@ -776,15 +777,16 @@ TEST(GroupMatmulW4A8PerGroup, AutoPromptPrepackWarmsOnlyTheCustomKernelPack) {
 
     const auto stats = prepack::test_api::get_last_invocation_stats();
     ASSERT_TRUE(stats.valid) << "prepack must fire for the W4A8 prompt";
-    EXPECT_EQ(stats.scheduling_algo, 3);
+    EXPECT_EQ(stats.group_schedule, 3);
     EXPECT_EQ(static_cast<int>(stats.cross_warm_regime),
             static_cast<int>(prepack::CrossWarmRegime::none));
     EXPECT_GE(stats.ck.total_attempted, 15)
             << "the custom-kernel pack is warmed for every expert";
     EXPECT_EQ(stats.ck.skipped_invalid, 0);
     EXPECT_EQ(stats.aocl.total_attempted, 0) << "no AOCL layout is warmed";
-    const char *m = mm::test_api::s_last_group_matmul_direct_gemm_mode.load(
-            std::memory_order_relaxed);
+    const char *m
+            = mm::test_api::s_last_group_matmul_direct_execution_path.load(
+                    std::memory_order_relaxed);
     const std::string mode = m != nullptr ? m : "";
     EXPECT_NE(mode.find("ptile"), std::string::npos) << mode;
 }

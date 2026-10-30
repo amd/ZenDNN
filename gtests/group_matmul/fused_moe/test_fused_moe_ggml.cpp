@@ -278,7 +278,7 @@ void run_fused_ggml_scenario(const std::string &label,
         if (ntile_algo_pin >= 0) {
             // N-tile mode: pin ALGO 3 (or AUTO=0, which routes this decode-class
             // shape to ALGO 3) so the fused two-pass N-tiles each op's per-group
-            // weight via do_tile's per-tile repack.  Capture the prepack stats to
+            // weight via execute_tile's per-tile repack.  Capture the prepack stats to
             // assert engagement (+ cross-warm under AUTO).
             //
             // Out-of-place (WC=1): in-place skips warmers so aocl.total_attempted
@@ -343,7 +343,7 @@ void run_fused_ggml_scenario(const std::string &label,
                 // Pinned ALGO 3: the fused two-pass N-tiles each op's per-group weight.
                 // The LAST prepack captured is Op2 (act=none).  Its resolved
                 // inner kernel may need no AOCL or custom-kernel weight warm.
-                EXPECT_EQ(stats.scheduling_algo, 3)
+                EXPECT_EQ(stats.group_schedule, 3)
                         << label
                         << ": fused GGML two-pass did NOT route to ALGO 3 "
                            "(N-tile)";
@@ -526,7 +526,7 @@ TEST(FusedMoEGgml, VerticalFusionDenseSwigluBF16) {
 // GGML is per-group, so the fused call always lands on the two-pass legacy
 // dispatch (vertical fusion is per-token only).  With the Op1/Op2 unpack now
 // handing back RAW s8 ('n') under ALGO 3 / AUTO, each op's per-group weight is
-// N-tiled by `do_tile` — exactly like a caller-provided per-group s8 weight.
+// N-tiled by `execute_tile` — exactly like a caller-provided per-group s8 weight.
 // N is sized to the live thread team (`N >= stable * nr_align`) so both Op1
 // (N=2*dim) and Op2 (N=H) clear the narrow-N escape and actually split;
 // stable < 2 hosts can't demonstrate a split, so skip.  The fused result is

@@ -658,7 +658,7 @@ TEST(CkPackF16InPlace, RegistryKeepsFamiliesSeparate) {
     ck::clear_custom_kernel_pack_cache_f16();
     EXPECT_FALSE(ck::weight_packed_in_place(f16.data()));
     EXPECT_TRUE(ck::weight_packed_in_place(bf16.data()));
-    ck::clear_custom_kernel_pack_cache();
+    ck::clear_custom_kernel_pack_cache_bf16();
     EXPECT_FALSE(ck::weight_packed_in_place(bf16.data()));
 }
 

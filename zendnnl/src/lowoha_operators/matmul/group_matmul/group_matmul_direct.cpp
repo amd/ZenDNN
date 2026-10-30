@@ -145,7 +145,7 @@ inline bool prepack_extras_metadata_undersized(
 //
 //   A  Input shapes & mode-feature compatibility
 //        empty / size mismatch / src.size() ∈ {1, num_ops} /
-//        moe_postop ⋅ gated_act ⋅ fused_moe → parallel-mode-only
+//        weighted_reduce ⋅ gated_act ⋅ fused_moe → parallel-mode-only
 //
 //   B  Sequential mode (src.size() == 1)
 //        per-element non-null + positive dims, uniform M, K[i]==N[i-1]
@@ -164,7 +164,7 @@ inline bool prepack_extras_metadata_undersized(
 //   F  Fused MoE (parallel mode only)
 //        per-expert vector sizes; active-expert non-null pointers;
 //        N_down/ldb_down/ldc_down range; bias_dt_down vs bias_down;
-//        uniform N_down when also paired with moe_postop
+//        uniform N_down when also paired with weighted_reduce
 //
 //   G  MoE post-op
 //        uniform N (or N_down if fused) and uniform dst dtype across
@@ -180,7 +180,7 @@ status_t validate_group_matmul_direct_inputs(const std::vector<char> &layout,
         const std::vector<void *> &dst, const std::vector<int> &ldc,
         const std::vector<bool> &is_weights_const,
         const std::vector<matmul_params> &params,
-        const group_matmul_moe_postop_params *moe_postop,
+        const group_matmul_moe_postop_params *weighted_reduce,
         const grp_matmul_gated_act_params *gated_act,
         const grp_matmul_fused_moe_params *fused_moe) {
 
@@ -274,7 +274,7 @@ status_t validate_group_matmul_direct_inputs(const std::vector<char> &layout,
                               bool *out_internal) -> status_t {
         const status_t st = detect_internal_alloc(v, num_ops,
                 /*fused_moe_present=*/(fused_moe != nullptr),
-                internal_alloc_mode::sweep_active, out_internal);
+                internal_alloc_mode::active_range, out_internal);
         if (st != status_t::success) {
             log_error("group_matmul_direct: fused_moe ", name,
                     " has a mixed "
@@ -393,14 +393,15 @@ status_t validate_group_matmul_direct_inputs(const std::vector<char> &layout,
         log_error("group_matmul_direct: src.size() must be 1 or num_ops");
         return status_t::failure;
     }
-    // moe_postop / gated_act / fused_moe are parallel-only for a REAL
+    // weighted_reduce / gated_act / fused_moe are parallel-only for a REAL
     // sequential chain (src.size() == 1 with >= 2 ops).  A lone expert
     // (single_expert_parallel) is dispatched through the parallel path, so
     // it may carry all three.
-    if (moe_postop != nullptr && src.size() == 1 && !single_expert_parallel) {
+    if (weighted_reduce != nullptr && src.size() == 1
+            && !single_expert_parallel) {
         log_error(
-                "group_matmul_direct: moe_postop is only supported in parallel "
-                "mode");
+                "group_matmul_direct: moe_postop (weighted reduce) is only "
+                "supported in parallel mode");
         return status_t::failure;
     }
     if (gated_act != nullptr && gated_act->act != grp_matmul_gated_act_t::none
@@ -463,7 +464,7 @@ status_t validate_group_matmul_direct_inputs(const std::vector<char> &layout,
                 return status_t::failure;
             }
         }
-        // Sequential path has no fused-MoE / gated-act / moe_postop variants
+        // Sequential path has no fused-MoE / gated-act / weighted_reduce variants
         // (Phase A already rejected those combos), so we are done.
         return status_t::success;
     }
@@ -786,12 +787,12 @@ status_t validate_group_matmul_direct_inputs(const std::vector<char> &layout,
                 return status_t::failure;
             }
         }
-        if (moe_postop != nullptr) {
+        if (weighted_reduce != nullptr) {
             for (size_t i = 1; i < num_ops; ++i) {
                 if (fused_moe->N_down[i] != fused_moe->N_down[0]) {
                     log_error(
                             "group_matmul_direct: fused_moe + moe_postop "
-                            "requires "
+                            "(weighted reduce) requires "
                             "uniform N_down, N_down[0]=",
                             fused_moe->N_down[0], " N_down[", i,
                             "]=", fused_moe->N_down[i]);
@@ -802,24 +803,28 @@ status_t validate_group_matmul_direct_inputs(const std::vector<char> &layout,
     }
 
     // ── Phase G ─ MoE post-op rules ────────────────────────────────────
-    if (moe_postop != nullptr) {
+    if (weighted_reduce != nullptr) {
         for (size_t i = 1; i < num_ops; ++i) {
             if (N[i] != N[0]) {
                 log_error(
-                        "group_matmul_direct: moe_postop requires identical N "
+                        "group_matmul_direct: moe_postop (weighted reduce) "
+                        "requires "
+                        "identical N "
                         "across experts");
                 return status_t::failure;
             }
             if (params[i].dtypes.dst != params[0].dtypes.dst) {
                 log_error(
-                        "group_matmul_direct: moe_postop requires identical "
+                        "group_matmul_direct: moe_postop (weighted reduce) "
+                        "requires "
+                        "identical "
                         "dst "
                         "dtype across experts");
                 return status_t::failure;
             }
         }
     }
-    // Validate moe_postop with the correct D: N_down[0] when fused,
+    // Validate weighted_reduce with the correct D: N_down[0] when fused,
     // otherwise Op1's OUTPUT width -- which a gated activation halves.
     //
     // `dst[:, 0:N/2] = act(gate) * up` is the documented contract, and the
@@ -836,7 +841,7 @@ status_t validate_group_matmul_direct_inputs(const std::vector<char> &layout,
                       (gated_act != nullptr) ? gated_act->act
                                              : grp_matmul_gated_act_t::none);
     if (validate_group_matmul_moe_postop(
-                moe_postop, moe_D, params[0].dtypes.dst)
+                weighted_reduce, moe_D, params[0].dtypes.dst)
             != status_t::success) {
         return status_t::failure;
     }
@@ -892,7 +897,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
         const std::vector<void *> &dst, const std::vector<int> &ldc,
         const std::vector<bool> &is_weights_const,
         const std::vector<matmul_params> &params,
-        const group_matmul_moe_postop_params *moe_postop,
+        const group_matmul_moe_postop_params *weighted_reduce,
         const grp_matmul_gated_act_params *gated_act,
         const grp_matmul_fused_moe_params *fused_moe) {
 
@@ -909,7 +914,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
     //
     //   (1) primary-vector emptiness — params[0] is dereferenced
     //       unconditionally for thread / dtype resolution.
-    //   (2) parallel-mode-only feature rejection — moe_postop /
+    //   (2) parallel-mode-only feature rejection — weighted_reduce /
     //       gated_act / fused_moe are only supported when src.size()
     //       == num_ops (one src per expert).  Allowing any of them
     //       through in sequential mode (src.size() == 1) and then
@@ -930,7 +935,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
     //       is_weights_const) must be sized to at least total_matmul
     //       so the prepack module's `min({...})` clamp cannot silently
     //       truncate the warm.
-    //   (5) gated-act `ldc` uniformity — ALGO 3 flat_n_tile auto-
+    //   (5) gated-act `ldc` uniformity — ALGO 3 n_tile_execute auto-
     //       engages from `ldc[0] < N[0]` and applies the tight/wide
     //       decision uniformly across experts; mixed states would
     //       OOB-write or leak undefined output.
@@ -1063,7 +1068,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
     // production log (no DIAGNOSTICS) still pinpoints which gate the
     // caller violated without needing to enable diagnostics and
     // reproduce.
-    // Parallel-only features (moe_postop / gated_act / fused_moe) are
+    // Parallel-only features (weighted_reduce / gated_act / fused_moe) are
     // rejected ONLY for a REAL multi-op sequential chain
     // (src.size() == 1 && !single_expert_parallel, i.e. num_ops > 1): that
     // path has no Op2 / activation / weighted-reduce stage and would crash.
@@ -1071,10 +1076,11 @@ status_t group_matmul_direct(const std::vector<char> &layout,
     // both route to the parallel dispatch, which supports all three, so they
     // pass through here.
     if (src.size() == 1 && !single_expert_parallel) {
-        if (moe_postop != nullptr) {
+        if (weighted_reduce != nullptr) {
             log_error(
-                    "group_matmul_direct: moe_postop is only supported in "
-                    "parallel mode; got a multi-op sequential chain "
+                    "group_matmul_direct: moe_postop (weighted reduce) is only "
+                    "supported in parallel mode; got a multi-op sequential "
+                    "chain "
                     "(src.size() == 1, num_ops > 1).  Either enable parallel "
                     "mode by supplying a per-expert src[] vector, or drop the "
                     "moe_postop argument.");
@@ -1131,10 +1137,10 @@ status_t group_matmul_direct(const std::vector<char> &layout,
         bool inline_op2_internal = false;
         detect_internal_alloc(dst, /*num_ops=*/no,
                 /*fused_moe_present=*/(fused_moe != nullptr),
-                internal_alloc_mode::quick_o1, &inline_op1_internal);
+                internal_alloc_mode::first_slot, &inline_op1_internal);
         if (fused_moe != nullptr) {
             detect_internal_alloc(fused_moe->dst_down, /*num_ops=*/no,
-                    /*fused_moe_present=*/true, internal_alloc_mode::quick_o1,
+                    /*fused_moe_present=*/true, internal_alloc_mode::first_slot,
                     &inline_op2_internal);
         }
         // else: inline_op2_internal stays false (no fused-MoE, no Op2).
@@ -1199,7 +1205,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
         }
 
         // (4) Cross-expert caller-layout uniformity for the gated-activation
-        // path (ALGO 3 flat_n_tile auto-engage).  The planner infers the
+        // path (ALGO 3 n_tile_execute auto-engage).  The planner infers the
         // tight vs wide swiglu writer from `ldc[0] < N[0]` and applies
         // that decision to EVERY expert — the tight branch writes
         // compacted [M, :I] output at each expert's stride `ldc[e]`.
@@ -1246,7 +1252,8 @@ status_t group_matmul_direct(const std::vector<char> &layout,
     status_t val = op_instrumentation::validate([&]() {
         return validate_group_matmul_direct_inputs(layout, transA, transB, M, N,
                 K, alpha, src, lda, weight, ldb, bias, beta, dst, ldc,
-                is_weights_const, params, moe_postop, gated_act, fused_moe);
+                is_weights_const, params, weighted_reduce, gated_act,
+                fused_moe);
     });
     if (val != status_t::success) { return val; }
 
@@ -1257,7 +1264,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
     bool is_profile = is_profile_enabled();
     if (is_profile) { profiler.tbp_start(); }
 
-    const char *gemm_mode = nullptr;
+    const char *execution_path = nullptr;
 
     const int32_t omp_mt = thread_guard::max_threads();
     const int32_t num_threads
@@ -1272,9 +1279,10 @@ status_t group_matmul_direct(const std::vector<char> &layout,
         // whole-call interceptor.
         if (s_l1_log || is_profile) {
             std::ostringstream ss;
-            ss << "[GRP_MATMUL.CALL] num_ops=" << num_ops
-               << " mode=" << (gemm_mode != nullptr ? gemm_mode : "null")
-               << " exec_algo=" << executed_algo_from_gemm_mode(gemm_mode)
+            ss << "[GRP_MATMUL.CALL] num_ops=" << num_ops << " mode="
+               << (execution_path != nullptr ? execution_path : "null")
+               << " exec_algo="
+               << executed_algo_from_execution_path(execution_path)
                << " threads=" << num_threads
                << " dtype=" << dt_name(params[0].dtypes.src) << ">"
                << dt_name(params[0].dtypes.wei) << ">"
@@ -1303,7 +1311,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
             const bool has_act = (gated_act != nullptr
                     && gated_act->act != grp_matmul_gated_act_t::none);
             const bool has_fused = (fused_moe != nullptr);
-            const bool has_moe = (moe_postop != nullptr);
+            const bool has_moe = (weighted_reduce != nullptr);
             ss << " fused=[";
             bool need_comma = false;
             if (has_act) {
@@ -1317,8 +1325,8 @@ status_t group_matmul_direct(const std::vector<char> &layout,
             }
             if (has_moe) {
                 if (need_comma) { ss << ','; }
-                ss << "moe_postop(tokens=" << moe_postop->num_tokens
-                   << ",topk=" << moe_postop->topk << ')';
+                ss << "moe_postop(tokens=" << weighted_reduce->num_tokens
+                   << ",topk=" << weighted_reduce->topk << ')';
                 need_comma = true;
             }
             if (!need_comma) { ss << "none"; }
@@ -1334,11 +1342,11 @@ status_t group_matmul_direct(const std::vector<char> &layout,
             }
         }
 
-        if (zendnnl::lowoha::matmul::test_api::s_capture_gemm_mode.load(
+        if (zendnnl::lowoha::matmul::test_api::s_capture_execution_path.load(
                     std::memory_order_relaxed)) {
             zendnnl::lowoha::matmul::test_api::
-                    s_last_group_matmul_direct_gemm_mode.store(
-                            gemm_mode, std::memory_order_relaxed);
+                    s_last_group_matmul_direct_execution_path.store(
+                            execution_path, std::memory_order_relaxed);
         }
         return status_t::success;
     };
@@ -1368,11 +1376,12 @@ status_t group_matmul_direct(const std::vector<char> &layout,
     // strides and declines before writes.
     if (algo4_source != grp_matmul_ntile_flat_parallel_request_source::none) {
         status_t fast_st = status_t::unimplemented;
-        if (moe_postop != nullptr && gated_act != nullptr
+        if (weighted_reduce != nullptr && gated_act != nullptr
                 && fused_moe != nullptr) {
             fast_st = ntile_flat_parallel::try_execute(layout, transA, transB,
                     M, N, K, alpha, src, lda, weight, ldb, bias, beta, dst, ldc,
-                    is_weights_const, params, moe_postop, gated_act, fused_moe);
+                    is_weights_const, params, weighted_reduce, gated_act,
+                    fused_moe);
         }
         static const bool s_algo4_log
                 = zendnnl::error_handling::apilog_verbose_enabled();
@@ -1399,7 +1408,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
                     " fast_path=", result, " fallback=", fallback);
         }
         if (fast_st == status_t::success) {
-            gemm_mode = "ntile_flat_parallel";
+            execution_path = "ntile_flat_parallel";
             return finish_success();
         } else if (fast_st != status_t::unimplemented) {
             return fast_st;
@@ -1414,7 +1423,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
     //
     // `num_ops_total` (the prepack iteration count) is NOT materialised
     // here: each scheduling ALGO body reads `params[0].total_matmul` when
-    // building its `PrepackParams` (falling back to `M.size()` for legacy
+    // building its `PrepackRequest` (falling back to `M.size()` for legacy
     // callers under the uniform-eager `ZENDNNL_GRP_MATMUL_PREPACK=1`
     // default; set the env to `0` to restore the strict lazy-only path).
 
@@ -1477,7 +1486,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
                     size_of(exec_params[i].dtypes.dst), num_threads, kernel,
                     exec_params[i], bp, auto_version);
         }
-        gemm_mode = "sequential";
+        execution_path = "sequential";
     } else {
         // ── Parallel grouped dispatch ─────────────────────────────────────
         const bool run_gated_act = (gated_act != nullptr
@@ -1498,7 +1507,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
         // (`active = total = 0` → both fall back to `M.size()`,
         // first-iter serial reorder cost).  The new module owns the
         // env-knob (`ZENDNNL_GRP_MATMUL_PREPACK`), the thread-local
-        // fingerprint cache, the `resolve_kernel()` gate, and the AOCL /
+        // fingerprint cache, the `resolve_matmul_backend()` gate, and the AOCL /
         // custom-kernel branch logic.  See group_matmul/prepack/prepack.hpp
         // for the public contract.
 
@@ -1561,7 +1570,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
                         ? gated_act->act
                         : grp_matmul_gated_act_t::none;
                 // Unpack always returns raw s8 and clears pack_format_b.
-                // setup_op2_dispatch_scratch() therefore takes its plain branch
+                // prepare_op2_dispatch() therefore takes its plain branch
                 // and gives Op2 mem_format_b='n'.  Both projections are reordered
                 // later from those raw buffers.
                 fused_weight_unpacked = weight;
@@ -1701,7 +1710,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
             // Frameworks that want "Op1 → activation → Op2" MUST also pass
             // gated_act with a non-none activation.
             //
-            // When moe_postop is also supplied the fused MoE op runs the
+            // When weighted_reduce is also supplied the fused MoE op runs the
             // weighted-reduce internally as the natural Stage 4 of the
             // pipeline, so the dispatch body has nothing more to do here.
             status_t fused_st = group_matmul_fused_moe_execute(*fused_moe_eff,
@@ -1710,11 +1719,11 @@ status_t group_matmul_direct(const std::vector<char> &layout,
                     act_dtype, layout, transA, transB, M_eff, N, K, alpha, src,
                     lda, *fused_weight_eff, ldb, bias, beta, dst, ldc,
                     is_weights_const, *fused_params_eff, num_threads,
-                    &gemm_mode, moe_postop);
+                    &execution_path, weighted_reduce);
             if (fused_st != status_t::success) { return fused_st; }
         } else {
             // Non-fused path: Op1 + activation (fused where possible) followed
-            // by separate Op2 / moe_postop as needed.
+            // by separate Op2 / weighted_reduce as needed.
             //
             // Source dynamic quantization is gated by ZENDNNL_ENABLE_GROUP_DQ
             // (default on).  When on, the grouped pre-pass quantizes all expert
@@ -1812,22 +1821,22 @@ status_t group_matmul_direct(const std::vector<char> &layout,
                 weight_eff = &weight_unpacked;
             }
 
-            const bool act_fused = group_matmul_run_parallel_dispatch(layout,
-                    transA, transB, M_eff, N, K, alpha,
-                    group_quantized ? quantized_src : src,
+            const bool act_fused = group_matmul_execute(layout, transA, transB,
+                    M_eff, N, K, alpha, group_quantized ? quantized_src : src,
                     group_quantized ? quantized_lda : lda, *weight_eff, ldb,
                     bias, beta, dst, ldc, is_weights_const, exec_params,
-                    num_threads, &gemm_mode,
+                    num_threads, &execution_path,
                     run_gated_act ? gated_act->act
                                   : grp_matmul_gated_act_t::none,
                     act_dtype);
 
             // Abort-class sentinels: an executor that cannot leave the
-            // caller's dst in a defined state reports it through `gemm_mode`
-            // (see `gemm_mode_is_error`).  Fail the call rather than let the
+            // caller's dst in a defined state reports it through `execution_path`
+            // (see `execution_path_is_error`).  Fail the call rather than let the
             // caller consume an unwritten or partly-written dst.
-            if (gemm_mode_is_error(gemm_mode)) {
-                if (std::strcmp(gemm_mode, kGrpMatmulErrPrepackedNoCk) == 0) {
+            if (execution_path_is_error(execution_path)) {
+                if (std::strcmp(execution_path, kGrpMatmulErrPrepackedNoCk)
+                        == 0) {
                     log_error(
                             "group_matmul_direct: a pre-reordered weight "
                             "(mem_format_b='r') could not be consumed by the "
@@ -1837,7 +1846,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
                             "a "
                             "weight is VNNI-packed and has no safe fallback "
                             "path.");
-                } else if (std::strcmp(gemm_mode,
+                } else if (std::strcmp(execution_path,
                                    kGrpMatmulErrWc2PhaseSplitUnsupported)
                         == 0) {
                     log_error(
@@ -1850,8 +1859,8 @@ status_t group_matmul_direct(const std::vector<char> &layout,
                 } else {
                     log_error(
                             "group_matmul_direct: the executor could not "
-                            "produce a defined destination (gemm_mode=",
-                            gemm_mode, ").");
+                            "produce a defined destination (execution_path=",
+                            execution_path, ").");
                 }
                 return status_t::failure;
             }
@@ -1862,7 +1871,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
                 if (act_st != status_t::success) { return act_st; }
             }
 
-            if (moe_postop != nullptr) {
+            if (weighted_reduce != nullptr) {
                 // Reduce over Op1's OUTPUT width, which a gated activation
                 // halves -- see the `moe_D` note in the validator.  The two
                 // must use the same expression or a call that validates will
@@ -1870,8 +1879,9 @@ status_t group_matmul_direct(const std::vector<char> &layout,
                 const int postop_d = op2_k_for_act(N[0],
                         run_gated_act ? gated_act->act
                                       : grp_matmul_gated_act_t::none);
-                status_t moe_st = group_matmul_moe_postop_execute(moe_postop,
-                        postop_d, num_threads, params[0].dtypes.dst);
+                status_t moe_st
+                        = group_matmul_moe_postop_execute(weighted_reduce,
+                                postop_d, num_threads, params[0].dtypes.dst);
                 if (moe_st != status_t::success) { return moe_st; }
             }
         }

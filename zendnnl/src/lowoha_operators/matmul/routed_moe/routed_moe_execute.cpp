@@ -1146,20 +1146,22 @@ status_t execute_w4(
                     * custom_kernel::kS4BytesPerOctetCol
             + static_cast<size_t>(down_groups) * pack_nr * sizeof(int32_t);
 
-    const custom_kernel::ActKind gate_act
+    const custom_kernel::ActivationKind gate_act
             = p.activation == routed_moe_activation_t::gelu_and_mul
-            ? custom_kernel::ActKind::gelu_and_mul
-            : custom_kernel::ActKind::silu_and_mul;
-    std::array<custom_kernel::s4_ukernel_fn_t, s4_max_mr + 1> gate_kfn {};
-    std::array<custom_kernel::s4_ukernel_fn_t, s4_max_mr + 1> down_kfn {};
+            ? custom_kernel::ActivationKind::gelu_and_mul
+            : custom_kernel::ActivationKind::silu_and_mul;
+    std::array<custom_kernel::w4a8_ukernel_fn_t, s4_max_mr + 1> gate_kfn {};
+    std::array<custom_kernel::w4a8_ukernel_fn_t, s4_max_mr + 1> down_kfn {};
     for (int mr = 1; mr <= s4_max_mr; ++mr) {
-        gate_kfn[static_cast<size_t>(mr)] = custom_kernel::select_s4_ukernel(mr,
+        gate_kfn[static_cast<size_t>(mr)] = custom_kernel::select_w4a8_ukernel(
+                mr,
                 /*NV=*/2, gate_act, custom_kernel::S4SourceKind::kU8Zp128,
                 custom_kernel::S4OutputKind::kBf16);
-        down_kfn[static_cast<size_t>(mr)] = custom_kernel::select_s4_ukernel(mr,
-                /*NV=*/2, custom_kernel::ActKind::none,
-                custom_kernel::S4SourceKind::kU8Zp128,
-                custom_kernel::S4OutputKind::kF32);
+        down_kfn[static_cast<size_t>(mr)]
+                = custom_kernel::select_w4a8_ukernel(mr,
+                        /*NV=*/2, custom_kernel::ActivationKind::none,
+                        custom_kernel::S4SourceKind::kU8Zp128,
+                        custom_kernel::S4OutputKind::kF32);
         if (gate_kfn[static_cast<size_t>(mr)] == nullptr
                 || down_kfn[static_cast<size_t>(mr)] == nullptr) {
             return status_t::unimplemented;

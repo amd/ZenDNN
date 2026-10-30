@@ -15,7 +15,7 @@
  *******************************************************************************/
 
 /// Single-expert blocking plan and executor tests: the knob grammar, the plan
-/// `se_block_plan` picks for each split, and that every plan writes the same
+/// `make_single_expert_plan` picks for each split, and that every plan writes the same
 /// output as the N-tile executor's N-only split (exactly for DQ-INT8, to f32
 /// rounding for BF16).  Code lives in
 /// `lowoha_operators/matmul/group_matmul/single_expert/single_expert_plan.*`
@@ -71,28 +71,28 @@ public:
     }
 
 private:
-    mm::se_block_knob_t knob_;
-    const mm::se_block_knob_t *prev_knob_;
+    mm::SingleExpertBlockConfig knob_;
+    const mm::SingleExpertBlockConfig *prev_knob_;
     int prev_ksplit_;
 };
 
 TEST(TestSingleExpertPlan, KnobGrammar) {
-    mm::se_block_knob_t k;
+    mm::SingleExpertBlockConfig k;
     std::string error;
     ASSERT_TRUE(mm::parse_single_expert_block(
             "split=grid, MParts=2 kparts=4,kc=1024 mr=6 order=k", &k, &error));
-    EXPECT_EQ(k.split, mm::se_split_t::grid);
+    EXPECT_EQ(k.split, mm::SingleExpertSplit::mnk_grid);
     EXPECT_EQ(k.m_parts, 2);
     EXPECT_EQ(k.k_parts, 4);
     EXPECT_EQ(k.kc, 1024);
     EXPECT_EQ(k.mr, 6);
-    EXPECT_EQ(k.order, mm::se_order_t::k_outer);
+    EXPECT_EQ(k.order, mm::SingleExpertLoopOrder::k_outer);
     ASSERT_TRUE(mm::parse_single_expert_block(
             "split=remainder kparts=auto", &k, &error));
-    EXPECT_EQ(k.split, mm::se_split_t::remainder);
+    EXPECT_EQ(k.split, mm::SingleExpertSplit::n_remainder_k_split);
     EXPECT_EQ(k.k_parts, 0);
     ASSERT_TRUE(mm::parse_single_expert_block(" ", &k, &error));
-    EXPECT_EQ(k.split, mm::se_split_t::legacy);
+    EXPECT_EQ(k.split, mm::SingleExpertSplit::n_tile_default);
     EXPECT_FALSE(k.given);
     ASSERT_TRUE(mm::parse_single_expert_block("split=legacy", &k, &error));
     EXPECT_TRUE(k.given);
@@ -107,58 +107,69 @@ TEST(TestSingleExpertPlan, DefaultsKeepTheLegacySplit) {
             || std::getenv("ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_KSPLIT")
                     != nullptr)
         GTEST_SKIP() << "plan knobs set in the environment";
-    EXPECT_FALSE(mm::se_block_plan_enabled());
-    EXPECT_FALSE(mm::se_block_plan(1, 8, 2560, 4096, 32, 4, 32).active());
+    EXPECT_FALSE(mm::single_expert_plan_enabled());
+    EXPECT_FALSE(
+            mm::make_single_expert_plan(1, 8, 2560, 4096, 32, 4, 32).active());
 }
 
 TEST(TestSingleExpertPlan, RemainderSplitsOnlyTheRemainderBlocks) {
     PlanOverride auto_ksplit(nullptr, 1);
     // 80 blocks on 32 threads: two whole blocks each, the last 16 in halves.
-    auto p = mm::se_block_plan(1, 8, 2560, 4096, 32, 4, 32);
-    EXPECT_EQ(p.split, mm::se_split_t::remainder);
+    auto p = mm::make_single_expert_plan(1, 8, 2560, 4096, 32, 4, 32);
+    EXPECT_EQ(p.split, mm::SingleExpertSplit::n_remainder_k_split);
     EXPECT_EQ(p.whole_blocks, 2);
     EXPECT_EQ(p.split_blocks, 16);
     EXPECT_EQ(p.k_parts, 2);
     // 72 blocks: 8 remainder blocks in four K ranges.
-    p = mm::se_block_plan(1, 8, 2304, 4096, 32, 4, 32);
+    p = mm::make_single_expert_plan(1, 8, 2304, 4096, 32, 4, 32);
     EXPECT_EQ(p.split_blocks, 8);
     EXPECT_EQ(p.k_parts, 4);
     // Fewer blocks than threads.
-    p = mm::se_block_plan(1, 8, 512, 4096, 32, 4, 32);
+    p = mm::make_single_expert_plan(1, 8, 512, 4096, 32, 4, 32);
     EXPECT_EQ(p.whole_blocks, 0);
     EXPECT_EQ(p.k_parts, 2);
     // Even split, too many remainder blocks, shallow K, prompt, MoE: legacy.
-    EXPECT_FALSE(mm::se_block_plan(1, 8, 3072, 4096, 32, 4, 32).active());
-    EXPECT_FALSE(mm::se_block_plan(1, 8, 1792, 4096, 32, 4, 32).active());
-    EXPECT_FALSE(mm::se_block_plan(1, 8, 2560, 256, 32, 4, 32).active());
-    EXPECT_FALSE(mm::se_block_plan(1, 512, 2560, 4096, 32, 4, 32).active());
-    EXPECT_FALSE(mm::se_block_plan(4, 8, 2560, 4096, 32, 4, 32).active());
+    EXPECT_FALSE(
+            mm::make_single_expert_plan(1, 8, 3072, 4096, 32, 4, 32).active());
+    EXPECT_FALSE(
+            mm::make_single_expert_plan(1, 8, 1792, 4096, 32, 4, 32).active());
+    EXPECT_FALSE(
+            mm::make_single_expert_plan(1, 8, 2560, 256, 32, 4, 32).active());
+    EXPECT_FALSE(mm::make_single_expert_plan(1, 512, 2560, 4096, 32, 4, 32)
+                         .active());
+    EXPECT_FALSE(
+            mm::make_single_expert_plan(4, 8, 2560, 4096, 32, 4, 32).active());
 }
 
 TEST(TestSingleExpertPlan, AnExplicitLegacyKnobOverridesKsplit) {
     PlanOverride legacy("split=legacy", 1);
-    EXPECT_FALSE(mm::se_block_plan_enabled());
-    EXPECT_FALSE(mm::se_block_plan(1, 8, 2560, 4096, 32, 4, 32).active());
+    EXPECT_FALSE(mm::single_expert_plan_enabled());
+    EXPECT_FALSE(
+            mm::make_single_expert_plan(1, 8, 2560, 4096, 32, 4, 32).active());
 }
 
 TEST(TestSingleExpertPlan, GridValidatesAgainstTheShape) {
     {
         PlanOverride grid("split=grid mparts=2 kparts=2 kc=1000", 0);
-        const auto p = mm::se_block_plan(1, 8, 2560, 4096, 32, 4, 32);
-        EXPECT_EQ(p.split, mm::se_split_t::grid);
+        const auto p = mm::make_single_expert_plan(1, 8, 2560, 4096, 32, 4, 32);
+        EXPECT_EQ(p.split, mm::SingleExpertSplit::mnk_grid);
         EXPECT_EQ(p.n_parts, 8);
         EXPECT_EQ(p.kc, 1000);
         // M parts are capped at M.
-        EXPECT_EQ(mm::se_block_plan(1, 1, 2560, 4096, 32, 4, 32).m_parts, 1);
+        EXPECT_EQ(mm::make_single_expert_plan(1, 1, 2560, 4096, 32, 4, 32)
+                          .m_parts,
+                1);
     }
     {
         // 3 x 1 does not divide 32 threads.
         PlanOverride grid("split=grid mparts=3", 0);
-        EXPECT_FALSE(mm::se_block_plan(1, 8, 2560, 4096, 32, 4, 32).active());
+        EXPECT_FALSE(mm::make_single_expert_plan(1, 8, 2560, 4096, 32, 4, 32)
+                             .active());
     }
     {
         PlanOverride grid("split=grid kparts=2 kc=6", 0);
-        EXPECT_EQ(mm::se_block_plan(1, 8, 2560, 4096, 32, 4, 32).kc, 4)
+        EXPECT_EQ(
+                mm::make_single_expert_plan(1, 8, 2560, 4096, 32, 4, 32).kc, 4)
                 << "kc rounds down to the K step";
     }
 }
@@ -261,7 +272,7 @@ void run_plans_match_legacy(bool int8, int N, int K, int threads) {
             ASSERT_EQ(run(M, out), status_t::success);
             const bool ran = mm::test_api::s_single_expert_executor_runs.load()
                     > runs_before;
-            const bool expect_run = mm::se_block_plan(1, M, N, K,
+            const bool expect_run = mm::make_single_expert_plan(1, M, N, K,
                     mm::custom_kernel::plan_pack_nr(K, N), int8 ? 4 : 2,
                     threads)
                                             .active();
@@ -291,7 +302,7 @@ TEST(TestSingleExpertExecutor, Int8PlansMatchLegacy) {
 }
 
 TEST(TestSingleExpertExecutor, Bf16PlansMatchLegacy) {
-    if (!mm::custom_kernel::dispatch_supported()) GTEST_SKIP();
+    if (!mm::custom_kernel::bf16_isa_supported()) GTEST_SKIP();
     run_plans_match_legacy(false, 2560, 4096, 32);
     run_plans_match_legacy(false, 1536, 3072, 32);
 }

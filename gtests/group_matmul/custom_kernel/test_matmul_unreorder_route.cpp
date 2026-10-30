@@ -98,7 +98,7 @@ void run_route_case(bool packed_input, int M = 8, bool expect_custom = true,
         bool probe_derived_cache = true, bool relu_postop = false,
         matmul_algo_t per_op_algo = matmul_algo_t::none,
         matmul_algo_t global_algo = matmul_algo_t::aocl_dlp_blocked) {
-    if (!ck::dispatch_supported()) {
+    if (!ck::bf16_isa_supported()) {
         GTEST_SKIP() << "AVX-512 BF16 custom kernel is unavailable";
     }
 #if !ZENDNNL_DEPENDS_AOCLDLP
@@ -174,7 +174,7 @@ void run_route_case(bool packed_input, int M = 8, bool expect_custom = true,
     }
     matmul::matmul_batch_params_t batch;
 
-    mt::GemmModeCaptureGuard mode_capture;
+    mt::ExecutionPathCaptureGuard mode_capture;
     if (direct_group) {
         ASSERT_EQ(matmul::group_matmul_direct(
                           /*layout=*/ {'r'}, /*transA=*/ {false},
@@ -196,7 +196,7 @@ void run_route_case(bool packed_input, int M = 8, bool expect_custom = true,
                 status_t::success);
     }
     const char *mode
-            = matmul::test_api::s_last_group_matmul_direct_gemm_mode.load(
+            = matmul::test_api::s_last_group_matmul_direct_execution_path.load(
                     std::memory_order_relaxed);
     if (expect_custom) {
         ASSERT_NE(mode, nullptr);
@@ -336,14 +336,15 @@ TEST(TestMatmulUnreorderRoute, F16PackedWeightRoutesAndReusesDerivedCkCache) {
     for (int call = 0; call < 2; ++call) {
         std::vector<float16_t> dst(static_cast<size_t>(M) * N);
         {
-            mt::GemmModeCaptureGuard mode_capture;
+            mt::ExecutionPathCaptureGuard mode_capture;
             ASSERT_EQ(matmul::matmul_direct('r', false, true, M, N, K, 1.0f,
                               src.data(), K, packed.get(), ldb, bias.data(),
                               0.0f, dst.data(), N, true, batch, params),
                     status_t::success);
             const char *mode
-                    = matmul::test_api::s_last_group_matmul_direct_gemm_mode
-                              .load(std::memory_order_relaxed);
+                    = matmul::test_api::
+                              s_last_group_matmul_direct_execution_path.load(
+                                      std::memory_order_relaxed);
             ASSERT_NE(mode, nullptr);
             EXPECT_NE(std::string(mode).find("custom"), std::string::npos);
         }
@@ -391,7 +392,7 @@ TEST(TestMatmulUnreorderRoute, RawWeightUsesDirectGroupPath) {
 }
 
 TEST(TestMatmulUnreorderRoute, RawWc2IneligiblePromptPreservesFutureDecode) {
-    if (!ck::dispatch_supported()) {
+    if (!ck::bf16_isa_supported()) {
         GTEST_SKIP() << "AVX-512 BF16 custom kernel is unavailable";
     }
     constexpr int K = 64, N = 1024, prompt_M = 64, decode_M = 8;
@@ -446,15 +447,15 @@ TEST(TestMatmulUnreorderRoute, RawWc2IneligiblePromptPreservesFutureDecode) {
     params.dtypes.dst = data_type_t::bf16;
     params.num_threads = decode_threads;
     {
-        mt::GemmModeCaptureGuard mode_capture;
+        mt::ExecutionPathCaptureGuard mode_capture;
         ASSERT_EQ(matmul::matmul_direct('r', false, true, decode_M, N, K, 1.0f,
                           decode_src.data(), K, weight.data(), K,
                           /*bias=*/nullptr, 0.0f, decode_dst.data(), N, true,
                           batch, params),
                 status_t::success);
         const char *mode
-                = matmul::test_api::s_last_group_matmul_direct_gemm_mode.load(
-                        std::memory_order_relaxed);
+                = matmul::test_api::s_last_group_matmul_direct_execution_path
+                          .load(std::memory_order_relaxed);
         ASSERT_NE(mode, nullptr);
         EXPECT_NE(std::string(mode).find("custom"), std::string::npos) << mode;
     }
@@ -537,14 +538,14 @@ static void run_narrow_prompt_case(bool packed_input, bool knob_on) {
 
     namespace pt = zendnnl::lowoha::matmul::prompt_tile;
     const long served0 = pt::test_api::s_calls_served.load();
-    mt::GemmModeCaptureGuard mode_capture;
+    mt::ExecutionPathCaptureGuard mode_capture;
     ASSERT_EQ(matmul::matmul_direct('r', false, /*transB=*/true, M, N, K, 1.0f,
                       src.data(), K, route_weight, K, /*bias=*/nullptr, 0.0f,
                       dst.data(), N, true, batch, params),
             status_t::success);
     const long served = pt::test_api::s_calls_served.load() - served0;
     const char *mode
-            = matmul::test_api::s_last_group_matmul_direct_gemm_mode.load(
+            = matmul::test_api::s_last_group_matmul_direct_execution_path.load(
                     std::memory_order_relaxed);
     if (knob_on) {
         EXPECT_EQ(served, 1);
@@ -574,7 +575,7 @@ static void run_narrow_prompt_case(bool packed_input, bool knob_on) {
 }
 
 TEST(TestMatmulUnreorderRoute, NarrowBf16PromptRoutesToPromptTile) {
-    if (!ck::dispatch_supported()) {
+    if (!ck::bf16_isa_supported()) {
         GTEST_SKIP() << "AVX-512 BF16 custom kernel is unavailable";
     }
     for (const bool packed : {false, true}) {
@@ -712,14 +713,14 @@ TEST(TestMatmulUnreorderRoute, StaticU8S8AoclPackedUsesCachedDerivedCkPath) {
     std::vector<bfloat16_t> dst_ck(static_cast<size_t>(M) * N);
     std::vector<bfloat16_t> dst_aocl(static_cast<size_t>(M) * N);
     {
-        mt::GemmModeCaptureGuard mode_capture;
+        mt::ExecutionPathCaptureGuard mode_capture;
         ASSERT_EQ(matmul::matmul_direct('r', false, trans_b, M, N, K, 1.0f,
                           src.data(), K, packed.get(), ldb, bias.data(), 0.0f,
                           dst_ck.data(), N, true, batch, params),
                 status_t::success);
         const char *mode
-                = matmul::test_api::s_last_group_matmul_direct_gemm_mode.load(
-                        std::memory_order_relaxed);
+                = matmul::test_api::s_last_group_matmul_direct_execution_path
+                          .load(std::memory_order_relaxed);
         ASSERT_NE(mode, nullptr);
         EXPECT_NE(std::string(mode).find("custom"), std::string::npos) << mode;
     }
@@ -823,7 +824,7 @@ TEST(TestMatmulUnreorderRoute, ScalarFallbackFailsOnMutatedWeightConflict) {
 
 TEST(TestMatmulUnreorderRoute,
         MixedActiveAoclPackedAndRawWc2PreservesPolicyAndNumerics) {
-    if (!ck::dispatch_supported()) {
+    if (!ck::bf16_isa_supported()) {
         GTEST_SKIP() << "AVX-512 BF16 custom kernel is unavailable";
     }
 #if !ZENDNNL_DEPENDS_AOCLDLP
@@ -906,14 +907,14 @@ TEST(TestMatmulUnreorderRoute,
     params[0].mem_format_b = 'r';
     params[0].lowoha_algo = matmul_algo_t::none;
 
-    mt::GemmModeCaptureGuard mode_capture;
+    mt::ExecutionPathCaptureGuard mode_capture;
     ASSERT_EQ(matmul::group_matmul_direct(layout, trans_a, trans_b, ms, ns, ks,
                       alpha, src_ptr, lda, weight_ptr, ldb, bias, beta, dst_ptr,
                       ldc, weights_const, params, /*moe_postop=*/nullptr,
                       /*gated_act=*/nullptr),
             status_t::success);
     const char *mode
-            = matmul::test_api::s_last_group_matmul_direct_gemm_mode.load(
+            = matmul::test_api::s_last_group_matmul_direct_execution_path.load(
                     std::memory_order_relaxed);
     ASSERT_NE(mode, nullptr);
     EXPECT_NE(std::string(mode).find("custom"), std::string::npos);
@@ -1105,15 +1106,16 @@ void run_narrow_phase_switch(int weight_cache_mode, bool with_bias, int knob,
         matmul::matmul_batch_params_t batch;
         std::vector<bfloat16_t> dst(static_cast<size_t>(M) * N);
         {
-            mt::GemmModeCaptureGuard mode_capture;
+            mt::ExecutionPathCaptureGuard mode_capture;
             ASSERT_EQ(matmul::matmul_direct('r', false, /*transB=*/true, M, N,
                               K, 1.0f, src.data(), K, weight.data(), K,
                               with_bias ? bias.data() : nullptr, 0.0f,
                               dst.data(), N, true, batch, params),
                     status_t::success);
             const char *mode
-                    = matmul::test_api::s_last_group_matmul_direct_gemm_mode
-                              .load(std::memory_order_relaxed);
+                    = matmul::test_api::
+                              s_last_group_matmul_direct_execution_path.load(
+                                      std::memory_order_relaxed);
             if (M <= 4 && decode_cov) {
                 ASSERT_NE(mode, nullptr);
                 EXPECT_NE(std::string(mode).find("custom"), std::string::npos)
@@ -1157,7 +1159,7 @@ void run_narrow_phase_switch(int weight_cache_mode, bool with_bias, int knob,
 }
 
 TEST(TestMatmulUnreorderRoute, NarrowWeightPromptDecodeShareCkPack) {
-    if (!ck::dispatch_supported()) {
+    if (!ck::bf16_isa_supported()) {
         GTEST_SKIP() << "AVX-512 BF16 custom kernel is unavailable";
     }
     for (const int knob : {1, 0})
@@ -1190,7 +1192,7 @@ TEST(TestMatmulUnreorderRoute, NarrowWeightPromptDecodeShareCkPack) {
 // ALGO 3 pin, a finite LRU capacity) let the prompt's pack go in place; the
 // decode must then read it through the custom kernel.
 TEST(TestMatmulUnreorderRoute, NarrowWeightInPlaceCkPackWithoutMixedMode) {
-    if (!ck::dispatch_supported()) {
+    if (!ck::bf16_isa_supported()) {
         GTEST_SKIP() << "AVX-512 BF16 custom kernel is unavailable";
     }
     for (const bool bias : {false, true}) {
@@ -1209,7 +1211,7 @@ TEST(TestMatmulUnreorderRoute, NarrowWeightInPlaceCkPackWithoutMixedMode) {
 // closed, not compute on packed bytes.
 TEST(TestMatmulUnreorderRoute,
         NonRoutedCallOnSingleExpertInPlaceImageFailsClosed) {
-    if (!ck::dispatch_supported()) {
+    if (!ck::bf16_isa_supported()) {
         GTEST_SKIP() << "AVX-512 BF16 custom kernel is unavailable";
     }
     constexpr int N = 1280, K = 768, M = 256, threads = 32;
@@ -1281,7 +1283,7 @@ void expect_narrow_phase_switch_in_child(const char *env, const char *value) {
 // unpacked: the first prompt may not pack it in place.
 TEST(TestMatmulUnreorderRoute,
         NarrowPromptOnlyLayerWithPrepackOffKeepsRawWeight) {
-    if (!ck::dispatch_supported()) {
+    if (!ck::bf16_isa_supported()) {
         GTEST_SKIP() << "AVX-512 BF16 custom kernel is unavailable";
     }
     testing::FLAGS_gtest_death_test_style = "threadsafe";
@@ -1305,14 +1307,14 @@ TEST(TestMatmulUnreorderRoute,
 }
 
 TEST(TestMatmulUnreorderRoute, NarrowWeightInPlaceCkPackCrossWarmOff) {
-    if (!ck::dispatch_supported()) {
+    if (!ck::bf16_isa_supported()) {
         GTEST_SKIP() << "AVX-512 BF16 custom kernel is unavailable";
     }
     expect_narrow_phase_switch_in_child("ZENDNNL_GRP_MATMUL_CROSS_WARM", "0");
 }
 
 TEST(TestMatmulUnreorderRoute, NarrowWeightInPlaceCkPackPrepackOff) {
-    if (!ck::dispatch_supported()) {
+    if (!ck::bf16_isa_supported()) {
         GTEST_SKIP() << "AVX-512 BF16 custom kernel is unavailable";
     }
     expect_narrow_phase_switch_in_child("ZENDNNL_GRP_MATMUL_PREPACK", "0");
@@ -1323,7 +1325,7 @@ TEST(TestMatmulUnreorderRoute, NarrowWeightInPlaceCkPackPrepackOff) {
 // layer under the prompt knob keeps the standard MatMul path either way, and
 // FORCE_CK routes it either way.
 TEST(TestMatmulUnreorderRoute, NarrowBf16PromptDecodeDKeepsStandardPath) {
-    if (!ck::dispatch_supported()) {
+    if (!ck::bf16_isa_supported()) {
         GTEST_SKIP() << "AVX-512 BF16 custom kernel is unavailable";
     }
     RouteConfigGuard route_config;
@@ -1335,8 +1337,8 @@ TEST(TestMatmulUnreorderRoute, NarrowBf16PromptDecodeDKeepsStandardPath) {
     params.dtypes.wei = data_type_t::bf16;
     params.dtypes.dst = data_type_t::bf16;
     const auto routable = [&](int M) {
-        return matmul::custom_kernel_routable('r', M, 1280, 768, 32, 1, false,
-                true, 1.0f, 0.0f, nullptr, 768, true, params);
+        return matmul::single_matmul_group_routable('r', M, 1280, 768, 32, 1,
+                false, true, 1.0f, 0.0f, nullptr, 768, true, params);
     };
     for (const int strategy : {2, 1}) {
         SCOPED_TRACE(strategy);

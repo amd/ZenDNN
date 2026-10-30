@@ -131,7 +131,7 @@ inline bool get_grp_matmul_ntile_flat_parallel() {
 }
 
 // ZENDNNL_GRP_MATMUL_N_ROUNDS = { 0, 1, 2, 3 } — cached, default 1.
-//   ALGO 3 ManyExperts round-mode selection.  Internal tuning knob.
+//   ALGO 3 FixedTeamRounds round-mode selection.  Internal tuning knob.
 //     0 = auto: planner picks single-round / multi-round / balanced
 //               via cost-model on wall time.
 //     1 = force single-round (all experts in one round, n_thr =
@@ -289,22 +289,22 @@ inline std::atomic<int> s_grp_matmul_algo_legacy_override {-1};
 inline std::atomic<int> s_grp_matmul_custom_kernel_subtile_per_expert_override {
         -1};
 
-// Last `gemm_mode` string set by `group_matmul_direct` on a
+// Last `execution_path` string set by `group_matmul_direct` on a
 // successful return.  Read-only inspection hook for tests that need
 // to verify which executor path actually ran (e.g. asserting the
 // custom BF16 microkernel engaged vs the call falling back to AOCL
 // DLP or the Sequential strategy that bypasses CK entirely).
 //
-// Strings come from `flat_n_tile`'s `gemm_mode_label` (defined in
+// Strings come from `n_tile_execute`'s `execution_path_label` (defined in
 // `group_matmul_n_tile.cpp`) or the per-algo executor labels.  They
 // are static literals — never freed — so the atomic stores a stable
 // pointer that test code can read after the call returns.
 //
-// CAPTURE GATE — `s_capture_gemm_mode` (atomic bool, default false):
+// CAPTURE GATE — `s_capture_execution_path` (atomic bool, default false):
 //   Production builds never set this flag, so the store path in
 //   `group_matmul_direct` short-circuits on a single relaxed load
 //   of a cache-line-shared `false` value (no coherence traffic).
-//   Tests arm the flag (via `GemmModeCaptureGuard` in
+//   Tests arm the flag (via `ExecutionPathCaptureGuard` in
 //   `moe_test_utils.hpp`) for the test's scope, in which case the
 //   gated store DOES fire and writes through to the atomic below.
 //   Without this gate the unconditional store would mark its
@@ -314,8 +314,9 @@ inline std::atomic<int> s_grp_matmul_custom_kernel_subtile_per_expert_override {
 //   tax on multi-rank serving deployments that have no use for
 //   the test hook.  Same pattern as `s_capture_phase_b` (see
 //   `group_matmul_n_tile.hpp`).
-inline std::atomic<bool> s_capture_gemm_mode {false};
-inline std::atomic<const char *> s_last_group_matmul_direct_gemm_mode {nullptr};
+inline std::atomic<bool> s_capture_execution_path {false};
+inline std::atomic<const char *> s_last_group_matmul_direct_execution_path {
+        nullptr};
 
 // Whether a deep-K K-blocked custom-kernel tile ran (BF16 or symmetric INT8).
 // Gated by its own capture flag because the decision sits per TILE, not per
@@ -380,7 +381,7 @@ inline int get_grp_n_rounds_mode() {
 
 // `kDecodeTileAbOn` documents the production decode-tile-AB
 // behaviour as an unconditional constant: when max_M ≤ kDecodeMaxM,
-// FewExperts/ManyExperts use kDecodeNTile (256) instead of kMinNTile
+// ProportionalRounds/FixedTeamRounds use kDecodeNTile (256) instead of kMinNTile
 // (512) as the per-thread N-tile bound — doubles max_n_thr for
 // decode-shape down_proj.  Was previously a getter
 // (`get_grp_n_decode_tile_ab`) preserving function shape for a
@@ -402,7 +403,7 @@ inline constexpr bool kDecodeTileAbOn = true;
 //   The dispatcher
 //   only engages tight when ALL of: act is a CK-fusible gated
 //   activation (swiglu_oai_mul, silu_and_mul, gelu_and_mul — see
-//   `a3_can_fuse_act` for the live predicate; silu and gelu require
+//   `n_tile_can_fuse_activation` for the live predicate; silu and gelu require
 //   `CUSTOM_KERNEL=1` because only the CK in-register epilogue
 //   implements them), Op1 internal-alloc on, ALGO 3 selected (auto
 //   or env-forced), shape-adaptive picker agrees — otherwise falls
@@ -412,7 +413,7 @@ inline constexpr bool kDecodeTileAbOn = true;
 //   destination (ldc < N), the dispatcher auto-enables ALGO 3 fused
 //   activation regardless of N_TILE_FUSED_ACT (tight is a
 //   correctness constraint on the writer, not a perf toggle).  See
-//   `pick_fused_moe_want_tight` in group_matmul_fused_moe.cpp for
+//   `should_use_tight_intermediate` in group_matmul_fused_moe.cpp for
 //   the full predicate.  Set "0" here to force wide (debug /
 //   layout-regression bisection).
 inline int get_grp_matmul_fused_moe_tight() {
@@ -455,7 +456,7 @@ inline int get_grp_matmul_fused_moe_tight() {
 //                  + cross-warm regime 1 (full-weight AOCL)
 //       Memory cost on many-experts MoE at high thread counts is
 //       sizeable (full-weight + custom-kernel pack).  Regime 2
-//       (per-tile AOCL) is populated by `prepack_for_algo_3` when
+//       (per-tile AOCL) is populated by `prepack_n_tile` when
 //       `STABLE_NTILE=1` AND the custom kernel is not eligible; when
 //       CK is eligible the per-tile AOCL warm is skipped (the runtime
 //       takes the CK path, so those entries would never be queried).
@@ -528,7 +529,7 @@ inline bool get_grp_matmul_cross_warm() {
 //             `build_prepack_params` resolves both to `M.size()`):
 //             prepack warms exactly the firing experts up front.
 //             This is a one-time first-iter serial reorder cost
-//             paid in exchange for `do_tile()` cache hits in
+//             paid in exchange for `execute_tile()` cache hits in
 //             subsequent iterations of the same configuration
 //             (subsequent calls short-circuit via the per-thread
 //             fingerprint cache).  Steady-state throughput is

@@ -14,13 +14,13 @@
  * limitations under the License.
  *******************************************************************************/
 
-/// `dispatch_supported()` ISA gate — the cheap CPUID check the
+/// `bf16_isa_supported()` ISA gate — the cheap CPUID check the
 /// dispatcher exposes so callers can early-out before building any
 /// inputs to `prepare_for_call`.  These tests assert the function's
 /// observable contract on this host:
 ///   1. Returns the same value across calls (cached after first).
 ///   2. Is consistent with the per-call `prepare_for_call` ISA branch
-///      (when `dispatch_supported()` is false, `prepare_for_call`
+///      (when `bf16_isa_supported()` is false, `prepare_for_call`
 ///      MUST refuse — the dispatcher relies on this invariant to
 ///      decide whether the per-tile path is safe to invoke).
 ///
@@ -33,9 +33,9 @@ namespace {
 namespace ck = ck_test::ck;
 
 TEST(CkDispatchSupported, IsCachedAcrossCalls) {
-    const bool a = ck::dispatch_supported();
-    const bool b = ck::dispatch_supported();
-    const bool c = ck::dispatch_supported();
+    const bool a = ck::bf16_isa_supported();
+    const bool b = ck::bf16_isa_supported();
+    const bool c = ck::bf16_isa_supported();
     EXPECT_EQ(a, b);
     EXPECT_EQ(b, c);
 }
@@ -50,22 +50,22 @@ TEST(CkDispatchSupported, MatchesPrepareForCallIsaGate) {
     ck::CallContext kctx;
     const auto status = ck_test::run_prepare(c, storage, kctx);
 
-    if (ck::dispatch_supported()) {
+    if (ck::bf16_isa_supported()) {
         EXPECT_EQ(status, zendnnl::error_handling::status_t::success)
-                << "dispatch_supported()=true but prepare_for_call refused "
+                << "bf16_isa_supported()=true but prepare_for_call refused "
                    "the canonical bf16:bf16:bf16 supported tuple";
         EXPECT_TRUE(kctx.enabled);
         EXPECT_NE(kctx.variant, ck::KernelVariant::kUnsupported);
     } else {
         EXPECT_EQ(status, zendnnl::error_handling::status_t::failure)
-                << "dispatch_supported()=false but prepare_for_call accepted "
+                << "bf16_isa_supported()=false but prepare_for_call accepted "
                    "the call — kernel would run with no-AVX512BF16 host UB";
         EXPECT_FALSE(kctx.enabled);
     }
 }
 
 TEST(CkDispatchSupported, F16IsaConsistentWithPrepareForCall) {
-    // `dispatch_supported()` reports the BF16 ISA only (by design — it
+    // `bf16_isa_supported()` reports the BF16 ISA only (by design — it
     // backs the bf16/int8 early-out).  The FP16 family has its OWN gate,
     // `avx512f16_available()`, consulted inside `prepare_for_call`'s
     // f16 branch.  Pin that the two agree: on a host/toolchain WITH
@@ -101,7 +101,7 @@ TEST(CkDispatchSupported, F16IsaConsistentWithPrepareForCall) {
 }
 
 TEST(CkDispatchSupported, NoSideEffects) {
-    // Calling dispatch_supported() must not mutate any global state
+    // Calling bf16_isa_supported() must not mutate any global state
     // observable to a follow-up prepare_for_call.  Probe twice with a
     // call in between; both `enabled` outcomes must match.
     ck_test::PrepCallCase c {};
@@ -109,7 +109,7 @@ TEST(CkDispatchSupported, NoSideEffects) {
     ck::CallContext k1, k2;
 
     const auto st1 = ck_test::run_prepare(c, s1, k1);
-    (void)ck::dispatch_supported(); // intervening probe
+    (void)ck::bf16_isa_supported(); // intervening probe
     const auto st2 = ck_test::run_prepare(c, s2, k2);
 
     EXPECT_EQ(st1, st2);

@@ -88,7 +88,7 @@ struct PackProbeStats {
 /// image, so their warm loops are intentionally serial. Safe to call before
 /// an OMP parallel region. Callers must NOT invoke this
 /// concurrently with any in-flight `dispatch_tile()` (which reads
-/// cached pointers) or `clear_custom_kernel_pack_cache()` (which drops
+/// cached pointers) or `clear_custom_kernel_pack_cache_bf16()` (which drops
 /// every cached entry) on other threads.
 ///
 /// `total_count` is the number of expert slots to probe; the helper
@@ -105,7 +105,7 @@ struct PackProbeStats {
 /// empty vector falls through and every reachable expert is warmed.
 ///
 /// `is_weights_const` mirrors the AOCL DLP warmer's per-expert gate
-/// at `prepack_aocl_dlp.cpp::warm_pack_all_aocl_dlp_experts` — when
+/// at `prepack_aocl_dlp.cpp::warm_aocl_weight_cache` — when
 /// the caller flags expert `i` as variable-weight
 /// (`is_weights_const[i] == false`), the warmer skips packing for
 /// that expert and counts it in `stats.skipped_invalid`.  The CK

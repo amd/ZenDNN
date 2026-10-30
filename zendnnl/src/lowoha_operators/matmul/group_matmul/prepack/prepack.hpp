@@ -17,10 +17,10 @@
 /// `group_matmul/prepack/prepack.hpp` — generic per-scheduling-ALGO
 /// weight pre-pack module.
 ///
-/// Each of the five scheduling ALGOs (1=sequential_experts,
-/// 2=flat_m_tile, 3=flat_n_tile, 5=parallel_per_expert,
-/// 6=parallel_multilevel) calls its matching
-/// `prepack_for_algo_X(...)` as the first action of its body.  Each
+/// Each of the five scheduling ALGOs (1=sequential_execute,
+/// 2=m_tile_execute, 3=n_tile_execute, 5=expert_parallel_execute,
+/// 6=hierarchical_execute) calls its matching
+/// `prepack_<schedule>(...)` as the first action of its body.  Each
 /// per-ALGO function:
 ///
 ///   1. Short-circuits when `ZENDNNL_GRP_MATMUL_PREPACK=0`.  This is
@@ -30,7 +30,7 @@
 ///   2. Short-circuits when the process-wide fingerprint cache holds
 ///      a previously-warmed configuration (idempotent across calls
 ///      and across threads — see Fix A in prepack.cpp).
-///   3. Picks the inner kernel via `resolve_kernel()` and eagerly
+///   3. Picks the inner kernel via `resolve_matmul_backend()` and eagerly
 ///      warms its cache for `num_ops_total` experts (resolved by
 ///      `build_prepack_params`: framework-hint `total_matmul` when
 ///      set, else `active_matmul` when only that is set, else
@@ -43,7 +43,7 @@
 ///      eligible — BF16/BF16/BF16 (bf16 pack family) or DQ-INT8
 ///      bf16:s8:bf16 with `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_INT8=1`
 ///      (int8 pack family).
-///      flat_n_tile picks between custom and AOCL per call, so we
+///      n_tile_execute picks between custom and AOCL per call, so we
 ///      warm both caches.
 ///
 /// Uniform-eager semantic (PR change-log):
@@ -111,7 +111,7 @@ using zendnnl::common::data_type_t;
 /// matmul operation's per-expert metadata; there is no Op1 / Op2
 /// distinction at this layer.  Callers (the five ALGO bodies) build
 /// this from their local arguments and pass it through.
-struct PrepackParams {
+struct PrepackRequest {
     // Per-expert weight metadata for this matmul.
     const std::vector<const void *> *weight = nullptr;
     const std::vector<int> *K = nullptr;
@@ -265,7 +265,7 @@ struct PrepackParams {
     //
     // Folded into the fingerprint by `prepack.cpp::fingerprint` so a
     // floating-family warmed config does not alias a DQ-INT8 one at the
-    // same `(weight, K, N, scheduling_algo)`.  Read by
+    // same `(weight, K, N, group_schedule)`.  Read by
     // `ck_eligible_bf16` / `ck_eligible_int8` to decide which family
     // (if any) is engaged.
     bool dynamic_quant = false;
@@ -301,7 +301,7 @@ struct PrepackParams {
     // warm to 1 (their inner GEMMs are serial) while preserving this outer-team
     // value for ALGO 3 cross-warm.
     //
-    // Zero (default) means "no thread context" — `prepack_for_algo_3`
+    // Zero (default) means "no thread context" — `prepack_n_tile`
     // intentionally skips AOCL DLP per-tile warm-pack because its keys depend
     // on both num_threads and nr_align.
     /// Bytes writable at EACH expert's weight pointer (0 = exactly the
@@ -331,7 +331,7 @@ struct PrepackParams {
     int num_threads = 0;
 
     // Per-thread N-slice alignment that ALGO 3's `aligned_n_split`
-    // will use at run time.  Only consumed by `prepack_for_algo_3`.
+    // will use at run time.  Only consumed by `prepack_n_tile`.
     // For the AOCL DLP path it's typically 1 (`backend_n_align` for
     // `aocl_dlp_blocked`) or 2 (when `tight_fused_epilogue` widens it
     // to keep gate/up pairs on the same thread); for the custom-kernel
@@ -339,12 +339,12 @@ struct PrepackParams {
     //
     // Zero (default) is the "no align context" sentinel — the
     // production ALGO 3 call site always resolves the runtime value
-    // via `ntile_effective_nr_align(...)` and forwards a positive
-    // number.  `prepack_for_algo_3` intentionally SKIPS the AOCL DLP
+    // via `n_tile_nr_align(...)` and forwards a positive
+    // number.  `prepack_n_tile` intentionally SKIPS the AOCL DLP
     // warm-pack when `nr_align == 0` (and again when `num_threads ==
     // 0`) — without both, the per-tile cache keys this warmer would
     // build (which embed `n_tile = aligned_n_split(N, n_thr, ..., nr_align)`)
-    // do not match what `do_tile()` queries at run time, so the warm
+    // do not match what `execute_tile()` queries at run time, so the warm
     // would prefill useless entries.  The `std::max(1, p.nr_align)`
     // clamp inside the warmer is defence-in-depth for the
     // already-positive case — it does not turn a zero into a one for
@@ -357,13 +357,13 @@ struct PrepackParams {
 
 /// Inline helper that pulls the typical per-call locals (weight, K,
 /// N, ldb, transB, is_weights_const, params, M) into a
-/// `PrepackParams` ready for `prepack_for_algo_X`.  Lives in the
+/// `PrepackRequest` ready for `prepack_for_algo_X`.  Lives in the
 /// header so each ALGO body's call site stays a single line; the
 /// helper is templated on the params element type so it works for
 /// `std::vector<matmul_params>` and `std::vector<grp_matmul_params>`
 /// alike (both expose `.dtypes`, `.active_matmul`, `.total_matmul`).
 ///
-/// `num_threads` and `nr_align` default to 0 — only ALGO 3 (flat_n_tile)
+/// `num_threads` and `nr_align` default to 0 — only ALGO 3 (n_tile_execute)
 /// supplies them so the AOCL DLP warmer can mirror the strict-stable
 /// per-tile decomposition.  ALGOs 1, 2, 5, 6 use the full-weight
 /// warmer regardless and the defaults are correct for them.
@@ -375,7 +375,7 @@ struct PrepackParams {
 /// the BF16 dtype gates pass; per-call activation refusal at runtime
 /// remains the catch-all).
 template <typename ParamsVec>
-inline PrepackParams build_prepack_params(
+inline PrepackRequest build_prepack_params(
         const std::vector<const void *> &weight, const std::vector<int> &K,
         const std::vector<int> &N, const std::vector<int> &ldb,
         const std::vector<bool> &transB,
@@ -406,7 +406,7 @@ inline PrepackParams build_prepack_params(
         // per-group `{G, N}` weight scale so the per-group AOCL sym-quant pack
         // cache key the warmer builds is bit-identical to the runtime's.
         int group_size = 0) {
-    PrepackParams p;
+    PrepackRequest p;
     p.weight = &weight;
     p.K = &K;
     p.N = &N;
@@ -419,7 +419,7 @@ inline PrepackParams build_prepack_params(
     p.beta = beta;
 
     // Representative expert for DQ-INT8 quant-mode classification = the
-    // FIRST ACTIVE expert (M[i] > 0), mirroring flat_n_tile's `rep`
+    // FIRST ACTIVE expert (M[i] > 0), mirroring n_tile_execute's `rep`
     // selection (group_matmul_n_tile.cpp).  The grouped / per-expert DQ
     // pre-pass rewrites ONLY active experts to `src=s8` + cleared
     // `dynamic_quant`; a leading INACTIVE expert (M==0, common in MoE
@@ -503,7 +503,7 @@ inline PrepackParams build_prepack_params(
     //         vectors that legacy-mode strict size validation requires
     //         to be exactly `M.size()` long, producing misleading
     //         `skipped_invalid` counts after the `min({...})` clamp in
-    //         `warm_pack_all_aocl_dlp_experts`.
+    //         `warm_aocl_weight_cache`.
     //     Within the opt-in regime, `total_matmul == 0` means "no
     //     prepack-extras tail" and `num_ops_total` falls back to
     //     `num_ops_active = active_matmul` (warmer walks exactly the
@@ -560,7 +560,7 @@ inline PrepackParams build_prepack_params(
     //
     // CRITICAL — sym/asym MUST be keyed off `params[rep].dtypes.compute`
     // (s8 vs u8), the EXACT field the runtime resolver reads
-    // (`flat_n_tile` `ck_compute_dtype`), for BOTH DQ-INT8 forms:
+    // (`n_tile_execute` `ck_compute_dtype`), for BOTH DQ-INT8 forms:
     //   * runtime hoist  (`dynamic_quant=true`, src still bf16), and
     //   * grouped prequant (`dynamic_quant=false`, src already s8).
     // It must NOT be keyed off `src_zp.buff`: `src_zp` is an OUTPUT the
@@ -622,7 +622,7 @@ inline PrepackParams build_prepack_params(
 //   * the process-wide fingerprint cache holds a previously-warmed
 //     configuration (idempotent across calls and across threads —
 //     see Fix A in prepack.cpp), OR
-//   * the inner kernel resolved by `resolve_kernel()` is not one this
+//   * the inner kernel resolved by `resolve_matmul_backend()` is not one this
 //     module knows about (oneDNN / libxsmm / native).
 //
 // Otherwise eagerly warms `p.num_ops_total` experts before the
@@ -641,11 +641,12 @@ inline PrepackParams build_prepack_params(
 // "each ALGO has its own prepack function" — if a future ALGO needs
 // special-cased warm-pack behaviour, the per-ALGO body is the place.
 
-void prepack_for_algo_1(const PrepackParams &p); // sequential_experts
-void prepack_for_algo_2(const PrepackParams &p); // flat_m_tile
-void prepack_for_algo_3(const PrepackParams &p); // flat_n_tile
-void prepack_for_algo_5(const PrepackParams &p); // parallel_per_expert
-void prepack_for_algo_6(const PrepackParams &p); // parallel_multilevel
+void prepack_sequential(const PrepackRequest &p); // sequential_execute
+void prepack_m_tile(const PrepackRequest &p); // m_tile_execute
+void prepack_n_tile(const PrepackRequest &p); // n_tile_execute
+void prepack_expert_parallel(
+        const PrepackRequest &p); // expert_parallel_execute
+void prepack_hierarchical(const PrepackRequest &p); // hierarchical_execute
 
 /// Clear the process-wide fingerprint cache.  Test-only API used by
 /// gtest cases that need a clean fingerprint state to avoid false
@@ -667,7 +668,7 @@ void clear_fingerprint_cache_for_test();
 // invocation actually warmed (e.g. did Fix B skip the AOCL DLP
 // per-tile warm under CK=1?  did Fix D's cross-warm fire from ALGO 1
 // under CK=0 to populate regime 2?).  Probe-stats counters
-// `AoclDlpPackProbeStats` / `PackProbeStats` are already accumulated
+// `PackStats` / `PackProbeStats` are already accumulated
 // across the primary warm and any cross-warm inside the per-ALGO
 // function, but the final values get consumed by the PREPACK
 // apilog line and discarded.  This API captures the most recent
@@ -692,7 +693,7 @@ void clear_fingerprint_cache_for_test();
 //   gate the unconditional mutex lock in `log_pack_probe` ran on
 //   every dispatcher call — measurable cost on hot fused-MoE serving
 //   paths that have no use for the test hook.  Mirror of the
-//   `s_capture_gemm_mode` gate in `group_matmul_parallel_common.hpp`.
+//   `s_capture_execution_path` gate in `group_matmul_parallel_common.hpp`.
 // ───────────────────────────────────────────────────────────────────────
 
 /// Which cross_warm regime fired alongside the primary warm.  Recorded
@@ -717,7 +718,7 @@ void clear_fingerprint_cache_for_test();
 ///                            the structural skip path on ALGO 3 where
 ///                            the primary already covered the
 ///                            cross-warm target.
-///   * `aocl_full_weight`   — fired from `prepack_for_algo_3`: covers
+///   * `aocl_full_weight`   — fired from `prepack_n_tile`: covers
 ///                            the upcoming ALGO 1 prompt path.
 ///   * `custom_kernel_pack` — fired from a non-ALGO-3 prepack with
 ///                            `ck_eligible(p)==true`: covers the
@@ -757,9 +758,9 @@ namespace test_api {
 /// reports, but in a struct that gtest can `EXPECT_*` on.
 struct LastInvocationStats {
     /// Scheduling ALGO whose per-ALGO function was called ({1,2,3,5,6}).
-    int scheduling_algo = 0;
+    int group_schedule = 0;
 
-    /// Inner kernel resolved by `prelude(...)::resolve_kernel()` for
+    /// Inner kernel resolved by `prelude(...)::resolve_matmul_backend()` for
     /// this invocation.  Lets tests distinguish "AOCL DLP warm path
     /// was eligible (= `aocl_dlp_blocked`)" from "inner kernel is
     /// oneDNN / libxsmm / native, no AOCL DLP warm path taken".
@@ -778,7 +779,7 @@ struct LastInvocationStats {
     ///   * CK=0 + ALGO 3: per-tile warm contributes
     ///     `num_experts × stable_n_thr`, cross-warm regime 1 adds
     ///     another `num_experts`.
-    aocl_dlp::AoclDlpPackProbeStats aocl {};
+    aocl_dlp::PackStats aocl {};
 
     /// Accumulated custom-kernel probe stats.  Same accumulation
     /// model as `aocl` above.
@@ -813,7 +814,7 @@ void clear_last_invocation_stats();
 /// GATE doc-block above.  Tests flip this to `true` for the scope of
 /// the test (via `LastInvocationCaptureGuard`); production code never
 /// touches it.  `inline` so the single definition lives in the header
-/// (same pattern as `s_capture_gemm_mode`).
+/// (same pattern as `s_capture_execution_path`).
 inline std::atomic<bool> s_capture_last_invocation {false};
 
 } // namespace test_api

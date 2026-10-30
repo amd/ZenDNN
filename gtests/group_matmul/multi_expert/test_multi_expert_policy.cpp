@@ -81,8 +81,8 @@ AutoProbeShape quant_layer(quant_t q, int m, int num_ops, int active) {
 }
 
 std::string pick_reason(const AutoProbeShape &s, int *algo = nullptr) {
-    mm::auto_algo_trace trace;
-    const int a = mm::select_grp_matmul_algo(
+    mm::GroupMatmulAlgoTrace trace;
+    const int a = mm::group_matmul_algo_select(
             s.layout, s.M, s.N, s.K, s.params, s.num_threads, &trace);
     if (algo != nullptr) *algo = a;
     return trace.reason != nullptr ? trace.reason : "<none>";
@@ -448,8 +448,9 @@ TEST_F(MoeAlgo3Quant, Wc2PhaseSplitGuardOnlyRejectsMutableWeights) {
 TEST(MoeAlgo3QuantDefaults, PromptTileCoversEveryFamily) {
     namespace pt = mm::prompt_tile;
     EXPECT_EQ(pt::defaults()[pt::kEnable], 15);
-    for (pt::Family f : {pt::Family::kBf16, pt::Family::kInt8,
-                 pt::Family::kW4a8, pt::Family::kF16})
+    for (pt::kernel_type_t f :
+            {pt::kernel_type_t::kBf16, pt::kernel_type_t::kInt8,
+                    pt::kernel_type_t::kW4a8, pt::kernel_type_t::kF16})
         EXPECT_TRUE((pt::defaults()[pt::kEnable] >> static_cast<int>(f)) & 1);
 }
 

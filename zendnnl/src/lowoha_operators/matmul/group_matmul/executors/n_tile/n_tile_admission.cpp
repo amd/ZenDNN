@@ -39,7 +39,7 @@ namespace detail {
 // quantised workload's routing.
 //
 //   This helper only computes `n_tile_safe`; it does NOT make the
-//   final ALGO decision.  `select_grp_matmul_algo` consults
+//   final ALGO decision.  `group_matmul_algo_select` consults
 //   `n_tile_safe` ONLY at the ALGO 3 decision points:
 //
 //     * Forced `env_algo == 3`: rejected → falls back to ALGO 1.
@@ -75,12 +75,12 @@ namespace detail {
 //   Sequential. Gated activation cannot be combined with these post-ops.
 //   There are three gated activation forms, all restricted to BF16 output.
 //
-// PRECONDITION: the caller has already run `check_m_tile_safe` and
+// PRECONDITION: the caller has already run `m_tile_supported` and
 // confirmed it returned true.  This helper intentionally does NOT
-// re-run those checks — the orchestrator `select_grp_matmul_algo`
+// re-run those checks — the orchestrator `group_matmul_algo_select`
 // always calls M-tile first and only invokes this when m_tile_safe is
 // true, so a second pass would just be duplicated work.
-bool check_n_tile_extra(const std::vector<int> &M, const std::vector<int> &N,
+bool n_tile_supported(const std::vector<int> &M, const std::vector<int> &N,
         const std::vector<matmul_params> &params, int num_ops,
         grp_matmul_gated_act_t fused_act) {
     // Per-token source side: dims must be exactly `{M[i], 1}`
@@ -91,14 +91,14 @@ bool check_n_tile_extra(const std::vector<int> &M, const std::vector<int> &N,
     // the single-row decode case `M[i] == 1` with dims `{1, 1}`.
     //
     // Dynamic-quant input reaches this gate with `buff == nullptr` and
-    // is hoisted by flat_n_tile. Grouped dynamic-quant reaches this gate
+    // is hoisted by n_tile_execute. Grouped dynamic-quant reaches this gate
     // after pre-quantizing to S8, so `buff != nullptr` and the same
     // per-token dims describe the ready-to-use scale buffer.
     // Per-group source side: dims `{M[i], G}` with G > 1 (one scale per
     // K-group, row-local).  Pairs with a `{G, N}` per-group weight scale.
     // The source scale is N-independent, so N-tile column slicing leaves it
-    // whole; `do_tile` slices the WEIGHT scale to `{G, n_tile}`.  Reaches
-    // this gate either as dynamic (`buff == nullptr`, hoisted by flat_n_tile)
+    // whole; `execute_tile` slices the WEIGHT scale to `{G, n_tile}`.  Reaches
+    // this gate either as dynamic (`buff == nullptr`, hoisted by n_tile_execute)
     // or grouped-pre-quantized S8 (`buff != nullptr`).
     auto is_per_group_src
             = [](const matmul_quantization_params_t::matmul_quant_t &q,
@@ -108,7 +108,7 @@ bool check_n_tile_extra(const std::vector<int> &M, const std::vector<int> &N,
     };
 
     // Per-group weight side: dims `{G, N}` with G > 1 and N > 1, non-null
-    // buff (statically quantised by the caller).  do_tile column-slices the
+    // buff (statically quantised by the caller).  execute_tile column-slices the
     // {G, N} scale into a contiguous {G, n_tile} per-thread scratch for the
     // AOCL sym-quant GEMM.
     auto is_per_group_wei =
@@ -116,7 +116,7 @@ bool check_n_tile_extra(const std::vector<int> &M, const std::vector<int> &N,
         return q.buff != nullptr && q.dims.size() == 2 && q.dims[0] > 1
                 && q.dims[1] > 1;
     };
-    // Same active-range constraint as `check_m_tile_safe` above —
+    // Same active-range constraint as `m_tile_supported` above —
     // tail slots carry framework prepack metadata, not real per-call
     // state, and would falsely flip n-tile-safe to false.
     for (int i = 0; i < num_ops; ++i) {
@@ -126,7 +126,7 @@ bool check_n_tile_extra(const std::vector<int> &M, const std::vector<int> &N,
         // `!dynamic_quant && !grouped_s8_src` source-side reject below and
         // veto ALGO 3 for the WHOLE call — even though every ACTIVE expert is
         // a valid grouped-s8 / dynamic-INT8 shape.  Skip them (matches the
-        // first-active reference in `check_m_tile_safe`).
+        // first-active reference in `m_tile_supported`).
         if (M[i] == 0) { continue; }
         const auto &qp = params[i].quant_params;
         const bool static_u8s8 = is_static_u8s8_quant_config(params[i]);
@@ -147,7 +147,7 @@ bool check_n_tile_extra(const std::vector<int> &M, const std::vector<int> &N,
 
         if (any_quant) {
             // W4A8 (s4 weight): accepted on the N-tile path when is_w4a8_config
-            // passes AND the shape is a valid per-group layout that flat_n_tile
+            // passes AND the shape is a valid per-group layout that n_tile_execute
             // can column-slice.  Inner aocl_dlp expands s4→s8 into the W4A8
             // LRU and rewrites tile_params to flow through sym-quant GEMM;
             // inner aocl_dlp_blocked slices packed s4 directly.
@@ -176,7 +176,7 @@ bool check_n_tile_extra(const std::vector<int> &M, const std::vector<int> &N,
                 if (!static_u8s8_quant_supported(params[i], N[i])) return false;
             } else {
                 // Source side: accept either (a) dynamic BF16/F32 input that
-                // flat_n_tile will hoist, or (b) already grouped-quantized S8
+                // n_tile_execute will hoist, or (b) already grouped-quantized S8
                 // input with a ready per-token source scale buffer.
                 const bool grouped_s8_src = !params[i].dynamic_quant
                         && params[i].dtypes.src == data_type_t::s8
@@ -232,7 +232,7 @@ bool check_n_tile_extra(const std::vector<int> &M, const std::vector<int> &N,
             }
         }
 
-        // `do_tile` column-slices `wei_scale` and `wei_zp` for each tile but
+        // `execute_tile` column-slices `wei_scale` and `wei_zp` for each tile but
         // never touches `dst_scale` / `dst_zp`, and the AOCL post-op layer
         // infers their granularity from the buffer length against the N it is
         // handed -- which is `n_tile` on a tile call.  A per-channel `{N}`

@@ -24,9 +24,9 @@
 /// and the accumulator element type (`__m512h` native FP16 lanes vs
 /// the bf16 path's FP32 zmm accumulators).
 ///
-/// Engaged through a single call site: `flat_n_tile` (ALGO 3) in
+/// Engaged through a single call site: `n_tile_execute` (ALGO 3) in
 /// group_matmul_n_tile.cpp, exactly like the bf16 sibling.  That path
-/// serves both plain group_matmul (`ActKind::none`) and the fused-MoE
+/// serves both plain group_matmul (`ActivationKind::none`) and the fused-MoE
 /// entry (Op1 + a gated activation / Op2 + none).  The microkernel
 /// honours the caller's ldc so the same code covers both the wide
 /// (ldc = N) and tight (ldc = N/2) destination layouts without a
@@ -66,7 +66,7 @@
 ///                    realised as NV/2 native `__m512h` accumulators
 ///                    per row (NV=2 → 1 zmm of 32 cols, NV=4 → 2 zmms).
 ///   * Act          — none / swiglu_oai_mul / silu_and_mul / gelu_and_mul.
-///   * DstDt        — kF16 or kF32 store (gated kinds are kF16-only).
+///   * OutputType        — kF16 or kF32 store (gated kinds are kF16-only).
 ///
 /// Register-pressure caps (32 zmm available on AVX-512-FP16 CPUs):
 ///   FP16 accumulators pack 32 cols/zmm (vs the bf16 path's 16
@@ -80,7 +80,7 @@
 #define ZENDNNL_GROUP_MATMUL_CUSTOM_KERNEL_UKERNEL_F16_MICROKERNEL_HPP
 
 #include "../pack.hpp"
-#include "bf16_microkernel.hpp" // ActKind, BiasKind, DstDt, kMaxMR, max_mr_for_nv
+#include "bf16_microkernel.hpp" // ActivationKind, BiasKind, OutputType, kMaxMR, max_mr_for_nv
 #include "common/float16.hpp"
 
 namespace zendnnl {
@@ -100,8 +100,8 @@ using zendnnl::common::float16_t;
 /// back to the standard AOCL DLP / BRGEMM F16 path.
 bool avx512f16_available();
 
-/// Function-pointer type for one (MR, NV, Act, DstDt) F16 microkernel
-/// specialization.  Mirrors the bf16-side `ukernel_fn_t` exactly: the
+/// Function-pointer type for one (MR, NV, Act, OutputType) F16 microkernel
+/// specialization.  Mirrors the bf16-side `bf16_ukernel_fn_t` exactly: the
 /// A panel and packed weight are FP16 (`float16_t`); whichever of
 /// `Cout` / `Cout_tight` is unused is passed nullptr / 0.  `bias` may
 /// be bf16, fp32, or f16 — the FP16 microkernel widens it to FP32 and
@@ -111,7 +111,7 @@ bool avx512f16_available();
 /// `bias_kind=BiasKind::none` when no bias is applied.
 ///
 /// `Cout` / `Cout_tight` are typed `void *` because the destination
-/// element width depends on the kernel's `DstDt` template parameter
+/// element width depends on the kernel's `OutputType` template parameter
 /// (F16 = 2 bytes, FP32 = 4 bytes).  The dispatcher passes the same
 /// caller-owned buffer cast to `void *`; the kernel reinterprets it
 /// as `DstT *` internally.  `ldc` / `ldc_tight` stay in element units
@@ -127,21 +127,22 @@ using f16_kblock_ukernel_fn_t = void (*)(const float16_t *A, int lda,
         const float16_t *Bpacked, float *accum, int ldacc, int K, bool add);
 
 /// Runtime selector — returns the function pointer for the requested
-/// (MR ∈ 1..max_mr_for_nv(NV), NV ∈ {2, 4}, Act, DstDt) tuple, or
+/// (MR ∈ 1..max_mr_for_nv(NV), NV ∈ {2, 4}, Act, OutputType) tuple, or
 /// nullptr if the combination is not instantiated.
 ///
-/// Mirrors `select_ukernel` on the bf16 side, including the
-/// (gated_act, DstDt::kF32) refusal: the in-register pair-store
+/// Mirrors `select_bf16_ukernel` on the bf16 side, including the
+/// (gated_act, OutputType::kF32) refusal: the in-register pair-store
 /// helpers write the half-width F16 output only, so any gated
 /// activation with a non-F16 dst returns nullptr and the dispatcher's
-/// `fill_kfn_table_f16` refuses the call cleanly.
+/// `fill_kernel_table_f16` refuses the call cleanly.
 ///
 /// On a toolchain WITHOUT AVX-512-FP16 intrinsics the microkernel
 /// bodies are `#ifdef`-compiled out, so this returns nullptr for
-/// EVERY (MR, NV, Act, DstDt) slot — not just the gated+f32-dst
-/// combination above.  `fill_kfn_table_f16` then fails on the first
+/// EVERY (MR, NV, Act, OutputType) slot — not just the gated+f32-dst
+/// combination above.  `fill_kernel_table_f16` then fails on the first
 /// slot and `prepare_for_call` refuses, routing the call to AOCL DLP.
-f16_ukernel_fn_t select_f16_ukernel(int MR, int NV, ActKind act, DstDt dst_dt);
+f16_ukernel_fn_t select_f16_ukernel(
+        int MR, int NV, ActivationKind act, OutputType dst_dt);
 f16_kblock_ukernel_fn_t select_f16_kblock_ukernel(int MR, int NV);
 
 /// K steps each FP16 accumulator covers before it is added into the FP32
@@ -167,7 +168,7 @@ using f16_prompt_ukernel_fn_t = void (*)(const float16_t *A, int lda,
 /// MR ∈ 1..kMaxF16PromptMr, NB ∈ 1..kF16PromptNb; nullptr otherwise, for
 /// a gated `act` with an FP32 dst, and on a toolchain without AVX-512-FP16.
 f16_prompt_ukernel_fn_t select_f16_prompt_ukernel(
-        int MR, int NB, ActKind act, DstDt dst_dt);
+        int MR, int NB, ActivationKind act, OutputType dst_dt);
 
 } // namespace custom_kernel
 } // namespace matmul

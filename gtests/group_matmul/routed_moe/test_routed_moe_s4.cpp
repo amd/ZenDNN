@@ -57,7 +57,7 @@ namespace zendnnl {
 namespace lowoha {
 namespace matmul {
 void clear_ggml_weight_unpack_cache();
-void clear_grp_wei_scale_f32_cache();
+void clear_weight_scale_f32_cache();
 namespace custom_kernel {
 void clear_custom_kernel_pack_cache_s4();
 }
@@ -94,7 +94,7 @@ void reset_grouped_s4_caches() {
     zendnnl::lowoha::matmul::group_matmul_prepack::
             clear_fingerprint_cache_for_test();
     zendnnl::lowoha::matmul::clear_ggml_weight_unpack_cache();
-    zendnnl::lowoha::matmul::clear_grp_wei_scale_f32_cache();
+    zendnnl::lowoha::matmul::clear_weight_scale_f32_cache();
     zendnnl::lowoha::matmul::clear_matmul_weight_caches();
 }
 
@@ -572,9 +572,9 @@ void expect_output_written(const std::vector<uint16_t> &output) {
 
 struct grouped_call_probe {
     std::atomic<bool> &capture
-            = zendnnl::lowoha::matmul::test_api::s_capture_gemm_mode;
+            = zendnnl::lowoha::matmul::test_api::s_capture_execution_path;
     std::atomic<const char *> &last_mode = zendnnl::lowoha::matmul::test_api::
-            s_last_group_matmul_direct_gemm_mode;
+            s_last_group_matmul_direct_execution_path;
 
     grouped_call_probe() { arm(); }
     ~grouped_call_probe() { capture.store(false, std::memory_order_relaxed); }

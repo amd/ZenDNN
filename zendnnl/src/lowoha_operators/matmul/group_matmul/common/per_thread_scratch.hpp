@@ -29,19 +29,19 @@ namespace lowoha {
 namespace matmul {
 
 // =====================================================================
-// Section A.0 — PerThreadScratch
+// Section A.0 — AlignedTileScratch
 // =====================================================================
 //
 // Per-thread aligned heap buffer used by the tight-fused-epilogue
-// path of `do_tile()`.  When `fused_epilogue=swiglu` AND the caller's
+// path of `execute_tile()`.  When `fused_epilogue=swiglu` AND the caller's
 // dst is a tight [M, I]-layout buffer (ldc < N), the classic
 // matmul-then-in-place-compact pattern no longer fits (matmul writes
-// 2I cols but dst only has I cols per row).  In that case `do_tile()`
+// 2I cols but dst only has I cols per row).  In that case `execute_tile()`
 // switches to a per-thread scratch + out-of-place activation flow:
 //
 //   1. matmul the thread's N-tile slice into a thread-local scratch
 //      buffer (wide, `n_tile` cols, ldc=n_tile),
-//   2. run `apply_swiglu_oai_tile_rows_oop()` from that scratch into
+//   2. run `apply_swiglu_oai_tile_rows_out_of_place()` from that scratch into
 //      the caller's tight dst at halved col offset `col_start / 2`.
 //
 // This is barrier-free: each thread writes to its own scratch then to
@@ -62,21 +62,21 @@ namespace matmul {
 // an OMP region (one instance per worker, fixed lifetime); the delete
 // catches misuse if a future caller or test instantiates it as a
 // stack variable and accidentally returns / passes it by value.
-struct PerThreadScratch {
+struct AlignedTileScratch {
     void *buf = nullptr;
     size_t cap = 0;
-    PerThreadScratch() = default;
-    ~PerThreadScratch() { zendnnl_aligned_free(buf); }
-    PerThreadScratch(const PerThreadScratch &) = delete;
-    PerThreadScratch &operator=(const PerThreadScratch &) = delete;
-    PerThreadScratch(PerThreadScratch &&) = delete;
-    PerThreadScratch &operator=(PerThreadScratch &&) = delete;
+    AlignedTileScratch() = default;
+    ~AlignedTileScratch() { zendnnl_aligned_free(buf); }
+    AlignedTileScratch(const AlignedTileScratch &) = delete;
+    AlignedTileScratch &operator=(const AlignedTileScratch &) = delete;
+    AlignedTileScratch(AlignedTileScratch &&) = delete;
+    AlignedTileScratch &operator=(AlignedTileScratch &&) = delete;
 };
 
 // Grow a per-thread scratch to at least `need` bytes, 64-byte aligned.
 // Returns false on alloc failure (caller signals via the abort_code atomic
 // + post-OMP-region check).
-inline bool grow_scratch(PerThreadScratch &s, size_t need) {
+inline bool grow_scratch(AlignedTileScratch &s, size_t need) {
     if (need <= s.cap) return true;
     zendnnl_aligned_free(s.buf);
     s.buf = nullptr;

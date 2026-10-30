@@ -23,7 +23,7 @@
 /// (`VPDPBUSD` vs `VDPBF16PS`) and the K-interleave stride (4 int8
 /// elements per dot vs 2 bf16 elements per dot).
 ///
-/// Engaged through `flat_n_tile` (ALGO 3) when the call dispatcher
+/// Engaged through `n_tile_execute` (ALGO 3) when the call dispatcher
 /// resolves one of the symmetric/asymmetric S8-weight variants. The source is
 /// either dynamically quantized with row-local metadata or statically
 /// quantized U8 with scalar metadata. Weight scales are scalar or per-channel;
@@ -55,7 +55,7 @@
 ///       {kS8_Sym, kU8_Asym}  — quant flavour (see `IntCompute` below).
 ///   * Act ∈
 ///       {none, swiglu_oai_mul, silu_and_mul, gelu_and_mul}.
-///   * DstDt ∈ {kBf16, kF32, kU8}. F32/U8 are valid for Act=none only;
+///   * OutputType ∈ {kBf16, kF32, kU8}. F32/U8 are valid for Act=none only;
 ///     gated kinds are BF16-dst only (see `select_int8_ukernel`).
 ///
 /// Inner-loop pattern follows the bf16 sibling:
@@ -90,7 +90,7 @@
 /// the .cpp for the per-specialisation measurements behind that
 /// boundary.
 ///
-/// Destination dtype is a template axis (`DstDt`, shared with the bf16
+/// Destination dtype is a template axis (`OutputType`, shared with the bf16
 /// sibling): BF16, FP32, or U8 store for `Act = none`. Gated activations are
 /// BF16-dst only.
 
@@ -101,7 +101,7 @@
 #include <limits>
 
 #include "../pack.hpp"
-#include "bf16_microkernel.hpp" // ActKind, BiasKind, kMaxMR, max_mr_for_nv
+#include "bf16_microkernel.hpp" // ActivationKind, BiasKind, kMaxMR, max_mr_for_nv
 #include "common/bfloat16.hpp"
 
 namespace zendnnl {
@@ -156,7 +156,7 @@ enum class Int8UnaryPostOp : uint8_t {
 };
 
 /// Per-call quantization details that are orthogonal to the selected
-/// `(Compute, DstDt)` microkernel specialization.
+/// `(Compute, OutputType)` microkernel specialization.
 ///
 /// Dynamic per-token INT8 uses per-row source and per-channel weight scales,
 /// so both broadcast flags remain false. Static U8xS8 uses one source scale/zp
@@ -231,12 +231,12 @@ inline int max_mr_for_nv_int8(int NV, IntCompute compute) {
 ///   * `bias` — optional bias pointer (see `bias_kind` for dtype).
 ///   * `Cout` / `Cout_tight` — destination pointers in element
 ///     units (the kernel re-casts to `bfloat16_t *` or `float *`
-///     internally per its `DstDt` template axis).  Exactly one of
+///     internally per its `OutputType` template axis).  Exactly one of
 ///     the two is non-null per call (matches the bf16 pattern); the
 ///     unused one is passed `nullptr` with `ldc = 0`.  The gated-act
 ///     epilogue always writes BF16 to `Cout_tight`; `Act = none`
-///     writes `Cout` as BF16 (DstDt::kBf16), FP32 (DstDt::kF32), or
-///     requantized U8 (DstDt::kU8).
+///     writes `Cout` as BF16 (OutputType::kBf16), FP32 (OutputType::kF32), or
+///     requantized U8 (OutputType::kU8).
 ///   * `K` — K dimension of this call (in K-elements).  MUST be a
 ///     multiple of 4 for the INT8 CK path: the microkernel
 ///     broadcasts 4 source bytes per step (the VNNI K-quad) directly
@@ -273,14 +273,14 @@ void finish_int8_accum_nv2_sym_bf16(const int32_t *C, int ldc_c, int M,
 
 /// Runtime selector — returns the function pointer for the
 /// requested `(MR ∈ 1..max_mr_for_nv_int8(NV, Compute), NV ∈ {2, 4},
-/// Compute, Act, DstDt)` tuple, or `nullptr` if the combination is not
+/// Compute, Act, OutputType)` tuple, or `nullptr` if the combination is not
 /// instantiated.
 ///
-/// `dst_dt` mirrors the bf16 sibling's `DstDt` axis and adds `kU8` for
+/// `dst_dt` mirrors the bf16 sibling's `OutputType` axis and adds `kU8` for
 /// static per-tensor requantization. F32/U8 destinations are valid only for
 /// `Act = none`; gated activations remain BF16-only.
-int8_ukernel_fn_t select_int8_ukernel(
-        int MR, int NV, IntCompute compute, ActKind act, DstDt dst_dt);
+int8_ukernel_fn_t select_int8_ukernel(int MR, int NV, IntCompute compute,
+        ActivationKind act, OutputType dst_dt);
 
 } // namespace custom_kernel
 } // namespace matmul

@@ -67,16 +67,16 @@ Scratch &scratch() {
 }
 
 /// The family the executor plans `v` as; false when it does not serve `v`.
-bool family_of(KernelVariant v, Family &fam) {
+bool resolve_kernel_type(KernelVariant v, kernel_type_t &fam) {
     if (v == KernelVariant::kBF16_BF16_BF16
             || v == KernelVariant::kBF16_BF16_F32)
-        fam = Family::kBf16;
+        fam = kernel_type_t::kBf16;
     else if (custom_kernel::is_int8_variant(v))
-        fam = Family::kInt8;
-    else if (custom_kernel::is_s4_variant(v))
-        fam = Family::kW4a8;
+        fam = kernel_type_t::kInt8;
+    else if (custom_kernel::is_w4a8_variant(v))
+        fam = kernel_type_t::kW4a8;
     else if (custom_kernel::is_f16_variant(v))
-        fam = Family::kF16;
+        fam = kernel_type_t::kF16;
     else
         return false;
     return true;
@@ -89,13 +89,13 @@ size_t scale_bytes(const custom_kernel::CallContext &kctx) {
 /// Bytes the CK streams per weight column beyond its K weights: the INT8
 /// compensation, or W4A8's per-group compensation and weight scale.
 int64_t wei_col_extra_bytes(
-        const custom_kernel::CallContext &kctx, Family fam, int64_t K) {
-    if (fam == Family::kInt8) return 4;
-    if (fam != Family::kW4a8 || kctx.group_size <= 0) return 0;
+        const custom_kernel::CallContext &kctx, kernel_type_t fam, int64_t K) {
+    if (fam == kernel_type_t::kInt8) return 4;
+    if (fam != kernel_type_t::kW4a8 || kctx.group_size <= 0) return 0;
     return K / kctx.group_size * static_cast<int64_t>(4 + scale_bytes(kctx));
 }
 
-ShapeKey shape_key(Family fam, const CallView &call, int T) {
+ShapeKey shape_key(kernel_type_t fam, const CallView &call, int T) {
     ShapeKey key;
     key.fam = fam;
     key.T = T;
@@ -113,8 +113,8 @@ ShapeKey shape_key(Family fam, const CallView &call, int T) {
 }
 
 /// What `plan_call` planned with.
-struct Planned {
-    Family fam = Family::kBf16;
+struct PlannedCall {
+    kernel_type_t fam = kernel_type_t::kBf16;
     ShapeKey key;
     Resolved r;
     const TeamMap *tm = nullptr;
@@ -123,11 +123,11 @@ struct Planned {
 
 /// Resolves the call's knobs, fitted to its row alignment, and plans it.
 /// Flattened, so `plan_tiles` is inlined into the per-call planning step.
-ZENDNNL_FLATTEN Planned plan_call(const custom_kernel::CallContext &kctx,
+ZENDNNL_FLATTEN PlannedCall plan_call(const custom_kernel::CallContext &kctx,
         const CallView &call, int T, Plan &plan) {
-    Planned p;
-    family_of(kctx.variant, p.fam);
-    const FamilyFacts &ff = facts(p.fam);
+    PlannedCall p;
+    resolve_kernel_type(kctx.variant, p.fam);
+    const kernel_traits_t &ff = facts(p.fam);
     const int row_align
             = ff.row_align > 0 ? ff.row_align : std::max(kctx.max_mr, 1);
     p.key = shape_key(p.fam, call, T);
@@ -147,8 +147,8 @@ ZENDNNL_FLATTEN Planned plan_call(const custom_kernel::CallContext &kctx,
     cfg.min_mr = ff.min_mr;
     cfg.row_align = row_align;
     cfg.num_threads = T;
-    cfg.single_dense
-            = se_dense_prompt_plan(call.M.size(), p.fam == Family::kBf16);
+    cfg.single_dense = se_dense_prompt_plan(
+            call.M.size(), p.fam == kernel_type_t::kBf16);
     p.kc = se_prompt_tile_kc(kctx, p.r.t[kKc], p.key.K);
     cfg.kc = p.kc;
 
@@ -180,13 +180,14 @@ std::string join_knobs(const Tunables &k) {
 
 } // namespace
 
-bool should_run(const custom_kernel::CallContext &kctx, bool use_custom,
-        bool rounds_strategy, bool prompt_phase, const std::vector<int> &M,
-        const std::vector<int> &N, bool single_expert_prompt) {
+bool should_execute_prompt_tile(const custom_kernel::CallContext &kctx,
+        bool use_custom, bool rounds_strategy, bool prompt_phase,
+        const std::vector<int> &M, const std::vector<int> &N,
+        bool single_expert_prompt) {
     if (!use_custom || !kctx.enabled || !rounds_strategy || !prompt_phase)
         return false;
-    Family fam = Family::kBf16;
-    if (!family_of(kctx.variant, fam)) return false;
+    kernel_type_t fam = kernel_type_t::kBf16;
+    if (!resolve_kernel_type(kctx.variant, fam)) return false;
     if (facts(fam).kblock && grp_matmul_kblock_enabled(kctx.kblock_auto))
         return false;
     if (kctx.pack_nr <= 0) return false;
@@ -205,12 +206,12 @@ bool should_run(const custom_kernel::CallContext &kctx, bool use_custom,
     return active > 1 && enabled(fam);
 }
 
-void execute(custom_kernel::CallContext &kctx, const CallView &call,
+void prompt_tile_execute(custom_kernel::CallContext &kctx, const CallView &call,
         int num_threads, bool log_plan) {
     const int T = std::max(num_threads, 1);
     Scratch &s = scratch();
     Plan &plan = s.plan;
-    const Planned p = plan_call(kctx, call, T, plan);
+    const PlannedCall p = plan_call(kctx, call, T, plan);
     kctx.prompt_kc = p.kc;
     const TeamMap &tm = *p.tm;
     const Tunables &k = p.r.t;
@@ -251,7 +252,7 @@ void execute(custom_kernel::CallContext &kctx, const CallView &call,
     const size_t dst_elem = custom_kernel::dst_elem_bytes(kctx.variant);
     const size_t src_elem = facts(p.fam).a_bytes;
     const size_t scale_elem = scale_bytes(kctx);
-    const QuantRow *quant = call.quant;
+    const QuantizedInputView *quant = call.quant;
     // Per-row source and per-channel weight scales only: static U8xS8, whose
     // epilogue requantizes and applies post-ops, stays on the round executor.
     const custom_kernel::Int8EpilogueConfig int8_epilogue {};
@@ -262,7 +263,7 @@ void execute(custom_kernel::CallContext &kctx, const CallView &call,
         auto *d = static_cast<char *>(call.dst[e])
                 + m0 * call.ldc[e] * dst_elem;
         if (quant != nullptr) {
-            const QuantRow &q = quant[e];
+            const QuantizedInputView &q = quant[e];
             custom_kernel::dispatch_tile(kctx, e, t.rows, call.K[e], t.ncols,
                     t.n0, static_cast<const char *>(q.src) + m0 * q.lda, q.lda,
                     call.bias[e], d, call.ldc[e],
@@ -315,7 +316,8 @@ const Plan &plan_only(const custom_kernel::CallContext &kctx,
 }
 } // namespace test_api
 
-const char *gemm_mode_label(bool fused_epilogue, grp_matmul_gated_act_t act) {
+const char *execution_path_label(
+        bool fused_epilogue, grp_matmul_gated_act_t act) {
     if (!fused_epilogue) return "flat_n_tile_ptile_custom";
     switch (act) {
         case grp_matmul_gated_act_t::silu_and_mul:

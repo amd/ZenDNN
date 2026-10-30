@@ -48,7 +48,7 @@ using zendnnl::error_handling::apilog_info_enabled;
 using zendnnl::error_handling::apilog_verbose;
 using zendnnl::error_handling::apilog_verbose_enabled;
 
-bool dispatch_supported() {
+bool bf16_isa_supported() {
     return avx512bf16_available();
 }
 
@@ -138,7 +138,7 @@ void CallContext::reset() {
     single_expert = false;
     f16_prompt = false;
     subtile_cols = 0;
-    act_kind = ActKind::none;
+    act_kind = ActivationKind::none;
     bias_kind = BiasKind::none;
     compute_int = IntCompute::kS8_Sym;
     // Restore the same safe default as the member initializer: f32 scales.
@@ -146,21 +146,21 @@ void CallContext::reset() {
     // `scale_kind`, so a stale value across a CallContext reuse would read
     // scales at the wrong element width if the next caller forgot to set it.
     scale_kind = ScaleKind::kF32;
-    for (auto &fn : kfn_table)
+    for (auto &fn : kernel_table)
         fn = nullptr;
-    for (auto &fn : kfn_table_int8)
+    for (auto &fn : kernel_table_int8)
         fn = nullptr;
-    for (auto &fn : kfn_table_f16)
+    for (auto &fn : kernel_table_f16)
         fn = nullptr;
-    for (auto &fn : kfn_table_f16_kblock)
+    for (auto &fn : kernel_table_f16_kblock)
         fn = nullptr;
-    for (auto &row : kfn_table_f16_prompt)
+    for (auto &row : kernel_table_f16_prompt)
         for (auto &fn : row)
             fn = nullptr;
-    for (auto &row : kfn_table_f16_prompt_f32)
+    for (auto &row : kernel_table_f16_prompt_f32)
         for (auto &fn : row)
             fn = nullptr;
-    for (auto &fn : kfn_table_s4)
+    for (auto &fn : kernel_table_s4)
         fn = nullptr;
     // A stale `group_size` across a CallContext reuse would make the s4
     // kernel walk the wrong number of compensation rows.
@@ -170,7 +170,7 @@ void CallContext::reset() {
     packed_ptrs_int8.fill(nullptr);
     packed_ptrs_f16.fill(nullptr);
     packed_ptrs_s4.fill(nullptr);
-    for (auto &lease : aocl_ck_weight_leases)
+    for (auto &lease : aocl_custom_kernel_weight_leases)
         lease.reset();
     subtile_cols_per_expert.fill(0);
 }
@@ -208,7 +208,7 @@ KernelVariant resolve_variant(data_type_t src, data_type_t wei, data_type_t dst,
     //      `group_dynamic_quant` pre-pass already quantized the src to s8,
     //      set `dtypes.src = s8`, cleared `dynamic_quant`, and left a
     //      per-token `src_scale` buffer in params.  The src arrives here
-    //      ALREADY s8, so accept `src == s8` directly — `check_n_tile_extra`
+    //      ALREADY s8, so accept `src == s8` directly — `n_tile_supported`
     //      has already validated the grouped per-token src_scale + per-
     //      channel wei_scale shape, so this only fires on the DQ-INT8
     //      grouped form (a static s8s8 GEMM would have dst = s8, not
@@ -231,7 +231,7 @@ KernelVariant resolve_variant(data_type_t src, data_type_t wei, data_type_t dst,
                 return KernelVariant::kU8_S8_BF16_ASYM;
         }
         // FP32 dst — direct store of the dequantised accumulator (Act=none
-        // only; gated kinds stay BF16 and are refused in fill_kfn_table_int8
+        // only; gated kinds stay BF16 and are refused in fill_kernel_table_int8
         // / the microkernel selector).  Mirror of the bf16 family's
         // bf16/f32 dst split.
         if (dst == data_type_t::f32) {
@@ -368,7 +368,7 @@ inline SubtileBytes subtile_bytes_for_variant(KernelVariant v) {
         // Comp row is int32 per-column appended after each o-block.
         return {1, 1, 4};
     }
-    if (is_s4_variant(v)) {
+    if (is_w4a8_variant(v)) {
         // The true W4A8 footprint is `K/2 + (K/group_size)*4` bytes per
         // column, which this bytes-per-element model cannot express and
         // `group_size` is not visible here anyway.  Reusing the int8
@@ -391,64 +391,66 @@ inline SubtileBytes subtile_bytes_for_variant(KernelVariant v) {
 
 // Resolve the per-MR microkernel function-pointer table for one
 // (NV, act_kind, dst_dt) tuple.  Called once by `prepare_for_call()`.
-// Per-tile lookup is then a direct `kfn_table[mr_now]` — no switch.
-status_t fill_kfn_table(int NV, int max_mr, ActKind act_kind, DstDt dst_dt,
-        ukernel_fn_t (&kfn_table)[kMaxMR + 1]) {
+// Per-tile lookup is then a direct `kernel_table[mr_now]` — no switch.
+status_t fill_kernel_table(int NV, int max_mr, ActivationKind act_kind,
+        OutputType dst_dt, bf16_ukernel_fn_t (&kernel_table)[kMaxMR + 1]) {
     for (int mr = 1; mr <= max_mr; ++mr) {
-        kfn_table[mr] = select_ukernel(mr, NV, act_kind, dst_dt);
-        if (kfn_table[mr] == nullptr) return status_t::failure;
+        kernel_table[mr] = select_bf16_ukernel(mr, NV, act_kind, dst_dt);
+        if (kernel_table[mr] == nullptr) return status_t::failure;
     }
     return status_t::success;
 }
 
-// DQ-INT8 sibling of `fill_kfn_table` — same loop shape, different
+// DQ-INT8 sibling of `fill_kernel_table` — same loop shape, different
 // selector (`select_int8_ukernel`).  Carries both the `compute`
 // (kS8_Sym / kU8_Asym) axis and the `dst_dt` (kBf16 / kF32) axis;
 // the selector returns nullptr for any (gated_act, kF32) tuple so a
 // mis-resolved f32 gated variant refuses here rather than at runtime.
-status_t fill_kfn_table_int8(int NV, IntCompute compute, ActKind act_kind,
-        DstDt dst_dt, int8_ukernel_fn_t (&kfn_table)[kMaxMR + 1]) {
+status_t fill_kernel_table_int8(int NV, IntCompute compute,
+        ActivationKind act_kind, OutputType dst_dt,
+        int8_ukernel_fn_t (&kernel_table)[kMaxMR + 1]) {
     const int max_mr = max_mr_for_nv_int8(NV, compute);
     for (int mr = 1; mr <= max_mr; ++mr) {
-        kfn_table[mr] = select_int8_ukernel(mr, NV, compute, act_kind, dst_dt);
-        if (kfn_table[mr] == nullptr) return status_t::failure;
+        kernel_table[mr]
+                = select_int8_ukernel(mr, NV, compute, act_kind, dst_dt);
+        if (kernel_table[mr] == nullptr) return status_t::failure;
     }
     return status_t::success;
 }
 
-// FP16 sibling of `fill_kfn_table` — same loop shape, different
+// FP16 sibling of `fill_kernel_table` — same loop shape, different
 // selector (`select_f16_ukernel`).  On a toolchain without AVX-512-FP16
 // intrinsics `select_f16_ukernel` returns nullptr for every MR, so
 // this fails and `prepare_for_call` refuses the call (caller → AOCL).
-status_t fill_kfn_table_f16(int NV, ActKind act_kind, DstDt dst_dt,
-        f16_ukernel_fn_t (&kfn_table)[kMaxMR + 1]) {
+status_t fill_kernel_table_f16(int NV, ActivationKind act_kind,
+        OutputType dst_dt, f16_ukernel_fn_t (&kernel_table)[kMaxMR + 1]) {
     const int max_mr = max_mr_for_nv(NV);
     for (int mr = 1; mr <= max_mr; ++mr) {
-        kfn_table[mr] = select_f16_ukernel(mr, NV, act_kind, dst_dt);
-        if (kfn_table[mr] == nullptr) return status_t::failure;
+        kernel_table[mr] = select_f16_ukernel(mr, NV, act_kind, dst_dt);
+        if (kernel_table[mr] == nullptr) return status_t::failure;
     }
     return status_t::success;
 }
 
-status_t fill_kfn_table_f16_kblock(
-        int NV, f16_kblock_ukernel_fn_t (&kfn_table)[kMaxMR + 1]) {
+status_t fill_kernel_table_f16_kblock(
+        int NV, f16_kblock_ukernel_fn_t (&kernel_table)[kMaxMR + 1]) {
     const int max_mr = max_mr_for_nv(NV);
     for (int mr = 1; mr <= max_mr; ++mr) {
-        kfn_table[mr] = select_f16_kblock_ukernel(mr, NV);
-        if (kfn_table[mr] == nullptr) return status_t::failure;
+        kernel_table[mr] = select_f16_kblock_ukernel(mr, NV);
+        if (kernel_table[mr] == nullptr) return status_t::failure;
     }
     return status_t::success;
 }
 
-// W4A8 sibling of `fill_kfn_table`: no Compute / DstDt axis, and a
+// W4A8 sibling of `fill_kernel_table`: no Compute / OutputType axis, and a
 // tighter MR bound.  Slots above it stay null, so `dispatch_tile` must
 // clamp its MR chunking to `ctx.max_mr`.
-status_t fill_kfn_table_s4(
-        int NV, ActKind act_kind, s4_ukernel_fn_t (&kfn_table)[kMaxMR + 1]) {
+status_t fill_kernel_table_s4(int NV, ActivationKind act_kind,
+        w4a8_ukernel_fn_t (&kernel_table)[kMaxMR + 1]) {
     const int max_mr = max_mr_for_nv_s4(NV);
     for (int mr = 1; mr <= max_mr; ++mr) {
-        kfn_table[mr] = select_s4_ukernel(mr, NV, act_kind);
-        if (kfn_table[mr] == nullptr) return status_t::failure;
+        kernel_table[mr] = select_w4a8_ukernel(mr, NV, act_kind);
+        if (kernel_table[mr] == nullptr) return status_t::failure;
     }
     return status_t::success;
 }
@@ -479,7 +481,7 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
     // we cannot rely on the destructor to clear stale state from a
     // previous successful prepare.  If we only cleared `enabled` and
     // a refusal exited before assigning `variant` / `pack_nr` /
-    // `kfn_table[...]` / `packed_ptrs[...]` / `subtile_cols_per_expert[...]`,
+    // `kernel_table[...]` / `packed_ptrs[...]` / `subtile_cols_per_expert[...]`,
     // those fields would carry over from the prior call — making any
     // future read that bypasses the `enabled` gate (a debug assert,
     // an APILOG line, or a refactor that misses the gate) silently
@@ -645,7 +647,7 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
             : matmul_config.get_weight_cache();
     const bool cache_off = (wc_mode == 0);
     // The caller decides whether this pack may mutate the weight
-    // (`allow_in_place`): `flat_n_tile` refuses it when its fallback needs
+    // (`allow_in_place`): `n_tile_execute` refuses it when its fallback needs
     // the raw weight, and in AUTO mixed in-place mode (grp ALGO 0 + WC=2 +
     // prepack/cross_warm), where exactly ONE layout may mutate the shared
     // buffer and that owner is the AOCL full-weight (prompt) reorder, unless
@@ -699,7 +701,7 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
     // and a FP16-only host (no BF16) still serve the FP16 variants — the
     // bf16 ISA requirement must therefore only apply to the bf16 variants.
     if (!is_int8_variant(variant) && !is_f16_variant(variant)
-            && !is_s4_variant(variant) && !avx512bf16_available()) {
+            && !is_w4a8_variant(variant) && !avx512bf16_available()) {
         return refuse("avx512bf16_not_available",
                 "BF16 custom kernel requires AVX-512 BF16 (VDPBF16PS)"
                 " — runtime CPU detection failed");
@@ -709,20 +711,20 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
                 "DQ-INT8 custom kernel requires AVX-512 VNNI "
                 "(VPDPBUSD) — runtime CPU detection failed");
     }
-    if (is_s4_variant(variant) && !avx512vnni_available()) {
+    if (is_w4a8_variant(variant) && !avx512vnni_available()) {
         return refuse_w4a8("avx512vnni_not_available",
                 "W4A8 custom kernel requires AVX-512 VNNI "
                 "(VPDPBUSD) — runtime CPU detection failed");
     }
     // group_size == 0 means the caller was never ported to the s4 path;
     // a non-multiple of the octet would leave the kernel a partial group.
-    if (is_s4_variant(variant)
+    if (is_w4a8_variant(variant)
             && (group_size <= 0 || (group_size % kS4Octet) != 0)) {
         return refuse_w4a8("s4_group_size_unsupported",
                 "W4A8 custom kernel requires a positive group_size that "
                 "is a multiple of 8; falling back to AOCL DLP");
     }
-    if (is_s4_variant(variant) && wei_scale_grp_stride <= 0) {
+    if (is_w4a8_variant(variant) && wei_scale_grp_stride <= 0) {
         return refuse_w4a8("s4_missing_wei_scale_stride",
                 "W4A8 custom kernel requires the caller's {G, N} weight "
                 "scale group stride (the expert's full N)");
@@ -916,7 +918,7 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
         // With the `group_size % 8` check above, this also guarantees
         // `K % 8 == 0`: no partial trailing octet in the pack, and no
         // src over-read in the kernel's 4-byte broadcasts.
-        if (is_s4_variant(variant) && (K[i] % group_size) != 0)
+        if (is_w4a8_variant(variant) && (K[i] % group_size) != 0)
             return refuse_w4a8("s4_K_not_multiple_of_group_size",
                     "W4A8 custom kernel requires K divisible by "
                     "group_size; falling back to AOCL DLP");
@@ -960,11 +962,11 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
     out.NV = pack_nr / 16;
     // W4A8 caps MR lower: its per-group f32 accumulator lives alongside
     // the s32 one.  The general bound would index null table slots.
-    out.max_mr = is_s4_variant(variant) ? max_mr_for_nv_s4(out.NV)
+    out.max_mr = is_w4a8_variant(variant) ? max_mr_for_nv_s4(out.NV)
             : is_int8_variant(variant)
             ? max_mr_for_nv_int8(out.NV, out.compute_int)
             : max_mr_for_nv(out.NV);
-    if (is_s4_variant(variant)) {
+    if (is_w4a8_variant(variant)) {
         out.group_size = group_size;
         out.wei_scale_grp_stride = wei_scale_grp_stride;
     }
@@ -975,20 +977,20 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
     out.f16_prompt = se_f16_prompt(out.single_expert, out.NV, m_max, variant);
     out.base_max_mr = (bf16_prompt || out.f16_prompt) ? out.max_mr : 0;
     out.max_mr = se_prompt_max_mr(out.max_mr, bf16_prompt, out.f16_prompt);
-    // Map framework activation → CK ActKind.  Order matters: refusal
+    // Map framework activation → CK ActivationKind.  Order matters: refusal
     // gate above guarantees `act` is one of {none, swiglu_oai_mul,
     // silu_and_mul, gelu_and_mul} at this point.
     out.act_kind = (act == grp_matmul_gated_act_t::swiglu_oai_mul)
-            ? ActKind::swiglu_oai_mul
+            ? ActivationKind::swiglu_oai_mul
             : (act == grp_matmul_gated_act_t::silu_and_mul)
-            ? ActKind::silu_and_mul
+            ? ActivationKind::silu_and_mul
             : (act == grp_matmul_gated_act_t::gelu_and_mul)
-            ? ActKind::gelu_and_mul
-            : ActKind::none;
+            ? ActivationKind::gelu_and_mul
+            : ActivationKind::none;
     out.bias_kind = bias_kind;
-    out.prompt_kc_eligible
-            = se_prompt_kc_eligible(bf16_prompt, out.f16_prompt, K_for_subtile,
-                    out.act_kind != ActKind::none, bias_kind != BiasKind::none);
+    out.prompt_kc_eligible = se_prompt_kc_eligible(bf16_prompt, out.f16_prompt,
+            K_for_subtile, out.act_kind != ActivationKind::none,
+            bias_kind != BiasKind::none);
     out.prompt_kc = se_prompt_kc(out.prompt_kc_eligible, out.f16_prompt,
             pack_nr, K_for_subtile, ck_l2_budget_bytes());
     // Representative subtile_cols (worst-case m_max) — used by APILOG /
@@ -1001,72 +1003,73 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
             sb.comp_bytes_per_col);
 
     // Fill the per-MR kernel-pointer table from the resolved variant:
-    // BF16 family → `kfn_table` (template axis is `DstDt`); DQ-INT8
-    // family → `kfn_table_int8` (template axes are `IntCompute` and
-    // `DstDt` — bf16 or f32 dst).  Only the populated table is read
+    // BF16 family → `kernel_table` (template axis is `OutputType`); DQ-INT8
+    // family → `kernel_table_int8` (template axes are `IntCompute` and
+    // `OutputType` — bf16 or f32 dst).  Only the populated table is read
     // by `dispatch_tile`; the other stays zero-initialised.
     if (is_int8_variant(out.variant)) {
-        const DstDt dst_dt = dst_dt_for_variant(out.variant);
-        if (fill_kfn_table_int8(out.NV, out.compute_int, out.act_kind, dst_dt,
-                    out.kfn_table_int8)
+        const OutputType dst_dt = dst_dt_for_variant(out.variant);
+        if (fill_kernel_table_int8(out.NV, out.compute_int, out.act_kind,
+                    dst_dt, out.kernel_table_int8)
                 != status_t::success) {
-            return refuse("kfn_table_int8_fill_failed",
+            return refuse("kernel_table_int8_fill_failed",
                     "no DQ-INT8 microkernel for this (NV, compute, "
                     "act_kind, dst_dt) tuple — note gated act + FP32-dst "
                     "is intentionally rejected (BF16 dst only)");
         }
-    } else if (is_s4_variant(out.variant)) {
-        if (fill_kfn_table_s4(out.NV, out.act_kind, out.kfn_table_s4)
+    } else if (is_w4a8_variant(out.variant)) {
+        if (fill_kernel_table_s4(out.NV, out.act_kind, out.kernel_table_s4)
                 != status_t::success) {
-            return refuse_w4a8("kfn_table_s4_fill_failed",
+            return refuse_w4a8("kernel_table_s4_fill_failed",
                     "no W4A8 microkernel for this (NV, act_kind) tuple");
         }
     } else if (is_f16_variant(out.variant)) {
-        const DstDt dst_dt = dst_dt_for_variant(out.variant);
-        if (fill_kfn_table_f16(out.NV, out.act_kind, dst_dt, out.kfn_table_f16)
+        const OutputType dst_dt = dst_dt_for_variant(out.variant);
+        if (fill_kernel_table_f16(
+                    out.NV, out.act_kind, dst_dt, out.kernel_table_f16)
                 != status_t::success) {
-            return refuse("kfn_table_f16_fill_failed",
+            return refuse("kernel_table_f16_fill_failed",
                     "no FP16 microkernel for this (NV, act_kind, dst_dt) "
                     "tuple — note gated act + FP32-dst is intentionally "
                     "rejected (F16 dst only), and on a toolchain without "
                     "AVX-512-FP16 intrinsics every FP16 selector slot is "
                     "nullptr so the call falls back to AOCL DLP");
         }
-        if (fill_kfn_table_f16_kblock(out.NV, out.kfn_table_f16_kblock)
+        if (fill_kernel_table_f16_kblock(out.NV, out.kernel_table_f16_kblock)
                 != status_t::success) {
-            return refuse("kfn_table_f16_kblock_fill_failed",
+            return refuse("kernel_table_f16_kblock_fill_failed",
                     "no FP16 partial-K microkernel for this NV/MR tuple");
         }
         const bool f32_chunks = out.f16_prompt && out.prompt_kc_eligible
                 && out.variant == KernelVariant::kF16_F16_F16;
         for (int nb = 1; f32_chunks && nb <= kF16PromptNb; ++nb) {
             for (int mr = 1; mr <= out.max_mr; ++mr) {
-                out.kfn_table_f16_prompt_f32[nb - 1][mr]
+                out.kernel_table_f16_prompt_f32[nb - 1][mr]
                         = select_f16_prompt_ukernel(
-                                mr, nb, ActKind::none, DstDt::kF32);
-                if (out.kfn_table_f16_prompt_f32[nb - 1][mr] == nullptr)
-                    return refuse("kfn_table_f16_prompt_fill_failed",
+                                mr, nb, ActivationKind::none, OutputType::kF32);
+                if (out.kernel_table_f16_prompt_f32[nb - 1][mr] == nullptr)
+                    return refuse("kernel_table_f16_prompt_fill_failed",
                             "no FP32-destination FP16 prompt microkernel for "
                             "the K chunks");
             }
         }
         for (int nb = 1; out.f16_prompt && nb <= kF16PromptNb; ++nb) {
             for (int mr = 1; mr <= out.max_mr; ++mr) {
-                out.kfn_table_f16_prompt[nb - 1][mr]
+                out.kernel_table_f16_prompt[nb - 1][mr]
                         = select_f16_prompt_ukernel(
                                 mr, nb, out.act_kind, dst_dt);
-                if (out.kfn_table_f16_prompt[nb - 1][mr] == nullptr)
-                    return refuse("kfn_table_f16_prompt_fill_failed",
+                if (out.kernel_table_f16_prompt[nb - 1][mr] == nullptr)
+                    return refuse("kernel_table_f16_prompt_fill_failed",
                             "no FP16 prompt microkernel for this (MR, NB, "
                             "act_kind, dst_dt) tuple");
             }
         }
     } else {
-        const DstDt dst_dt = dst_dt_for_variant(out.variant);
-        if (fill_kfn_table(
-                    out.NV, out.max_mr, out.act_kind, dst_dt, out.kfn_table)
+        const OutputType dst_dt = dst_dt_for_variant(out.variant);
+        if (fill_kernel_table(
+                    out.NV, out.max_mr, out.act_kind, dst_dt, out.kernel_table)
                 != status_t::success) {
-            return refuse("kfn_table_fill_failed",
+            return refuse("kernel_table_fill_failed",
                     "no microkernel for this (NV, act_kind, dst_dt) tuple "
                     "— note swiglu_oai_mul + FP32-dst is intentionally "
                     "rejected (BF16 dst only)");
@@ -1107,7 +1110,7 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
     // below stores into them.
     const bool variant_is_int8 = is_int8_variant(out.variant);
     const bool variant_is_f16 = is_f16_variant(out.variant);
-    const bool variant_is_s4 = is_s4_variant(out.variant);
+    const bool variant_is_s4 = is_w4a8_variant(out.variant);
     for (int i = 0; i < num_ops; ++i) {
         if (M[i] <= 0) continue;
         bool was_hit_unused = false;
@@ -1209,7 +1212,7 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
                         "CK declined; AOCL fallback keeps the original "
                         "blocked weight");
             }
-            out.aocl_ck_weight_leases[i] = derived_ck_weight;
+            out.aocl_custom_kernel_weight_leases[i] = derived_ck_weight;
             if (static_u8s8_variant) {
                 out.packed_ptrs_int8[i]
                         = static_cast<const int8_t *>(derived_ck_weight.get());
@@ -1337,7 +1340,7 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
 
     // Counterpart to the REFUSED lines above; once per call, so it
     // cannot flood a hot loop.
-    if (is_s4_variant(out.variant) && s_w4a8_log) {
+    if (is_w4a8_variant(out.variant) && s_w4a8_log) {
         const int rep_K = (K.empty() ? 0 : K[0]);
         const int groups = (out.group_size > 0) ? (rep_K / out.group_size) : 0;
         apilog_info("[GRP_MATMUL.CK.W4A8 ENGAGED] Calling INT4 custom kernel:",
@@ -1345,10 +1348,11 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
                 " wei_scale_grp_stride=", out.wei_scale_grp_stride,
                 " pack_nr=", out.pack_nr, " NV=", out.NV,
                 " max_mr=", out.max_mr, " act=",
-                (out.act_kind == ActKind::swiglu_oai_mul ? "swiglu_oai_mul"
-                                : out.act_kind == ActKind::silu_and_mul
+                (out.act_kind == ActivationKind::swiglu_oai_mul
+                                ? "swiglu_oai_mul"
+                                : out.act_kind == ActivationKind::silu_and_mul
                                 ? "silu_and_mul"
-                                : out.act_kind == ActKind::gelu_and_mul
+                                : out.act_kind == ActivationKind::gelu_and_mul
                                 ? "gelu_and_mul"
                                 : "none"),
                 " scale_kind=",
@@ -1387,10 +1391,11 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
                 " pack_nr=", out.pack_nr, " NV=", out.NV,
                 " max_mr=", out.max_mr, " subtile_cols=", out.subtile_cols,
                 " act_kind=",
-                (out.act_kind == ActKind::swiglu_oai_mul ? "swiglu_oai_mul"
-                                : out.act_kind == ActKind::silu_and_mul
+                (out.act_kind == ActivationKind::swiglu_oai_mul
+                                ? "swiglu_oai_mul"
+                                : out.act_kind == ActivationKind::silu_and_mul
                                 ? "silu_and_mul"
-                                : out.act_kind == ActKind::gelu_and_mul
+                                : out.act_kind == ActivationKind::gelu_and_mul
                                 ? "gelu_and_mul"
                                 : "none"),
                 " bias_kind=",
@@ -1491,14 +1496,15 @@ inline void dispatch_tile_int8(const CallContext &ctx, int expert_idx, int M,
     // Dst element width tracks the resolved variant: BF16 (2 bytes) for
     // the kS8/U8_*_BF16_* variants, FP32 (4 bytes) for the kS8/U8_*_F32_*
     // variants.  The kernel itself reinterprets the `void *` dst to the
-    // right type via its `DstDt` template; the dispatcher only needs the
+    // right type via its `OutputType` template; the dispatcher only needs the
     // element stride here for pointer arithmetic.  FP32 dst is act=none
     // only (gated kinds are BF16-dst), so the gated path below always
     // sees the BF16 width.
-    const DstDt dst_dt = dst_dt_for_variant(ctx.variant);
-    const size_t dst_elem_bytes_int8 = (dst_dt == DstDt::kF32) ? sizeof(float)
-            : (dst_dt == DstDt::kU8)                           ? sizeof(uint8_t)
-                                     : sizeof(bfloat16_t);
+    const OutputType dst_dt = dst_dt_for_variant(ctx.variant);
+    const size_t dst_elem_bytes_int8 = (dst_dt == OutputType::kF32)
+            ? sizeof(float)
+            : (dst_dt == OutputType::kU8) ? sizeof(uint8_t)
+                                          : sizeof(bfloat16_t);
 
     const int K_quad = (K + kVNNIInt8Quad - 1) / kVNNIInt8Quad;
     // Per-o-block stride in BYTES: weight slab + per-column int32
@@ -1539,9 +1545,9 @@ inline void dispatch_tile_int8(const CallContext &ctx, int expert_idx, int M,
         return c * mr_base + std::min(c, n_big);
     };
 
-    const bool is_gated_act = (ctx.act_kind == ActKind::swiglu_oai_mul)
-            || (ctx.act_kind == ActKind::silu_and_mul)
-            || (ctx.act_kind == ActKind::gelu_and_mul);
+    const bool is_gated_act = (ctx.act_kind == ActivationKind::swiglu_oai_mul)
+            || (ctx.act_kind == ActivationKind::silu_and_mul)
+            || (ctx.act_kind == ActivationKind::gelu_and_mul);
 
     if (is_gated_act) {
         for (int sub_off = 0; sub_off < n_tile; sub_off += subtile_cols) {
@@ -1567,7 +1573,7 @@ inline void dispatch_tile_int8(const CallContext &ctx, int expert_idx, int M,
             const auto call_one = [&](int c, int b) {
                 const int mr_now = mr_of(c);
                 const int m_off = m_off_of(c);
-                const int8_ukernel_fn_t kfn = ctx.kfn_table_int8[mr_now];
+                const int8_ukernel_fn_t kfn = ctx.kernel_table_int8[mr_now];
 
                 const uint8_t *A_chunk
                         = A_bytes + static_cast<size_t>(m_off) * lda;
@@ -1640,7 +1646,7 @@ inline void dispatch_tile_int8(const CallContext &ctx, int expert_idx, int M,
         const auto call_one = [&](int c, int b) {
             const int mr_now = mr_of(c);
             const int m_off = m_off_of(c);
-            const int8_ukernel_fn_t kfn = ctx.kfn_table_int8[mr_now];
+            const int8_ukernel_fn_t kfn = ctx.kernel_table_int8[mr_now];
 
             const uint8_t *A_chunk = A_bytes + static_cast<size_t>(m_off) * lda;
             const void *src_scale_chunk
@@ -1825,9 +1831,9 @@ inline void dispatch_tile_s4(const CallContext &ctx, int expert_idx, int M,
             ? sizeof(bfloat16_t)
             : sizeof(float);
 
-    const bool is_gated_act = (ctx.act_kind == ActKind::swiglu_oai_mul)
-            || (ctx.act_kind == ActKind::silu_and_mul)
-            || (ctx.act_kind == ActKind::gelu_and_mul);
+    const bool is_gated_act = (ctx.act_kind == ActivationKind::swiglu_oai_mul)
+            || (ctx.act_kind == ActivationKind::silu_and_mul)
+            || (ctx.act_kind == ActivationKind::gelu_and_mul);
 
     for (int sub_off = 0; sub_off < n_tile; sub_off += subtile_cols) {
         const int sub_n = std::min(subtile_cols, n_tile - sub_off);
@@ -1848,7 +1854,7 @@ inline void dispatch_tile_s4(const CallContext &ctx, int expert_idx, int M,
         int m_off = 0;
         for (int c = 0; c < n_calls; ++c) {
             const int mr_now = (c < n_big) ? mr_base + 1 : mr_base;
-            const s4_ukernel_fn_t kfn = ctx.kfn_table_s4[mr_now];
+            const w4a8_ukernel_fn_t kfn = ctx.kernel_table_s4[mr_now];
 
             const uint8_t *A_chunk = A_bytes + static_cast<size_t>(m_off) * lda;
             const void *src_scale_chunk
@@ -1920,7 +1926,7 @@ inline bool dispatch_tile_f16_kblocked(const CallContext &ctx, int expert_idx,
         int M, int K, int n_tile, int col_start, const void *src, int lda,
         void *dst, int ldc) {
     if (ctx.variant != KernelVariant::kF16_F16_F16
-            || ctx.act_kind != ActKind::none || !ctx.single_expert
+            || ctx.act_kind != ActivationKind::none || !ctx.single_expert
             || ctx.f16_prompt || M != 32)
         return false;
 
@@ -1962,7 +1968,7 @@ inline bool dispatch_tile_f16_kblocked(const CallContext &ctx, int expert_idx,
             for (int c = 0; c < n_calls; ++c) {
                 const int mr_now = (c < n_big) ? mr_base + 1 : mr_base;
                 const f16_kblock_ukernel_fn_t kfn
-                        = ctx.kfn_table_f16_kblock[mr_now];
+                        = ctx.kernel_table_f16_kblock[mr_now];
                 kfn(A + static_cast<size_t>(m_off) * lda + k_begin, lda,
                         Bpacked_block
                                 + static_cast<size_t>(k_begin) * ctx.pack_nr,
@@ -2011,7 +2017,7 @@ inline void dispatch_tile_f16_prompt(const CallContext &ctx, int expert_idx,
     const size_t bias_elem_bytes = (ctx.bias_kind == BiasKind::fp32)
             ? sizeof(float)
             : sizeof(float16_t);
-    const bool gated = ctx.act_kind != ActKind::none;
+    const bool gated = ctx.act_kind != ActivationKind::none;
     const int kc = (!gated && ctx.prompt_kc > 0 && ctx.prompt_kc < K
                            && M > ctx.max_mr)
             ? (std::max(ctx.prompt_kc, kPromptKcMin) + kF16AccumBlockK - 1)
@@ -2048,7 +2054,7 @@ inline void dispatch_tile_f16_prompt(const CallContext &ctx, int expert_idx,
             for (int c = 0; c < n_calls; ++c) {
                 const int mr_now = (c < n_big) ? mr_base + 1 : mr_base;
                 const f16_prompt_ukernel_fn_t kfn
-                        = ctx.kfn_table_f16_prompt[nb - 1][mr_now];
+                        = ctx.kernel_table_f16_prompt[nb - 1][mr_now];
                 const float16_t *A_chunk
                         = A + static_cast<size_t>(m_off) * lda + k0;
                 if (gated) {
@@ -2061,9 +2067,9 @@ inline void dispatch_tile_f16_prompt(const CallContext &ctx, int expert_idx,
                     float *dst = c32.data()
                             + static_cast<size_t>(m_off) * n_tile
                             + (col - col_start);
-                    ctx.kfn_table_f16_prompt_f32[nb - 1][mr_now](A_chunk, lda,
-                            B_blk, o_blk_stride, bias_blk, ctx.bias_kind, dst,
-                            n_tile, nullptr, 0, kk, k0 > 0);
+                    ctx.kernel_table_f16_prompt_f32[nb - 1][mr_now](A_chunk,
+                            lda, B_blk, o_blk_stride, bias_blk, ctx.bias_kind,
+                            dst, n_tile, nullptr, 0, kk, k0 > 0);
                 } else {
                     std::byte *dst = static_cast<std::byte *>(tight_dst)
                             + (static_cast<size_t>(m_off) * tight_ldc + col)
@@ -2131,9 +2137,9 @@ inline void dispatch_tile_f16(const CallContext &ctx, int expert_idx, int M,
             ? sizeof(float)
             : sizeof(float16_t);
 
-    const bool is_gated_act = (ctx.act_kind == ActKind::swiglu_oai_mul)
-            || (ctx.act_kind == ActKind::silu_and_mul)
-            || (ctx.act_kind == ActKind::gelu_and_mul);
+    const bool is_gated_act = (ctx.act_kind == ActivationKind::swiglu_oai_mul)
+            || (ctx.act_kind == ActivationKind::silu_and_mul)
+            || (ctx.act_kind == ActivationKind::gelu_and_mul);
 
     if (is_gated_act) {
         for (int sub_off = 0; sub_off < n_tile; sub_off += subtile_cols) {
@@ -2157,7 +2163,7 @@ inline void dispatch_tile_f16(const CallContext &ctx, int expert_idx, int M,
                     oblk_outer, n_calls, n_blocks, [&](int c, int b) {
                 const int mr_now = mr_of(c);
                 const int m_off = m_off_of(c);
-                const f16_ukernel_fn_t kfn = ctx.kfn_table_f16[mr_now];
+                const f16_ukernel_fn_t kfn = ctx.kernel_table_f16[mr_now];
 
                 const float16_t *A_chunk = A + static_cast<size_t>(m_off) * lda;
                 // Gated-act epilogues are F16-dst-only, so the half-width tight
@@ -2207,7 +2213,7 @@ inline void dispatch_tile_f16(const CallContext &ctx, int expert_idx, int M,
         for_each_call_block(oblk_outer, n_calls, n_blocks, [&](int c, int b) {
             const int mr_now = mr_of(c);
             const int m_off = m_off_of(c);
-            const f16_ukernel_fn_t kfn = ctx.kfn_table_f16[mr_now];
+            const f16_ukernel_fn_t kfn = ctx.kernel_table_f16[mr_now];
 
             const float16_t *A_chunk = A + static_cast<size_t>(m_off) * lda;
             std::byte *Wide_row_base = Tight_bytes
@@ -2249,7 +2255,7 @@ inline void dispatch_tile_f16(const CallContext &ctx, int expert_idx, int M,
 // that the epilogue narrows to the caller's dst dtype.
 //
 // Scope guards (all enforced by the caller's routing predicate):
-//   * BF16 family, ActKind::none (no fused activation epilogue here).
+//   * BF16 family, ActivationKind::none (no fused activation epilogue here).
 //   * bias == nullptr (bias-free; keeps the epilogue a plain narrow).
 //   * K even (K-pair aligned chunks; the deep-K shapes are all even).
 //   * M > max_mr AND the o-block B strip exceeds the L2 budget
@@ -2296,10 +2302,11 @@ inline void dispatch_tile_bf16_kblocked(const CallContext &ctx, int expert_idx,
     const int n_big = M - mr_base * n_calls;
 
     // f32-store, act=none kernels for the two MR sizes we emit.
-    const ukernel_fn_t fn_small
-            = select_ukernel(mr_base, NV, ActKind::none, DstDt::kF32);
-    const ukernel_fn_t fn_big = (n_big > 0)
-            ? select_ukernel(mr_base + 1, NV, ActKind::none, DstDt::kF32)
+    const bf16_ukernel_fn_t fn_small = select_bf16_ukernel(
+            mr_base, NV, ActivationKind::none, OutputType::kF32);
+    const bf16_ukernel_fn_t fn_big = (n_big > 0)
+            ? select_bf16_ukernel(
+                      mr_base + 1, NV, ActivationKind::none, OutputType::kF32)
             : fn_small;
     // A prompt tile runs the 12-row prompt kernels, whose accumulate form
     // lives with them; the decode-tuned accumulate kernels stop at 8 rows.
@@ -2308,8 +2315,8 @@ inline void dispatch_tile_bf16_kblocked(const CallContext &ctx, int expert_idx,
                 ? select_ukernel_accumulate_f32(mr, NV)
                 : decode_specialized::select_plain_bf16_f32_accumulate(mr, NV);
     };
-    const ukernel_fn_t accumulate_small = select_accumulate(mr_base);
-    const ukernel_fn_t accumulate_big
+    const bf16_ukernel_fn_t accumulate_small = select_accumulate(mr_base);
+    const bf16_ukernel_fn_t accumulate_big
             = (n_big > 0) ? select_accumulate(mr_base + 1) : accumulate_small;
     const bool direct_accumulate
             = accumulate_small != nullptr && accumulate_big != nullptr;
@@ -2352,7 +2359,7 @@ inline void dispatch_tile_bf16_kblocked(const CallContext &ctx, int expert_idx,
     auto mr_call = [&](int c, int m_off, int b, int kc_off, int kc_now,
                            const bfloat16_t *Bpk, bool first) {
         const int mr_now = (c < n_big) ? mr_base + 1 : mr_base;
-        const ukernel_fn_t kfn = (c < n_big) ? fn_big : fn_small;
+        const bf16_ukernel_fn_t kfn = (c < n_big) ? fn_big : fn_small;
         const bfloat16_t *A_chunk
                 = A + static_cast<size_t>(m_off) * lda + kc_off;
         float *Cdst = c_accum.data() + static_cast<size_t>(m_off) * n_tile
@@ -2362,7 +2369,7 @@ inline void dispatch_tile_bf16_kblocked(const CallContext &ctx, int expert_idx,
                     /*Cout=*/Cdst, /*ldc=*/n_tile, /*Cout_tight=*/nullptr,
                     /*ldc_tight=*/0, kc_now);
         } else if (direct_accumulate) {
-            const ukernel_fn_t accumulate_kfn
+            const bf16_ukernel_fn_t accumulate_kfn
                     = (c < n_big) ? accumulate_big : accumulate_small;
             accumulate_kfn(A_chunk, lda, Bpk, /*bias=*/nullptr, BiasKind::none,
                     /*Cout=*/Cdst, /*ldc=*/n_tile,
@@ -2404,7 +2411,7 @@ inline void dispatch_tile_bf16_kblocked(const CallContext &ctx, int expert_idx,
             int m_off = 0;
             for (int c = 0; c < n_calls; ++c) {
                 const int mr_now = (c < n_big) ? mr_base + 1 : mr_base;
-                const ukernel_fn_t kfn = (c < n_big) ? fn_big : fn_small;
+                const bf16_ukernel_fn_t kfn = (c < n_big) ? fn_big : fn_small;
                 const bfloat16_t *A_chunk
                         = A + static_cast<size_t>(m_off) * lda + kc_off;
                 if (first) {
@@ -2418,7 +2425,7 @@ inline void dispatch_tile_bf16_kblocked(const CallContext &ctx, int expert_idx,
                     float *Cdst = c_accum.data()
                             + static_cast<size_t>(m_off) * n_tile
                             + static_cast<size_t>(b) * pack_nr;
-                    const ukernel_fn_t accumulate_kfn
+                    const bf16_ukernel_fn_t accumulate_kfn
                             = (c < n_big) ? accumulate_big : accumulate_small;
                     accumulate_kfn(A_chunk, lda, Bpk, /*bias=*/nullptr,
                             BiasKind::none, /*Cout=*/Cdst, /*ldc=*/n_tile,
@@ -2521,7 +2528,7 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
     //      b. for any `n_thr ≤ N / pack_nr`, `aligned_n_split` always
     //         finds an aligned candidate that satisfies the 2× imbalance
     //         bound, never falling back to its unaligned even-split path;
-    //      c. `participating_n_thr` upstream caps `n_thr` by
+    //      c. `tile_thread_count` upstream caps `n_thr` by
     //         `N / min_n_tile`, and `min_n_tile >= nr_align >= pack_nr`,
     //         so condition (b) holds.  `min_n_tile` used to be the fixed
     //         `kDecodeNTile` (256) which cleared `pack_nr` trivially; the
@@ -2555,7 +2562,7 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
         const bool int8_kblock_shape
                 = ctx.variant == KernelVariant::kS8_S8_BF16_SYM
                 && ctx.compute_int == IntCompute::kS8_Sym && ctx.pack_nr == 32
-                && ctx.act_kind == ActKind::none && bias == nullptr
+                && ctx.act_kind == ActivationKind::none && bias == nullptr
                 && src_zp == nullptr && simple_dynamic_epilogue
                 && M > ctx.max_mr && int8_oblock_bytes > int8_kblock_l2_budget;
         if (int8_kblock_policy && int8_kblock_shape) {
@@ -2573,7 +2580,7 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
                 int8_epilogue);
         return;
     }
-    if (is_s4_variant(ctx.variant)) {
+    if (is_w4a8_variant(ctx.variant)) {
         dispatch_tile_s4(ctx, expert_idx, M, K, n_tile, col_start, src, lda,
                 bias, tight_dst, tight_ldc, src_scale, wei_scale);
         return;
@@ -2611,8 +2618,8 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
     // Everything else falls through to the straight-line path below.
     const bool prompt_kblock = ctx.prompt_kc > 0 && ctx.prompt_kc < K;
     if ((prompt_kblock || grp_matmul_kblock_enabled(ctx.kblock_auto))
-            && ctx.act_kind == ActKind::none && bias == nullptr && (K % 2) == 0
-            && M > ctx.max_mr) {
+            && ctx.act_kind == ActivationKind::none && bias == nullptr
+            && (K % 2) == 0 && M > ctx.max_mr) {
         const int64_t kblock_l2_budget = ck_l2_budget_bytes();
         if (prompt_kblock
                 || static_cast<int64_t>(K) * ctx.pack_nr * 2
@@ -2682,12 +2689,12 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
     // gelu_and_mul) share the same tight-arena contract: halved-width
     // output, BF16-only, 16 cols per (g, u) pair × NV/2 pairs per
     // kernel call.  They differ only in which in-register pair-store
-    // helper the microkernel calls (resolved at `select_ukernel` time
-    // and baked into `ctx.kfn_table[]`), so the dispatcher loop body
+    // helper the microkernel calls (resolved at `select_bf16_ukernel` time
+    // and baked into `ctx.kernel_table[]`), so the dispatcher loop body
     // is identical.
-    const bool is_gated_act = (ctx.act_kind == ActKind::swiglu_oai_mul)
-            || (ctx.act_kind == ActKind::silu_and_mul)
-            || (ctx.act_kind == ActKind::gelu_and_mul);
+    const bool is_gated_act = (ctx.act_kind == ActivationKind::swiglu_oai_mul)
+            || (ctx.act_kind == ActivationKind::silu_and_mul)
+            || (ctx.act_kind == ActivationKind::gelu_and_mul);
     if (is_gated_act) {
         // Walk the per-thread N range in L2-friendly sub-tiles.  Each
         // sub-tile's B strip (= K × subtile_cols × 2 bytes) fits in L2
@@ -2734,7 +2741,7 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
                     int m_off_b = 0;
                     for (int c = 0; c < n_calls; ++c) {
                         const int mr_now = (c < n_big) ? mr_base + 1 : mr_base;
-                        const ukernel_fn_t kfn = ctx.kfn_table[mr_now];
+                        const bf16_ukernel_fn_t kfn = ctx.kernel_table[mr_now];
                         const bfloat16_t *A_chunk
                                 = A + static_cast<size_t>(m_off_b) * lda;
                         bfloat16_t *Tight_row
@@ -2754,12 +2761,12 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
             int m_off = 0;
             for (int c = 0; c < n_calls; ++c) {
                 const int mr_now = (c < n_big) ? mr_base + 1 : mr_base;
-                const ukernel_fn_t kfn = ctx.kfn_table[mr_now];
+                const bf16_ukernel_fn_t kfn = ctx.kernel_table[mr_now];
 
                 const bfloat16_t *A_chunk
                         = A + static_cast<size_t>(m_off) * lda;
                 // Gated-act epilogues are BF16-dst-only (gated by
-                // select_ukernel for swiglu_oai_mul, silu_and_mul, and
+                // select_bf16_ukernel for swiglu_oai_mul, silu_and_mul, and
                 // gelu_and_mul — see `is_gated_act` above), so the half-width
                 // tight arena is a plain bfloat16_t matrix (`tight_ldc` in
                 // elements) regardless of `dst_elem_bytes`.  Index it as
@@ -2819,7 +2826,7 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
                 int m_off_b = 0;
                 for (int c = 0; c < n_calls; ++c) {
                     const int mr_now = (c < n_big) ? mr_base + 1 : mr_base;
-                    const ukernel_fn_t kfn = ctx.kfn_table[mr_now];
+                    const bf16_ukernel_fn_t kfn = ctx.kernel_table[mr_now];
                     const bfloat16_t *A_chunk
                             = A + static_cast<size_t>(m_off_b) * lda;
                     std::byte *Wide_row = Tight_bytes
@@ -2839,7 +2846,7 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
         int m_off = 0;
         for (int c = 0; c < n_calls; ++c) {
             const int mr_now = (c < n_big) ? mr_base + 1 : mr_base;
-            const ukernel_fn_t kfn = ctx.kfn_table[mr_now];
+            const bf16_ukernel_fn_t kfn = ctx.kernel_table[mr_now];
 
             const bfloat16_t *A_chunk = A + static_cast<size_t>(m_off) * lda;
             // Wide / act=none path: dst element width depends on the
@@ -2872,7 +2879,7 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
 
 bool block_api_supported(const CallContext &ctx, const void *bias,
         const void *src_zp, const Int8EpilogueConfig &int8_epilogue) {
-    if (ctx.act_kind != ActKind::none || bias != nullptr) return false;
+    if (ctx.act_kind != ActivationKind::none || bias != nullptr) return false;
     if (ctx.variant == KernelVariant::kS8_S8_BF16_SYM)
         return ctx.compute_int == IntCompute::kS8_Sym && ctx.pack_nr == kNRMin
                 && src_zp == nullptr && !int8_epilogue.src_quant_per_tensor
@@ -2912,7 +2919,7 @@ inline size_t int8_block_stride_bytes(int K) {
 
 } // namespace
 
-void block_accum(const CallContext &ctx, int expert_idx, int M, int K,
+void accumulate_block(const CallContext &ctx, int expert_idx, int M, int K,
         int block, int k_begin, int k_end, const void *src, int lda, void *acc,
         bool add, int mr_cap) {
     assert(k_begin % block_k_step(ctx) == 0 && k_begin < k_end && k_end <= K);
@@ -2955,8 +2962,8 @@ void block_accum(const CallContext &ctx, int expert_idx, int M, int K,
     int m_off = 0;
     for (int c = 0; c < n_calls; ++c) {
         const int mr_now = (c < n_big) ? mr_base + 1 : mr_base;
-        const ukernel_fn_t kfn
-                = select_ukernel(mr_now, ctx.NV, ActKind::none, DstDt::kF32);
+        const bf16_ukernel_fn_t kfn = select_bf16_ukernel(
+                mr_now, ctx.NV, ActivationKind::none, OutputType::kF32);
         assert(kfn != nullptr);
         float *Crow = C + static_cast<size_t>(m_off) * pack_nr;
         kfn(A + static_cast<size_t>(m_off) * lda, lda, Bpk, /*bias=*/nullptr,
@@ -2970,7 +2977,7 @@ void block_accum(const CallContext &ctx, int expert_idx, int M, int K,
     }
 }
 
-void block_finish(const CallContext &ctx, int expert_idx, int M, int K,
+void finish_block(const CallContext &ctx, int expert_idx, int M, int K,
         int block, const void *acc, const void *src_scale,
         const void *wei_scale, void *dst, int ldc) {
     const int pack_nr = ctx.pack_nr;

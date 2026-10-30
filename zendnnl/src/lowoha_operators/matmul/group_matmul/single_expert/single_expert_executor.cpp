@@ -49,7 +49,7 @@ struct RowView {
     void *dst;
 };
 
-inline RowView rows_at(const se_call_view_t &c, int m_begin) {
+inline RowView rows_at(const SingleExpertCallView &c, int m_begin) {
     const ck::CallContext &kc = *c.kctx;
     const size_t src_elem = ck::is_int8_variant(kc.variant) ? 1 : 2;
     RowView r;
@@ -69,27 +69,29 @@ inline RowView rows_at(const se_call_view_t &c, int m_begin) {
 // Accumulate K range [k0, k1) of blocks [b0, b1) for `m` rows into
 // `acc_of(b)`, in `plan.kc` chunks and `plan.order`.
 template <typename AccOf>
-void accum_blocks(const se_call_view_t &c, const se_block_plan_t &plan, int m,
-        const void *src, int b0, int b1, int k0, int k1, AccOf acc_of) {
+void accum_blocks(const SingleExpertCallView &c,
+        const SingleExpertBlockPlan &plan, int m, const void *src, int b0,
+        int b1, int k0, int k1, AccOf acc_of) {
     const ck::CallContext &kc = *c.kctx;
     const int chunk = plan.kc > 0 ? plan.kc : k1 - k0;
-    if (plan.order == se_order_t::n_outer) {
+    if (plan.order == SingleExpertLoopOrder::n_outer) {
         for (int b = b0; b < b1; ++b)
             for (int k = k0; k < k1; k += chunk)
-                ck::block_accum(kc, 0, m, c.K, b, k, std::min(k + chunk, k1),
-                        src, c.lda, acc_of(b), k != k0, plan.mr);
+                ck::accumulate_block(kc, 0, m, c.K, b, k,
+                        std::min(k + chunk, k1), src, c.lda, acc_of(b), k != k0,
+                        plan.mr);
         return;
     }
     for (int k = k0; k < k1; k += chunk)
         for (int b = b0; b < b1; ++b)
-            ck::block_accum(kc, 0, m, c.K, b, k, std::min(k + chunk, k1), src,
-                    c.lda, acc_of(b), k != k0, plan.mr);
+            ck::accumulate_block(kc, 0, m, c.K, b, k, std::min(k + chunk, k1),
+                    src, c.lda, acc_of(b), k != k0, plan.mr);
 }
 
 // Full-K blocks [b0, b1) for rows [m_begin, m_begin + m), straight to dst.
 // Without a K chunk or MR cap this is the regular tile kernel.
-void run_whole_blocks(const se_call_view_t &c, const se_block_plan_t &plan,
-        int m_begin, int m, int b0, int b1) {
+void run_whole_blocks(const SingleExpertCallView &c,
+        const SingleExpertBlockPlan &plan, int m_begin, int m, int b0, int b1) {
     if (b1 <= b0 || m <= 0) return;
     const ck::CallContext &kc = *c.kctx;
     const int nr = kc.pack_nr;
@@ -108,7 +110,7 @@ void run_whole_blocks(const se_call_view_t &c, const se_block_plan_t &plan,
     accum_blocks(c, plan, m, r.src, b0, b1, 0, c.K,
             [&](int b) { return local.data() + (b - b0) * per_block; });
     for (int b = b0; b < b1; ++b)
-        ck::block_finish(kc, 0, m, c.K, b, local.data() + (b - b0) * per_block,
+        ck::finish_block(kc, 0, m, c.K, b, local.data() + (b - b0) * per_block,
                 r.src_scale, c.wei_scale, r.dst, c.ldc);
 }
 
@@ -138,7 +140,7 @@ inline int k_at(const ck::CallContext &kc, int K, int parts, int part) {
 
 } // namespace
 
-bool se_executor_supports(const se_call_view_t &c) {
+bool single_expert_call_supported(const SingleExpertCallView &c) {
     if (c.kctx == nullptr || c.M <= 0 || c.N <= 0 || c.K <= 0
             || c.num_threads < 1 || c.src == nullptr || c.dst == nullptr)
         return false;
@@ -153,8 +155,8 @@ bool se_executor_supports(const se_call_view_t &c) {
             c.int8_epilogue != nullptr ? *c.int8_epilogue : kNoEpilogue);
 }
 
-bool execute_single_expert_plan(
-        const se_call_view_t &c, const se_block_plan_t &plan) {
+bool single_expert_plan_execute(
+        const SingleExpertCallView &c, const SingleExpertBlockPlan &plan) {
     const ck::CallContext &kc = *c.kctx;
     const int nr = kc.pack_nr;
     const int blocks = c.N / nr;
@@ -163,7 +165,7 @@ bool execute_single_expert_plan(
     test_api::s_single_expert_executor_runs.fetch_add(
             1, std::memory_order_relaxed);
 
-    if (plan.split == se_split_t::remainder) {
+    if (plan.split == SingleExpertSplit::n_remainder_k_split) {
         const int first_split = plan.whole_blocks * T;
         const size_t acc_elems = static_cast<size_t>(c.M) * nr;
         thread_local std::vector<int32_t> scratch;
@@ -193,7 +195,7 @@ bool execute_single_expert_plan(
                 int32_t *a = acc
                         + static_cast<size_t>(tid) * plan.k_parts * acc_elems;
                 sum_parts(kc, a, plan.k_parts, acc_elems, acc_elems);
-                ck::block_finish(kc, 0, c.M, c.K, first_split + tid, a,
+                ck::finish_block(kc, 0, c.M, c.K, first_split + tid, a,
                         c.src_scale, c.wei_scale, c.dst, c.ldc);
             }
         }
@@ -248,7 +250,7 @@ bool execute_single_expert_plan(
                     sum_parts(kc, a, kp_n, static_cast<size_t>(rows.count) * nr,
                             acc_elems);
                     const RowView r = rows_at(c, rows.begin);
-                    ck::block_finish(kc, 0, rows.count, c.K, b, a, r.src_scale,
+                    ck::finish_block(kc, 0, rows.count, c.K, b, a, r.src_scale,
                             c.wei_scale, r.dst, c.ldc);
                 }
             }

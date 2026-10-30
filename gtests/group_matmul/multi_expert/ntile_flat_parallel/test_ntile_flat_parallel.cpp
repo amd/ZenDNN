@@ -662,7 +662,7 @@ void expect_close(const std::vector<uint16_t> &got,
 TEST(W8A8MoEPack, ByteExactAgainstScalarPacker) {
     SKIP_IF_NO_ISA();
     constexpr int64_t E = 3;
-    constexpr int64_t OC = 64; // two block_n blocks
+    constexpr int64_t OC = 64; // two kBlockN blocks
     constexpr int64_t IC = 128;
 
     std::vector<int8_t> src(static_cast<size_t>(E) * OC * IC);
@@ -680,22 +680,22 @@ TEST(W8A8MoEPack, ByteExactAgainstScalarPacker) {
     // Independent scalar packer: per 32-output-channel block, K/4 groups of
     // 32 channels x 4 k-values, then the 32 int32 compensation values.
     std::vector<int8_t> want(got.size(), 0);
-    const int64_t blocks = OC / w8a8::block_n;
+    const int64_t blocks = OC / w8a8::kBlockN;
     for (int64_t e = 0; e < E; ++e) {
         for (int64_t b = 0; b < blocks; ++b) {
             int8_t *dst
-                    = want.data() + (e * OC + b * w8a8::block_n) * oc_stride;
-            const int8_t *s = src.data() + (e * OC + b * w8a8::block_n) * IC;
+                    = want.data() + (e * OC + b * w8a8::kBlockN) * oc_stride;
+            const int8_t *s = src.data() + (e * OC + b * w8a8::kBlockN) * IC;
             for (int64_t k4 = 0; k4 < IC / 4; ++k4) {
-                for (int64_t n = 0; n < w8a8::block_n; ++n) {
+                for (int64_t n = 0; n < w8a8::kBlockN; ++n) {
                     for (int64_t j = 0; j < 4; ++j) {
-                        dst[(k4 * w8a8::block_n + n) * 4 + j]
+                        dst[(k4 * w8a8::kBlockN + n) * 4 + j]
                                 = s[n * IC + k4 * 4 + j];
                     }
                 }
             }
-            auto *comp = reinterpret_cast<int32_t *>(dst + w8a8::block_n * IC);
-            for (int64_t n = 0; n < w8a8::block_n; ++n) {
+            auto *comp = reinterpret_cast<int32_t *>(dst + w8a8::kBlockN * IC);
+            for (int64_t n = 0; n < w8a8::kBlockN; ++n) {
                 int32_t sum = 0;
                 for (int64_t k = 0; k < IC; ++k) {
                     sum += s[n * IC + k];
@@ -710,7 +710,7 @@ TEST(W8A8MoEPack, ByteExactAgainstScalarPacker) {
 TEST(W8A8MoEPack, RejectsUnalignedGeometry) {
     std::vector<int8_t> src(32 * 32);
     std::vector<int8_t> dst(32 * 64);
-    // out_channels must be a multiple of block_n.
+    // out_channels must be a multiple of kBlockN.
     EXPECT_EQ(w8a8::pack_weights(src.data(), dst.data(), 1, 31, 32, 1),
             status_t::memory_bad_size);
     // in_channels must be a multiple of the VNNI step.
@@ -726,7 +726,7 @@ TEST(W8A8MoEPack, RejectsUnalignedGeometry) {
 #if ZENDNNL_NTILE_FLAT_PARALLEL_KERNELS_COMPILED
 TEST(W8A8MoEMicrokernel, SignedS8MatchesBiasedU8GateUp) {
     SKIP_IF_NO_ISA();
-    constexpr int64_t N = w8a8::block_n;
+    constexpr int64_t N = w8a8::kBlockN;
     constexpr int64_t K = 32;
     const int8_t corners[] = {-128, -127, -1, 0, 1, 126, 127};
     constexpr size_t num_corners = sizeof(corners) / sizeof(corners[0]);
@@ -1070,14 +1070,15 @@ TEST(W8A8MoEDispatch, RequiresAlgo4OptIn) {
     const auto p = make_problem(/*E=*/8, /*H=*/128, /*I=*/64, /*T=*/8,
             /*topk=*/4, /*seed=*/71);
     auto explicit_fastpath = build_call(p);
-    moe_test_utils::GemmModeCaptureGuard capture;
+    moe_test_utils::ExecutionPathCaptureGuard capture;
     ASSERT_EQ(explicit_fastpath->run(/*algo=*/4), status_t::success);
     EXPECT_EQ(w8a8::packed_weight_cache_size(), 2u);
-    const char *mode = test_api::s_last_group_matmul_direct_gemm_mode.load(
+    const char *mode = test_api::s_last_group_matmul_direct_execution_path.load(
             std::memory_order_relaxed);
     ASSERT_NE(mode, nullptr);
     EXPECT_STREQ(mode, "ntile_flat_parallel");
-    EXPECT_EQ(zendnnl::lowoha::matmul::executed_algo_from_gemm_mode(mode), 4);
+    EXPECT_EQ(zendnnl::lowoha::matmul::executed_algo_from_execution_path(mode),
+            4);
     expect_close(explicit_fastpath->output, reference_moe(p), kRtol, "algo 4");
 
     zendnnl::lowoha::matmul::clear_fused_moe_scratch();
@@ -1161,16 +1162,16 @@ TEST(W8A8MoEDispatch, AutoDecodePhase4ClassifiesActivePrefixBeforeFallback) {
     call->M.resize(static_cast<size_t>(p.num_experts), 4096);
     moe_test_utils::AutoPromptAlgoOverride prompt_multilevel(6);
     moe_test_utils::AutoDecodeAlgoOverride decode_w8a8(4);
-    moe_test_utils::GemmModeCaptureGuard capture;
+    moe_test_utils::ExecutionPathCaptureGuard capture;
     ASSERT_EQ(call->run(/*algo=*/0), status_t::success);
     EXPECT_EQ(w8a8::packed_weight_cache_size(), 0u)
             << "the existing hook declines mismatched M/src vector lengths";
-    const char *mode = test_api::s_last_group_matmul_direct_gemm_mode.load(
+    const char *mode = test_api::s_last_group_matmul_direct_execution_path.load(
             std::memory_order_relaxed);
     ASSERT_NE(mode, nullptr);
     // The inherited decode default of an INT8 MoE layer is ALGO 3. Prompt
     // ALGO 6 would prove tail leakage.
-    EXPECT_EQ(executed_algo_from_gemm_mode(mode), 3) << "mode=" << mode;
+    EXPECT_EQ(executed_algo_from_execution_path(mode), 3) << "mode=" << mode;
     EXPECT_EQ(call->output, generic_baseline->output)
             << "the active decode prefix must inherit its refined default "
                "policy, not prompt ALGO 6";
@@ -1188,14 +1189,14 @@ TEST(W8A8MoEDispatch, Phase4OverridesGlobalGenericPin) {
             /*topk=*/2, /*seed=*/83);
     auto call = build_call(p);
     moe_test_utils::AutoDecodeAlgoOverride decode_w8a8(4);
-    moe_test_utils::GemmModeCaptureGuard capture;
+    moe_test_utils::ExecutionPathCaptureGuard capture;
     ASSERT_EQ(call->run(/*algo=*/1), status_t::success);
     EXPECT_EQ(w8a8::packed_weight_cache_size(), 2u)
             << "the phase-specific W8A8 request must override global ALGO 1";
-    const char *mode = test_api::s_last_group_matmul_direct_gemm_mode.load(
+    const char *mode = test_api::s_last_group_matmul_direct_execution_path.load(
             std::memory_order_relaxed);
     ASSERT_NE(mode, nullptr);
-    EXPECT_EQ(executed_algo_from_gemm_mode(mode), 4) << "mode=" << mode;
+    EXPECT_EQ(executed_algo_from_execution_path(mode), 4) << "mode=" << mode;
     expect_close(call->output, reference_moe(p), kRtol,
             "phase-specific ALGO 4 over global ALGO 1");
 
@@ -1464,7 +1465,7 @@ TEST_F(W8A8MoEEligibility, RejectsZeroPointsAndCoarseScales) {
 
 TEST_F(W8A8MoEEligibility, RejectsUnsupportedShapes) {
     expect_declined([](CallArgs &c) {
-        // hidden size not a multiple of block_n
+        // hidden size not a multiple of kBlockN
         for (auto &k : c.K) {
             k -= 1;
         }
@@ -1699,12 +1700,12 @@ TEST(W8A8MoEFallback, PromptGeometryMissInheritsAlgo1Policy) {
     ASSERT_EQ(call->run_fastpath_only(), status_t::unimplemented);
     moe_test_utils::AutoPromptAlgoOverride prompt_w8a8(4);
     moe_test_utils::AutoDecodeAlgoOverride inactive_decode(6);
-    moe_test_utils::GemmModeCaptureGuard capture;
+    moe_test_utils::ExecutionPathCaptureGuard capture;
     ASSERT_EQ(call->run(/*algo=*/0), status_t::success);
-    const char *mode = test_api::s_last_group_matmul_direct_gemm_mode.load(
+    const char *mode = test_api::s_last_group_matmul_direct_execution_path.load(
             std::memory_order_relaxed);
     ASSERT_NE(mode, nullptr);
-    EXPECT_EQ(executed_algo_from_gemm_mode(mode), 1) << "mode=" << mode;
+    EXPECT_EQ(executed_algo_from_execution_path(mode), 1) << "mode=" << mode;
     EXPECT_EQ(call->output, generic_baseline->output)
             << "phase-4 decline must preserve forced-ALGO1 numerics";
 
@@ -1830,13 +1831,15 @@ TEST(W8A8MoECache, DisabledDeclinesWithoutPublishingOrWriting) {
     ASSERT_EQ(generic_baseline->run(/*algo=*/3), status_t::success);
     auto fallback = build_call(p);
     {
-        moe_test_utils::GemmModeCaptureGuard capture;
+        moe_test_utils::ExecutionPathCaptureGuard capture;
         ASSERT_EQ(fallback->run(), status_t::success);
-        const char *mode = zendnnl::lowoha::matmul::test_api::
-                                   s_last_group_matmul_direct_gemm_mode.load(
-                                           std::memory_order_relaxed);
+        const char *mode
+                = zendnnl::lowoha::matmul::test_api::
+                          s_last_group_matmul_direct_execution_path.load(
+                                  std::memory_order_relaxed);
         ASSERT_NE(mode, nullptr);
-        EXPECT_EQ(executed_algo_from_gemm_mode(mode), 3) << "mode=" << mode;
+        EXPECT_EQ(executed_algo_from_execution_path(mode), 3)
+                << "mode=" << mode;
     }
     EXPECT_EQ(fallback->output, generic_baseline->output);
     EXPECT_EQ(w8a8::packed_weight_cache_size(), 0u);
@@ -2084,7 +2087,7 @@ float bf16_ulp(uint16_t b) {
 // two per-channel scale vectors are a direct handle on the activation input.
 std::vector<uint16_t> run_gate_up_epilogue(
         const std::vector<float> &xs, const std::vector<float> &ys) {
-    const int64_t N = w8a8::block_n;
+    const int64_t N = w8a8::kBlockN;
     const int64_t K = 32; // multiple of the VNNI step and of 32
     EXPECT_EQ(static_cast<int64_t>(xs.size()), N);
     EXPECT_EQ(static_cast<int64_t>(ys.size()), N);
@@ -2108,7 +2111,7 @@ std::vector<uint16_t> run_gate_up_epilogue(
     std::vector<uint16_t> C(static_cast<size_t>(N), 0);
     w8a8::tinygemm_gate_up(A.data(), packed.data(), packed.data(), C.data(),
             As.data(), xs.data(), ys.data(), comp, comp, /*M=*/1, K,
-            /*lda=*/K, /*ldb=*/w8a8::block_n, /*ldc=*/N);
+            /*lda=*/K, /*ldb=*/w8a8::kBlockN, /*ldc=*/N);
     return C;
 }
 
@@ -2123,7 +2126,7 @@ double silu_exact(double x) {
 // catch a wrong polynomial, a dropped `* up`, or a lane permutation.
 TEST(W8A8MoESiluEpilogue, MatchesExactSiluOverOperatingRange) {
     SKIP_IF_NO_ISA();
-    const int64_t N = w8a8::block_n;
+    const int64_t N = w8a8::kBlockN;
     // -40 .. +40 in 0.05 steps, taken 32 lanes at a time, plus the awkward
     // small magnitudes where silu(x) ~ x/2 and rounding is most delicate.
     std::vector<float> all;
@@ -2190,7 +2193,7 @@ TEST(W8A8MoESiluEpilogue, MatchesExactSiluOverOperatingRange) {
 // deep negative tail, and that disagreement is recorded rather than pinned.
 TEST(W8A8MoESiluEpilogue, TinyExtremeAndNonFiniteAreWellBehaved) {
     SKIP_IF_NO_ISA();
-    const int64_t N = w8a8::block_n;
+    const int64_t N = w8a8::kBlockN;
     const float qnan = std::numeric_limits<float>::quiet_NaN();
     const float inf = std::numeric_limits<float>::infinity();
 

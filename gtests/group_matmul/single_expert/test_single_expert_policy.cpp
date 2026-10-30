@@ -198,7 +198,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, SingleDenseExpertDecodeRoutesToAlgo3) {
     // Dense-FFN W2-style decode: one expert, deep K, shallow M.
     auto s = build_auto_probe(/*M=*/16, /*K=*/2880, /*N=*/5760,
             /*num_ops=*/1, /*num_threads=*/64);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             3)
             << "Rule 0.45 (default ON) must route a single-expert decode "
@@ -217,7 +217,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, SingleDenseExpertDecodeHonoursExplicitPin) {
 
     auto s = build_auto_probe(/*M=*/16, /*K=*/2880, /*N=*/5760,
             /*num_ops=*/1, /*num_threads=*/64);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             2)
             << "an explicit AUTO_DECODE_ALGO pin must outrank Rule 0.45";
@@ -236,7 +236,7 @@ TEST(TestGroupMatmulAutoPhaseEnv,
             /*num_ops=*/1, /*num_threads=*/64);
     for (auto &c : s.layout)
         c = 'c';
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             1)
             << "Rule 0.45 must honour the n_tile_safe clamp rather than hand "
@@ -257,7 +257,7 @@ TEST(TestGroupMatmulAutoPhaseEnv,
 
     auto s = build_auto_probe(/*M=*/16, /*K=*/2880, /*N=*/5760,
             /*num_ops=*/1, /*num_threads=*/64);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             1)
             << "DENSE_DECODE_NTILE=0 must restore the generic few-expert "
@@ -266,8 +266,8 @@ TEST(TestGroupMatmulAutoPhaseEnv,
 
 // Phase gate: the rule is decode-only, so a single-expert PROMPT frame
 // is NOT pulled into ALGO 3 — it keeps the prompt policy and lands on
-// Rule 0.7's `kWideN → ALGO 1`.  One expert needs only `ceil(M /
-// slice_target)` M-slices, far fewer than the team, so `kWideN` (whose
+// Rule 0.7's `kShallowM → ALGO 1`.  One expert needs only `ceil(M /
+// slice_target)` M-slices, far fewer than the team, so `kShallowM` (whose
 // ALGO 1 gives the full team an N-split) is the right prompt answer.
 // That same classification in DECODE is what Rule 0.45 exists to
 // override, so this test also pins the boundary between the two.
@@ -281,11 +281,11 @@ TEST(TestGroupMatmulAutoPhaseEnv, SingleDenseExpertPromptStaysOnWideNAlgo1) {
     // Same expert, prompt-class M (> kDecodeMaxM).
     auto s = build_auto_probe(/*M=*/256, /*K=*/2880, /*N=*/5760,
             /*num_ops=*/1, /*num_threads=*/64);
-    EXPECT_EQ(select_grp_matmul_algo(
+    EXPECT_EQ(group_matmul_algo_select(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             1)
             << "Rule 0.45 is decode-only; a single-expert prompt frame must "
-               "stay on the prompt policy (kWideN → ALGO 1), not ALGO 3";
+               "stay on the prompt policy (kShallowM → ALGO 1), not ALGO 3";
 }
 
 // ── Rule 0.46 — single dense expert → ALGO 3 (custom kernel) ───────────
@@ -296,7 +296,7 @@ static int select_one(const AutoProbeShape &s,
         zendnnl::lowoha::matmul::grp_matmul_gated_act_t act
         = zendnnl::lowoha::matmul::grp_matmul_gated_act_t::none,
         bool epilogue_ok = true) {
-    return zendnnl::lowoha::matmul::select_grp_matmul_algo(s.layout, s.M, s.N,
+    return zendnnl::lowoha::matmul::group_matmul_algo_select(s.layout, s.M, s.N,
             s.K, s.params, s.num_threads, nullptr, act, epilogue_ok);
 }
 
@@ -344,8 +344,8 @@ void apply_static_u8s8_auto_probe(AutoProbeShape &s) {
 }
 
 const char *select_reason(const AutoProbeShape &s) {
-    zendnnl::lowoha::matmul::auto_algo_trace trace;
-    zendnnl::lowoha::matmul::select_grp_matmul_algo(
+    zendnnl::lowoha::matmul::GroupMatmulAlgoTrace trace;
+    zendnnl::lowoha::matmul::group_matmul_algo_select(
             s.layout, s.M, s.N, s.K, s.params, s.num_threads, &trace);
     return trace.reason != nullptr ? trace.reason : "";
 }
@@ -414,7 +414,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, SingleExpertCkDtypeGrammar) {
 TEST(TestGroupMatmulAutoPhaseEnv, SingleDenseExpertBf16PromptRoutesToAlgo3) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
-    if (!custom_kernel::dispatch_supported()) {
+    if (!custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "needs the BF16 custom kernel (AVX512-BF16)";
     }
     reset_grp_matmul_caches();
@@ -459,7 +459,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, SingleDenseExpertBf16PromptRoutesToAlgo3) {
 TEST(TestGroupMatmulAutoPhaseEnv, SingleDenseExpertPromptScope) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
-    if (!custom_kernel::dispatch_supported()) {
+    if (!custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "needs the BF16 custom kernel (AVX512-BF16)";
     }
     reset_grp_matmul_caches();
@@ -544,7 +544,7 @@ std::vector<se_fam_t> served_se_fams();
 std::vector<se_fam_t> served_se_fams() {
     namespace ck = zendnnl::lowoha::matmul::custom_kernel;
     std::vector<se_fam_t> fams;
-    if (ck::dispatch_supported()) fams.push_back(se_fam_t::bf16);
+    if (ck::bf16_isa_supported()) fams.push_back(se_fam_t::bf16);
     if (ck::avx512vnni_available()) {
         fams.push_back(se_fam_t::dq_int8);
         fams.push_back(se_fam_t::w4a8);
@@ -669,7 +669,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, SingleDenseExpertPerPhaseKnobs) {
 
     // Prompt exclusions keep the prompt knob off the prompt, FORCE_CK or not:
     // it lifts only the N gate.
-    if (!custom_kernel::dispatch_supported()) return;
+    if (!custom_kernel::bf16_isa_supported()) return;
     auto prompt = build_auto_probe(/*M=*/1024, /*K=*/768, /*N=*/1280,
             /*num_ops=*/1, /*num_threads=*/8);
     {
@@ -856,7 +856,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, SingleExpertCkRefusedShapesAndDqForms) {
     w4_bad_group.params[0].quant_params.wei_scale.dims = {320, 1280};
     EXPECT_STRNE(select_reason(w4_bad_group), kForce) << "group 4";
 
-    if (custom_kernel::dispatch_supported()) {
+    if (custom_kernel::bf16_isa_supported()) {
         auto gated_f32 = build_auto_probe(/*M=*/512, /*K=*/768, /*N=*/2304,
                 /*num_ops=*/1, /*num_threads=*/32);
         gated_f32.params[0].dtypes.dst = data_type_t::f32;
@@ -912,7 +912,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, SingleExpertCkRefusedShapesAndDqForms) {
 TEST(TestGroupMatmulAutoPhaseEnv, Wc2PhaseSplitGuardUsesCallShape) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
-    if (!custom_kernel::dispatch_supported()) {
+    if (!custom_kernel::bf16_isa_supported()) {
         GTEST_SKIP() << "needs the BF16 custom kernel (AVX512-BF16)";
     }
     reset_grp_matmul_caches();
@@ -997,7 +997,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, SingleExpertForceCkRoutesEveryFamily) {
                 << "N not divisible by the CK pack";
     }
 
-    if (!custom_kernel::dispatch_supported()) return;
+    if (!custom_kernel::bf16_isa_supported()) return;
     auto bf16_prepacked = build_auto_probe(/*M=*/1, /*K=*/1280, /*N=*/1280,
             /*num_ops=*/1, /*num_threads=*/32);
     bf16_prepacked.params[0].mem_format_b = 'r';

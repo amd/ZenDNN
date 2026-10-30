@@ -272,7 +272,7 @@ TEST(CkInt8Pack, CacheHitReturnsSamePointer) {
 // from `pack.hpp`.
 TEST(CkInt8Pack, ClearInt8CacheDoesNotEvictBf16) {
     INT8_CK_SKIP_IF_NO_VNNI();
-    ck::clear_custom_kernel_pack_cache();
+    ck::clear_custom_kernel_pack_cache_bf16();
     ck::clear_custom_kernel_pack_cache_int8();
 
     constexpr int K = 32, N = 32, pack_nr = 32;
@@ -317,7 +317,7 @@ TEST(CkInt8Pack, ClearInt8CacheDoesNotEvictBf16) {
     EXPECT_FALSE(ihit)
             << "int8 pack must MISS after clear_custom_kernel_pack_cache_int8";
 
-    ck::clear_custom_kernel_pack_cache();
+    ck::clear_custom_kernel_pack_cache_bf16();
     ck::clear_custom_kernel_pack_cache_int8();
 }
 
