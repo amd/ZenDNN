@@ -19,6 +19,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include "lowoha_operators/matmul/ggml_weight_unpack.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
@@ -2836,6 +2837,27 @@ uint32_t batch_size_end() {
                                       : static_cast<uint32_t>(BATCH_END);
 }
 
+void fill_buffer_with_nan(void *buf, size_t nbytes, data_type_t dt) {
+    const float qnan = std::numeric_limits<float>::quiet_NaN();
+    if (buf == nullptr || nbytes == 0) { return; }
+    if (dt == data_type_t::bf16) {
+        auto *p = static_cast<bfloat16_t *>(buf);
+        std::fill(p, p + nbytes / sizeof(bfloat16_t), bfloat16_t(qnan));
+    } else if (dt == data_type_t::f16) {
+        auto *p = static_cast<float16_t *>(buf);
+        std::fill(p, p + nbytes / sizeof(float16_t), float16_t(qnan));
+    } else if (dt == data_type_t::f32) {
+        auto *p = static_cast<float *>(buf);
+        std::fill(p, p + nbytes / sizeof(float), qnan);
+    }
+}
+
+void fill_tensor_with_nan(tensor_t &tensor) {
+    if (!tensor.check()) { return; }
+    fill_buffer_with_nan(tensor.get_raw_handle_unsafe(),
+            tensor.get_buffer_sz_bytes(), tensor.get_data_type());
+}
+
 status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         tensor_t &bias_tensor, tensor_t &output_tensor,
         const std::vector<post_op_type_t> &po_types,
@@ -2843,6 +2865,11 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         matmul_algo_t algo, float alpha, float beta, bool use_reference,
         int pack_format_b, bool is_superblock) {
     try {
+        // beta == 0 must overwrite every element. A finite prefill can hide
+        // a skipped store; the reference path keeps the caller's buffer.
+        if (!use_reference && beta == 0.0f) {
+            fill_tensor_with_nan(output_tensor);
+        }
 
         if (use_LOWOHA) {
             try {
@@ -3958,7 +3985,12 @@ void compare_tensor_2D_matrix(tensor_t &output_tensor,
                 allowed_err = scaled_bound + rtol * fabs(ref_val);
             }
 
-            if (abs_err > allowed_err) {
+            // A skipped store leaves the prefilled NaN. `NaN > allowed_err`
+            // is false, so reject NaN directly. Finite values and
+            // infinities keep the tolerance check: matching infinities
+            // produce a NaN difference, which does not satisfy `>`.
+            if (std::isnan(actual_val) || std::isnan(ref_val)
+                    || abs_err > allowed_err) {
                 log_verbose("actual(", i, ",", j, "): ", actual_val, " , ref(",
                         i, ",", j, "): ", ref_val);
                 log_verbose("abs_error: ", abs_err,
@@ -4041,7 +4073,12 @@ void compare_tensor_3D_matrix(tensor_t &output_tensor,
                 allowed_err = abs_bound + rtol * fabs(ref_val);
             }
 
-            if (abs_err > allowed_err) {
+            // A skipped store leaves the prefilled NaN. `NaN > allowed_err`
+            // is false, so reject NaN directly. Finite values and
+            // infinities keep the tolerance check: matching infinities
+            // produce a NaN difference, which does not satisfy `>`.
+            if (std::isnan(actual_val) || std::isnan(ref_val)
+                    || abs_err > allowed_err) {
                 log_verbose("actual(", bs, ",", i, ",", j, "): ", actual_val,
                         " , ref(", bs, ",", i, ",", j, "): ", ref_val);
                 log_verbose("abs_error: ", abs_err,

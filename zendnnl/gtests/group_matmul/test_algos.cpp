@@ -31,6 +31,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <sstream>
 #include <thread>
 #include <vector>
@@ -996,6 +997,7 @@ TEST(TestGroupMatmulInt8LargeShape, CkVsDlpAtProductionDims) {
     double worst_rel = 0.0;
     int worst_e = -1, worst_m = -1, worst_n = -1;
     size_t out_of_band = 0;
+    bool saw_nan = false;
     for (int e = 0; e < p.num_ops; ++e) {
         for (int m = 0; m < p.M; ++m) {
             for (int n = 0; n < p.dim; ++n) {
@@ -1003,9 +1005,17 @@ TEST(TestGroupMatmulInt8LargeShape, CkVsDlpAtProductionDims) {
                 const double a = static_cast<float>(dst_dlp[e][idx]);
                 const double b = static_cast<float>(dst_ck[e][idx]);
                 const double band = std::abs(a) * tol.rel + tol.abs;
-                if (std::abs(b - a) > band) { ++out_of_band; }
+                // A skipped store leaves the prefilled NaN. `NaN > band`
+                // is false, so reject NaN directly. Finite values and
+                // infinities keep the tolerance check: matching infinities
+                // produce a NaN difference, which does not satisfy `>`.
+                const bool nan = std::isnan(a) || std::isnan(b);
+                const double abs_err = std::abs(b - a);
+                if (nan || abs_err > band) { ++out_of_band; }
+                if (nan) { saw_nan = true; }
                 const double denom = std::max(std::abs(a), 1e-6);
-                const double rel = std::abs(b - a) / denom;
+                const double rel = nan ? std::numeric_limits<double>::infinity()
+                                       : abs_err / denom;
                 if (rel > worst_rel) {
                     worst_rel = rel;
                     worst_e = e;
@@ -1019,7 +1029,8 @@ TEST(TestGroupMatmulInt8LargeShape, CkVsDlpAtProductionDims) {
     EXPECT_EQ(out_of_band, 0u)
             << out_of_band << " of " << total << " elements outside the bf16 "
             << "band; worst rel=" << worst_rel << " at expert=" << worst_e
-            << " m=" << worst_m << " n=" << worst_n << " (K=" << K
+            << " m=" << worst_m << " n=" << worst_n
+            << (saw_nan ? " (unwritten NaN)" : "") << " (K=" << K
             << " N_op1=" << N_op1 << " experts=" << p.num_ops << ")";
 }
 
@@ -1064,6 +1075,7 @@ TEST(TestGroupMatmulInt8LargeShape, ScalarOracleAtProductionDims) {
 
     double worst_rel = 0.0;
     size_t out_of_band = 0;
+    bool saw_nan = false;
     for (int e = 0; e < p.num_ops; ++e) {
         const auto *s = static_cast<const bfloat16_t *>(
                 src[e].get_raw_handle_unsafe());
@@ -1112,9 +1124,17 @@ TEST(TestGroupMatmulInt8LargeShape, ScalarOracleAtProductionDims) {
                 // converts, so an absolute floor is needed for near-zero
                 // products where a relative band is meaningless.
                 const double band = std::abs(ref) * 0.05 + 0.05;
-                if (std::abs(val - ref) > band) { ++out_of_band; }
-                const double rel
-                        = std::abs(val - ref) / std::max(std::abs(ref), 1e-6);
+                // A skipped store leaves the prefilled NaN. `NaN > band`
+                // is false, so reject NaN directly. Finite values and
+                // infinities keep the tolerance check: matching infinities
+                // produce a NaN difference, which does not satisfy `>`.
+                const bool nan = std::isnan(val) || std::isnan(ref);
+                const double abs_err = std::abs(val - ref);
+                if (nan || abs_err > band) { ++out_of_band; }
+                if (nan) { saw_nan = true; }
+                const double rel = nan
+                        ? std::numeric_limits<double>::infinity()
+                        : abs_err / std::max(std::abs(ref), 1e-6);
                 worst_rel = std::max(worst_rel, rel);
             }
         }
@@ -1123,8 +1143,8 @@ TEST(TestGroupMatmulInt8LargeShape, ScalarOracleAtProductionDims) {
     EXPECT_EQ(out_of_band, 0u)
             << out_of_band << " of " << total
             << " elements disagree with the scalar oracle; worst rel="
-            << worst_rel << " (K=" << K << " N_op1=" << N_op1
-            << " experts=" << p.num_ops << ")";
+            << worst_rel << (saw_nan ? " (unwritten NaN)" : "") << " (K=" << K
+            << " N_op1=" << N_op1 << " experts=" << p.num_ops << ")";
 }
 
 static std::vector<Int8AlgoCustomParam> make_int8_algo_custom_params() {
@@ -1712,7 +1732,8 @@ TEST_P(TestGroupMatmulInt8OblockOuter, MatchesOracle) {
                 if (b) acc[n] += static_cast<float>(b[n]);
             }
             double row_max = 0.0, worst = 0.0;
-            int worst_n = 0;
+            int worst_n = 0, nan_n = -1;
+            bool row_nan = false;
             for (int n = 0; n < cmpN; ++n) {
                 const double g = acc[n];
                 ref[n] = (p.act_int == 0)
@@ -1727,11 +1748,22 @@ TEST_P(TestGroupMatmulInt8OblockOuter, MatchesOracle) {
                         : static_cast<float>(
                                   static_cast<const bfloat16_t *>(raw)[idx]);
                 const double err = std::abs(val - ref[n]);
-                if (err > worst) {
+                // A skipped store leaves the prefilled NaN. `NaN > worst`
+                // is false, so reject NaN directly. Finite values and
+                // infinities keep the tolerance check: matching infinities
+                // produce a NaN difference, which does not satisfy `>`.
+                if (std::isnan(val) || std::isnan(ref[n])) {
+                    row_nan = true;
+                    nan_n = n;
+                } else if (err > worst) {
                     worst = err;
                     worst_n = n;
                 }
             }
+            EXPECT_FALSE(row_nan)
+                    << "int8 o-block nesting act=" << p.act_int
+                    << " E=" << p.num_ops << " e=" << e << " m=" << m
+                    << " unwritten NaN at n=" << nan_n;
             EXPECT_LE(worst, kRowBand * row_max)
                     << "int8 o-block nesting act=" << p.act_int
                     << " E=" << p.num_ops << " e=" << e << " m=" << m

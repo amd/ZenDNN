@@ -748,6 +748,16 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
         bool use_reference = false, int pack_format_b = 0,
         bool is_superblock = false);
 
+/** @brief Fill every stored f32, bf16, or f16 element with a quiet NaN.
+ *
+ *  Integer destinations are left unchanged: NaN is not representable.
+ *  Call this only when the kernel is invoked with beta == 0. A non-zero
+ *  beta accumulates into the existing buffer, and NaN would poison it.
+ *  The buffer overload is for destinations that are not a tensor_t.
+ */
+void fill_buffer_with_nan(void *buf, size_t nbytes, data_type_t dt);
+void fill_tensor_with_nan(tensor_t &tensor);
+
 // `group_matmul_kernel_test` was lifted into
 // `group_matmul/group_matmul_test_helpers.hpp` during the gtests folder
 // refactor so this header stays operator-agnostic.

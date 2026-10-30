@@ -272,6 +272,14 @@ status_t group_matmul_kernel_test(std::vector<tensor_t> &inputs,
             dsts[i] = outputs[i].get_raw_handle_unsafe();
         }
 
+        // beta == 0 must overwrite every element. A finite prefill can hide
+        // a skipped store. Integer destinations are left unchanged.
+        if (beta == 0.0f) {
+            for (size_t i = 0; i < num_ops; ++i) {
+                fill_tensor_with_nan(outputs[i]);
+            }
+        }
+
         status_t status = group_matmul_direct(layouts, transAs, transBs, Ms, Ns,
                 Ks, alphas, srcs, ldas_v, wts, ldbs_v, bias_ptrs, betas, dsts,
                 ldcs_v, is_wt_c, params_v, moe_postop, gated_act);
@@ -314,6 +322,12 @@ void expect_prompt_tile_matches_rounds(int mask, int mb, int ns,
     pt::test_api::ScopedOverride mb_knob(pt::kMb, mb), ns_knob(pt::kNs, ns);
 
     const auto initial = output_bytes(outputs);
+    // beta == 0 replaces every f32/bf16/f16 element with NaN before the
+    // kernel runs. The unwritten canary is that image: a skipped store
+    // leaves those bytes unchanged.
+    for (tensor_t &out : outputs)
+        fill_tensor_with_nan(out);
+    const auto unwritten = output_bytes(outputs);
     std::vector<std::vector<uint8_t>> got[2];
     std::string mode[2];
     long served[2] = {0, 0};
@@ -347,7 +361,7 @@ void expect_prompt_tile_matches_rounds(int mask, int mb, int ns,
     ASSERT_EQ(served[1], 1);
     for (size_t e = 0; e < outputs.size(); ++e) {
         if (active_rows.empty() || active_rows[e] > 0) {
-            EXPECT_TRUE(got[0][e] != initial[e])
+            EXPECT_TRUE(got[0][e] != unwritten[e])
                     << "reference left expert " << e << " unwritten";
         }
         EXPECT_TRUE(got[0][e] == got[1][e]) << "expert " << e << " differs";

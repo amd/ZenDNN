@@ -224,6 +224,7 @@ protected:
             bias_t[i]
                     = tensor_factory.uniform_dist_tensor({1, n}, bias_dt, 2.0);
             out_t[i] = tensor_factory.uniform_dist_tensor({m, n}, dst_dt, 2.0);
+            if (beta == 0.0f) { fill_tensor_with_nan(out_t[i]); }
             out_ref_t[i]
                     = tensor_factory.uniform_dist_tensor({m, n}, dst_dt, 2.0);
 
@@ -263,6 +264,12 @@ protected:
         std::vector<float> moe_weights(num_slots, 1.0f / topk);
         const size_t dst_elem_sz = zendnnl::common::size_of(dst_dt);
         std::vector<char> moe_output((size_t)num_tokens * D * dst_elem_sz, 0);
+        // The reduce overwrites every element. GEMM beta does not scale
+        // this buffer. A zero prefill passes when the reference is inside
+        // the absolute bound.
+        if (enable_moe) {
+            fill_buffer_with_nan(moe_output.data(), moe_output.size(), dst_dt);
+        }
         std::vector<const void *> row_ptrs(num_slots);
 
         group_matmul_moe_postop_params moe {};
@@ -375,8 +382,11 @@ protected:
                     const float got = load_dst_f32(
                             reinterpret_cast<const char *>(moe_output.data()),
                             (size_t)t * D + d);
-                    if (std::abs(acc - got)
-                            > moe_abs_bound + effective_rtol * std::abs(acc)) {
+                    const float bound
+                            = moe_abs_bound + effective_rtol * std::abs(acc);
+                    // A skipped store stays NaN. NaN > bound is false.
+                    if (std::isnan(got) || std::isnan(acc)
+                            || std::abs(acc - got) > bound) {
                         log_error("MoE mismatch t=", t, " d=", d,
                                 " expected=", acc, " got=", got);
                         ok = false;

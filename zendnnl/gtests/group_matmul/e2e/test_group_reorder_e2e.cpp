@@ -50,6 +50,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 #include "common/op_config.hpp"
@@ -127,6 +128,7 @@ TEST(GroupReorderModelE2E, WarmUpThenInferenceFetchesReorderedWeights) {
         wt[e] = tf.uniform_dist_tensor({K, N}, data_type_t::bf16, 2.0, false);
         bias[e] = tensor_t {}; // no bias (CK bf16 none-act path)
         out[e] = tf.uniform_dist_tensor({M, N}, data_type_t::bf16, 2.0);
+        fill_tensor_with_nan(out[e]);
         out_ref[e] = tf.uniform_dist_tensor({M, N}, data_type_t::bf16, 2.0);
         wptr[e] = wt[e].get_raw_handle_unsafe();
     }
@@ -285,6 +287,7 @@ TEST(GroupReorderModelE2E, F16WarmUpThenInferenceFetchesReorderedWeights) {
         wt[e] = tf.uniform_dist_tensor({K, N}, data_type_t::f16, 2.0, false);
         bias[e] = tensor_t {}; // no bias (CK f16 none-act path)
         out[e] = tf.uniform_dist_tensor({M, N}, data_type_t::f16, 2.0);
+        fill_tensor_with_nan(out[e]);
         out_ref[e] = tf.uniform_dist_tensor({M, N}, data_type_t::f16, 2.0);
         wptr[e] = wt[e].get_raw_handle_unsafe();
     }
@@ -520,7 +523,10 @@ void expect_prepacked_ck_call_matches_reference(
     for (int e = 0; e < E; ++e) {
         src[e].resize(static_cast<size_t>(M) * K);
         wei[e].resize(static_cast<size_t>(K) * N);
-        dst[e].assign(static_cast<size_t>(M) * N, bfloat16_t(0.0f));
+        // beta == 0 must overwrite every element. A zero prefill passes
+        // ASSERT_NEAR when the reference is within about 0.01.
+        dst[e].assign(static_cast<size_t>(M) * N,
+                bfloat16_t(std::numeric_limits<float>::quiet_NaN()));
         mt::fill_src(src[e], e, 0.5f);
         mt::fill_wei1(wei[e], e, 0.1f);
         raw[e] = wei[e].data();

@@ -547,7 +547,13 @@ inline void compare_activated_2D(const tensor_t &out, const tensor_t &out_ref,
             if (gate_term > allowed) { allowed = gate_term; }
             if (up_term > allowed) { allowed = up_term; }
             const float abs_err = std::fabs(a - r);
-            if (abs_err > allowed) { ok = false; }
+            // A skipped store leaves the prefilled NaN. `NaN > allowed`
+            // is false, so reject NaN directly. Finite values and
+            // infinities keep the tolerance check: matching infinities
+            // produce a NaN difference, which does not satisfy `>`.
+            if (std::isnan(a) || std::isnan(r) || abs_err > allowed) {
+                ok = false;
+            }
         }
     }
 }
