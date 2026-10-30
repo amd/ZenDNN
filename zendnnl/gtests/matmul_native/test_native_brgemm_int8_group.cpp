@@ -30,11 +30,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <random>
 #include <string>
 #include <utility>
 #include <vector>
@@ -42,6 +44,7 @@
 #include <gtest/gtest.h>
 
 #include "gtest_utils.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/native_int8_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_brgemm_looper.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_int8_tile.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_planner.hpp"
@@ -419,8 +422,9 @@ nat::native_problem_t problem_of(const nt::call_t &c) {
     desc.bias_dt = c.params.dtypes.bias;
     desc.bias = c.bias;
     desc.num_threads = c.params.num_threads;
-    return nat::make_native_problem(
-            desc, c.params, c.bias, nat::kNativeLayoutPackNr);
+    return nat::make_native_problem(desc, c.params, c.bias,
+            nat::kNativeLayoutPackNr,
+            nat::decide_int8_call(desc, c.params, c.bias));
 }
 
 /// The call under ALGO 11 into a copy of the initial dst, calls times; the
@@ -564,8 +568,8 @@ std::vector<gcase_t> named(std::vector<gcase_t> v) {
 std::vector<gcase_t> cases() {
     const gcase_t base;
     std::vector<gcase_t> v;
-    // group sizes (12 and 96 not powers of two) over the source scales
-    for (int gs : {4, 8, 12, 32, 64, 96, 128, 256})
+    // group sizes (12, 48 and 96 not powers of two) over the source scales
+    for (int gs : {4, 8, 12, 16, 32, 48, 64, 96, 128, 256})
         for (gran_t gran : {gran_t::group, gran_t::token, gran_t::tensor}) {
             gcase_t c = base;
             c.gs = gs;
@@ -637,6 +641,29 @@ std::vector<gcase_t> cases() {
         c.dst = kBf16;
         v.push_back(c);
     }
+    // many groups in one batch, the weight scales of each type read in
+    // place
+    for (data_type_t ws : {kF32, kBf16, kF16})
+        for (data_type_t dst : {kF32, kBf16}) {
+            gcase_t c = base;
+            c.M = 13;
+            c.gs = 8;
+            c.G = 80;
+            c.wei_scale_dt = ws;
+            c.dst = dst;
+            v.push_back(c);
+        }
+    // the weight scales of each type over several tiles and threads
+    for (data_type_t ws : {kF32, kBf16, kF16}) {
+        gcase_t c = base;
+        c.M = 33;
+        c.N = 320;
+        c.gs = 16;
+        c.G = 12;
+        c.wei_scale_dt = ws;
+        c.threads = 3;
+        v.push_back(c);
+    }
     for (po_t po : {po_t::add, po_t::gelu, po_t::gelu_add})
         for (data_type_t dst : {kF32, kBf16}) {
             gcase_t c = base;
@@ -686,6 +713,18 @@ std::vector<gcase_t> cases() {
         c.threads = threads;
         v.push_back(c);
     }
+    // the shift sums claimed over several chunks: at K = 4096 a claim covers
+    // 16 rows, so 100 rows take 7 claims, the last one partial, and tiles
+    // wait on chunks other threads claimed
+    for (int threads : {3, 0}) {
+        gcase_t c = base;
+        c.M = 100;
+        c.N = 128;
+        c.gs = 128;
+        c.G = 32;
+        c.threads = threads;
+        v.push_back(c);
+    }
     {
         gcase_t c = base;
         c.M = 128;
@@ -708,55 +747,64 @@ INSTANTIATE_TEST_SUITE_P(NativeBrgemmInt8PerGroup, NativeBrgemmInt8PerGroup,
 
 // A gated activation over a pack of interleaved gate / up columns: the
 // group sums and scales of both halves in the reference order, then the
-// activation within the band of the epilogue suite.
+// activation within the band of the epilogue suite.  The tile gathers the
+// weight scales of such a pack a bounded number of groups at a time, so 40
+// groups carry the sum from one batch of groups to the next.
 TEST(NativeBrgemmInt8PerGroupGated, MatchesTheModel) {
     if (!vnni()) GTEST_SKIP() << "no AVX-512 VNNI";
     mm::clear_matmul_weight_caches();
     WeightCacheGuard global_cache(2);
     for (mm::matmul_gated_act_t act : {mm::matmul_gated_act_t::silu_and_mul,
                  mm::matmul_gated_act_t::gelu_and_mul})
-        for (data_type_t dst : {kF32, kBf16}) {
-            gcase_t c;
-            c.M = 7;
-            c.N = 128;
-            c.dst = dst;
-            c.bias = kBf16;
-            c.wei_scale_dt = kBf16;
-            c.name = std::string("gated")
-                    + std::to_string(static_cast<int>(act)) + "_"
-                    + dt_name(dst);
-            SCOPED_TRACE(c.name);
-            const operands_t o = make_operands(c);
-            const source_t s = source_of(c, o);
-            const int I = c.N / 2;
-            buffer_t got = nt::make_buffer(
-                    static_cast<size_t>(c.M) * I * nt::dt_bytes(dst));
-            const buffer_t scale = copy_of(o.src_scale);
-            nt::call_t call = make_call(c, o, o.wei.get(), got.get(), scale);
-            call.gated = act;
-            call.ldc = I;
-            {
-                const nt::algo_pin_t pin(matmul_algo_t::native_brgemm);
-                ASSERT_EQ(nt::run_matmul(call), status_t::success);
-                if (c.wc != 0) {
-                    ASSERT_GE(nt::native_layouts(o.wei.get()), 1u)
-                            << "not served by the native BRGEMM";
+        for (data_type_t dst : {kF32, kBf16})
+            for (data_type_t ws : {kF32, kBf16, kF16})
+                for (int G : {4, 40}) {
+                    gcase_t c;
+                    c.M = 7;
+                    c.N = 128;
+                    c.gs = G == 4 ? 32 : 8;
+                    c.G = G;
+                    c.dst = dst;
+                    c.bias = kBf16;
+                    c.wei_scale_dt = ws;
+                    c.name = std::string("gated")
+                            + std::to_string(static_cast<int>(act)) + "_"
+                            + dt_name(dst) + "_ws" + dt_name(ws) + "_g"
+                            + std::to_string(G);
+                    SCOPED_TRACE(c.name);
+                    const operands_t o = make_operands(c);
+                    const source_t s = source_of(c, o);
+                    const int I = c.N / 2;
+                    buffer_t got = nt::make_buffer(
+                            static_cast<size_t>(c.M) * I * nt::dt_bytes(dst));
+                    const buffer_t scale = copy_of(o.src_scale);
+                    nt::call_t call
+                            = make_call(c, o, o.wei.get(), got.get(), scale);
+                    call.gated = act;
+                    call.ldc = I;
+                    {
+                        const nt::algo_pin_t pin(matmul_algo_t::native_brgemm);
+                        ASSERT_EQ(nt::run_matmul(call), status_t::success);
+                        if (c.wc != 0) {
+                            ASSERT_GE(nt::native_layouts(o.wei.get()), 1u)
+                                    << "not served by the native BRGEMM";
+                        }
+                    }
+                    std::vector<float> pre(static_cast<size_t>(c.M) * c.N);
+                    for (int m = 0; m < c.M; ++m)
+                        for (int n = 0; n < c.N; ++n)
+                            pre[static_cast<size_t>(m) * c.N + n]
+                                    = model_at(c, o, s, m, n);
+                    std::vector<float> out(static_cast<size_t>(c.M) * I);
+                    nt::gated_act_ref(pre.data(), c.M, c.N, act, out.data());
+                    buffer_t want = nt::make_buffer(
+                            static_cast<size_t>(c.M) * I * nt::dt_bytes(dst));
+                    for (size_t i = 0; i < out.size(); ++i)
+                        nt::store_f32(want.get(), dst, i, out[i]);
+                    EXPECT_TRUE(nt::within_band(got.get(), I, want.get(), I,
+                            dst, c.M, I,
+                            dst == kBf16 ? 3e-4f + 1.0f / 256 : 3e-4f, 3e-4f));
                 }
-            }
-            std::vector<float> pre(static_cast<size_t>(c.M) * c.N);
-            for (int m = 0; m < c.M; ++m)
-                for (int n = 0; n < c.N; ++n)
-                    pre[static_cast<size_t>(m) * c.N + n]
-                            = model_at(c, o, s, m, n);
-            std::vector<float> out(static_cast<size_t>(c.M) * I);
-            nt::gated_act_ref(pre.data(), c.M, c.N, act, out.data());
-            buffer_t want = nt::make_buffer(
-                    static_cast<size_t>(c.M) * I * nt::dt_bytes(dst));
-            for (size_t i = 0; i < out.size(); ++i)
-                nt::store_f32(want.get(), dst, i, out[i]);
-            EXPECT_TRUE(nt::within_band(got.get(), I, want.get(), I, dst, c.M,
-                    I, dst == kBf16 ? 3e-4f + 1.0f / 256 : 3e-4f, 3e-4f));
-        }
     mm::clear_matmul_weight_caches();
 }
 
@@ -779,9 +827,11 @@ TEST(NativeBrgemmInt8PerGroupPlan, PinsKeepTheBits) {
             {"int8_kc=4096", false}, {"l1_pass=0", false}, {"int8_mr=5", true},
             {"int8_cw=16", true}, {"int8_cw=32/16,int8_mr=3", true},
             {"nr=16", true}, {"mb=8", true}, {"bias_in_dequant=0", false},
-            {"direct_store=0", false}, {"threads_cap=1", true},
+            {"direct_store=0", true}, {"threads_cap=1", true},
             {"schedule=row_groups,domain_threads=2", true},
-            {"int8_kc=64,int8_mr=5", true}};
+            {"int8_kc=64,int8_mr=5", true}, {"schedule=blocks", true},
+            {"schedule=blocks,unit_tiles=3,domain_threads=2", true},
+            {"schedule=blocks,unit_tiles=2,domain_threads=2", true}};
     std::vector<gcase_t> v;
     {
         gcase_t c;
@@ -796,6 +846,14 @@ TEST(NativeBrgemmInt8PerGroupPlan, PinsKeepTheBits) {
         c.dst = kBf16;
         c.alpha = 0.5f;
         c.beta = 0.25f;
+        v.push_back(c);
+        // Several shift claims (K = 4096), under every setting; its own M
+        // range keeps its override clauses apart from the others'.
+        c = gcase_t {};
+        c.M = 100;
+        c.N = 128;
+        c.gs = 128;
+        c.G = 32;
         v.push_back(c);
     }
     // The process planner reads its settings once: one child process runs
@@ -1016,6 +1074,231 @@ TEST(NativeBrgemmInt8PerGroupDecline, OtherRoutesServe) {
                 status_t::unimplemented);
     }
     mm::clear_matmul_weight_caches();
+}
+
+TEST(NativeBrgemmInt8GroupKernel, Table) {
+    for (int nv : {1, 2}) {
+        const int max_mr = nat::native_int8_group_ukernel_max_mr(nv);
+        EXPECT_GE(max_mr, 6) << nv;
+        EXPECT_LE(max_mr, 12) << nv;
+        EXPECT_EQ(nat::select_native_int8_group_ukernel(0, nv), nullptr);
+        EXPECT_EQ(
+                nat::select_native_int8_group_ukernel(max_mr + 1, nv), nullptr);
+        for (int mr = 1; mr <= max_mr; ++mr)
+            EXPECT_NE(nat::select_native_int8_group_ukernel(mr, nv), nullptr)
+                    << mr << " " << nv;
+    }
+    for (int nv : {3, 4}) {
+        EXPECT_EQ(nat::native_int8_group_ukernel_max_mr(nv), 0);
+        EXPECT_EQ(nat::select_native_int8_group_ukernel(1, nv), nullptr);
+    }
+}
+
+// The batch-reduce contract of the group kernel on its own: per element the
+// exact int32 sum (its shift plus the weight read as w + 128), then source
+// and weight scales (f32, bf16 or f16) and one add per element, in batch
+// order from C (or +0.0), stored to C or to a bf16 / f32 destination; bit
+// for bit against a scalar model, over every row count, width and weight
+// scale type, with the store, the entry C, per-group source scales and the
+// source padding drawn from a generator of their own, independently of each
+// other and of the shapes.  Nothing past the tile's columns is
+// written, and C is not written when the tile stores to a destination.
+TEST(NativeBrgemmInt8GroupKernel, MatchesTheModel) {
+    if (!vnni()) GTEST_SKIP() << "no AVX-512 VNNI";
+    enum class store_t { c, f32, bf16 };
+    std::mt19937 rng(20261026);
+    std::uniform_int_distribution<int> byte(-128, 127);
+    std::uniform_real_distribution<float> scale(0.002f, 0.01f);
+    std::mt19937 draws(7);
+    std::uniform_int_distribution<int> pick(0, 35);
+    int variant = 0;
+    for (data_type_t sb_dt : {kF32, kBf16, kF16})
+        for (int nv : {1, 2})
+            for (int mr = 1; mr <= nat::native_int8_group_ukernel_max_mr(nv);
+                    ++mr)
+                for (int k_quads : {1, 3, 8, 32})
+                    for (int batch : {1, 2, 5}) {
+                        const int v = variant++;
+                        const int nr = 16 * nv;
+                        const int pack_nr = 64, col0 = nv == 1 ? 16 : 32;
+                        const int K = batch * k_quads * 4;
+                        const int s = pick(draws);
+                        const store_t store = static_cast<store_t>(s % 3);
+                        const bool accumulate = (s / 3) % 2 == 1;
+                        const bool per_group_src = (s / 6) % 2 == 0;
+                        const int lda = K + 4 * ((s / 12) % 3);
+                        // A zero sum with a negative scale gives -0.0, which
+                        // the first element adds to +0.0.
+                        const bool zero_row = v % 5 == 2;
+                        SCOPED_TRACE("mr=" + std::to_string(mr)
+                                + " nv=" + std::to_string(nv)
+                                + " k_quads=" + std::to_string(k_quads)
+                                + " batch=" + std::to_string(batch) + " store="
+                                + std::to_string(static_cast<int>(store))
+                                + " accumulate=" + std::to_string(accumulate)
+                                + " per_group_src="
+                                + std::to_string(per_group_src)
+                                + " lda=" + std::to_string(lda)
+                                + " wei_scale=" + dt_name(sb_dt));
+                        std::vector<int8_t> a(static_cast<size_t>(mr) * lda);
+                        for (auto &x : a)
+                            x = static_cast<int8_t>(byte(rng));
+                        if (zero_row)
+                            std::fill(a.begin(), a.begin() + lda, int8_t {0});
+                        const int quads = batch * k_quads;
+                        std::vector<int8_t> b(
+                                static_cast<size_t>(quads) * pack_nr * 4);
+                        for (auto &x : b)
+                            x = static_cast<int8_t>(byte(rng));
+                        const auto w_at = [&](int k, int n) {
+                            return b[(static_cast<size_t>(k / 4) * pack_nr
+                                             + col0 + n)
+                                            * 4
+                                    + k % 4];
+                        };
+                        std::vector<int32_t> shift(
+                                static_cast<size_t>(mr) * batch);
+                        for (int m = 0; m < mr; ++m)
+                            for (int g = 0; g < batch; ++g) {
+                                int32_t s = 0;
+                                for (int k = 0; k < k_quads * 4; ++k)
+                                    s += a[static_cast<size_t>(m) * lda
+                                            + static_cast<size_t>(g) * k_quads
+                                                    * 4
+                                            + k];
+                                shift[static_cast<size_t>(m) * batch + g]
+                                        = -128 * s;
+                            }
+                        const int sa_ld = per_group_src ? batch : 1;
+                        const int sa_step = per_group_src ? 1 : 0;
+                        std::vector<float> sa(
+                                static_cast<size_t>(mr) * batch, 0.0f);
+                        for (auto &x : sa)
+                            x = scale(rng) * (zero_row ? -1.0f : 1.0f);
+                        const int sb_step = nr + 16;
+                        const size_t sb_n
+                                = static_cast<size_t>(batch) * sb_step;
+                        buffer_t sb
+                                = nt::make_buffer(sb_n * nt::dt_bytes(sb_dt));
+                        for (size_t i = 0; i < sb_n; ++i)
+                            nt::store_f32(sb.get(), sb_dt, i, scale(rng));
+                        const int ldc = nr + 16, dst_ldc = nr + 32;
+                        std::vector<float> c(static_cast<size_t>(mr) * ldc);
+                        for (auto &x : c)
+                            x = scale(rng) * 100.0f - 0.5f;
+                        const std::vector<float> c_in = c;
+                        std::vector<uint8_t> dst(
+                                static_cast<size_t>(mr) * dst_ldc * 4, 0x5A);
+                        const std::vector<uint8_t> dst_in = dst;
+
+                        nat::native_int8_group_ukernel_args_t args;
+                        args.A = reinterpret_cast<const uint8_t *>(a.data());
+                        args.lda = lda;
+                        args.a_step = static_cast<size_t>(k_quads) * 4;
+                        args.B = b.data() + col0 * 4;
+                        args.b_stride = pack_nr * 4;
+                        args.b_step
+                                = static_cast<size_t>(k_quads) * pack_nr * 4;
+                        args.k_quads = k_quads;
+                        args.batch = batch;
+                        args.shift = shift.data();
+                        args.shift_ld = batch;
+                        args.shift_step = 1;
+                        args.src_scale = sa.data();
+                        args.src_scale_ld = sa_ld;
+                        args.src_scale_step = sa_step;
+                        args.wei_scale = sb.get();
+                        args.wei_scale_step = sb_step;
+                        args.wei_scale_dt = sb_dt;
+                        args.C = c.data();
+                        args.ldc = ldc;
+                        args.accumulate = accumulate;
+                        if (store != store_t::c) {
+                            args.dst = dst.data();
+                            args.dst_ldc = dst_ldc;
+                            args.dst_bf16 = store == store_t::bf16;
+                        }
+                        nat::select_native_int8_group_ukernel(mr, nv)(args);
+
+                        size_t bad = 0;
+                        for (int m = 0; m < mr; ++m)
+                            for (int n = 0; n < nr; ++n) {
+                                float sum = accumulate
+                                        ? c_in[static_cast<size_t>(m) * ldc + n]
+                                        : 0.0f;
+                                for (int g = 0; g < batch; ++g) {
+                                    int32_t acc = 0;
+                                    int32_t exact = 0;
+                                    for (int k = 0; k < k_quads * 4; ++k) {
+                                        const int kk = g * k_quads * 4 + k;
+                                        const int x
+                                                = a[static_cast<size_t>(m) * lda
+                                                        + kk];
+                                        acc += (w_at(kk, n) + 128) * x;
+                                        exact += w_at(kk, n) * x;
+                                    }
+                                    const int32_t d = acc
+                                            + shift[static_cast<size_t>(m)
+                                                            * batch
+                                                    + g];
+                                    if (d != exact) ++bad;
+                                    float t = static_cast<float>(d);
+                                    t = t
+                                            * sa[static_cast<size_t>(m) * sa_ld
+                                                    + g * sa_step];
+                                    t = t
+                                            * nt::load_f32(sb.get(), sb_dt,
+                                                    static_cast<size_t>(g)
+                                                                    * sb_step
+                                                            + n);
+                                    sum = sum + t;
+                                }
+                                const size_t ci
+                                        = static_cast<size_t>(m) * ldc + n;
+                                const size_t di
+                                        = static_cast<size_t>(m) * dst_ldc + n;
+                                if (store == store_t::c) {
+                                    if (std::memcmp(&c[ci], &sum, 4) != 0)
+                                        ++bad;
+                                } else if (store == store_t::f32) {
+                                    if (std::memcmp(
+                                                dst.data() + 4 * di, &sum, 4)
+                                            != 0)
+                                        ++bad;
+                                } else {
+                                    uint16_t want = 0;
+                                    nt::store_f32(&want, kBf16, 0, sum);
+                                    if (std::memcmp(
+                                                dst.data() + 2 * di, &want, 2)
+                                            != 0)
+                                        ++bad;
+                                }
+                            }
+                        EXPECT_EQ(bad, 0u);
+                        // The bytes the tile does not own: C past nr, or all
+                        // of C under a destination store; the destination
+                        // past nr, or all of it without one.
+                        const size_t esz = store == store_t::bf16 ? 2 : 4;
+                        size_t written = 0;
+                        for (int m = 0; m < mr; ++m)
+                            for (int n = 0; n < ldc; ++n) {
+                                const size_t ci
+                                        = static_cast<size_t>(m) * ldc + n;
+                                if (store == store_t::c && n < nr) continue;
+                                written += std::memcmp(&c[ci], &c_in[ci], 4)
+                                        != 0;
+                            }
+                        for (size_t i = 0; i < dst.size(); ++i) {
+                            const size_t row = i / (dst_ldc * esz);
+                            const size_t col = i % (dst_ldc * esz) / esz;
+                            if (store != store_t::c
+                                    && row < static_cast<size_t>(mr)
+                                    && col < static_cast<size_t>(nr))
+                                continue;
+                            written += dst[i] != dst_in[i];
+                        }
+                        EXPECT_EQ(written, 0u);
+                    }
 }
 
 } // namespace

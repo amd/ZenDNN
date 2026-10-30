@@ -64,13 +64,58 @@ inline const float *column_values(const void *v, data_type_t dt, int stride,
     return buf;
 }
 
-/// finish_in_reference_order with alpha 1 and beta 0 over nr pack columns (a
-/// multiple of 16): ((f32(S) + Z) * src_scale) * wei_scale[j], one rounding
-/// per operation.
-ZENDNNL_TARGET("avx512f,avx512dq")
-void scale_in_reference_order(const native_int8_call_t &call, int m0, int mr,
-        int nr, const int32_t *col_sum, const float *wei_scale, float *C,
-        int ldc) {
+/// The destination at row and columns p .. p + 16, read as float the way
+/// the reference reads it: exactly, an s32 value rounded to nearest.  Pack
+/// columns are destination columns: a call with beta has a plain pack.
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
+inline __m512 dst_values(const native_int8_call_t &call, int row, int p) {
+    const size_t at = static_cast<size_t>(row) * call.ldc + p;
+    switch (call.dst_dt) {
+        case data_type_t::f32:
+            return _mm512_loadu_ps(static_cast<const float *>(call.dst) + at);
+        case data_type_t::bf16:
+        case data_type_t::f16: {
+            const __m256i h
+                    = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(
+                            static_cast<const uint16_t *>(call.dst) + at));
+            return call.dst_dt == data_type_t::bf16 ? avx512_bf16_to_f32(h)
+                                                    : _mm512_cvtph_ps(h);
+        }
+        case data_type_t::s8:
+            return _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(
+                    _mm_loadu_si128(reinterpret_cast<const __m128i *>(
+                            static_cast<const int8_t *>(call.dst) + at))));
+        case data_type_t::u8:
+            return _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(
+                    _mm_loadu_si128(reinterpret_cast<const __m128i *>(
+                            static_cast<const uint8_t *>(call.dst) + at))));
+        case data_type_t::s32:
+            return _mm512_cvtepi32_ps(_mm512_loadu_si512(
+                    static_cast<const int32_t *>(call.dst) + at));
+        default: break;
+    }
+    alignas(64) float v[16];
+    for (int l = 0; l < 16; ++l)
+        v[l] = read_and_cast<float>(call.dst, call.dst_dt, at + l);
+    return _mm512_load_ps(v);
+}
+
+/// C holds f32(S) for rows m0 .. m0 + mr and pack columns p0 .. p0 + nr (a
+/// multiple of 16), wei_scale the f32 weight scales of those columns.
+/// Applies alpha, beta, the zero-point term and the scales one rounding at a
+/// time, in the reference algorithm's order: ((alpha * S + beta * C + Z) *
+/// src_scale) * wei_scale[j].
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,avx512dq")
+void finish_in_reference_order(const native_int8_call_t &call,
+        const native_weight_view_t &w, int m0, int mr, int p0, int nr,
+        const int32_t *col_sum, const float *wei_scale, float *C, int ldc) {
+    const bool scale_alpha = call.alpha != 1.0f;
+    const bool add_beta = call.beta != 0.0f;
+    // An interleaved pack comes only with a gated activation, which no call
+    // with beta takes (check_int8_call, prepare_epilogue).
+    assert(!add_beta || !w.interleaved);
+    const __m512 alpha = _mm512_set1_ps(call.alpha);
+    const __m512 beta = _mm512_set1_ps(call.beta);
     for (int r = 0; r < mr; ++r) {
         const int row = m0 + r;
         const int64_t zp = call.src_zp != nullptr
@@ -82,8 +127,16 @@ void scale_in_reference_order(const native_int8_call_t &call, int m0, int mr,
         float *c = C + static_cast<size_t>(r) * ldc;
         for (int j = 0; j < nr; j += 16) {
             __m512 v = _mm512_loadu_ps(c + j);
+            // No product may fuse with the add that follows it.
+            if (scale_alpha) v = avx512_mul_unfused(v, alpha);
+            if (add_beta)
+                v = _mm512_add_ps(v,
+                        avx512_mul_unfused(
+                                dst_values(call, row, p0 + j), beta));
             if (zp != 0) {
-                // The int64 products of the scalar finish, each rounded once.
+                // In int64, each product rounded once: exact for any zero
+                // point, and equal to the wrapping int32 product wherever
+                // that one does not wrap.
                 const __m512i cs = _mm512_loadu_si512(col_sum + j);
                 const __m256 lo = _mm512_cvtepi64_ps(_mm512_mullo_epi64(
                         _mm512_cvtepi32_epi64(_mm512_castsi512_si256(cs)),
@@ -97,48 +150,6 @@ void scale_in_reference_order(const native_int8_call_t &call, int m0, int mr,
             v = _mm512_mul_ps(
                     _mm512_mul_ps(v, a), _mm512_loadu_ps(wei_scale + j));
             _mm512_storeu_ps(c + j, v);
-        }
-    }
-}
-
-/// C holds f32(S) for rows m0 .. m0 + mr and pack columns p0 .. p0 + nr,
-/// wei_scale the f32 weight scales of those columns.  Applies alpha, beta,
-/// the zero-point term and the scales one rounding at a time, in the
-/// reference algorithm's order.
-void finish_in_reference_order(const native_int8_call_t &call,
-        const native_weight_view_t &w, int m0, int mr, int p0, int nr,
-        const int32_t *col_sum, const float *wei_scale, float *C, int ldc) {
-#if defined(__clang__)
-// Each step rounds once: no product may fuse with the add that follows it.
-#pragma clang fp contract(off)
-#endif
-    if (call.alpha == 1.0f && call.beta == 0.0f) {
-        scale_in_reference_order(call, m0, mr, nr, col_sum, wei_scale, C, ldc);
-        return;
-    }
-    for (int r = 0; r < mr; ++r) {
-        const int row = m0 + r;
-        const int32_t zp = call.src_zp != nullptr
-                ? call.src_zp[call.src_zp_stride * row]
-                : 0;
-        const float src_scale = call.src_scale[call.src_scale_stride * row];
-        float *c = C + static_cast<size_t>(r) * ldc;
-        for (int j = 0; j < nr; ++j) {
-            const int col = w.logical_col(p0 + j);
-            float v = c[j];
-            if (call.alpha != 1.0f) v *= call.alpha;
-            if (call.beta != 0.0f) {
-                v += read_and_cast<float>(call.dst, call.dst_dt,
-                             static_cast<size_t>(row) * call.ldc + col)
-                        * call.beta;
-            }
-            // In int64: exact for any zero point, and equal to the wrapping
-            // int32 product wherever that one does not wrap.
-            if (zp != 0)
-                v += static_cast<float>(-static_cast<int64_t>(zp) * col_sum[j]);
-            v *= src_scale;
-            v *= wei_scale[j];
-            c[j] = v;
         }
     }
 }
@@ -185,6 +196,7 @@ void compute_channel_tile(const native_plan_t &plan,
 
     for (int c = 0; c < nr;) {
         const int cw = native_int8_col_width(plan, nr - c);
+        assert(cw <= kMaxTileNr);
         const int nv = cw / 16;
         const float *col_scale
                 = column_values(call.wei_scale, call.wei_scale_dt,

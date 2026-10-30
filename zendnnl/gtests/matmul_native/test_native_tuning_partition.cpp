@@ -15,11 +15,13 @@
  ******************************************************************************/
 
 // Partition of the native BRGEMM.  For every strategy (slice in both tile
-// orders, row groups), column range and team size, every tile of the range
-// must go to exactly one worker, in whole tiles of at most mb rows; slice,
-// and row groups over the full range, must run the units in the order of a
-// reference copy of the schedules; a team other than the plan's must fall
-// back to slice.  The CPU team must run every unit once with scratch of its
+// orders, row groups, blocks), column range and team size, every tile of the
+// range must go to exactly one worker, in whole tiles of at most mb rows;
+// slice, and row groups over the full range, must run the units in the order
+// of a reference copy of the schedules; a team other than the plan's must
+// fall back to slice; the blocks schedule must deal each domain a
+// proportional share of the row blocks and order each share column group by
+// column group.  The CPU team must run every unit once with scratch of its
 // own per thread, inline for a team of 1.
 
 #include <algorithm>
@@ -59,7 +61,8 @@ int ceil_div(int a, int b) {
 
 std::string text(const unit_t &u) {
     std::ostringstream os;
-    os << "{m0 " << u.m0 << " rows " << u.rows << " n0 " << u.n0 << "}";
+    os << "{m0 " << u.m0 << " rows " << u.rows << " n0 " << u.n0 << " tiles "
+       << u.tiles << "}";
     return os.str();
 }
 
@@ -76,31 +79,34 @@ std::string text(const nat::native_plan_t &p) {
 bool same_units(const std::vector<unit_t> &a, const std::vector<unit_t> &b) {
     if (a.size() != b.size()) return false;
     for (size_t i = 0; i < a.size(); ++i)
-        if (a[i].m0 != b[i].m0 || a[i].rows != b[i].rows || a[i].n0 != b[i].n0)
+        if (a[i].m0 != b[i].m0 || a[i].rows != b[i].rows || a[i].n0 != b[i].n0
+                || a[i].tiles != b[i].tiles)
             return false;
     return true;
 }
 
 /// Rows [0, M) of column tiles c0 .. c1, each in exactly one unit; every
-/// unit one whole tile inside them, of at most mb rows (the scratch holds mb
-/// rows of one tile).
+/// unit whole tiles inside them (one, or under the blocks schedule at most
+/// unit_tiles), of at most mb rows (the scratch holds mb rows of the tiles
+/// of a unit).
 ::testing::AssertionResult covers_once(const std::vector<unit_t> &units,
         const nat::native_plan_t &p, int M, int c0, int c1) {
     std::vector<uint8_t> hits(static_cast<size_t>(M) * (c1 - c0), 0);
+    const int max_tiles = std::max(1, p.unit_tiles);
     for (const unit_t &u : units) {
         if (u.rows < 1 || u.m0 < 0 || u.m0 + u.rows > M || u.rows > p.mb
-                || u.n0 % p.nr != 0 || u.n0 < c0 * p.nr
-                || u.n0 + p.nr > c1 * p.nr)
+                || u.tiles < 1 || u.tiles > max_tiles || u.n0 % p.nr != 0
+                || u.n0 < c0 * p.nr || u.n0 + u.tiles * p.nr > c1 * p.nr)
             return ::testing::AssertionFailure()
                     << "unit " << text(u) << " outside rows [0, " << M
                     << ") x tiles [" << c0 << ", " << c1 << ") of nr " << p.nr
-                    << ", mb " << p.mb;
-        const int t = u.n0 / p.nr;
-        for (int r = u.m0; r < u.m0 + u.rows; ++r)
-            if (++hits[static_cast<size_t>(t - c0) * M + r] > 1)
-                return ::testing::AssertionFailure()
-                        << "row " << r << " of tile " << t
-                        << " in two units, the second " << text(u);
+                    << ", mb " << p.mb << ", at most " << max_tiles << " tiles";
+        for (int t = u.n0 / p.nr; t < u.n0 / p.nr + u.tiles; ++t)
+            for (int r = u.m0; r < u.m0 + u.rows; ++r)
+                if (++hits[static_cast<size_t>(t - c0) * M + r] > 1)
+                    return ::testing::AssertionFailure()
+                            << "row " << r << " of tile " << t
+                            << " in two units, the second " << text(u);
     }
     for (size_t i = 0; i < hits.size(); ++i)
         if (hits[i] == 0)
@@ -211,7 +217,11 @@ const char *const kPlanVariants[] = {"", "traversal=n_inner", "schedule=slice",
         "col_groups=4,mb=7,row_unit=1", "mb=50,traversal=n_inner",
         "nr=16,schedule=row_groups,domain_threads=8,row_unit=24",
         "threads_cap=6,schedule=row_groups,domain_threads=6",
-        "min_tiles_per_thread=4,col_groups=2"};
+        "min_tiles_per_thread=4,col_groups=2", "schedule=blocks",
+        "schedule=blocks,unit_tiles=1", "schedule=blocks,unit_tiles=3,mb=40",
+        "schedule=blocks,unit_tiles=4096,domain_threads=2",
+        "schedule=blocks,unit_tiles=5,mb=7,domain_threads=3",
+        "schedule=blocks,nr=16,unit_tiles=2,domain_threads=1"};
 
 nat::heuristic_params_t params_of(const char *settings) {
     nat::native_config_t cfg;
@@ -311,7 +321,9 @@ TEST(NativeTuningPartition, EveryTileOnceForEveryStrategyRangeAndTeam) {
                         = bf16_problem(s[0], s[1], kK, threads);
                 const nat::native_plan_t p
                         = nat::heuristic_plan(pr, uarch, params_of(settings));
-                if (!partition_legal(p, pr)) continue;
+                // The blocks schedule deals its units from counters
+                // (BlocksDealsEveryTileOnce).
+                if (!partition_legal(p, pr) || p.unit_tiles > 0) continue;
                 for (const auto &range : column_ranges(p.n_tiles)) {
                     const int64_t tiles = static_cast<int64_t>(p.m_blocks)
                             * (range.second - range.first);
@@ -331,6 +343,118 @@ TEST(NativeTuningPartition, EveryTileOnceForEveryStrategyRangeAndTeam) {
             {"slice m_inner", "slice n_inner", "row groups, full range",
                     "row groups, part range", "row-group plan, other team"})
         EXPECT_EQ(exercised.count(kind), 1u) << kind << " never exercised";
+}
+
+/// The units a worker alone takes from deal: those of its domain's counter,
+/// column group by column group over the domain's row blocks, then those of
+/// the other domains' counters in turn.
+std::vector<unit_t> reference_blocks(const nat::native_plan_t &p, int M, int c0,
+        int c1, int w, const nat::native_unit_deal_t &deal) {
+    std::vector<unit_t> v;
+    const int first = std::min(w / deal.domain_threads, deal.count - 1);
+    for (int k = 0; k < deal.count; ++k) {
+        const nat::native_unit_cursor_t &c
+                = deal.cursor[(first + k) % deal.count];
+        for (int64_t i = 0; i < c.end; ++i) {
+            const int t0 = static_cast<int>(i / c.rows) * p.unit_tiles;
+            unit_t u;
+            u.m0 = (c.r0 + static_cast<int>(i % c.rows)) * p.mb;
+            u.rows = std::min(p.mb, M - u.m0);
+            u.n0 = (c0 + t0) * p.nr;
+            u.tiles = std::min(p.unit_tiles, c1 - c0 - t0);
+            v.push_back(u);
+        }
+    }
+    return v;
+}
+
+// The blocks schedule, for every column range and team size: each domain of
+// domain_threads adjacent workers gets one counter over a contiguous share
+// of the row blocks, in proportion to its workers, and counts the share
+// column group by column group; a worker alone takes every unit, its own
+// domain's first; every tile goes to one unit.
+TEST(NativeTuningPartition, BlocksDealsEveryTileOnce) {
+    constexpr int kK = 64;
+    const int shapes[][2] = {{1, 32}, {7, 96}, {12, 512}, {25, 1024},
+            {192, 256}, {300, 4096}, {1031, 2048}};
+    const nat::UarchParams &uarch = nat::detect_uarch();
+    report_t report;
+    int exercised = 0;
+    for (const auto &s : shapes)
+        for (int threads : {1, 3, 8, 32})
+            for (const char *settings : kPlanVariants) {
+                const nat::native_problem_t pr
+                        = bf16_problem(s[0], s[1], kK, threads);
+                const nat::native_plan_t p
+                        = nat::heuristic_plan(pr, uarch, params_of(settings));
+                if (!partition_legal(p, pr) || p.unit_tiles == 0) continue;
+                for (const auto &range : column_ranges(p.n_tiles)) {
+                    const int c0 = range.first, c1 = range.second;
+                    const nat::native_partition_t part(p, s[0], c0, c1);
+                    const int groups = ceil_div(c1 - c0, p.unit_tiles);
+                    const int64_t units
+                            = static_cast<int64_t>(p.m_blocks) * groups;
+                    for (int team : team_sizes(p.threads, units)) {
+                        std::ostringstream os;
+                        os << "'" << settings << "' M " << s[0] << " N " << s[1]
+                           << " threads " << threads << ", plan " << text(p)
+                           << " unit_tiles " << p.unit_tiles << ", tiles ["
+                           << c0 << ", " << c1 << "), team " << team;
+                        const std::string where = os.str();
+                        report.check(part.kind(team)
+                                                == nat::native_partition_kind_t::
+                                                        blocks
+                                        && part.units() == units,
+                                [&] { return where + ": kind or units()"; });
+                        nat::native_unit_deal_t deal;
+                        part.deal(team, deal);
+                        const int dt = std::max(p.domain_threads,
+                                ceil_div(team, nat::kNativeMaxUnitCursors));
+                        bool shares = deal.count == ceil_div(team, dt)
+                                && deal.domain_threads == dt;
+                        int next = 0;
+                        for (int d = 0; shares && d < deal.count; ++d) {
+                            const nat::native_unit_cursor_t &c = deal.cursor[d];
+                            const int64_t w0 = static_cast<int64_t>(d) * dt;
+                            const int64_t w1 = std::min<int64_t>(team, w0 + dt);
+                            shares = c.r0 == next
+                                    && c.r0 == p.m_blocks * w0 / team
+                                    && c.r0 + c.rows == p.m_blocks * w1 / team
+                                    && c.end
+                                            == static_cast<int64_t>(c.rows)
+                                                    * groups
+                                    && c.next.load() == 0;
+                            next = c.r0 + c.rows;
+                        }
+                        report.check(shares && next == p.m_blocks,
+                                [&] { return where + ": the domain shares"; });
+                        for (int w : {0, team / 2, team - 1}) {
+                            nat::native_unit_deal_t fresh;
+                            part.deal(team, fresh);
+                            const std::vector<unit_t> want = reference_blocks(
+                                    p, s[0], c0, c1, w, fresh);
+                            std::vector<unit_t> got;
+                            part.for_each(w, team, [&](const unit_t &u) {
+                                got.push_back(u);
+                            }, &fresh);
+                            report.check(same_units(got, want), [&] {
+                                return where + ": worker "
+                                        + std::to_string(w)
+                                        + " alone does not take the "
+                                          "reference order";
+                            });
+                            const ::testing::AssertionResult once
+                                    = covers_once(got, p, s[0], c0, c1);
+                            report.check(static_cast<bool>(once), [&] {
+                                return where + ": " + once.message();
+                            });
+                        }
+                        ++exercised;
+                    }
+                }
+            }
+    report.finish();
+    EXPECT_GT(exercised, 0) << "no blocks plan exercised";
 }
 
 /// Records the units a CPU team runs and the scratch each thread gets.
@@ -404,6 +528,41 @@ TEST(NativeTuningPartition, CpuTeamInsideParallelRegionRunsEveryUnitOnce) {
     ASSERT_TRUE(partition_legal(p, pr)) << text(p);
     ASSERT_GT(p.col_groups, 0);
     // An inner region of one thread: the row-group plan meets another team.
+    team_log_t log;
+    std::atomic<int> failures {0};
+    {
+        const zendnnl::lowoha::scoped_active_levels one_level(1);
+#pragma omp parallel num_threads(2)
+        {
+            const int h = omp_get_thread_num(), n = omp_get_num_threads();
+            const nat::native_partition_t part(
+                    p, pr.M, p.n_tiles * h / n, p.n_tiles * (h + 1) / n);
+            const status_t st = nat::native_run_cpu_team(part, p.threads,
+                    p.threads, p.scratch_floats,
+                    [&](const unit_t &u, float *scratch) {
+                log.add(u, scratch);
+            });
+            if (st != status_t::success) ++failures;
+        }
+    }
+    EXPECT_EQ(failures.load(), 0);
+    EXPECT_TRUE(covers_once(log.units(), p, pr.M, 0, p.n_tiles));
+}
+
+// A blocks run that gets fewer threads than it planned for (an inner region
+// of one thread) still runs every unit once: the workers it has take the
+// other domains' units.
+TEST(NativeTuningPartition, BlocksTeamOfFewerThreadsRunsEveryUnitOnce) {
+    constexpr int kK = 64;
+    nat::heuristic_params_t hp;
+    hp.schedule = nat::native_schedule_t::blocks;
+    hp.unit_tiles = 3;
+    hp.domain_threads = 2;
+    const nat::native_problem_t pr = bf16_problem(300, 1024, kK, 8);
+    const nat::native_plan_t p
+            = nat::heuristic_plan(pr, nat::detect_uarch(), hp);
+    ASSERT_TRUE(partition_legal(p, pr)) << text(p);
+    ASSERT_EQ(p.unit_tiles, 3);
     team_log_t log;
     std::atomic<int> failures {0};
     {

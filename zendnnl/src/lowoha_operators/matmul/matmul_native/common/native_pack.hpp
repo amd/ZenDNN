@@ -23,6 +23,7 @@
 #include "common/error_status.hpp"
 #include "lowoha_operators/matmul/lowoha_common.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
+#include "lowoha_operators/matmul/matmul_native/native_layout_policy.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -30,10 +31,6 @@ namespace matmul {
 namespace native {
 
 using zendnnl::error_handling::status_t;
-
-/// Pack widths (columns per block) a native-layout weight can have.
-inline constexpr int kNativeMinPackNr = 32;
-inline constexpr int kNativeMaxPackNr = 64;
 
 /// K groups of a weight in the layout: K pairs for bf16, K quads for s8.
 inline int native_k_groups(data_type_t wei_dt, int K) {
@@ -50,10 +47,19 @@ inline size_t native_block_bytes(data_type_t wei_dt, int K, int pack_nr) {
     return groups * VNNI_PAIR * sizeof(uint16_t) * pack_nr;
 }
 
+/// Whether the layout holds a K x N weight of wei_dt in blocks of pack_nr
+/// columns: bf16 or s8, K >= 1, pack_nr == kNativeLayoutPackNr and N a
+/// positive multiple of it.  The layout rule (decide_native_layout) admits
+/// no other weight; the functions of the layout, the weight view and the
+/// looper assume it.
+inline bool native_layout_fits(data_type_t wei_dt, int K, int N, int pack_nr) {
+    return (wei_dt == data_type_t::bf16 || wei_dt == data_type_t::s8) && K >= 1
+            && pack_nr == kNativeLayoutPackNr && N >= pack_nr
+            && N % pack_nr == 0;
+}
+
 /// Bytes of a K x N weight in the layout (see native_weight_view_t) rounded
-/// up to 64; 0 for a weight type other than bf16 / s8, K < 1, a pack width
-/// other than kNativeMinPackNr / kNativeMaxPackNr, or N not a positive
-/// multiple of it.
+/// up to 64, for a weight native_layout_fits takes.
 size_t native_packed_bytes(data_type_t wei_dt, int K, int N, int pack_nr);
 
 /// Writes weight -- [K, N] row-major ldb apart, or [N, K] when transB --
@@ -61,7 +67,10 @@ size_t native_packed_bytes(data_type_t wei_dt, int K, int N, int pack_nr);
 /// to num_threads threads (one inside a parallel region).  With
 /// interleave_split_halves, pack column 2i holds column i and pack column
 /// 2i + 1 holds column N / 2 + i.  Odd K pads a pair, K % 4 != 0 a quad,
-/// with zeros; s8 column sums cover the real K.
+/// with zeros; s8 column sums cover the real K.  For a weight
+/// native_layout_fits takes, on a CPU with AVX-512 F, BW and VL
+/// (native_base_isa); failure for a null weight or dst, or an ldb below the
+/// row length.
 status_t native_pack_weight(data_type_t wei_dt, const void *weight, int K,
         int N, int ldb, int pack_nr, bool transB, bool interleave_split_halves,
         void *dst, int num_threads);

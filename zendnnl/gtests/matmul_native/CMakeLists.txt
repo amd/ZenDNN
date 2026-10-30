@@ -26,11 +26,12 @@ target_sources(gtests
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_brgemm_layout.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_brgemm_int8.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_brgemm_int8_group.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_native_brgemm_int8_scales.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_brgemm_epilogue.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_brgemm_parity.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_config.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_tuning_plan.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_native_tuning_plan_v2.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_native_tuning_rules.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_tuning_partition.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_tuning_exec.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_brgemm_hardening.cpp

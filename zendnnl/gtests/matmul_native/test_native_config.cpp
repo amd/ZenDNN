@@ -21,6 +21,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <fstream>
@@ -149,7 +150,8 @@ bool same_grid(const native_plan_t &a, const native_plan_t &b) {
     return a.nr == b.nr && a.mr == b.mr && a.mb == b.mb
             && a.m_blocks == b.m_blocks && a.n_tiles == b.n_tiles
             && a.kc == b.kc && a.threads == b.threads
-            && a.col_groups == b.col_groups && a.row_unit == b.row_unit
+            && a.col_groups == b.col_groups && a.unit_tiles == b.unit_tiles
+            && a.domain_threads == b.domain_threads && a.row_unit == b.row_unit
             && a.traversal == b.traversal
             && a.scratch_floats == b.scratch_floats
             && a.int8_rows_nv1 == b.int8_rows_nv1
@@ -228,6 +230,8 @@ const key_doc_t kKeyDocs[] = {
                 &field_value<native_schedule_t, &hp_t::schedule>},
         {"traversal", "both", true, true, "m_inner",
                 &field_value<native_traversal_t, &hp_t::traversal>},
+        {"unit_tiles", "both", true, true, "auto",
+                &field_value<int, &hp_t::unit_tiles>},
         {"threads_cap", "both", true, false, "none",
                 &field_value<int, &hp_t::threads_cap>},
         {"min_tiles_per_thread", "both", true, false, "1",
@@ -274,9 +278,7 @@ const key_doc_t kKeyDocs[] = {
                 &field_value<int64_t, &hp_t::bf16_copy_par_min>},
         {"int8_copy_par_min", "int8", true, false, "65536",
                 &field_value<int64_t, &hp_t::int8_copy_par_min>},
-        {"preset", "both", true, false, "v2",
-                &field_value<native_preset_t, &hp_t::preset>},
-        {"makespan", "both", true, false, "preset",
+        {"makespan", "both", true, false, "1",
                 &field_value<int, &hp_t::makespan>},
         {"min_gain_pct", "both", true, false, "5",
                 &field_value<int, &hp_t::min_gain_pct>},
@@ -284,14 +286,27 @@ const key_doc_t kKeyDocs[] = {
                 &field_value<int, &hp_t::idle_pct>},
         {"decode_m", "both", true, false, "128",
                 &field_value<int, &hp_t::decode_m>},
-        {"l1_pass", "both", true, false, "preset",
+        {"l1_pass", "both", true, false, "1",
                 &field_value<int, &hp_t::l1_pass>},
         {"l1_pct", "both", true, false, "100",
                 &field_value<int, &hp_t::l1_pct>},
         {"l1_pass_max_mb", "both", true, false, "64",
                 &field_value<int, &hp_t::l1_pass_max_mb>},
-        {"traffic_groups", "both", true, false, "preset",
+        {"traffic_groups", "both", true, false, "1",
                 &field_value<int, &hp_t::traffic_groups>},
+        {"bf16_alias", "bf16", true, false, "1",
+                &field_value<int, &hp_t::bf16_alias>},
+        {"bf16_alias_mr", "bf16", true, false, "8",
+                &field_value<int, &hp_t::bf16_alias_mr>},
+        {"bf16_narrow_n", "bf16", true, false, "1",
+                &field_value<int, &hp_t::bf16_narrow_n>},
+        {"bf16_narrow_n_min_m", "bf16", true, false, "1024",
+                &field_value<int, &hp_t::bf16_narrow_n_min_m>},
+        {"blocks", "both", true, false, "1", &field_value<int, &hp_t::blocks>},
+        {"bf16_blocks_min_m", "bf16", true, false, "1024",
+                &field_value<int, &hp_t::bf16_blocks_min_m>},
+        {"int8_blocks_min_m", "int8", true, false, "3072",
+                &field_value<int, &hp_t::int8_blocks_min_m>},
 };
 
 /// The doc of key, nullptr for a key it does not list.
@@ -313,6 +328,9 @@ std::string sample_value(const native_config_key_t &k) {
         case native_key_type_t::boolean: return builtin != 0 ? "0" : "1";
         case native_key_type_t::cw_list: return "16";
         default: {
+            // The sample of col_groups pins it, which only the row-group
+            // schedule allows.
+            if (k.type == native_key_type_t::schedule) return "row_groups";
             const std::vector<std::string> names
                     = native_brgemm_test::native_enum_values(k.type);
             return names[builtin == 0 ? names.size() - 1 : 0];
@@ -364,10 +382,8 @@ TEST(NativeConfigText, KeyDocsMatchTheKeyTable) {
         const bool integer = k.type == native_key_type_t::int32
                 || k.type == native_key_type_t::int64;
         if (integer && !native_text_int64(d.builtin, text_value)) {
-            // -1: col_groups by the schedule, a v2 rule by the preset.
-            const std::string name = k.name;
-            const bool minus_one = name == "col_groups" || name == "makespan"
-                    || name == "l1_pass" || name == "traffic_groups";
+            // -1: col_groups by the schedule.
+            const bool minus_one = std::string(k.name) == "col_groups";
             EXPECT_EQ(v, minus_one ? -1 : 0) << k.name;
         } else {
             const native_config_t c
@@ -388,27 +404,31 @@ TEST(NativeConfigText, KeyDocsMatchTheKeyTable) {
 }
 
 TEST(NativeConfigText, RejectsBadTokensAndRanges) {
-    for (const char *bad : {"nr=24", "nr=8", "nr=64", "nr=16,nr=32", "foo=1",
-                 "nr", "nr=", "=16", "nr=16,", ",nr=16", "nr=16;mb=8", "nr=1 6",
-                 "nr=16x", "nr=+16", "mb=99999999999", "mr=0", "mr=13", "kc=1",
-                 "kc=1073741825", "col_groups=-1", "col_groups=1025",
-                 "schedule=rows", "traversal=k_inner", "threads_cap=0",
-                 "min_tiles_per_thread=65", "row_unit=0", "tile_rows=13",
-                 "tall_rows=0", "block_rows=8193", "min_tile_cols=8",
-                 "min_tile_cols=64", "row_split=2", "row_split=yes",
-                 "min_pass_k=255", "min_pass_k=0", "bf16_l2_pct=0",
-                 "bf16_l2_pct=1001", "kc_split=half", "l3_pct=0",
-                 "domain_threads=0", "domain_threads=1025", "int8_mr=13",
-                 "int8_mr_wide=1", "int8_cw=32", "int8_cw=64/16",
+    for (const char *bad : {"nr=24", "nr=8", "nr=48", "nr=96", "nr=256",
+                 "nr=16,nr=32", "foo=1", "nr", "nr=", "=16", "nr=16,", ",nr=16",
+                 "nr=16;mb=8", "nr=1 6", "nr=16x", "nr=+16", "mb=99999999999",
+                 "mr=0", "mr=13", "kc=1", "kc=1073741825", "col_groups=-1",
+                 "col_groups=1025", "schedule=rows", "traversal=k_inner",
+                 "threads_cap=0", "min_tiles_per_thread=65", "row_unit=0",
+                 "tile_rows=13", "tall_rows=0", "block_rows=8193",
+                 "min_tile_cols=8", "min_tile_cols=64", "row_split=2",
+                 "row_split=yes", "min_pass_k=255", "min_pass_k=0",
+                 "bf16_l2_pct=0", "bf16_l2_pct=1001", "kc_split=half",
+                 "l3_pct=0", "domain_threads=0", "domain_threads=1025",
+                 "int8_mr=13", "int8_mr_wide=1", "int8_cw=32", "int8_cw=64/16",
                  "int8_cw=8/16", "int8_cw=", "int8_cw=16/", "int8_l2_pct=0",
                  "int8_kc=6", "int8_kc=0", "direct_store=-1",
                  "bias_in_dequant=2", "copy_block=0", "copy_block=4097",
                  "bf16_copy_par_min=-1", "int8_copy_par_min=1099511627777",
-                 "split=0", "k_split=1", "preset=v3", "preset=", "preset=2",
-                 "preset=v2x", "makespan=2", "makespan=-1", "min_gain_pct=101",
-                 "idle_pct=0", "idle_pct=101", "decode_m=-1", "l1_pass=on",
-                 "l1_pct=0", "l1_pct=1001", "l1_pass_max_mb=0",
-                 "l1_pass_max_mb=8193", "traffic_groups=2"}) {
+                 "split=0", "k_split=1", "makespan=2", "makespan=-1",
+                 "min_gain_pct=101", "idle_pct=0", "idle_pct=101",
+                 "decode_m=-1", "l1_pass=on", "l1_pct=0", "l1_pct=1001",
+                 "l1_pass_max_mb=0", "l1_pass_max_mb=8193", "traffic_groups=2",
+                 "bf16_alias=2", "bf16_alias=-1", "bf16_alias_mr=0",
+                 "bf16_alias_mr=13", "bf16_narrow_n=2", "bf16_narrow_n=-1",
+                 "bf16_narrow_n_min_m=0", "bf16_narrow_n_min_m=1073741825",
+                 "unit_tiles=0", "unit_tiles=4097", "blocks=2", "blocks=-1",
+                 "bf16_blocks_min_m=0", "int8_blocks_min_m=1073741825"}) {
         EXPECT_FALSE(parses(bad)) << bad;
     }
     // Every integer key rejects one past each end of its range.
@@ -437,6 +457,9 @@ TEST(NativeConfigText, RejectsBadTokensAndRanges) {
 TEST(NativeConfigText, CrossFieldRules) {
     EXPECT_FALSE(parses("schedule=slice,col_groups=4"));
     EXPECT_FALSE(parses("col_groups=0,schedule=row_groups"));
+    EXPECT_FALSE(parses("schedule=blocks,col_groups=0"));
+    EXPECT_FALSE(parses("col_groups=2,schedule=blocks"));
+    EXPECT_TRUE(parses("schedule=blocks,unit_tiles=4"));
     EXPECT_TRUE(parses("schedule=slice,col_groups=0"));
     EXPECT_TRUE(parses("schedule=row_groups,col_groups=4"));
     EXPECT_TRUE(parses("schedule=auto,col_groups=0"));
@@ -453,40 +476,38 @@ TEST(NativeConfigText, CrossFieldRules) {
 TEST(NativeConfigText, KeysAndValuesIgnoreCaseAndSpaces) {
     const native_config_t c = config(
             " NR = 16 , Schedule = ROW_GROUPS , Row_Split = Off , "
-            "int8_cw = 16 / 32 , direct_store = TRUE , Preset = V2 ");
+            "int8_cw = 16 / 32 , direct_store = TRUE , Blocks = 0 ");
     EXPECT_EQ(format_native_config(c),
             "nr=16,schedule=row_groups,row_split=0,int8_cw=32/16,"
-            "direct_store=1,preset=v2");
+            "direct_store=1,blocks=0");
 }
 
-TEST(NativeConfigText, PresetSetsTheDefaultOfEachRuleSwitch) {
-    const heuristic_params_t legacy = apply_native_config(
-            heuristic_params_t {}, config("preset=legacy"));
-    const heuristic_params_t v2
-            = apply_native_config(heuristic_params_t {}, config("preset=v2"));
-    EXPECT_EQ(legacy.preset, native_preset_t::legacy);
-    EXPECT_EQ(v2.preset, native_preset_t::v2);
-    // A switch left unset follows the preset; a set one stays as set.
-    for (const heuristic_params_t *hp : {&legacy, &v2}) {
-        EXPECT_EQ(hp->makespan, -1);
-        EXPECT_EQ(hp->l1_pass, -1);
-        EXPECT_EQ(hp->traffic_groups, -1);
-    }
-    const heuristic_params_t off = apply_native_config(heuristic_params_t {},
-            config("preset=v2,makespan=0,l1_pass=0,traffic_groups=0"));
+TEST(NativeConfigText, RuleSwitchesSetOff) {
+    const heuristic_params_t off = apply_native_config(
+            heuristic_params_t {}, config(native_brgemm_test::kNativeRulesOff));
     EXPECT_EQ(off.makespan, 0);
     EXPECT_EQ(off.l1_pass, 0);
     EXPECT_EQ(off.traffic_groups, 0);
-    // The rule constants take any legal value under either preset.
+    EXPECT_EQ(off.bf16_alias, 0);
+    EXPECT_EQ(off.bf16_narrow_n, 0);
+    EXPECT_EQ(off.blocks, 0);
+    // The rule constants take any legal value; the switches stay as they
+    // are.
     const heuristic_params_t tuned = apply_native_config(heuristic_params_t {},
             config("min_gain_pct=0,idle_pct=100,decode_m=0,l1_pct=1000,"
-                   "l1_pass_max_mb=8192"));
-    EXPECT_EQ(tuned.preset, heuristic_params_t {}.preset);
+                   "l1_pass_max_mb=8192,bf16_alias_mr=12,"
+                   "bf16_narrow_n_min_m=1,bf16_blocks_min_m=1,"
+                   "int8_blocks_min_m=1073741824"));
+    EXPECT_EQ(tuned.makespan, 1);
     EXPECT_EQ(tuned.min_gain_pct, 0);
     EXPECT_EQ(tuned.idle_pct, 100);
     EXPECT_EQ(tuned.decode_m, 0);
     EXPECT_EQ(tuned.l1_pct, 1000);
     EXPECT_EQ(tuned.l1_pass_max_mb, 8192);
+    EXPECT_EQ(tuned.bf16_alias_mr, 12);
+    EXPECT_EQ(tuned.bf16_narrow_n_min_m, 1);
+    EXPECT_EQ(tuned.bf16_blocks_min_m, 1);
+    EXPECT_EQ(tuned.int8_blocks_min_m, 1073741824);
 }
 
 TEST(NativeConfigText, MergeAndApply) {
@@ -547,9 +568,37 @@ TEST(NativeConfigValidate, RejectsEachRule) {
         change(q);
         return validate_native_plan(q, p) != nullptr;
     };
-    // 1. nr is 16 or 32 and divides pack_nr.
-    EXPECT_TRUE(rejects(bp, b, [](native_plan_t &q) { q.nr = 48; }));
-    EXPECT_TRUE(rejects(bp, b, [](native_plan_t &q) { q.nr = 64; }));
+    // Whether rule 1 (the tile width) is the rule a plan breaks.
+    const auto width_rejects
+            = [](const native_plan_t &q, const native_problem_t &p) {
+        const char *why = validate_native_plan(q, p);
+        return why != nullptr && std::string(why).rfind("nr ", 0) == 0;
+    };
+    // 1. nr is 16 or 32 and divides pack_nr; a BF16 tile of 64 or 128
+    // columns takes 32-column slabs inside its pack blocks: of 64- or
+    // 128-column blocks only.
+    native_plan_t n48 = b;
+    n48.nr = 48;
+    EXPECT_TRUE(width_rejects(n48, bp));
+    for (const int nr : {64, 128}) {
+        heuristic_params_t wide_tiles;
+        wide_tiles.nr = nr;
+        EXPECT_EQ(validate_native_plan(heuristic_plan(bp, u, wide_tiles), bp),
+                nullptr)
+                << nr;
+        for (const int pack_nr : {16, 48, 64, 128}) {
+            native_problem_t other = bp;
+            other.pack_nr = pack_nr;
+            const native_plan_t q = heuristic_plan(other, u, wide_tiles);
+            if (pack_nr == 64 || pack_nr == 128) {
+                EXPECT_EQ(validate_native_plan(q, other), nullptr)
+                        << nr << " columns of " << pack_nr << "-column blocks";
+            } else {
+                EXPECT_TRUE(width_rejects(q, other))
+                        << nr << " columns of " << pack_nr << "-column blocks";
+            }
+        }
+    }
     // 2. The grid covers the problem.
     EXPECT_TRUE(rejects(bp, b, [](native_plan_t &q) { ++q.n_tiles; }));
     EXPECT_TRUE(rejects(bp, b, [](native_plan_t &q) { ++q.m_blocks; }));
@@ -585,12 +634,63 @@ TEST(NativeConfigValidate, RejectsEachRule) {
     EXPECT_TRUE(rejects(bp, b, [](native_plan_t &q) { q.copy_par_min = -1; }));
     // 10. The scratch.
     EXPECT_TRUE(rejects(bp, b, [](native_plan_t &q) { ++q.scratch_floats; }));
+    // 11. The blocks schedule: at most n_tiles tiles per unit, no column
+    // groups, domains of at least one thread, and with K passes the
+    // accumulators of every tile of a unit.
+    heuristic_params_t blocks;
+    blocks.schedule = native_schedule_t::blocks;
+    blocks.unit_tiles = 3;
+    blocks.kc = 1024;
+    const native_plan_t k = heuristic_plan(bp, u, blocks);
+    ASSERT_EQ(validate_native_plan(k, bp), nullptr);
+    ASSERT_EQ(k.unit_tiles, 3);
+    ASSERT_LT(k.kc, bp.K);
+    EXPECT_EQ(k.col_groups, 0);
+    EXPECT_EQ(k.scratch_floats, static_cast<size_t>(k.mb) * k.nr * 3);
+    EXPECT_TRUE(rejects(bp, k, [](native_plan_t &q) { q.unit_tiles = -1; }));
+    EXPECT_TRUE(rejects(bp, k, [](native_plan_t &q) {
+        q.unit_tiles = q.n_tiles + 1;
+        q.scratch_floats = static_cast<size_t>(q.mb) * q.nr * q.unit_tiles;
+    }));
+    EXPECT_TRUE(rejects(bp, k, [](native_plan_t &q) { q.col_groups = 2; }));
+    EXPECT_TRUE(rejects(bp, k, [](native_plan_t &q) { q.domain_threads = 0; }));
+    EXPECT_TRUE(rejects(bp, k, [](native_plan_t &q) {
+        q.scratch_floats = static_cast<size_t>(q.mb) * q.nr;
+    }));
+    // A unit of every tile; under BF16 K passes at most the tiles whose
+    // accumulators fit the bf16_l2_pct share of L2.
+    UarchParams l2 = u;
+    l2.l2_bytes = 1 << 20;
+    blocks.kc = bp.K;
+    blocks.unit_tiles = 100000;
+    const native_plan_t one = heuristic_plan(bp, l2, blocks);
+    ASSERT_EQ(validate_native_plan(one, bp), nullptr);
+    EXPECT_EQ(one.unit_tiles, one.n_tiles);
+    EXPECT_EQ(one.scratch_floats, static_cast<size_t>(one.mr) * one.nr);
+    blocks.kc = 1024;
+    const native_plan_t bound = heuristic_plan(bp, l2, blocks);
+    ASSERT_EQ(validate_native_plan(bound, bp), nullptr);
+    const int64_t share = l2.l2_bytes / 2;
+    const int64_t tile_bytes
+            = static_cast<int64_t>(bound.mb) * bound.nr * sizeof(float);
+    EXPECT_EQ(bound.unit_tiles,
+            std::clamp<int64_t>(share / tile_bytes, 1, bound.n_tiles));
+    EXPECT_LT(bound.unit_tiles, bound.n_tiles);
+    EXPECT_LE(
+            static_cast<int64_t>(bound.scratch_floats * sizeof(float)), share);
 
     // 8, 9. INT8 widths, rows per call and K passes.
     const native_problem_t ip = problem(64, 4096, 4096, false, 24);
     const native_plan_t i = heuristic_plan(ip, u, heuristic_params_t {});
     ASSERT_EQ(validate_native_plan(i, ip), nullptr);
     ASSERT_EQ(i.nr, 32);
+    // 64 columns are BF16 only: an INT8 plan of 64 columns, its grid and
+    // scratch made for them, breaks the width rule.
+    native_plan_t i64 = i;
+    i64.nr = 64;
+    i64.n_tiles = ip.N / 64;
+    i64.scratch_floats = native_plan_scratch_floats(i64, ip);
+    EXPECT_TRUE(width_rejects(i64, ip));
     EXPECT_TRUE(rejects(
             ip, i, [](native_plan_t &q) { q.int8_cw_mask = kNativeInt8Cw32; }));
     EXPECT_TRUE(rejects(ip, i, [](native_plan_t &q) { q.int8_rows_nv1 = 13; }));
@@ -600,12 +700,17 @@ TEST(NativeConfigValidate, RejectsEachRule) {
             rejects(ip, i, [](native_plan_t &q) { q.int8_pass_quads = -1; }));
     EXPECT_TRUE(
             rejects(ip, i, [](native_plan_t &q) { q.int8_pass_budget = -1; }));
-    // A wider pack still gets tiles of at most 32 columns.
-    native_problem_t wide = ip;
-    wide.pack_nr = 64;
-    const native_plan_t w = heuristic_plan(wide, u, heuristic_params_t {});
-    EXPECT_EQ(w.nr, 32);
-    EXPECT_EQ(validate_native_plan(w, wide), nullptr);
+    // A per-group problem takes the group kernel's rows per call, 12 at 16
+    // columns and 6 at 32; more rows at 32 columns are illegal for it, and
+    // the per-channel plan with them too.
+    native_problem_t gp = ip;
+    gp.int8_scheme = native_int8_scheme_t::per_group;
+    const native_plan_t g = heuristic_plan(gp, u, heuristic_params_t {});
+    EXPECT_EQ(g.int8_rows_nv1, 12);
+    EXPECT_EQ(g.int8_rows_nv2, 6);
+    ASSERT_EQ(validate_native_plan(g, gp), nullptr);
+    EXPECT_TRUE(rejects(gp, g, [](native_plan_t &q) { q.int8_rows_nv2 = 7; }));
+    EXPECT_NE(validate_native_plan(i, gp), nullptr);
 }
 
 TEST(NativeConfigOverride, FiltersAndFirstMatch) {
@@ -789,35 +894,47 @@ TEST(NativeConfigTuningFile, FormatAndVersion) {
     EXPECT_NE(s.table, nullptr);
 }
 
+namespace {
+
+/// A version 2 file with the given hardware block and an entry for every
+/// problem.
+std::string tuning_with_hardware(const std::string &hardware) {
+    return tuning(R"("hardware": )" + hardware
+            + R"(, "entries": [{"config": {"nr": 16}}])");
+}
+
+bool hardware_applies(const std::string &hardware, const native_hw_t &hw) {
+    return load(tuning_with_hardware(hardware), hw).table != nullptr;
+}
+
+} // namespace
+
 TEST(NativeConfigTuningFile, HardwareMatch) {
     const native_hw_t hw = test_hw();
-    const std::string entries = R"("entries": [{"config": {"nr": 16}}])";
-    const auto applies
-            = [&](const std::string &hardware, const native_hw_t &on) {
-        const native_tuning_sources_t s = load(
-                tuning("\"hardware\": " + hardware + ", " + entries), on);
-        return s.table != nullptr;
-    };
-    EXPECT_TRUE(applies("{}", hw));
-    EXPECT_TRUE(applies(R"({"isa": ["avx512bf16", "avx512vnni"]})", hw));
-    EXPECT_FALSE(applies(R"({"isa": ["avx512bf16", "amx"]})", hw));
+    EXPECT_TRUE(hardware_applies("{}", hw));
+    EXPECT_TRUE(
+            hardware_applies(R"({"isa": ["avx512bf16", "avx512vnni"]})", hw));
+    EXPECT_FALSE(hardware_applies(R"({"isa": ["avx512bf16", "amx"]})", hw));
     native_hw_t no_vnni = hw;
     no_vnni.uarch.avx512vnni = false;
-    EXPECT_FALSE(applies(R"({"isa": ["avx512vnni"]})", no_vnni));
-    EXPECT_TRUE(applies(R"({"l1d_kib": 48, "l2_kib": 1024, "l3_kib": 32768,
+    EXPECT_FALSE(hardware_applies(R"({"isa": ["avx512vnni"]})", no_vnni));
+    EXPECT_TRUE(
+            hardware_applies(R"({"l1d_kib": 48, "l2_kib": 1024, "l3_kib": 32768,
                            "l3_threads": 16, "smt": 2, "cores": 128})",
-            hw));
-    EXPECT_FALSE(applies(R"({"l2_kib": 2048})", hw));
-    EXPECT_TRUE(applies(R"({"l2_kib": {"min": 512, "max": 2048}})", hw));
-    EXPECT_FALSE(applies(R"({"l2_kib": {"min": 2048}})", hw));
-    EXPECT_TRUE(applies(R"({"cores": {"min": 64}})", hw));
-    EXPECT_FALSE(applies(R"({"cores": {"max": 64}})", hw));
-    EXPECT_FALSE(applies(R"({"l3_threads": 8})", hw));
-    EXPECT_FALSE(applies(R"({"cores": {"least": 64}})", hw));
-    EXPECT_FALSE(applies(R"({"cores": "128"})", hw));
-    EXPECT_FALSE(applies(R"({"frequency": 3})", hw));
-    EXPECT_FALSE(applies(R"(["isa"])", hw));
-    EXPECT_EQ(warnings_of([&] { applies(R"({"smt": 1})", hw); }), shown(1));
+                    hw));
+    EXPECT_FALSE(hardware_applies(R"({"l2_kib": 2048})", hw));
+    EXPECT_TRUE(
+            hardware_applies(R"({"l2_kib": {"min": 512, "max": 2048}})", hw));
+    EXPECT_FALSE(hardware_applies(R"({"l2_kib": {"min": 2048}})", hw));
+    EXPECT_TRUE(hardware_applies(R"({"cores": {"min": 64}})", hw));
+    EXPECT_FALSE(hardware_applies(R"({"cores": {"max": 64}})", hw));
+    EXPECT_FALSE(hardware_applies(R"({"l3_threads": 8})", hw));
+    EXPECT_FALSE(hardware_applies(R"({"cores": {"least": 64}})", hw));
+    EXPECT_FALSE(hardware_applies(R"({"cores": "128"})", hw));
+    EXPECT_FALSE(hardware_applies(R"({"frequency": 3})", hw));
+    EXPECT_FALSE(hardware_applies(R"(["isa"])", hw));
+    EXPECT_EQ(warnings_of([&] { hardware_applies(R"({"smt": 1})", hw); }),
+            shown(1));
 }
 
 namespace {
@@ -832,18 +949,6 @@ native_hw_t identified_hw() {
     return hw;
 }
 
-/// A version 2 file with the given hardware block and an entry for every
-/// problem.
-std::string tuning_v2(const std::string &hardware) {
-    return R"({"format": "zendnnl-native-brgemm-tuning", "version": 2,
-               "hardware": )"
-            + hardware + R"(, "entries": [{"config": {"nr": 16}}]})";
-}
-
-bool applies_v2(const std::string &hardware, const native_hw_t &hw) {
-    return load(tuning_v2(hardware), hw).table != nullptr;
-}
-
 /// What f writes to stdout: the warnings, when they are on.
 template <typename F>
 std::string log_of(F &&f) {
@@ -855,10 +960,11 @@ std::string log_of(F &&f) {
 
 /// Checks that the version 2 file with the given hardware block is ignored
 /// on hw with one warning that names what.
-void ignored_v2(const std::string &hardware, const native_hw_t &hw,
+void hardware_ignored(const std::string &hardware, const native_hw_t &hw,
         const std::string &what) {
     bool applied = true;
-    const std::string out = log_of([&] { applied = applies_v2(hardware, hw); });
+    const std::string out
+            = log_of([&] { applied = hardware_applies(hardware, hw); });
     EXPECT_FALSE(applied) << hardware;
     int lines = 0;
     for (size_t at = out.find("native BRGEMM:"); at != std::string::npos;
@@ -872,9 +978,9 @@ void ignored_v2(const std::string &hardware, const native_hw_t &hw,
 
 } // namespace
 
-TEST(NativeConfigTuningFile, HardwareV2Fields) {
+TEST(NativeConfigTuningFile, HardwareFields) {
     const native_hw_t hw = identified_hw();
-    EXPECT_TRUE(applies_v2("{}", hw));
+    EXPECT_TRUE(hardware_applies("{}", hw));
     // Each key at this CPU's value, then all of them together.
     const std::pair<const char *, const char *> same[]
             = {{"vendor", R"("TestVendorId")"}, {"family", "26"},
@@ -886,10 +992,10 @@ TEST(NativeConfigTuningFile, HardwareV2Fields) {
     std::string all;
     for (const auto &[key, value] : same) {
         const std::string one = "\"" + std::string(key) + "\": " + value;
-        EXPECT_TRUE(applies_v2("{" + one + "}", hw)) << one;
+        EXPECT_TRUE(hardware_applies("{" + one + "}", hw)) << one;
         all += (all.empty() ? "" : ", ") + one;
     }
-    EXPECT_TRUE(applies_v2("{" + all + "}", hw));
+    EXPECT_TRUE(hardware_applies("{" + all + "}", hw));
     // Each key at another value: the warning names the key and this CPU's
     // value.
     const std::pair<const char *, const char *> other[] = {
@@ -899,16 +1005,16 @@ TEST(NativeConfigTuningFile, HardwareV2Fields) {
             {"l3_threads", "8"}, {"cores", "256"}, {"logical_cpus", "512"}};
     for (size_t i = 0; i < std::size(other); ++i) {
         const std::string key = other[i].first;
-        ignored_v2("{\"" + key + "\": " + other[i].second + "}", hw,
+        hardware_ignored("{\"" + key + "\": " + other[i].second + "}", hw,
                 "hardware." + key + "=" + other[i].second + " does not hold "
                         + same[i < 4 ? i : i + 1].second);
     }
     // The first key that fails, in the order of the key list.
-    ignored_v2(R"({"smt": 1, "model": 16, "l2_kib": 2048})", hw,
+    hardware_ignored(R"({"smt": 1, "model": 16, "l2_kib": 2048})", hw,
             "hardware.model=16 does not hold 17");
 }
 
-TEST(NativeConfigTuningFile, HardwareV2ListsAndRanges) {
+TEST(NativeConfigTuningFile, HardwareListsAndRanges) {
     const native_hw_t hw = identified_hw();
     for (const char *yes : {R"({"model": [16, 17, 81]})",
                  R"({"model": {"min": 17}})", R"({"model": {"max": 17}})",
@@ -919,7 +1025,7 @@ TEST(NativeConfigTuningFile, HardwareV2ListsAndRanges) {
                      "l3_cores": [8, 32]})",
                  R"({"family": [25, 26], "cores": {"min": 64},
                      "logical_cpus": {"max": 512}})"}) {
-        EXPECT_TRUE(applies_v2(yes, hw)) << yes;
+        EXPECT_TRUE(hardware_applies(yes, hw)) << yes;
     }
     for (const char *no : {R"({"model": [16, 81]})",
                  R"({"model": {"min": 18}})", R"({"model": {"max": 16}})",
@@ -928,33 +1034,34 @@ TEST(NativeConfigTuningFile, HardwareV2ListsAndRanges) {
                  R"({"vendor": "testvendorid"})",
                  R"({"l3_kib": {"min": 65536}})",
                  R"({"l3_cores": [16, 32]})"}) {
-        EXPECT_FALSE(applies_v2(no, hw)) << no;
+        EXPECT_FALSE(hardware_applies(no, hw)) << no;
     }
     // The warning shows a short list or range as written.
-    ignored_v2(R"({"model": [16, 81]})", hw,
+    hardware_ignored(R"({"model": [16, 81]})", hw,
             "hardware.model=[16,81] does not hold 17");
-    ignored_v2(R"({"model": {"min": 18, "max": 31}})", hw,
+    hardware_ignored(R"({"model": {"min": 18, "max": 31}})", hw,
             R"(hardware.model={"max":31,"min":18} does not hold 17)");
-    ignored_v2(R"({"vendor": ["OtherVendor0", "OtherVendor1"]})", hw,
+    hardware_ignored(R"({"vendor": ["OtherVendor0", "OtherVendor1"]})", hw,
             R"(hardware.vendor=["OtherVendor0","OtherVendor1"] does not hold "TestVendorId")");
 }
 
-TEST(NativeConfigTuningFile, HardwareV2IsaSubset) {
+TEST(NativeConfigTuningFile, HardwareIsaSubset) {
     const native_hw_t hw = identified_hw();
     for (const char *yes : {R"({"isa": []})", R"({"isa": "avx512vnni"})",
                  R"({"isa": ["avx512bf16", "avx512vnni"]})",
                  R"({"isa": ["avx512vnni", "avx512f", "avx512bf16"]})"}) {
-        EXPECT_TRUE(applies_v2(yes, hw)) << yes;
+        EXPECT_TRUE(hardware_applies(yes, hw)) << yes;
     }
     native_hw_t no_vnni = hw;
     no_vnni.uarch.avx512vnni = false;
-    EXPECT_TRUE(applies_v2(R"({"isa": ["avx512f", "avx512bf16"]})", no_vnni));
-    ignored_v2(R"({"isa": ["avx512bf16", "avx512vnni"]})", no_vnni,
+    EXPECT_TRUE(
+            hardware_applies(R"({"isa": ["avx512f", "avx512bf16"]})", no_vnni));
+    hardware_ignored(R"({"isa": ["avx512bf16", "avx512vnni"]})", no_vnni,
             "hardware.isa lists \"avx512vnni\", which this CPU lacks");
-    ignored_v2(R"({"isa": "avx512vnni"})", no_vnni, "avx512vnni");
+    hardware_ignored(R"({"isa": "avx512vnni"})", no_vnni, "avx512vnni");
 }
 
-TEST(NativeConfigTuningFile, HardwareV2OneFileForAFamily) {
+TEST(NativeConfigTuningFile, HardwareOneFileForAFamily) {
     // Two machines of one family that differ in model, L3 size, L3 domain
     // and core count.
     native_hw_t a = identified_hw();
@@ -976,12 +1083,12 @@ TEST(NativeConfigTuningFile, HardwareV2OneFileForAFamily) {
             = "{" + common + R"(, "model": 2, "l3_kib": 32768, "l3_cores": 8})";
     const std::string for_b = "{" + common
             + R"(, "model": 81, "l3_kib": 131072, "l3_cores": 32})";
-    EXPECT_TRUE(applies_v2(both, a));
-    EXPECT_TRUE(applies_v2(both, b));
-    EXPECT_TRUE(applies_v2(for_a, a));
-    ignored_v2(for_a, b, "hardware.model=2 does not hold 81");
-    EXPECT_TRUE(applies_v2(for_b, b));
-    ignored_v2(for_b, a, "hardware.model=81 does not hold 2");
+    EXPECT_TRUE(hardware_applies(both, a));
+    EXPECT_TRUE(hardware_applies(both, b));
+    EXPECT_TRUE(hardware_applies(for_a, a));
+    hardware_ignored(for_a, b, "hardware.model=2 does not hold 81");
+    EXPECT_TRUE(hardware_applies(for_b, b));
+    hardware_ignored(for_b, a, "hardware.model=81 does not hold 2");
     // The same part with SMT on, or with fewer cores, keeps the file made
     // for a.
     native_hw_t smt_on = a;
@@ -990,11 +1097,11 @@ TEST(NativeConfigTuningFile, HardwareV2OneFileForAFamily) {
     smt_on.l3_domain_threads = 16;
     native_hw_t fewer = a;
     fewer.logical_cpus = fewer.physical_cores = 128;
-    EXPECT_TRUE(applies_v2(for_a, smt_on));
-    EXPECT_TRUE(applies_v2(for_a, fewer));
+    EXPECT_TRUE(hardware_applies(for_a, smt_on));
+    EXPECT_TRUE(hardware_applies(for_a, fewer));
 }
 
-TEST(NativeConfigTuningFile, HardwareV2FieldsTheCpuDoesNotReport) {
+TEST(NativeConfigTuningFile, HardwareFieldsTheCpuDoesNotReport) {
     const native_hw_t hw = identified_hw();
     const struct {
         const char *block;
@@ -1029,20 +1136,21 @@ TEST(NativeConfigTuningFile, HardwareV2FieldsTheCpuDoesNotReport) {
     for (const auto &c : cases) {
         native_hw_t forgot = hw;
         c.forget(forgot);
-        EXPECT_TRUE(applies_v2(c.block, hw)) << c.block;
-        ignored_v2(c.block, forgot, "this CPU does not report it");
+        EXPECT_TRUE(hardware_applies(c.block, hw)) << c.block;
+        hardware_ignored(c.block, forgot, "this CPU does not report it");
         // A file that does not ask for the field still applies.
-        EXPECT_TRUE(applies_v2(R"({"isa": "avx512f"})", forgot)) << c.block;
+        EXPECT_TRUE(hardware_applies(R"({"isa": "avx512f"})", forgot))
+                << c.block;
     }
     // Without the L3 topology the plan's domain, and l3_cores, is ccx_cores.
     native_hw_t no_topology = hw;
     no_topology.l3_domain_threads = 0;
     no_topology.uarch.ccx_cores = 4;
-    EXPECT_TRUE(applies_v2(R"({"l3_cores": 4})", no_topology));
-    EXPECT_FALSE(applies_v2(R"({"l3_cores": 8})", no_topology));
+    EXPECT_TRUE(hardware_applies(R"({"l3_cores": 4})", no_topology));
+    EXPECT_FALSE(hardware_applies(R"({"l3_cores": 8})", no_topology));
 }
 
-TEST(NativeConfigTuningFile, HardwareV2UnusableFiles) {
+TEST(NativeConfigTuningFile, HardwareUnusableFiles) {
     const native_hw_t hw = identified_hw();
     const std::pair<const char *, const char *> bad[] = {
             {R"({"signature": "v1;isa=none"})",
@@ -1076,15 +1184,15 @@ TEST(NativeConfigTuningFile, HardwareV2UnusableFiles) {
             {R"(26)", "hardware is not an object"},
     };
     for (const auto &[block, what] : bad)
-        ignored_v2(block, hw, what);
+        hardware_ignored(block, hw, what);
 }
 
 // This CPU's value of every hardware key, as the schema dump prints it: the
 // block applies here, and each key at another value does not.
-TEST(NativeConfigTuningFile, HardwareV2BlockOfThisCpu) {
+TEST(NativeConfigTuningFile, HardwareBlockOfThisCpu) {
     const native_hw_t &hw = native_hw();
     const json m = json::parse(native_brgemm_test::hw_match_text(hw));
-    EXPECT_TRUE(applies_v2(m.dump(), hw));
+    EXPECT_TRUE(hardware_applies(m.dump(), hw));
     for (auto it = m.begin(); it != m.end(); ++it) {
         if (it.key() == "isa") continue;
         json other = m;
@@ -1092,7 +1200,7 @@ TEST(NativeConfigTuningFile, HardwareV2BlockOfThisCpu) {
             other["vendor"] = "OtherVendor0";
         else
             other[it.key()] = it->get<int64_t>() + 1;
-        EXPECT_FALSE(applies_v2(other.dump(), hw)) << it.key();
+        EXPECT_FALSE(hardware_applies(other.dump(), hw)) << it.key();
     }
     EXPECT_EQ(m.contains("vendor"), !hw.vendor.empty());
     if (!hw.vendor.empty()) { EXPECT_EQ(hw.vendor.size(), 12u); }
@@ -1169,19 +1277,18 @@ TEST(NativeConfigTuningFile, MatchValues) {
     EXPECT_EQ(config_of(t, problem(64, 4096, 2048, false)), "<none>");
 }
 
-TEST(NativeConfigTuningFile, PresetAndRuleKeys) {
+TEST(NativeConfigTuningFile, RuleKeys) {
     const native_tuning_sources_t s = load(tuning(R"("entries": [
-        {"id": "v2", "match": {"m": {"max": 64}},
-         "config": {"preset": "v2", "l1_pass": 0, "l1_pct": 75}},
-        {"id": "legacy", "config": {"preset": "legacy"}}])"));
+        {"id": "small", "match": {"m": {"max": 64}},
+         "config": {"blocks": 0, "l1_pass": 0, "l1_pct": 75}},
+        {"id": "other", "config": {"makespan": 0}}])"));
     ASSERT_NE(s.table, nullptr);
     EXPECT_EQ(config_of(s.table.get(), problem(8, 4096, 4096)),
-            "preset=v2,l1_pass=0,l1_pct=75");
-    EXPECT_EQ(
-            config_of(s.table.get(), problem(65, 4096, 4096)), "preset=legacy");
+            "l1_pass=0,l1_pct=75,blocks=0");
+    EXPECT_EQ(config_of(s.table.get(), problem(65, 4096, 4096)), "makespan=0");
     // Value names are lower case, and a switch is a number.
-    for (const char *bad : {R"({"config": {"preset": "V2"}})",
-                 R"({"config": {"preset": "v2 "}})",
+    for (const char *bad : {R"({"config": {"schedule": "SLICE"}})",
+                 R"({"config": {"schedule": "slice "}})",
                  R"({"config": {"l1_pass": true}})"}) {
         native_tuning_sources_t d;
         EXPECT_EQ(warnings_of([&] {
@@ -1578,14 +1685,15 @@ TEST(NativeConfigPlanner, PerChannelKeysSkipPerGroupProblems) {
         EXPECT_TRUE(entry.scope_noted.load());
         heuristic_params_t hp;
         hp.int8_mr = 4;
+        hp.direct_store = false;
         EXPECT_TRUE(same_grid(q, heuristic_plan(group, u, hp)));
+        EXPECT_FALSE(q.int8_direct_store);
         EXPECT_EQ(q.int8_scheme, native_int8_scheme_t::per_group);
         EXPECT_EQ(top_source(q), source_kind::override);
-        EXPECT_EQ(native_plan_config_text(q), "int8_mr=4");
+        EXPECT_EQ(native_plan_config_text(q), "int8_mr=4,direct_store=0");
         EXPECT_EQ(validate_native_plan(q, group), nullptr);
         const native_plan_t c = planner.plan(channel);
         hp.int8_kc = 64;
-        hp.direct_store = false;
         EXPECT_TRUE(same_grid(c, heuristic_plan(channel, u, hp)));
         EXPECT_EQ(c.int8_pass_quads, 16);
         EXPECT_FALSE(c.int8_direct_store);
@@ -1662,22 +1770,22 @@ TEST(NativeConfigPlanner, ProcessPlannerReadsTheSettings) {
     }, "ZENDNNL_MATMUL_NATIVE_CONFIG and ZENDNNL_MATMUL_NATIVE_TUNING_FILE");
 }
 
-TEST(NativeConfigPlanner, PresetThroughTheOverride) {
+TEST(NativeConfigPlanner, RuleSwitchThroughTheOverride) {
     if (!has_isa()) GTEST_SKIP() << "the CPU lacks AVX512-BF16 or AVX512-VNNI";
     const UarchParams &u = native_plan_uarch();
-    heuristic_params_t v2;
-    v2.preset = native_preset_t::v2;
-    const auto planner = make_native_planner("preset=v2", nullptr);
+    heuristic_params_t off;
+    off.makespan = 0;
+    const auto planner = make_native_planner("makespan=0", nullptr);
     ASSERT_TRUE(planner->has_sources());
     for (const bool bf16 : {true, false})
         for (const int M : {1, 32, 1031})
             for (const int N : {1536, 4096}) {
                 const native_problem_t p = problem(M, N, 4096, bf16, 32);
                 const native_plan_t q = planner->plan(p);
-                EXPECT_TRUE(same_grid(q, heuristic_plan(p, u, v2)))
+                EXPECT_TRUE(same_grid(q, heuristic_plan(p, u, off)))
                         << "M=" << M << " N=" << N << " bf16=" << bf16;
                 EXPECT_EQ(top_source(q), source_kind::override);
-                EXPECT_EQ(native_plan_config_text(q), "preset=v2");
+                EXPECT_EQ(native_plan_config_text(q), "makespan=0");
                 EXPECT_EQ(validate_native_plan(q, p), nullptr);
             }
 }
@@ -1780,7 +1888,8 @@ uint32_t kernel_rows(native_kernel_kind_t kind, int nr) {
     uint32_t mask = 0;
     for (int mr = 1; mr <= 12; ++mr) {
         const bool served = kind == native_kernel_kind_t::bf16
-                ? select_bf16_brgemm_tall_kernel(mr, nr) != nullptr
+                ? select_bf16_brgemm_tall_kernel(mr, native_bf16_slab_cols(nr))
+                        != nullptr
                 : select_native_int8_ukernel(mr, nr / 16, false) != nullptr
                         && select_native_int8_ukernel(mr, nr / 16, true)
                                 != nullptr;
@@ -1802,7 +1911,8 @@ int full_rows(uint32_t mask) {
 TEST(NativeConfigRegistry, MatchesTheSelectors) {
     const native_kernel_registry_t &r = native_kernel_registry();
     const UarchParams &u = detect_uarch();
-    for (const int nr : {16, 32}) {
+    // Tiles of 64 and 128 columns run the nr 32 kernels slab by slab.
+    for (const int nr : {16, 32, 64, 128}) {
         const native_kernel_caps_t *c = r.caps(native_kernel_kind_t::bf16, nr);
         if (!u.avx512bf16) {
             EXPECT_EQ(c, nullptr);
@@ -1812,7 +1922,8 @@ TEST(NativeConfigRegistry, MatchesTheSelectors) {
         ASSERT_NE(c, nullptr) << nr;
         for (int mr = 1; mr <= 12; ++mr)
             EXPECT_EQ(r.bf16_table(nr)[mr],
-                    select_bf16_brgemm_tall_kernel(mr, nr))
+                    select_bf16_brgemm_tall_kernel(
+                            mr, native_bf16_slab_cols(nr)))
                     << nr << " " << mr;
         const int max_mr
                 = full_rows(kernel_rows(native_kernel_kind_t::bf16, nr));
@@ -1831,20 +1942,33 @@ TEST(NativeConfigRegistry, MatchesTheSelectors) {
         EXPECT_EQ(c->max_mr,
                 full_rows(kernel_rows(native_kernel_kind_t::int8, nr)));
         EXPECT_EQ(c->max_mr, native_int8_ukernel_max_mr(nr / 16));
-        // The per-group tile runs the same kernel as a first K pass.
-        for (const native_int8_scheme_t s : {native_int8_scheme_t::per_channel,
-                     native_int8_scheme_t::per_group}) {
-            EXPECT_TRUE(c->serves(s)) << nr;
-            EXPECT_TRUE(r.covers_int8(c->max_mr, nr, s)) << nr;
-            EXPECT_FALSE(r.covers_int8(c->max_mr + 1, nr, s)) << nr;
+        // The per-channel kernels serve per-channel calls, the group kernels
+        // per-group calls.
+        const native_kernel_caps_t *g
+                = r.int8_caps(nr, native_int8_scheme_t::per_group);
+        ASSERT_NE(g, nullptr) << nr;
+        EXPECT_EQ(r.int8_caps(nr, native_int8_scheme_t::per_channel), c);
+        EXPECT_EQ(g->max_mr, native_int8_group_ukernel_max_mr(nr / 16));
+        for (const native_kernel_caps_t *k : {c, g}) {
+            const native_int8_scheme_t s = k == c
+                    ? native_int8_scheme_t::per_channel
+                    : native_int8_scheme_t::per_group;
+            EXPECT_TRUE(k->serves(s)) << nr;
+            EXPECT_FALSE(k->serves(k == c ? native_int8_scheme_t::per_group
+                                          : native_int8_scheme_t::per_channel))
+                    << nr;
+            EXPECT_TRUE(r.covers_int8(k->max_mr, nr, s)) << nr;
+            EXPECT_FALSE(r.covers_int8(k->max_mr + 1, nr, s)) << nr;
             EXPECT_FALSE(r.covers_int8(0, nr, s)) << nr;
         }
     }
-    for (const int nr : {48, 64}) {
+    for (const int nr : {48, 96, 256}) {
         EXPECT_EQ(r.caps(native_kernel_kind_t::bf16, nr), nullptr) << nr;
         EXPECT_EQ(r.caps(native_kernel_kind_t::int8, nr), nullptr) << nr;
         EXPECT_EQ(r.bf16_table(nr), nullptr) << nr;
     }
+    for (const int nr : {64, 128})
+        EXPECT_EQ(r.caps(native_kernel_kind_t::int8, nr), nullptr) << nr;
     EXPECT_FALSE(r.covers(native_kernel_kind_t::int8, 0, 16));
     if (u.avx512bf16 && u.avx512vnni) {
         EXPECT_EQ(kernel_rows(native_kernel_kind_t::bf16, 16), 0x3fu);
@@ -2025,7 +2149,7 @@ nlohmann::ordered_json schema_json() {
     const native_kernel_registry_t &r = native_kernel_registry();
     for (const native_kernel_kind_t kind :
             {native_kernel_kind_t::bf16, native_kernel_kind_t::int8})
-        for (const int nr : {16, 32}) {
+        for (const int nr : {16, 32, 64, 128}) {
             const native_kernel_caps_t *c = r.caps(kind, nr);
             if (c == nullptr) continue;
             const bool bf16 = kind == native_kernel_kind_t::bf16;
@@ -2034,6 +2158,18 @@ nlohmann::ordered_json schema_json() {
                     {"k_unit", bf16 ? 2 : 4},
                     {"int8_schemes", scheme_names(c->int8_schemes)}});
         }
+    for (const int nr : {16, 32}) {
+        const native_kernel_caps_t *c
+                = r.int8_caps(nr, native_int8_scheme_t::per_group);
+        if (c == nullptr) continue;
+        uint32_t mask = 0;
+        for (int mr = 1; mr <= 12; ++mr)
+            if (select_native_int8_group_ukernel(mr, nr / 16) != nullptr)
+                mask |= 1u << (mr - 1);
+        kernels.push_back({{"kind", "int8"}, {"nr", nr}, {"mr_mask", mask},
+                {"max_mr", c->max_mr}, {"k_unit", 4},
+                {"int8_schemes", scheme_names(c->int8_schemes)}});
+    }
     doc["kernels"] = kernels;
     doc["tuning_file"] = {{"format", kNativeTuningFormat},
             {"version", kNativeTuningVersion},
@@ -2079,10 +2215,12 @@ TEST(NativeConfigSchema, SchemaDump) {
     };
     EXPECT_EQ(key("nr").value("default", json()), "auto");
     EXPECT_EQ(key("nr").value("auto", json()), 0);
-    EXPECT_EQ(key("nr").value("values", json()), json::array({16, 32}));
+    EXPECT_EQ(
+            key("nr").value("values", json()), json::array({16, 32, 64, 128}));
     EXPECT_EQ(key("col_groups").value("auto", json()), -1);
     EXPECT_EQ(key("schedule").value("values", json()),
-            json::array({"auto", "slice", "row_groups"}));
+            json::array({"auto", "slice", "row_groups", "blocks"}));
+    EXPECT_EQ(key("unit_tiles").value("auto", json()), 0);
     EXPECT_EQ(key("row_split").value("default", json()), true);
     EXPECT_EQ(key("min_pass_k").value("multiple_of", json()), 2);
     EXPECT_EQ(key("min_pass_k").value("applies", json()), "both");
@@ -2092,41 +2230,54 @@ TEST(NativeConfigSchema, SchemaDump) {
     EXPECT_EQ(key("threads_cap").value("default", json()), "none");
     EXPECT_EQ(
             key("domain_threads").value("default", json()), "l3_domain_cores");
-    // The rule set: the preset, and the v2 rules whose switches follow it.
-    EXPECT_EQ(key("preset").value("type", json()), "enum");
-    EXPECT_EQ(key("preset").value("values", json()),
-            json::array({"legacy", "v2"}));
-    EXPECT_EQ(key("preset").value("default", json()), "v2");
-    for (const char *name : {"makespan", "l1_pass", "traffic_groups"}) {
-        EXPECT_EQ(key(name).value("default", json()), "preset") << name;
-        EXPECT_EQ(key(name).value("auto", json()), -1) << name;
+    // The rule switches, on by default.
+    const std::vector<std::string> switches
+            = native_brgemm_test::native_rule_switches();
+    EXPECT_EQ(switches,
+            (std::vector<std::string> {"makespan", "l1_pass", "traffic_groups",
+                    "bf16_alias", "bf16_narrow_n", "blocks"}));
+    for (const std::string &name : switches) {
+        EXPECT_EQ(key(name).value("default", json()), 1) << name;
+        EXPECT_FALSE(key(name).contains("auto")) << name;
         EXPECT_EQ(key(name).value("min", json()), 0) << name;
         EXPECT_EQ(key(name).value("max", json()), 1) << name;
         EXPECT_EQ(key(name).value("bits", json()), "same") << name;
     }
     for (const auto &[name, value] : std::vector<std::pair<const char *, int>> {
                  {"min_gain_pct", 5}, {"idle_pct", 10}, {"decode_m", 128},
-                 {"l1_pct", 100}, {"l1_pass_max_mb", 64}}) {
+                 {"l1_pct", 100}, {"l1_pass_max_mb", 64}, {"bf16_alias_mr", 8},
+                 {"bf16_narrow_n_min_m", 1024}, {"bf16_blocks_min_m", 1024},
+                 {"int8_blocks_min_m", 3072}}) {
         EXPECT_EQ(key(name).value("default", json()), value) << name;
         EXPECT_EQ(key(name).value("bits", json()), "same") << name;
     }
-    // The INT8 schemes a key applies to: the per-group tile reads none of
-    // the K pass, the direct store and the bias placement.
+    // The INT8 schemes a key applies to: the per-group tile reads neither
+    // the K pass nor the bias placement.
     const json both = json::array({"per_channel", "per_group"});
     for (const json &e : k) {
         const std::string name = e.at("name");
         const bool per_channel = name == "int8_kc" || name == "int8_l2_pct"
-                || name == "direct_store" || name == "bias_in_dequant"
-                || name == "min_pass_k" || name == "l1_pass" || name == "l1_pct"
+                || name == "bias_in_dequant" || name == "min_pass_k"
+                || name == "l1_pass" || name == "l1_pct"
                 || name == "l1_pass_max_mb";
         const json want = e.at("applies") == "bf16"
                 ? json::array()
                 : (per_channel ? json::array({"per_channel"}) : both);
         EXPECT_EQ(e.at("int8_schemes"), want) << name;
     }
-    for (const json &c : doc.at("kernels"))
-        EXPECT_EQ(c.at("int8_schemes"),
-                c.at("kind") == "int8" ? both : json::array());
+    // Each INT8 kernel family serves one scheme.
+    size_t group_kernels = 0;
+    for (const json &c : doc.at("kernels")) {
+        if (c.at("kind") != "int8") {
+            EXPECT_EQ(c.at("int8_schemes"), json::array());
+            continue;
+        }
+        const bool group = c.at("int8_schemes") == json::array({"per_group"});
+        group_kernels += group ? 1 : 0;
+        EXPECT_TRUE(
+                group || c.at("int8_schemes") == json::array({"per_channel"}));
+    }
+    EXPECT_EQ(group_kernels, detect_uarch().avx512vnni ? 2u : 0u);
     EXPECT_EQ(doc.at("match_keys").size(), 12u);
     EXPECT_EQ(doc.at("match_keys").at("dtype"), json::array({"bf16", "s8"}));
     EXPECT_EQ(doc.at("features").size(), 26u);

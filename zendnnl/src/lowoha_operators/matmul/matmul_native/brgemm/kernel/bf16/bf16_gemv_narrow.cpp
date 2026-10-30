@@ -116,9 +116,7 @@ inline int kp_fast_max_for_K(int K) {
 /// Core templated narrow kernel.  N is a template parameter so the
 /// memcpy sizes, zero-extension patterns, and final store width all
 /// collapse at compile time — no runtime branching inside the
-/// K-loop.  Double-buffered over K-pairs (even / odd) to cover the
-/// 4-cycle VDPBF16PS latency at 1-cycle issue rate, matching the
-/// pattern in the group-matmul custom microkernel.
+/// K-loop.
 template <int N>
 ZENDNNL_TARGET_NOINLINE("avx512f,avx512bw,avx512vl,avx512bf16,fma")
 static void bf16_gemv_narrow_impl(const uint16_t *__restrict A, int K,
@@ -128,14 +126,10 @@ static void bf16_gemv_narrow_impl(const uint16_t *__restrict A, int K,
 
     static_assert(N >= 1 && N <= 4, "narrow kernel handles N ∈ [1, 4]");
 
-    // Four independent accumulator chains unroll the K-pair loop by 4
-    // to cover the 4-cycle VDPBF16PS xmm latency on Zen 5 — two chains
-    // (double-buffer) would saturate issue only if the xmm FMA issues
-    // at 1 op/cycle; profiling on representative narrow-N decode
-    // shapes (M=1, N=3, K~6000) showed ~1.6× distance from ideal with
-    // 2 chains, pointing to a ≤ 0.5 op/cycle issue rate on xmm.  Four
-    // chains give the out-of-order engine enough slack to cover either
-    // case.
+    // Four independent accumulator chains unroll the K-pair loop by 4, so
+    // each chain's VDPBF16PS waits on the result of the one four
+    // instructions back, which hides a latency of up to four issue intervals
+    // at one issue per cycle, and so at any slower rate.
     __m128 acc0 = _mm_setzero_ps();
     __m128 acc1 = _mm_setzero_ps();
     __m128 acc2 = _mm_setzero_ps();

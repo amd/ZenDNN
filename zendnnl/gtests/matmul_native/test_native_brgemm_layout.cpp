@@ -44,6 +44,7 @@
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_brgemm_looper.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_int8_call.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_partition.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_planner.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
@@ -413,11 +414,9 @@ std::vector<view_case_t> view_cases(
     std::vector<view_case_t> v;
     for (int K : Ks)
         for (int N : Ns)
-            for (int pack_nr : {32, 64})
-                for (bool transB : {false, true})
-                    for (bool interleave : {false, true})
-                        if (N % pack_nr == 0)
-                            v.push_back({K, N, pack_nr, transB, interleave});
+            for (bool transB : {false, true})
+                for (bool interleave : {false, true})
+                    v.push_back({K, N, 32, transB, interleave});
     return v;
 }
 
@@ -616,17 +615,14 @@ std::vector<pack_case_t> pack_cases() {
     std::vector<pack_case_t> v;
     for (int K : {1, 2, 3, 4, 5, 31, 63, 64, 100, 1000})
         for (int N : {32, 64, 96, 128})
-            for (int pack_nr : {32, 64})
-                for (int pad : {0, 3})
-                    for (bool transB : {false, true})
-                        for (bool interleave : {false, true})
-                            if (N % pack_nr == 0)
-                                v.push_back({K, N, pack_nr, pad, transB,
-                                        interleave});
+            for (int pad : {0, 3})
+                for (bool transB : {false, true})
+                    for (bool interleave : {false, true})
+                        v.push_back({K, N, 32, pad, transB, interleave});
     for (bool transB : {false, true})
         for (bool interleave : {false, true}) {
             v.push_back({1000, 4096, 32, 0, transB, interleave});
-            v.push_back({4097, 1024, 64, 0, transB, interleave});
+            v.push_back({4097, 1024, 32, 0, transB, interleave});
         }
     return v;
 }
@@ -684,33 +680,23 @@ TEST_F(NativeBrgemmLayoutTest, PackRejects) {
         return std::count(dst.begin(), dst.end(), uint8_t {0xCD})
                 == static_cast<std::ptrdiff_t>(dst.size());
     };
+    // Shapes off the layout never reach the pack: the layout rule declines
+    // them (NativeLayoutRule).
     const struct {
         const char *what;
         data_type_t dt;
-        int K, N, ldb, pack_nr;
-        bool transB, has_layout;
+        int K, N, ldb;
+        bool transB;
     } cases[] = {
-            {"f32 weight", data_type_t::f32, K, N, N, 32, false, false},
-            {"u8 weight", data_type_t::u8, K, N, N, 32, false, false},
-            {"K 0", data_type_t::bf16, 0, N, N, 32, false, false},
-            {"N 48", data_type_t::bf16, K, 48, 48, 32, false, false},
-            {"N 0", data_type_t::bf16, K, 0, N, 32, false, false},
-            {"N 32 at pack_nr 64", data_type_t::bf16, K, 32, 32, 64, false,
-                    false},
-            {"pack_nr 16", data_type_t::s8, K, N, N, 16, false, false},
-            {"pack_nr 48", data_type_t::s8, K, 96, 96, 48, false, false},
-            {"ldb below N", data_type_t::bf16, K, N, N - 1, 32, false, true},
-            {"ldb below K", data_type_t::s8, K, N, K - 1, 32, true, true},
+            {"ldb below N", data_type_t::bf16, K, N, N - 1, false},
+            {"ldb below K", data_type_t::s8, K, N, K - 1, true},
     };
     for (const auto &b : cases) {
-        EXPECT_NE(nv::native_pack_weight(b.dt, w.data(), b.K, b.N, b.ldb,
-                          b.pack_nr, b.transB, false, dst.data(), 4),
+        EXPECT_NE(nv::native_pack_weight(b.dt, w.data(), b.K, b.N, b.ldb, 32,
+                          b.transB, false, dst.data(), 4),
                 status_t::success)
                 << b.what;
         EXPECT_TRUE(untouched()) << b.what;
-        EXPECT_EQ(nv::native_packed_bytes(b.dt, b.K, b.N, b.pack_nr) > 0,
-                b.has_layout)
-                << b.what;
     }
     EXPECT_NE(nv::native_pack_weight(data_type_t::bf16, nullptr, K, N, N, 32,
                       false, false, dst.data(), 1),
@@ -730,24 +716,10 @@ TEST_F(NativeBrgemmLayoutTest, AcquisitionRejects) {
         nv::native_weight_lease_t lease;
         return nv::acquire_native_weight(ref, dt, K, N, ldb, true, v, lease);
     };
+    // Shapes off the layout never reach the acquisition: the layout rule
+    // declines them (NativeLayoutRule).
     const nv::native_weight_ref_t ok = raw_ref(copy.data(), 32, 0);
     EXPECT_EQ(acquire(ok, data_type_t::bf16, 64, 64, 64), status_t::success);
-    EXPECT_NE(acquire(ok, data_type_t::f32, 64, 64, 64), status_t::success);
-    EXPECT_NE(acquire(ok, data_type_t::u8, 64, 64, 64), status_t::success);
-    EXPECT_NE(acquire(ok, data_type_t::bf16, 0, 64, 64), status_t::success);
-    EXPECT_NE(acquire(ok, data_type_t::bf16, 64, 48, 64), status_t::success);
-    EXPECT_NE(acquire(ok, data_type_t::bf16, 64, 0, 64), status_t::success);
-    for (int pack_nr : {0, 16, 48, 128}) {
-        nv::native_weight_ref_t r = ok;
-        r.pack_nr = pack_nr;
-        EXPECT_NE(acquire(r, data_type_t::bf16, 64, 64, 64), status_t::success)
-                << pack_nr;
-    }
-    {
-        nv::native_weight_ref_t r = ok;
-        r.pack_nr = 64;
-        EXPECT_NE(acquire(r, data_type_t::bf16, 64, 96, 64), status_t::success);
-    }
     {
         nv::native_weight_ref_t r = ok;
         r.weight = nullptr;
@@ -780,12 +752,6 @@ TEST_F(NativeBrgemmLayoutTest, ExecuteRejectsAndCounts) {
     bad = pb;
     bad.ldc = pb.N - 1;
     EXPECT_NE(execute(bad, r, ref, io), status_t::success);
-    bad = pb;
-    bad.N = 48;
-    EXPECT_NE(execute(bad, r, ref, io), status_t::success);
-    nv::native_weight_ref_t wrong = ref;
-    wrong.pack_nr = 16;
-    EXPECT_NE(execute(pb, r, wrong, io), status_t::success);
     {
         nv::GemmDescriptor desc;
         desc.M = 4;
@@ -1015,10 +981,6 @@ TEST_F(NativeBrgemmLayoutTest, InPlaceImageReusedAcrossCalls) {
         run_and_expect(pb, r, raw_ref(w.data(), 32, 1));
         r.tag = "wc0_after_image";
         run_and_expect(pb, r, raw_ref(w.data(), 32, 0));
-        r.tag = "wc1_pack64_after_image";
-        run_and_expect(pb, r, raw_ref(w.data(), 64, 1));
-        r.tag = "wc2_pack64_after_image";
-        run_and_expect(pb, r, raw_ref(w.data(), 64, 2));
         // The buffer keeps the first image.
         EXPECT_EQ(std::memcmp(w.data(), image32.get(),
                           static_cast<size_t>(pb.K) * pb.N * 2),
@@ -1092,9 +1054,7 @@ TEST_F(NativeBrgemmLayoutTest, CacheKeepsOneLayoutPerRequest) {
     EXPECT_EQ(a.owned, nullptr);
     EXPECT_EQ(b.data, a.data) << "a cached layout serves weight cache 1 and 2";
     const nv::native_layout_t c = layout_of(32, true, 1);
-    const nv::native_layout_t d = layout_of(64, false, 1);
     EXPECT_NE(c.data, a.data);
-    EXPECT_NE(d.data, a.data);
     nv::native_layout_t e = layout_of(32, false, 0);
     EXPECT_NE(e.owned, nullptr);
     EXPECT_EQ(e.data, e.owned);
@@ -1104,8 +1064,6 @@ TEST_F(NativeBrgemmLayoutTest, CacheKeepsOneLayoutPerRequest) {
         EXPECT_EQ(
                 std::memcmp(x.first.data, want.get(), layout_bytes(pb, 32)), 0);
     }
-    buffer_t want64 = prepack_bf16(pb, 64, false);
-    EXPECT_EQ(std::memcmp(d.data, want64.get(), layout_bytes(pb, 64)), 0);
     nv::native_free_layout(e.owned);
     EXPECT_EQ(std::memcmp(w.data(), pb.w.data(), w.size() * 2), 0)
             << "a cached layout leaves the weight raw";
@@ -1154,23 +1112,19 @@ TEST_F(NativeBrgemmLayoutTest, InPlaceImageServesOrRebuildsEveryRequest) {
     EXPECT_FALSE(nv::native_weight_packed_in_place(w.data() + w.size(), 0));
     buffer_t image = prepack_bf16(pb, 32, false);
     for (int32_t wc : {0, 1, 2})
-        for (bool interleave : {false, true})
-            for (int pack_nr : {32, 64}) {
-                SCOPED_TRACE("wc=" + std::to_string(wc)
-                        + " interleave=" + std::to_string(interleave)
-                        + " pack_nr=" + std::to_string(pack_nr));
-                nv::native_layout_t l;
-                ASSERT_EQ(nv::get_native_layout(
-                                  raw_bf16(pb, w.data(), pack_nr, interleave),
-                                  wc, 0, 4, l),
-                        status_t::success);
-                buffer_t want = prepack_bf16(pb, pack_nr, interleave);
-                EXPECT_EQ(std::memcmp(l.data, want.get(),
-                                  layout_bytes(pb, pack_nr)),
-                        0);
-                EXPECT_EQ(l.data == w.data(), pack_nr == 32 && !interleave);
-                nv::native_free_layout(l.owned);
-            }
+        for (bool interleave : {false, true}) {
+            SCOPED_TRACE("wc=" + std::to_string(wc)
+                    + " interleave=" + std::to_string(interleave));
+            nv::native_layout_t l;
+            ASSERT_EQ(nv::get_native_layout(
+                              raw_bf16(pb, w.data(), 32, interleave), wc, 0, 4,
+                              l),
+                    status_t::success);
+            buffer_t want = prepack_bf16(pb, 32, interleave);
+            EXPECT_EQ(std::memcmp(l.data, want.get(), layout_bytes(pb, 32)), 0);
+            EXPECT_EQ(l.data == w.data(), !interleave);
+            nv::native_free_layout(l.owned);
+        }
     EXPECT_EQ(std::memcmp(w.data(), image.get(), w.size() * 2), 0)
             << "an image is never rewritten";
 
@@ -1599,7 +1553,8 @@ TEST_F(NativeBrgemmLayoutTest, RowGroupScheduleMatchesSingleThread) {
                 schedule_call(int8, kM, t.N, kK, t.threads, wei_scale.data(),
                         desc, params);
                 const nv::native_plan_t plan = nv::native_planner().plan(
-                        nv::make_native_problem(desc, params, nullptr, 32));
+                        nv::make_native_problem(desc, params, nullptr, 32,
+                                nv::decide_int8_call(desc, params, nullptr)));
                 const int workers = static_cast<int>(std::min<int64_t>(
                         plan.threads,
                         static_cast<int64_t>(plan.m_blocks) * plan.n_tiles));

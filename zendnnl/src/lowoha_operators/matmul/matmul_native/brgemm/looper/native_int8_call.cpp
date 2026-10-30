@@ -20,15 +20,17 @@
 #include <cstddef>
 #include <cstring>
 #include <limits>
+#include <thread>
 
+#include <immintrin.h>
 #include <omp.h>
 
 #include "common/bfloat16.hpp"
 #include "common/float16.hpp"
-#include "lowoha_operators/common/omp_thread_control.hpp"
-#include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
+#include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/native_int8_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_epilogue.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_operator_bridge.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -45,10 +47,15 @@ using quant_t = matmul_quantization_params_t::matmul_quant_t;
 
 constexpr float kUnitScale = 1.0f;
 
+/// Source bytes whose group shifts one claim of ready_group_shifts covers.
+constexpr int kShiftClaimBytes = 65536;
+/// Pauses a wait of ready_group_shifts spins before it yields.
+constexpr int kShiftSpinPauses = 4096;
+
 /// 1 for a per-tensor buffer, rows for a per-row one ({rows} or {rows, 1}),
 /// 0 for any other shape.
 int64_t per_tensor_or_row(const std::vector<int64_t> &dims, int rows) {
-    const int64_t n = checked_quant_param_num_elements(dims);
+    const int64_t n = quant_elements(dims);
     if (n == 1) return 1;
     const bool row_shape
             = dims.size() == 1 || (dims.size() == 2 && dims[1] == 1);
@@ -128,13 +135,64 @@ void copy_rows(const void *src, int lds, bool trans, int M, int K, void *dst,
     }
 }
 
+/// shift[g] = -128 times the sum of the s8 values of group g of one row:
+/// groups groups of group_bytes bytes (a multiple of 4) from row.
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vnni")
+void row_group_shifts(
+        const uint8_t *row, int groups, int group_bytes, int32_t *shift) {
+    const __m512i ones = _mm512_set1_epi8(1);
+    const int quads = group_bytes / 4;
+    if (group_bytes < 64 && 16 % quads == 0) {
+        // The quad sums of 64 bytes, added up over the lanes of each group
+        // they hold.
+        const int64_t bytes = static_cast<int64_t>(groups) * group_bytes;
+        alignas(64) int32_t lanes[16];
+        int g = 0;
+        for (int64_t k = 0; k < bytes; k += 64) {
+            const int64_t left = bytes - k;
+            const __mmask64 in
+                    = _cvtu64_mask64(left >= 64 ? ~0ull : ~0ull >> (64 - left));
+            __m512i s = _mm512_dpbusd_epi32(_mm512_setzero_si512(), ones,
+                    _mm512_maskz_loadu_epi8(in, row + k));
+            if (quads >= 2)
+                s = _mm512_add_epi32(s, _mm512_shuffle_epi32(s, _MM_PERM_CDAB));
+            if (quads >= 4)
+                s = _mm512_add_epi32(s, _mm512_shuffle_epi32(s, _MM_PERM_BADC));
+            if (quads >= 8)
+                s = _mm512_add_epi32(
+                        s, _mm512_shuffle_i32x4(s, s, _MM_SHUFFLE(2, 3, 0, 1)));
+            _mm512_store_si512(lanes,
+                    _mm512_sub_epi32(
+                            _mm512_setzero_si512(), _mm512_slli_epi32(s, 7)));
+            const int n = std::min(16 / quads, groups - g);
+            for (int j = 0; j < n; ++j)
+                shift[g + j] = lanes[j * quads];
+            g += n;
+        }
+        return;
+    }
+    for (int g = 0; g < groups; ++g) {
+        const uint8_t *p = row + static_cast<size_t>(g) * group_bytes;
+        __m512i acc = _mm512_setzero_si512();
+        int k = 0;
+        for (; k + 64 <= group_bytes; k += 64)
+            acc = _mm512_dpbusd_epi32(acc, ones, _mm512_loadu_si512(p + k));
+        if (k < group_bytes)
+            acc = _mm512_dpbusd_epi32(acc, ones,
+                    _mm512_maskz_loadu_epi8(
+                            _cvtu64_mask64(~0ull >> (64 - (group_bytes - k))),
+                            p + k));
+        shift[g] = _mm512_reduce_add_epi32(acc) * -128;
+    }
+}
+
 /// Dynamic quantization of a bf16 / f32 source by matmul's per-call reorder
 /// quantization into call.src_buffers.  On success q describes the quantized
-/// source.
+/// source (reorder_quantize_source).
 status_t quantize_source(const GemmDescriptor &desc,
         const matmul_params &params, const void *src, int nt, int copy_block,
         int64_t copy_par_min, int groups, native_int8_call_t &call,
-        const void *&a, int &lda, matmul_params &q) {
+        const void *&a, int &lda, const matmul_params *&q) {
     const int M = desc.M;
     const int K = desc.K;
     const auto &qp = params.quant_params;
@@ -168,26 +226,16 @@ status_t quantize_source(const GemmDescriptor &desc,
         rows_ld = K;
     }
 
-    // What the quantizer reads, and rewrites for the quantized source.
-    q.dtypes = params.dtypes;
-    q.quant_params = params.quant_params;
-    q.dynamic_quant = params.dynamic_quant;
-    q.packing = params.packing;
     const void *quantized = rows;
     int quantized_lda = rows_ld;
-    size_t elem_size = size_of(params.dtypes.src);
-    matmul_batch_params_t batch;
-    // The quantization kernels size their thread teams from the nthreads ICV.
-    const thread_guard team(nt);
-    const status_t st
-            = reorder_quantization_wrapper(quantized, rows_ld, quantized_lda,
-                    elem_size, q, batch, false, M, K, nt, call.src_buffers);
+    const status_t st = reorder_quantize_source(params, rows, rows_ld, M, K, nt,
+            call.src_buffers, quantized, quantized_lda, q);
     if (st != status_t::success) return st;
     a = quantized;
     lda = quantized_lda;
     // The wrapper leaves the source as it was when it does not quantize;
     // another route can still serve the call.
-    if (q.dtypes.src != data_type_t::s8 && q.dtypes.src != data_type_t::u8)
+    if (q->dtypes.src != data_type_t::s8 && q->dtypes.src != data_type_t::u8)
         return status_t::unimplemented;
     return status_t::success;
 }
@@ -207,7 +255,7 @@ status_t check_group_call(
     const bool per_group = per_group_scale(sc, desc.M, groups);
     if (dynamic_source(params))
         return params.dtypes.compute == data_type_t::s8
-                        && (n_scale == 1 || quant_param_is_per_token(sc, desc.M)
+                        && (n_scale == 1 || quant_per_token(sc, desc.M)
                                 || per_group)
                 ? status_t::success
                 : status_t::unimplemented;
@@ -223,12 +271,14 @@ native_int8_decision_t decide_int8_call(const GemmDescriptor &desc,
         const matmul_params &params, const void *bias) {
     native_int8_decision_t d;
     d.groups = int8_scale_groups(params, desc.N);
+    const data_type_t dst = desc.dst_dt;
     if (d.groups > 0) {
         d.scheme = native_int8_scheme_t::per_group;
         d.order = native_int8_order_t::reference;
+        d.direct_store = desc.alpha == 1.0f && desc.beta == 0.0f
+                && (dst == data_type_t::f32 || dst == data_type_t::bf16);
         return d;
     }
-    const data_type_t dst = desc.dst_dt;
     if (desc.alpha != 1.0f || desc.beta != 0.0f || dst == data_type_t::s8
             || dst == data_type_t::u8 || dst == data_type_t::s32) {
         d.order = native_int8_order_t::reference;
@@ -265,7 +315,7 @@ status_t check_int8_call(const GemmDescriptor &desc,
         // of the scale's shape.
         const auto &sc = qp.src_scale;
         const int64_t n_scale = per_tensor_or_row(sc.dims, M);
-        if (n_scale == 0 || (n_scale != 1 && !quant_param_is_per_token(sc, M))
+        if (n_scale == 0 || (n_scale != 1 && !quant_per_token(sc, M))
                 || (sc.buff != nullptr && !native_float_dt(sc.dt)))
             return status_t::unimplemented;
         if (compute == data_type_t::u8
@@ -292,8 +342,8 @@ status_t check_int8_call(const GemmDescriptor &desc,
     }
 
     if (qp.wei_scale.buff != nullptr
-            && ((!quant_param_dims_are_per_tensor(qp.wei_scale.dims)
-                        && !quant_param_is_per_channel(qp.wei_scale, desc.N))
+            && ((!quant_dims_per_tensor(qp.wei_scale.dims)
+                        && !quant_per_channel(qp.wei_scale, desc.N))
                     || !native_float_dt(qp.wei_scale.dt)))
         return status_t::unimplemented;
     return status_t::success;
@@ -334,6 +384,7 @@ status_t prepare_int8_call(const GemmDescriptor &desc,
     call.groups = 0;
     call.group_quads = 0;
     call.src_scale_group_stride = 0;
+    call.group_shift = nullptr;
 
     const int nt = omp_in_parallel() ? 1 : std::max(1, desc.num_threads);
     const data_type_t src_dt = params.dtypes.src;
@@ -347,15 +398,15 @@ status_t prepare_int8_call(const GemmDescriptor &desc,
             && params.dtypes.compute != data_type_t::u8;
     const quant_t *src_scale = &qp.src_scale;
     const quant_t *src_zp = dynamic_sym ? nullptr : &qp.src_zp;
-    matmul_params quantized;
+    const matmul_params *quantized = nullptr;
     if (src_dt == data_type_t::bf16 || src_dt == data_type_t::f32) {
         const status_t st = quantize_source(desc, params, src, nt, copy_block,
                 copy_par_min, groups, call, a, lda, quantized);
         if (st != status_t::success) return st;
         trans = false;
-        a_dt = quantized.dtypes.src;
-        src_scale = &quantized.quant_params.src_scale;
-        if (src_zp != nullptr) src_zp = &quantized.quant_params.src_zp;
+        a_dt = quantized->dtypes.src;
+        src_scale = &quantized->quant_params.src_scale;
+        if (src_zp != nullptr) src_zp = &quantized->quant_params.src_zp;
     } else if (src_dt != data_type_t::u8 && src_dt != data_type_t::s8) {
         return status_t::unimplemented;
     }
@@ -427,9 +478,9 @@ status_t prepare_int8_call(const GemmDescriptor &desc,
         call.group_quads = K / groups / 4;
     } else {
         int64_t n = 0;
-        if (quant_param_dims_are_per_tensor(wei_scale.dims))
+        if (quant_dims_per_tensor(wei_scale.dims))
             n = 1;
-        else if (quant_param_is_per_channel(wei_scale, desc.N))
+        else if (quant_per_channel(wei_scale, desc.N))
             n = desc.N;
         if (n == 0 || !native_float_dt(wei_scale.dt))
             return status_t::unimplemented;
@@ -437,7 +488,56 @@ status_t prepare_int8_call(const GemmDescriptor &desc,
         call.wei_scale_dt = wei_scale.dt;
         call.wei_scale_stride = n == 1 ? 0 : 1;
     }
+    if (call.scheme == native_int8_scheme_t::per_group) {
+        // Every shift is written before its chunk is marked ready, and read
+        // only after: the buffer needs no fill.
+        call.shift_buf.reset(new int32_t[static_cast<size_t>(M) * groups]);
+        call.group_shift = call.shift_buf.get();
+        call.rows = M;
+        // A claim covers about kShiftClaimBytes of source, so that the
+        // claims, on one shared counter, stay few next to the work they hand
+        // out.
+        call.shift_chunk = std::max(1, kShiftClaimBytes / K);
+        const int chunks = (M + call.shift_chunk - 1) / call.shift_chunk;
+        call.shift_rows.reset(new std::atomic<int>[chunks + 1]);
+        for (int i = 0; i <= chunks; ++i)
+            call.shift_rows[i].store(0, std::memory_order_relaxed);
+    }
     return status_t::success;
+}
+
+void ready_group_shifts(const native_int8_call_t &call, int m0, int mr) {
+    std::atomic<int> *const next = &call.shift_rows[0];
+    std::atomic<int> *const ready = &call.shift_rows[1];
+    const int chunk = call.shift_chunk;
+    const int chunks = (call.rows + chunk - 1) / chunk;
+    const int first = m0 / chunk;
+    const int end = (m0 + mr + chunk - 1) / chunk;
+    const int group_bytes = call.group_quads * 4;
+    // Chunks are claimed in order: once next reaches end, every chunk of the
+    // range is claimed.
+    while (next->load(std::memory_order_relaxed) < end) {
+        const int c = next->fetch_add(1, std::memory_order_relaxed);
+        if (c >= chunks) break;
+        const int m_end = std::min(call.rows, (c + 1) * chunk);
+        for (int m = c * chunk; m < m_end; ++m)
+            row_group_shifts(call.A + static_cast<size_t>(m) * call.lda,
+                    call.groups, group_bytes,
+                    call.group_shift + static_cast<size_t>(m) * call.groups);
+        ready[c].store(1, std::memory_order_release);
+    }
+    // One budget of pauses for the whole wait, then yields.
+    int spin = 0;
+    for (int c = first; c < end; ++c) {
+        while (ready[c].load(std::memory_order_acquire) == 0) {
+            if (spin < kShiftSpinPauses) {
+                ++spin;
+                _mm_pause();
+            } else {
+                std::this_thread::yield();
+            }
+        }
+    }
 }
 
 } // namespace native

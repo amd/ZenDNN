@@ -58,9 +58,9 @@ inline constexpr unsigned kBf16BkcMtL2SliceBudgetPct = 85;
 
 /// Map OpenMP \p tid → column slice index (same \p chunk = ceil(N/nt) layout as
 /// linear scheduling, but permuted so consecutive \p tid values map to the same
-/// CCX). When \p nt % ccx_cores == 0 and \p nt >= ccx_cores, indices \p s are a
-/// permutation of 0..nt-1 (every slice assigned once). Otherwise returns \p tid
-/// (linear). \p nt == ccx_cores gives the identity map.
+/// L3 domain). When \p nt % ccx_cores == 0 and \p nt >= ccx_cores, indices
+/// \p s are a permutation of 0..nt-1 (every slice assigned once). Otherwise
+/// returns \p tid (linear). \p nt == ccx_cores gives the identity map.
 inline int bf16_gemv_mt_slice_index(int tid, int nt, int ccx_cores) {
     if (ccx_cores < 2 || nt < ccx_cores || (nt % ccx_cores) != 0) return tid;
     const int num_ccxs = nt / ccx_cores;
@@ -283,7 +283,7 @@ bool bf16_gemv_direct(const GemmDescriptor &desc, const UarchParams &uarch,
                 = (l2_cap * kBf16BkcMtL2SliceBudgetPct) / 100;
         // Const weights: allow >L2 slices. Per-thread BKC packing is cached
         // thread-local (one-time cost), and each thread's first-touch places
-        // pages in its local CCD's DRAM → L3-resident with NUMA locality.
+        // pages in its local node's DRAM → L3-resident with NUMA locality.
         // The kernel's sequential k-pair access lets HW prefetcher stream from
         // L3/DRAM. Non-const weights repack every call → gate on L2.
         if (slice_bytes > l2_slice_budget && !desc.is_weights_const)

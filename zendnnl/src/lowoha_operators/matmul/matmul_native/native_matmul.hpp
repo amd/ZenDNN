@@ -87,8 +87,7 @@ bool native_matmul_execute(matmul_algo_t kernel, char layout, bool transA,
         int ldc, bool is_weights_const, int num_threads, matmul_params &params);
 
 /// Best-algo selector for BF16 M≤8 (GEMV/decode) shapes.
-/// Returns the optimal algo (native_brgemm or aocl_dlp_blocked) based
-/// on empirical benchmarks on AMD Zen 5.
+/// Returns native_brgemm or aocl_dlp_blocked by the rules below.
 ///   * M>1            → native_brgemm (BRGEMM dominates DLP for M=2-8).
 ///   * M=1, !transB,
 ///     N ≤ 4          → native_brgemm (engages pack-free narrow GEMV).

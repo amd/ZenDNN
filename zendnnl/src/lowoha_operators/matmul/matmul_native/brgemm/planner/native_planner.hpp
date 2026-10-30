@@ -27,6 +27,7 @@
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_config.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/gemm_descriptor.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_int8_scheme.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -68,9 +69,12 @@ struct native_problem_t {
 
 size_t hash_native_problem(const native_problem_t &p) noexcept;
 
-/// The problem of a call native_brgemm_execute serves.  Cheap; no allocation.
+/// The problem of a call native_brgemm_execute serves.  decision is the
+/// call's decide_int8_call, read only for an s8 weight.  Cheap; no
+/// allocation.
 native_problem_t make_native_problem(const GemmDescriptor &desc,
-        const matmul_params &params, const void *bias, int pack_nr);
+        const matmul_params &params, const void *bias, int pack_nr,
+        const native_int8_decision_t &decision);
 
 enum class native_plan_source_t : uint8_t { heuristic, rules, table, override };
 
@@ -80,7 +84,10 @@ struct native_config_entry_t;
 /// the INT8 tile read.  Legal for its problem (validate_native_plan).
 struct native_plan_t {
     // Tile grid and schedule.
-    int nr = 0; ///< tile width: 16 or 32, dividing pack_nr
+    /// Tile width: 16 or 32, dividing pack_nr; BF16 also 64 or 128:
+    /// 32-column slabs, each inside one pack block, of whole blocks or of
+    /// one block.
+    int nr = 0;
     int mr = 0; ///< BF16 rows per call; rows of the row-split rounding
     int mb = 0; ///< rows per M block
     int m_blocks = 0;
@@ -88,6 +95,11 @@ struct native_plan_t {
     int kc = 0; ///< BF16 K per pass; even unless it covers K
     int threads = 1; ///< compute team
     int col_groups = 0; ///< 0: slice schedule; > 0: row-group schedule
+    /// > 0: the blocks schedule (col_groups 0): units of a row block by
+    /// unit_tiles column tiles; each domain_threads adjacent threads take
+    /// the units of their rows from one counter, then the other domains'.
+    int unit_tiles = 0;
+    int domain_threads = 1;
     int row_unit = 12; ///< rows per unit of the row-group ranges
     native_traversal_t traversal = native_traversal_t::m_inner;
     size_t scratch_floats = 0; ///< accumulators per thread
@@ -125,10 +137,20 @@ native_plan_t heuristic_plan(const native_problem_t &p,
 const char *validate_native_plan(
         const native_plan_t &plan, const native_problem_t &p);
 
+/// The accumulators per thread a plan for p needs: one row call's for a BF16
+/// plan of one K pass; else a row block's for each tile a unit computes
+/// between K passes.
+size_t native_plan_scratch_floats(
+        const native_plan_t &plan, const native_problem_t &p);
+
 /// INT8 tile helpers; the INT8 tile calls these instead of its constants.
+/// The widest INT8 call width, which the tiles' per-call buffers hold.
+inline constexpr int kNativeInt8MaxCallCols = 32;
 /// Widest allowed width <= remaining (remaining is a multiple of 16).
 inline int native_int8_col_width(const native_plan_t &p, int remaining) {
-    if ((p.int8_cw_mask & kNativeInt8Cw32) != 0 && remaining >= 32) return 32;
+    if ((p.int8_cw_mask & kNativeInt8Cw32) != 0
+            && remaining >= kNativeInt8MaxCallCols)
+        return kNativeInt8MaxCallCols;
     return 16;
 }
 /// Rows per INT8 call at NR = 16 * nv, nv 1 or 2.

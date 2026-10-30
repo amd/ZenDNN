@@ -16,9 +16,9 @@
 
 #include "lowoha_operators/matmul/matmul_native/native_layout_policy.hpp"
 
-#include "common/zendnnl_cpuid_compat.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/native_int8_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_hw.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -36,17 +36,7 @@ native_layout_decision_t declined(const char *reason) {
 } // namespace
 
 bool native_base_isa() {
-    static const bool has = [] {
-        unsigned eax = 0, ebx = 0, ecx = 0, edx = 0;
-        zendnnl_cpuid(1, eax, ebx, ecx, edx);
-        const bool fma = (ecx >> 12) & 1u;
-        zendnnl_cpuid_count(7, 0, eax, ebx, ecx, edx);
-        const bool dq = (ebx >> 17) & 1u;
-        const bool bw = (ebx >> 30) & 1u;
-        const bool vl = (ebx >> 31) & 1u;
-        return detect_uarch().avx512f && fma && dq && bw && vl;
-    }();
-    return has;
+    return native_hw().base_isa;
 }
 
 native_layout_decision_t decide_native_layout(const native_layout_query_t &q) {

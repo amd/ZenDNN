@@ -17,13 +17,18 @@
 #ifndef MATMUL_NATIVE_BRGEMM_KERNEL_INT8_NATIVE_INT8_UKERNEL_HPP
 #define MATMUL_NATIVE_BRGEMM_KERNEL_INT8_NATIVE_INT8_UKERNEL_HPP
 
+#include <cstddef>
 #include <cstdint>
 #include <limits>
+
+#include "common/data_types.hpp"
 
 namespace zendnnl {
 namespace lowoha {
 namespace matmul {
 namespace native {
+
+using zendnnl::common::data_type_t;
 
 /// Largest K for which the int32 accumulation of a u8 x s8 dot product
 /// cannot overflow for any byte values; the zero-point term stays exact up
@@ -81,6 +86,69 @@ int native_int8_ukernel_max_mr(int nv);
 /// nullptr outside MR 1 .. native_int8_ukernel_max_mr(nv).
 native_int8_ukernel_fn_t select_native_int8_ukernel(
         int mr, int nv, bool src_signed);
+
+/// A batch-reduce INT8 kernel over one MR x NR tile (NR = 16 * nv): a batch
+/// of (A, B) blocks, each reduced exactly in int32, then taken through a
+/// per-element step into f32 accumulators that stay in registers across the
+/// batch; C enters before the first element and leaves after the last.  The
+/// per-group tile runs it with one element per K group.
+struct native_int8_group_ukernel_args_t {
+    // The batch.  Element g multiplies MR rows of s8 source, at A + g *
+    // a_step and lda apart, by B + g * b_step, k_quads K quads each.
+    const uint8_t *A = nullptr;
+    int lda = 0;
+    size_t a_step = 0;
+    /// Quad 0 of the tile's first pack column; b_stride bytes between quads.
+    /// The weight is read as w + 128.
+    const int8_t *B = nullptr;
+    int b_stride = 0;
+    size_t b_step = 0;
+    int k_quads = 0;
+    int batch = 0;
+    // The step of element g, for row m: the row's int32 sum starts at
+    // shift[m * shift_ld + g * shift_step], which cancels what reading the
+    // weight as w + 128 adds (-128 times the sum of the row's source values
+    // over the element), and the scales are src_scale[m * src_scale_ld + g *
+    // src_scale_step] and the NR weight scales from element g *
+    // wei_scale_step of wei_scale on, of type wei_scale_dt (f32, bf16 or
+    // f16), each read exactly as f32.
+    const int32_t *shift = nullptr;
+    int shift_ld = 0;
+    int shift_step = 0;
+    const float *src_scale = nullptr;
+    int src_scale_ld = 0;
+    int src_scale_step = 0;
+    const void *wei_scale = nullptr;
+    int wei_scale_step = 0;
+    data_type_t wei_scale_dt = data_type_t::f32;
+    /// The f32 tile, ldc apart.  With accumulate it holds the sum of the
+    /// elements before this batch; else the sum starts at +0.0.
+    float *C = nullptr;
+    int ldc = 0;
+    bool accumulate = false;
+    /// When set, the sum is stored here instead of C: MR rows dst_ldc
+    /// elements apart, bf16 rounded to nearest even or f32.
+    void *dst = nullptr;
+    int dst_ldc = 0;
+    bool dst_bf16 = false;
+};
+
+/// C[m][n] (+)= the sum over the batch, in order, of (f32(shift_g + acc_g)
+/// * src_scale_g) * wei_scale_g[n], where acc_g is the int32 dot product of
+/// row m of element g's A and column n of its B read as w + 128: one
+/// rounding per operation and no fused multiply-add, the first element
+/// added to the entry value of C (+0.0 without accumulate).  shift_g + acc_g
+/// is the exact sum of element g, so equal inputs give equal bits.
+using native_int8_group_ukernel_fn_t
+        = void (*)(const native_int8_group_ukernel_args_t &);
+
+/// Largest MR served for NR = 16 * nv: 12 at nv 1, 6 at nv 2, 0 otherwise.
+/// The int32 and f32 accumulators, the B vectors, the broadcast source, the
+/// flip constant and the step's scales fit the 32 vector registers.
+int native_int8_group_ukernel_max_mr(int nv);
+
+/// nullptr outside MR 1 .. native_int8_group_ukernel_max_mr(nv).
+native_int8_group_ukernel_fn_t select_native_int8_group_ukernel(int mr, int nv);
 
 } // namespace native
 } // namespace matmul

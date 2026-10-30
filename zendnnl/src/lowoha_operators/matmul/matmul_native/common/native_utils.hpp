@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/lowoha_common.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/avx512_math.hpp"
 
@@ -28,6 +29,16 @@ namespace matmul {
 namespace native {
 
 using zendnnl::common::post_op_type_t;
+
+/// Frees memory from zendnnl_aligned_alloc.
+struct native_aligned_free_t {
+    void operator()(void *p) const { zendnnl_aligned_free(p); }
+};
+
+/// a / b rounded up, for a >= 0 and b > 0; no intermediate overflows.
+inline int ceil_div(int a, int b) {
+    return a / b + (a % b != 0);
+}
 
 /// Detect the first fuseable activation post-op from the post-op chain.
 /// Returns fused_postop_t::none if no fuseable activation is found.

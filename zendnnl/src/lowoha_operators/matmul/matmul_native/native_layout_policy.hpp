@@ -64,7 +64,7 @@ struct native_layout_decision_t {
 native_layout_decision_t decide_native_layout(const native_layout_query_t &q);
 
 /// AVX-512 F, BW, VL and DQ and FMA: what the native kernels and epilogue
-/// use besides AVX512-BF16 / AVX512-VNNI.  Detected once.
+/// use besides AVX512-BF16 / AVX512-VNNI (native_hw_t::base_isa).
 bool native_base_isa();
 
 } // namespace native

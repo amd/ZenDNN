@@ -41,10 +41,11 @@ struct native_int8_out_t {
 /// and beta apply here (see native_int8_call_t::order) and the epilogue then
 /// takes alpha 1 and beta 0; with per-group weight scales the epilogue
 /// applies them.  Post-ops are left to the epilogue.  With out (alpha 1 and
-/// beta 0 only), the result is stored there instead and C holds only the
-/// int32 sums between K passes.  The column widths, rows per kernel call and
-/// K passes are plan's; with per-group weight scales each group is a pass,
-/// and out must be nullptr.  Safe to call concurrently on disjoint tiles.
+/// beta 0 only), the result is stored there instead and C holds only what
+/// the tile carries between K passes or batches of groups.  The column
+/// widths, rows per kernel call and K passes are plan's; with per-group
+/// weight scales one call of the group kernel reduces every group of its
+/// rows (no K passes).  Safe to call concurrently on disjoint tiles.
 void compute_int8_tile(const native_plan_t &plan,
         const native_int8_call_t &call, const native_weight_view_t &w, int m0,
         int mr, int n0, int nr, float *C, int ldc,

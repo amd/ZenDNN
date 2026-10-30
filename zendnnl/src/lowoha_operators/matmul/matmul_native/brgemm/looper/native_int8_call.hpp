@@ -17,14 +17,16 @@
 #ifndef MATMUL_NATIVE_BRGEMM_LOOPER_NATIVE_INT8_CALL_HPP
 #define MATMUL_NATIVE_BRGEMM_LOOPER_NATIVE_INT8_CALL_HPP
 
+#include <atomic>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "common/error_status.hpp"
 #include "lowoha_operators/matmul/lowoha_common.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/gemm_descriptor.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_int8_scheme.hpp"
-#include "lowoha_operators/matmul/quantization/reorder_quantization.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_operator_bridge.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -32,18 +34,6 @@ namespace matmul {
 namespace native {
 
 using zendnnl::error_handling::status_t;
-
-/// What an INT8 call does where its scheme and order give a choice.
-struct native_int8_decision_t {
-    native_int8_scheme_t scheme = native_int8_scheme_t::per_channel;
-    int groups = 0; ///< G of a per-group call, 0 otherwise
-    native_int8_order_t order = native_int8_order_t::fused;
-    /// The bias may move into the dequantization (native_int8_call_t::bias).
-    bool bias_in_dequant = false;
-    /// The kernel may store the destination itself when the epilogue has
-    /// nothing else to do.
-    bool direct_store = false;
-};
 
 /// The decision of an INT8 call with weight scales params.quant_params and
 /// bias (params.dtypes.bias, or nullptr):
@@ -56,16 +46,17 @@ struct native_int8_decision_t {
 ///     the epilogue);
 ///   * bias_in_dequant: a per-channel call of the fused order with an f32,
 ///     bf16 or f16 bias;
-///   * direct_store: a per-channel call of the fused order with an f32 or
-///     bf16 destination.
+///   * direct_store: a per-channel call of the fused order, or a per-group
+///     call with alpha 1 and beta 0, with an f32 or bf16 destination.
 native_int8_decision_t decide_int8_call(const GemmDescriptor &desc,
         const matmul_params &params, const void *bias);
 
 /// Per-call INT8 operands, prepared once before the tile loop.
 struct native_int8_call_t {
     /// Source rows of K bytes zero padded to whole quads, lda apart: u8, or
-    /// s8 when src_signed, which the tile reads as s8 + 128 and compensates
-    /// with a zero point raised by 128.
+    /// s8 when src_signed, which the per-channel tile reads as s8 + 128
+    /// (compensated by a zero point raised by 128) and the group kernel reads
+    /// as it is (the weight read as w + 128, compensated by group_shift).
     const uint8_t *A = nullptr;
     int lda = 0;
     bool src_signed = false;
@@ -90,6 +81,17 @@ struct native_int8_call_t {
     int groups = 0;
     int group_quads = 0;
     int src_scale_group_stride = 0;
+    /// per_group: -128 times the sum of row m's source values over group g,
+    /// at m * groups + g: it cancels what the group kernel's reading of the
+    /// weight as w + 128 adds to the group's sum.  Written by
+    /// ready_group_shifts.
+    int32_t *group_shift = nullptr;
+    /// per_group: the rows, claimed shift_chunk at a time; shift_rows[0] is
+    /// the next chunk a tile may claim, shift_rows[1 + c] is set once the
+    /// shifts of chunk c are written.
+    int rows = 0;
+    int shift_chunk = 1;
+    std::unique_ptr<std::atomic<int>[]> shift_rows;
     /// Weight column order (f32, bf16 or f16); set when the dequantization
     /// takes the bias (bias_in_dequant, when the plan allows it).
     const void *bias = nullptr;
@@ -114,9 +116,10 @@ struct native_int8_call_t {
     std::vector<uint8_t> a_buf;
     std::vector<float> scale_buf;
     std::vector<int32_t> zp_buf;
+    std::unique_ptr<int32_t[]> shift_buf;
     /// A dynamically quantized source and the scales and zero points the
     /// quantizer allocated.
-    reorder_quant_buffers_t src_buffers;
+    native_quant_buffers_t src_buffers;
 };
 
 /// The INT8 tile serves the call's weight, source and quantization params
@@ -142,11 +145,19 @@ int int8_scale_groups(const matmul_params &params, int N);
 /// whole quads.  The copies (and the transpose before a dynamic
 /// quantization) work in blocks of copy_block rows (by copy_block columns
 /// when they transpose), on the requested threads when M * K >=
-/// copy_par_min.
+/// copy_par_min.  The group shifts of a per-group call are left to its tiles
+/// (ready_group_shifts).
 status_t prepare_int8_call(const GemmDescriptor &desc,
         const matmul_params &params, const native_int8_decision_t &decision,
         const void *src, int copy_block, int64_t copy_par_min,
         native_int8_call_t &call);
+
+/// Makes the group shifts of rows m0 .. m0 + mr of a prepared per-group call
+/// ready: the tiles of a call claim the chunks of rows nobody has claimed
+/// yet in order, each chunk once, until every chunk of the range is claimed,
+/// then wait for the chunks of the range other tiles are writing.  Safe to
+/// call concurrently on any ranges.
+void ready_group_shifts(const native_int8_call_t &call, int m0, int mr);
 
 } // namespace native
 } // namespace matmul

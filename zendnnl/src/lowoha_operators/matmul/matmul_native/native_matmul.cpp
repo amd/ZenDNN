@@ -24,8 +24,6 @@
 #include "common/data_types.hpp"
 #include "common/zendnnl_global.hpp"
 #include "lowoha_operators/common/omp_thread_control.hpp"
-#include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
-#include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/bf16/bf16_gemv_narrow.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/bf16_brgemm_looper.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/bf16_gemv_direct.hpp"
@@ -36,7 +34,7 @@
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/gemm_descriptor.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
-#include "lowoha_operators/matmul/matmul_native/common/native_aocl_unreorder.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_operator_bridge.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_utils.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_weight_cache.hpp"
 #include "lowoha_operators/matmul/matmul_native/gemm/looper/bf16_gemm_looper.hpp"
@@ -56,11 +54,11 @@ using namespace zendnnl::error_handling;
 // Called by ALGO 0 (dynamic_dispatch) to route M≤8 shapes to
 // native_brgemm or aocl_dlp_blocked.
 //
-// M=5-8: always native_brgemm (BRGEMM looper has different cache
-// access patterns; the L3/CCD heuristic isn't validated for these).
+// M=5-8: always native_brgemm (the BRGEMM looper has different cache
+// access patterns; the per-L3 rule below covers only M=1-4).
 //
 // M=1-4 multi-thread: native_brgemm unless BKC packed data overflows
-// CCD-local L3 while raw B fits in aggregate L3. In that case DLP's
+// the L3 of one L3 domain while raw B fits in aggregate L3. In that case DLP's
 // unpacked streaming stays L3-resident. Exception: K > 5120 shapes
 // with low NR-pad waste (≤25%) benefit from BKC K-contiguous format
 // even with L3 overflow.
@@ -69,16 +67,14 @@ using namespace zendnnl::error_handling;
 //
 // M=1 single-thread: shape-based DLP gates for small-N high-K where
 // BKC dispatch overhead exceeds DLP's thin-dispatcher advantage.
-// Decision tree (AMD Zen 5, L1d=48KB, L2=1MB, L3=32MB/CCD),
-// validated against a broad BF16 GEMV shape sweep plus a focused
-// narrow-N decode set.
+// Decision tree for L1d=48KB, L2=1MB and 32MB of L3 per L3 domain:
 //
 //   Rules are evaluated in order (first match wins):
 //
 //   ┌──────────────────────────────────┬──────────┬────────────────────────┐
 //   │ Shape characteristic             │ Best     │ Reason                 │
 //   ├──────────────────────────────────┼──────────┼────────────────────────┤
-//   │ M≤4 MT: per-CCD BKC ≥ L3/CCD,  │ DLP      │ BKC overflows CCD L3; │
+//   │ M≤4 MT: BKC per L3 ≥ its L3,   │ DLP      │ BKC overflows its L3; │
 //   │   raw B < agg L3,               │          │ DLP stays L3-resident  │
 //   │   K≤5120 or NR-waste>25%        │          │                        │
 //   │ N ≤ 4                            │ BRGEMM   │ Narrow-GEMV xmm kernel │
@@ -97,14 +93,14 @@ using namespace zendnnl::error_handling;
 // ════════════════════════════════════════════════════════════════════════
 static matmul_algo_t bf16_gemv_best_algo_impl(
         int M, int N, int K, int num_threads, bool transB) {
-    // M=5-8: always native BRGEMM. The L3/CCD overflow heuristic below is
-    // validated for M=1-4 paths (BKC GEMV + decode flat); M=5-8 uses the
-    // general BRGEMM looper which has different cache access patterns.
+    // M=5-8: always native BRGEMM. The per-L3 overflow rule below covers the
+    // M=1-4 paths (BKC GEMV + decode flat); M=5-8 uses the general BRGEMM
+    // looper, which has different cache access patterns.
     if (M > 4) return matmul_algo_t::native_brgemm;
 
-    // ── M=1-4 multi-thread: L3/CCD overflow gate ─────────────────────
+    // ── M=1-4 multi-thread: per-L3 overflow gate ─────────────────────
     // BKC packing pads each thread's N-slice to a multiple of BKC_NR_PAD (64).
-    // When the per-CCD packed footprint exceeds L3/CCD but raw B fits in
+    // When the packed footprint per L3 domain exceeds its L3 but raw B fits in
     // aggregate L3, DLP streams unpacked B from L3 while BKC spills to DRAM.
     // High-K shapes (K > 5120) with low NR-pad waste (≤25%) still benefit
     // from BKC's K-contiguous streaming pattern even with L3 overflow.
@@ -445,7 +441,7 @@ size_t weight_buffer_bytes(
     if ((wdt == data_type_t::bf16 || wdt == data_type_t::s8) && K > 0 && N > 0
             && ldb > 0 && params.packing.pack_format_b == 0) {
         if (params.mem_format_b == 'r') {
-            if (is_aocl_prepacked_weight(params)
+            if (aocl_prepacked_weight(params)
                     && aocl_prepack_unreorderable(params))
                 reads = aocl_prepack_bytes(
                         K, N, ldb, transB, wdt == data_type_t::s8);
@@ -457,13 +453,15 @@ size_t weight_buffer_bytes(
 }
 
 /// reason is set when the weight is an in-place image the call cannot read.
-/// owned is weight_buffer_bytes of the call.
+/// owned is weight_buffer_bytes of the call; image is what its check for an
+/// in-place image found.
 native_source_t classify_source(const matmul_params &params, const void *weight,
         int K, int N, int ldb, bool transB, int batch_count,
-        bool process_native, size_t owned, int &pack_nr, const char *&reason) {
+        bool process_native, size_t owned, int &pack_nr, const char *&reason,
+        native_image_check_t &image) {
     // A native in-place image has this route as its only reader, whatever
     // algorithm the call selects.
-    if (native_weight_packed_in_place(weight, owned)) {
+    if (native_weight_find_image(weight, owned, image)) {
         const native_layout_decision_t rule = decide_native_layout(
                 native_layout_query_for(params, K, N, ldb, transB));
         pack_nr = kNativeLayoutPackNr;
@@ -475,7 +473,7 @@ native_source_t classify_source(const matmul_params &params, const void *weight,
     }
     bool aocl = false;
     if (params.mem_format_b == 'r') {
-        if (!process_native || !is_aocl_prepacked_weight(params))
+        if (!process_native || !aocl_prepacked_weight(params))
             return native_source_t::none;
         aocl = true;
     } else if (params.mem_format_b != 'n' || !native_brgemm_requested(params)) {
@@ -493,8 +491,7 @@ native_source_t classify_source(const matmul_params &params, const void *weight,
                 : native_source_t::none;
     // A buffer a custom-kernel pack rewrote in place has its reader on that
     // route.
-    if (custom_kernel::weight_packed_in_place(weight))
-        return native_source_t::none;
+    if (custom_kernel_packed_in_place(weight)) return native_source_t::none;
     return native_source_t::raw;
 }
 
@@ -511,8 +508,10 @@ bool native_layout_matmul(char layout, bool transA, bool transB, int M, int N,
     int pack_nr = 0;
     const char *reason = nullptr;
     const size_t owned = weight_buffer_bytes(params, K, N, ldb, transB);
-    const native_source_t source = classify_source(params, weight, K, N, ldb,
-            transB, batch_count, process_native, owned, pack_nr, reason);
+    native_weight_ref_t ref;
+    const native_source_t source
+            = classify_source(params, weight, K, N, ldb, transB, batch_count,
+                    process_native, owned, pack_nr, reason, ref.image);
     if (source == native_source_t::none) return false;
     bool in_place = source == native_source_t::in_place;
     if (reason == nullptr && layout != 'r' && layout != 'R')
@@ -528,11 +527,10 @@ bool native_layout_matmul(char layout, bool transA, bool transB, int M, int N,
         reason = "gated call with beta, post-ops or a dst other than f32 / "
                  "bf16";
 
-    native_weight_ref_t ref;
     ref.weight = weight;
     ref.pack_nr = pack_nr;
     ref.aocl_blocked = source == native_source_t::aocl_prepacked
-            || (in_place && is_aocl_prepacked_weight(params));
+            || (in_place && aocl_prepacked_weight(params));
     ref.interleave_split_halves = gated_act == matmul_gated_act_t::silu_and_mul
             || gated_act == matmul_gated_act_t::gelu_and_mul;
     ref.weight_cache_mode = is_weights_const
@@ -583,7 +581,7 @@ bool native_layout_matmul(char layout, bool transA, bool transB, int M, int N,
     // this one.
     std::string line;
     if (apilog_info_enabled() || profiler != nullptr) {
-        const std::string po_dtypes = post_op_data_types_to_string(params);
+        const std::string po_dtypes = post_op_dtypes_text(params);
         std::ostringstream ss;
         ss << "LOWOHA matmul_direct: M=" << M << ", N=" << N << ", K=" << K
            << ", alpha=" << alpha << ", beta=" << beta << ", lda=" << lda
@@ -596,7 +594,7 @@ bool native_layout_matmul(char layout, bool transA, bool transB, int M, int N,
            << ", bias_dtype=" << dtype_info(params.dtypes.bias)
            << ", bias=" << (bias != nullptr ? "true" : "false")
            << ", is_weights_const=" << (is_weights_const ? "true" : "false")
-           << ", post_op=[" << post_op_names_to_string(params) << "]"
+           << ", post_op=[" << post_op_names_text(params) << "]"
            << ", post_op_dtype=[" << (po_dtypes.empty() ? "none" : po_dtypes)
            << "], Batch_A=" << (batch ? batch->Batch_A : batch_count)
            << ", Batch_B=" << (batch ? batch->Batch_B : batch_count)

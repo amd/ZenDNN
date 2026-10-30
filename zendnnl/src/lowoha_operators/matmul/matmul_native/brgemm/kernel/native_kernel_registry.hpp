@@ -30,15 +30,29 @@ namespace native {
 
 enum class native_kernel_kind_t : uint8_t { bf16, int8 };
 
+/// Columns of a slab: one 2-vector BF16 kernel call of a wider tile.
+inline constexpr int kNativeBf16SlabCols = 32;
+
+/// Widest BF16 tile: slabs of kNativeBf16SlabCols, at most this many columns.
+inline constexpr int kNativeBf16MaxTileCols = 128;
+static_assert(kNativeBf16MaxTileCols % kNativeBf16SlabCols == 0,
+        "the widest BF16 tile is whole slabs");
+
+/// Columns of one 2-vector BF16 kernel call in a tile nr wide: the tile, or
+/// a slab for a tile of several slabs.
+constexpr int native_bf16_slab_cols(int nr) {
+    return nr < kNativeBf16SlabCols ? nr : kNativeBf16SlabCols;
+}
+
 /// What the micro-kernels of one dtype offer at one tile width.
 struct native_kernel_caps_t {
     native_kernel_kind_t kind = native_kernel_kind_t::bf16;
     int nr = 0; ///< 16 * nv
     int max_mr = 0; ///< every row count 1 .. max_mr has a kernel
     /// INT8: the weight-scale schemes the kernel serves, a mask of
-    /// native_int8_scheme_bit.  Every INT8 kernel serves every scheme;
-    /// validate_native_plan checks the call's scheme against the mask, so a
-    /// kernel that serves fewer schemes is never planned for the others.
+    /// native_int8_scheme_bit: the per-channel kernels serve per_channel, the
+    /// group kernels per_group.  validate_native_plan checks the call's
+    /// scheme against the mask, so a kernel is never planned for the other.
     uint8_t int8_schemes = 0;
 
     bool serves(native_int8_scheme_t scheme) const noexcept {
@@ -48,15 +62,20 @@ struct native_kernel_caps_t {
 
 class native_kernel_registry_t {
 public:
-    /// nullptr when kind has no kernel at nr on this CPU.
+    /// nullptr when kind has no kernel at nr on this CPU; for INT8, the
+    /// per-channel kernels.
     const native_kernel_caps_t *caps(
             native_kernel_kind_t kind, int nr) const noexcept;
+    /// The INT8 kernels that serve scheme at nr; nullptr when none.
+    const native_kernel_caps_t *int8_caps(
+            int nr, native_int8_scheme_t scheme) const noexcept;
     /// A kernel for every row count 1 .. mr at nr.
     bool covers(native_kernel_kind_t kind, int mr, int nr) const noexcept;
     /// An INT8 kernel that serves scheme, for every row count 1 .. mr at nr.
     bool covers_int8(
             int mr, int nr, native_int8_scheme_t scheme) const noexcept;
-    /// BF16 kernels by row count (index 0 unused, size 13); nullptr when
+    /// BF16 kernels by row count (index 0 unused, size 13) of the calls of a
+    /// tile nr wide, native_bf16_slab_cols(nr) columns each; nullptr when
     /// caps(bf16, nr) is nullptr.
     const bf16_brgemm_fn_t *bf16_table(int nr) const noexcept;
 
@@ -72,9 +91,10 @@ private:
 };
 
 /// Built once by probing select_bf16_brgemm_tall_kernel (mr 1 .. 12 at nr
-/// 16 / 32) and select_native_int8_ukernel (mr 1 .. 12 at nv 1 / 2).
-/// A dtype is probed only when the CPU has its ISA; otherwise it has no
-/// entries.
+/// 16 / 32), select_native_int8_ukernel and select_native_int8_group_ukernel
+/// (mr 1 .. 12 at nv 1 / 2).  BF16 tiles of 64 and 128 columns take the row
+/// counts of nr 32.  A dtype is probed only when the CPU has its ISA;
+/// otherwise it has no entries.
 const native_kernel_registry_t &native_kernel_registry();
 
 } // namespace native

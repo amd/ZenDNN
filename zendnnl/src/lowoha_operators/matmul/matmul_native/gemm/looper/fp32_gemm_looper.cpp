@@ -129,7 +129,7 @@ static void native_thread_loop(const GemmDescriptor &desc,
 
     // Pack controls (read once from singleton, cached across calls).
     // Auto-enable A packing when row stride exceeds L1 stride prefetcher
-    // limit (~4KB on Zen4/5). For lda=3584 FP32: 14KB stride → pack.
+    // limit (~4KB). For lda=3584 FP32: 14KB stride → pack.
     const bool do_pack_a
             = transA || (lda * static_cast<int>(sizeof(float)) > 4096);
 

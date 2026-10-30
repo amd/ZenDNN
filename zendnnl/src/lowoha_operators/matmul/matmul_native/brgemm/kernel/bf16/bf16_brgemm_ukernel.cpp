@@ -132,7 +132,7 @@ void bf16_brgemm_ukernel(const uint16_t *__restrict A, int lda,
 // identical ZMM usage in the K-loop.
 //
 // Live ZMM count = MR×NV (accumulators) + NV (b vectors) + 1 (a
-// broadcast).  Zen 4/5 EPYC exposes 32 ZMM; over-budget instantiations
+// broadcast).  AVX-512 has 32 ZMM registers; over-budget instantiations
 // spill to L1 in the inner loop but compile and run correctly.
 //
 //   NV=4 (NR=64): clean up to MR=6 (29 ZMM); MR=8 spills (37 ZMM).

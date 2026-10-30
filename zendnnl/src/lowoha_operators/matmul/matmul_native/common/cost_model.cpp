@@ -120,8 +120,8 @@ static UarchParams do_detect() {
     zendnnl_cpuid_count(7, 1, eax, ebx, ecx, edx);
     p.avx512bf16 = p.avx512f && (eax & (1u << 5));
 
-    // CCX width for parallel GEMV column scheduling (spread slice indices across
-    // CCX groups when OpenMP tid order matches consecutive CPU ids).
+    // L3 domain width for parallel GEMV column scheduling (spread slice indices
+    // across L3 domains when OpenMP tid order matches consecutive CPU ids).
     if (is_amd && (cpu_family == 0x19 || cpu_family == 0x1A))
         p.ccx_cores = 8;
     else

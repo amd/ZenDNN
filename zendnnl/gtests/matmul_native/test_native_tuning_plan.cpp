@@ -14,25 +14,22 @@
  * limitations under the License.
  ******************************************************************************/
 
-// The legacy preset of the native BRGEMM plan against a reference copy of
-// its planning rules.  heuristic_plan with preset=legacy must give, field by
-// field, the reference copy's tile grid, K pass, schedule constants, scratch
-// size and the INT8 tile's call widths, rows per call and K passes, over
-// dense linear shapes plus small N, M from 1 to 8192, 1 to 256 threads, both
-// dtypes, the detected micro-architecture and synthetic L2 / L3 / L3-domain
-// sizes; so must preset=v2 with every v2 rule switched off.  Every such plan
-// must pass validate_native_plan, and a planner without sources must return
-// the built-in plan (heuristic_params_t{}) unchanged.  The
-// L3 domain of the plan is the topology's physical cores per L3, else
-// ccx_cores; it must decide the row-group schedule and keep the plan legal
-// for every domain and team size.
+// The built-in plan of the native BRGEMM: heuristic_params_t's defaults are
+// the built-in constants, a planner without sources returns
+// heuristic_plan(heuristic_params_t{}) over dense linear shapes plus small N,
+// M from 1 to 8192, 1 to 256 threads and both dtypes, and that plan and the
+// plan with every rule switched off pass validate_native_plan on the detected
+// and on synthetic L2 / L3 / L3-domain sizes.  The INT8 tile's call widths,
+// rows per call and K passes follow their definitions.  The L3 domain of the
+// plan is the topology's physical cores per L3, else ccx_cores; it must
+// decide the row-group schedule and keep the plan legal for every domain and
+// team size.
 
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <iterator>
 #include <memory>
-#include <numeric>
 #include <ostream>
 #include <sstream>
 #include <string>
@@ -47,6 +44,7 @@
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_hw.hpp"
 #include "lowoha_operators/matmul/matmul_native/native_layout_policy.hpp"
+#include "matmul_native/native_brgemm_test_utils.hpp"
 
 namespace {
 
@@ -58,104 +56,8 @@ constexpr data_type_t kF32 = data_type_t::f32;
 constexpr data_type_t kBf16 = data_type_t::bf16;
 constexpr data_type_t kS8 = data_type_t::s8;
 constexpr data_type_t kU8 = data_type_t::u8;
-
-/// Reference copy of the built-in planning rules, with the micro-architecture
-/// as a parameter.  The library's built-in plan must reproduce it exactly, so
-/// it must not be edited to follow the library.
-namespace frozen {
-
-constexpr int kTileRows = 6;
-constexpr int kTallTileRows = 12;
-constexpr int kBlockRows = 16 * kTallTileRows;
-constexpr int kMinTileCols = 16;
-constexpr int kMinPassK = 256;
-constexpr int kMaxTileMr = 12;
-/// Rows and columns of a source copy block (BF16 transpose, INT8 copy).
-constexpr int kCopyBlock = 64;
-/// M * K from which the INT8 source copy runs in parallel.
-constexpr int64_t kInt8CopyParMin = int64_t {1} << 16;
-
-int ceil_div(int a, int b) {
-    return (a + b - 1) / b;
-}
-
-struct native_tile_plan_t {
-    int nr = 0;
-    int mr = kTileRows;
-    int mb = 0;
-    int m_blocks = 0;
-    int n_tiles = 0;
-    int kc = 0;
-    int threads = 1;
-    int col_groups = 0;
-
-    int tiles() const { return m_blocks * n_tiles; }
-};
-
-native_tile_plan_t plan_native_tiles(int M, int N, int K, int pack_nr,
-        int threads, bool bf16, const nat::UarchParams &uarch) {
-    native_tile_plan_t p;
-    p.nr = pack_nr;
-    p.mb = std::min(M, kBlockRows);
-    auto count = [&p, M, N]() {
-        p.m_blocks = ceil_div(M, p.mb);
-        p.n_tiles = N / p.nr;
-        return p.tiles();
-    };
-    while (count() < threads && p.m_blocks == 1 && p.nr > kMinTileCols)
-        p.nr /= 2;
-    if (bf16 && p.nr == 32) p.mr = kTallTileRows;
-    if (count() < threads && p.mb > p.mr) {
-        const int blocks = ceil_div(threads, p.n_tiles);
-        p.mb = std::max(p.mr, ceil_div(ceil_div(M, blocks), p.mr) * p.mr);
-        count();
-    }
-    p.threads = std::max(1, std::min(threads, p.tiles()));
-
-    p.kc = K;
-    if (bf16 && p.mb > p.mr) {
-        const int kc = (uarch.l2_bytes / 2)
-                / (p.nr * static_cast<int>(sizeof(uint16_t)));
-        if (kc < K) p.kc = std::max(kMinPassK, kc & ~1);
-    }
-
-    const int64_t domain_bytes
-            = (static_cast<int64_t>(M)
-                      + static_cast<int64_t>(uarch.ccx_cores) * p.nr)
-            * K * (bf16 ? 2 : 1);
-    if (p.m_blocks > 1 && p.n_tiles % p.threads != 0 && uarch.ccx_cores > 1
-            && domain_bytes > uarch.l3_bytes_per_ccd)
-        p.col_groups
-                = std::gcd(std::gcd(p.n_tiles, p.threads), uarch.ccx_cores);
-    return p;
-}
-
-/// Accumulator floats per thread.
-size_t scratch_floats(const native_tile_plan_t &p, int K, bool bf16) {
-    return static_cast<size_t>(bf16 && p.kc >= K ? p.mr : p.mb) * p.nr;
-}
-
-/// INT8 call width with left pack columns of the tile still to compute.
-int int8_col_width(int left) {
-    return left >= 32 ? 32 : 16;
-}
-
-/// Rows per INT8 call at NR = 16 * nv.
-int int8_max_mr(int nv) {
-    return std::min(kMaxTileMr, nat::native_int8_ukernel_max_mr(nv));
-}
-
-int k_pass_quads(int k_quads, int cw, int mr, int max_mr,
-        const nat::UarchParams &uarch) {
-    const int64_t quad_bytes = static_cast<int64_t>(4) * (cw + max_mr);
-    const int64_t budget = uarch.l2_bytes / 2;
-    if (mr <= max_mr || k_quads * quad_bytes <= budget) return k_quads;
-    const int64_t per = std::max<int64_t>(1, budget / quad_bytes);
-    const int64_t passes = (k_quads + per - 1) / per;
-    return static_cast<int>((k_quads + passes - 1) / passes);
-}
-
-} // namespace frozen
+constexpr nat::native_int8_scheme_t kPerGroup
+        = nat::native_int8_scheme_t::per_group;
 
 struct shape_t {
     int N, K;
@@ -211,6 +113,7 @@ struct variant_t {
     data_type_t src, dst;
     bool trans_a, dynamic, has_bias;
     epilogue_t epilogue;
+    nat::native_int8_scheme_t scheme = nat::native_int8_scheme_t::per_channel;
 };
 
 const variant_t kBf16Variants[] = {
@@ -227,6 +130,8 @@ const variant_t kInt8Variants[] = {
         {kF32, kBf16, false, true, true, epilogue_t::gated},
         {kS8, kS8, false, false, false, epilogue_t::postops},
         {kU8, kBf16, false, false, true, epilogue_t::bias},
+        {kBf16, kBf16, false, true, false, epilogue_t::store, kPerGroup},
+        {kS8, kF32, false, false, false, epilogue_t::store, kPerGroup},
 };
 
 nat::native_problem_t make_problem(int M, int N, int K, int pack_nr,
@@ -247,6 +152,7 @@ nat::native_problem_t make_problem(int M, int N, int K, int pack_nr,
     p.dynamic_quant = v.dynamic;
     p.has_bias = v.has_bias;
     p.epilogue = v.epilogue;
+    p.int8_scheme = v.scheme;
     return p;
 }
 
@@ -260,112 +166,6 @@ std::string describe(const nat::native_problem_t &p) {
     return os.str();
 }
 
-/// The first plan value that differs from the value it must have.
-class first_mismatch_t {
-public:
-    void check(const char *field, int64_t got, int64_t want) {
-        if (field_ != nullptr || got == want) return;
-        field_ = field;
-        got_ = got;
-        want_ = want;
-    }
-    bool ok() const { return field_ == nullptr; }
-    std::string text() const {
-        return std::string(field_) + " " + std::to_string(got_)
-                + ", reference copy " + std::to_string(want_);
-    }
-
-private:
-    const char *field_ = nullptr;
-    int64_t got_ = 0;
-    int64_t want_ = 0;
-};
-
-/// What the reference copy reads for uarch: its ccx_cores is the L3 domain,
-/// which is l3_domain_cores when known.
-nat::UarchParams frozen_input(const nat::UarchParams &uarch) {
-    nat::UarchParams u = uarch;
-    if (uarch.l3_domain_cores > 0) u.ccx_cores = uarch.l3_domain_cores;
-    return u;
-}
-
-/// The parameters of the legacy preset.
-nat::heuristic_params_t legacy_params() {
-    nat::heuristic_params_t hp;
-    hp.preset = nat::native_preset_t::legacy;
-    return hp;
-}
-
-/// Preset v2 with every v2 rule switched off.
-nat::heuristic_params_t v2_rules_off() {
-    nat::heuristic_params_t hp;
-    hp.preset = nat::native_preset_t::v2;
-    hp.makespan = 0;
-    hp.l1_pass = 0;
-    hp.traffic_groups = 0;
-    return hp;
-}
-
-/// The legacy plan q of p against the reference copy's choices.
-first_mismatch_t compare_with_frozen(const nat::native_plan_t &q,
-        const nat::native_problem_t &p, const nat::UarchParams &plan_uarch) {
-    const bool bf16 = p.bf16();
-    const nat::UarchParams uarch = frozen_input(plan_uarch);
-    const frozen::native_tile_plan_t f = frozen::plan_native_tiles(
-            p.M, p.N, p.K, p.pack_nr, p.threads, bf16, uarch);
-    constexpr unsigned kHeuristicBit = 1u
-            << static_cast<unsigned>(nat::native_plan_source_t::heuristic);
-    first_mismatch_t m;
-    m.check("nr", q.nr, f.nr);
-    m.check("mr", q.mr, f.mr);
-    m.check("mb", q.mb, f.mb);
-    m.check("m_blocks", q.m_blocks, f.m_blocks);
-    m.check("n_tiles", q.n_tiles, f.n_tiles);
-    m.check("kc", q.kc, f.kc);
-    m.check("threads", q.threads, f.threads);
-    m.check("col_groups", q.col_groups, f.col_groups);
-    m.check("row_unit", q.row_unit, frozen::kTallTileRows);
-    m.check("traversal", static_cast<int>(q.traversal),
-            static_cast<int>(nat::native_traversal_t::m_inner));
-    m.check("scratch_floats", static_cast<int64_t>(q.scratch_floats),
-            static_cast<int64_t>(frozen::scratch_floats(f, p.K, bf16)));
-    m.check("int8_rows_nv1", q.int8_rows_nv1, frozen::int8_max_mr(1));
-    m.check("int8_rows_nv2", q.int8_rows_nv2, frozen::int8_max_mr(2));
-    m.check("int8_cw_mask", q.int8_cw_mask, nat::kNativeInt8CwAll);
-    m.check("int8_pass_budget", q.int8_pass_budget, uarch.l2_bytes / 2);
-    m.check("int8_pass_quads", q.int8_pass_quads, 0);
-    m.check("int8_direct_store", q.int8_direct_store, 1);
-    m.check("int8_bias_in_dequant", q.int8_bias_in_dequant, 1);
-    m.check("copy_block", q.copy_block, frozen::kCopyBlock);
-    m.check("copy_par_min", q.copy_par_min, bf16 ? 0 : frozen::kInt8CopyParMin);
-    m.check("sources other than the heuristic", q.sources & ~kHeuristicBit, 0);
-    m.check("entry pointers",
-            q.rules_entry != nullptr || q.table_entry != nullptr
-                    || q.override_entry != nullptr,
-            0);
-    if (bf16) return m;
-    // Every call width of a tile, and row counts on both sides of the
-    // one-call limit of each width.
-    const int k_quads = (p.K + 3) / 4;
-    const int last_rows = p.M - (q.m_blocks - 1) * q.mb;
-    for (int c = 0; c < q.nr;) {
-        const int cw = frozen::int8_col_width(q.nr - c);
-        m.check("int8 call width", nat::native_int8_col_width(q, q.nr - c), cw);
-        const int nv = cw / 16;
-        const int max_mr = frozen::int8_max_mr(nv);
-        m.check("int8 rows per call", nat::native_int8_call_rows(q, nv),
-                max_mr);
-        for (int rows : {1, max_mr, max_mr + 1, last_rows, q.mb}) {
-            if (rows < 1 || rows > q.mb) continue;
-            m.check("int8 K pass quads",
-                    nat::native_int8_pass_quads(q, k_quads, cw, rows, max_mr),
-                    frozen::k_pass_quads(k_quads, cw, rows, max_mr, uarch));
-        }
-        c += cw;
-    }
-    return m;
-}
-
 /// The first field in which two plans differ, or nullptr.
 const char *plan_diff(
         const nat::native_plan_t &a, const nat::native_plan_t &b) {
@@ -377,6 +177,8 @@ const char *plan_diff(
     if (a.kc != b.kc) return "kc";
     if (a.threads != b.threads) return "threads";
     if (a.col_groups != b.col_groups) return "col_groups";
+    if (a.unit_tiles != b.unit_tiles) return "unit_tiles";
+    if (a.domain_threads != b.domain_threads) return "domain_threads";
     if (a.row_unit != b.row_unit) return "row_unit";
     if (a.traversal != b.traversal) return "traversal";
     if (a.scratch_floats != b.scratch_floats) return "scratch_floats";
@@ -417,51 +219,261 @@ private:
     size_t failed_ = 0;
 };
 
-/// The legacy plan of p against the reference copy, the per-problem rules,
-/// preset v2 with its rules off, and a planner without sources against the
-/// built-in plan.
-void check_built_in(const nat::native_problem_t &p,
-        const nat::UarchParams &uarch, const nat::native_planner_t &planner,
-        report_t &report) {
-    const nat::native_plan_t q = nat::heuristic_plan(p, uarch, legacy_params());
-    const first_mismatch_t m = compare_with_frozen(q, p, uarch);
-    report.check(m.ok(), [&] { return describe(p) + ": " + m.text(); });
-    // The kernel registry offers a dtype only on a CPU with its ISA.
-    const nat::UarchParams &host = nat::detect_uarch();
-    if (p.bf16() ? host.avx512bf16 : host.avx512vnni) {
-        const char *why = nat::validate_native_plan(q, p);
-        report.check(why == nullptr, [&] {
-            return describe(p) + ": validate_native_plan rejects it: " + why;
-        });
-    }
-    const char *off
-            = plan_diff(nat::heuristic_plan(p, uarch, v2_rules_off()), q);
-    report.check(off == nullptr, [&] {
-        return describe(p) + ": preset v2 with its rules off differs in " + off;
-    });
-    const char *field = plan_diff(planner.plan(p),
-            nat::heuristic_plan(p, uarch, nat::heuristic_params_t {}));
-    report.check(field == nullptr, [&] {
-        return describe(p) + ": the planner without sources differs in "
-                + field;
-    });
+/// The parameters with every rule switch off.
+nat::heuristic_params_t rules_off() {
+    nat::native_config_t cfg;
+    std::string why;
+    EXPECT_TRUE(nat::parse_native_config(
+            native_brgemm_test::kNativeRulesOff, cfg, why))
+            << why;
+    return nat::apply_native_config(nat::heuristic_params_t {}, cfg);
 }
 
-/// check_built_in over the grid at one pack width.
-void check_grid(int pack_nr, const nat::UarchParams &uarch,
-        const nat::native_planner_t &planner, report_t &report) {
+// The plans with every rule switch off, field by field, on 48 KiB of L1,
+// 1 MiB of L2 and 32 MiB of L3 per 8 cores at 32 threads: the narrowing to
+// 16 columns of a decode slice, the row split of one block, the BF16 L2 K
+// pass, the INT8 pass budget and the L3 row-group test.
+TEST(NativeTuningPlan, RulesOffWorkedExamples) {
+    nat::UarchParams u = nat::detect_uarch();
+    u.l1d_bytes = 48 << 10;
+    u.l2_bytes = 1 << 20;
+    u.l3_bytes_per_ccd = 32 << 20;
+    u.ccx_cores = 1;
+    u.l3_domain_cores = 8;
+    const nat::heuristic_params_t none = rules_off();
+    const auto plan = [&](int M, int N, int K, bool bf16) {
+        return nat::heuristic_plan(
+                make_problem(M, N, K, nat::kNativeLayoutPackNr, 32, bf16, 0), u,
+                none);
+    };
+    const struct {
+        int M, N, K;
+        bool bf16;
+        int nr, mb, kc, threads, col_groups;
+    } examples[] = {
+            // A decode slice of 8 tiles narrows to 16 columns.
+            {1, 256, 4096, true, 16, 1, 4096, 16, 0},
+            // One block of 192 rows splits into two for 32 threads.
+            {192, 256, 4096, true, 16, 96, 4096, 32, 0},
+            // A 32-column B slab over K = 14336 passes half of L2.
+            {1024, 4096, 14336, true, 32, 192, 8192, 32, 0},
+            // The source and a domain's B slabs over 32 MiB, 24 column tiles
+            // for 32 threads: row groups of the 8 threads of a domain.
+            {4096, 768, 4096, true, 32, 192, 4096, 32, 8},
+            // INT8: no K pass of its own; the INT8 source fits the share.
+            {1024, 4096, 14336, false, 32, 192, 14336, 32, 0},
+    };
+    for (const auto &e : examples) {
+        const nat::native_plan_t q = plan(e.M, e.N, e.K, e.bf16);
+        SCOPED_TRACE(std::string(e.bf16 ? "bf16" : "int8")
+                + " M=" + std::to_string(e.M) + " N=" + std::to_string(e.N)
+                + " K=" + std::to_string(e.K));
+        EXPECT_EQ(q.nr, e.nr);
+        EXPECT_EQ(q.mb, e.mb);
+        EXPECT_EQ(q.kc, e.kc);
+        EXPECT_EQ(q.threads, e.threads);
+        EXPECT_EQ(q.col_groups, e.col_groups);
+        EXPECT_EQ(q.unit_tiles, 0);
+    }
+    // INT8 passes come from the tile's budget, half of L2: a tile of 192
+    // rows at 32 columns and 12 rows per call takes two passes of K = 14336.
+    const nat::native_plan_t i = plan(1024, 4096, 14336, false);
+    EXPECT_EQ(i.int8_pass_quads, 0);
+    EXPECT_EQ(i.int8_pass_budget, 1 << 19);
+    EXPECT_EQ(nat::native_int8_pass_quads(i, 3584, 32, 192, 12), 1792);
+}
+
+TEST(NativeTuningPlan, DefaultParamsAreTheBuiltInConstants) {
+    const nat::heuristic_params_t hp;
+    EXPECT_EQ(hp.nr, 0);
+    EXPECT_EQ(hp.mr, 0);
+    EXPECT_EQ(hp.mb, 0);
+    EXPECT_EQ(hp.kc, 0);
+    EXPECT_EQ(hp.col_groups, -1);
+    EXPECT_EQ(hp.schedule, nat::native_schedule_t::automatic);
+    EXPECT_EQ(hp.traversal, nat::native_traversal_t::m_inner);
+    EXPECT_EQ(hp.threads_cap, 0);
+    EXPECT_EQ(hp.min_tiles_per_thread, 1);
+    EXPECT_EQ(hp.row_unit, 12);
+    EXPECT_EQ(hp.tile_rows, 6);
+    EXPECT_EQ(hp.tall_rows, 12);
+    EXPECT_EQ(hp.block_rows, 192);
+    EXPECT_EQ(hp.min_tile_cols, 16);
+    EXPECT_TRUE(hp.row_split);
+    EXPECT_EQ(hp.min_pass_k, 256);
+    EXPECT_EQ(hp.bf16_l2_pct, 50);
+    EXPECT_EQ(hp.kc_split, nat::native_kc_split_t::budget);
+    EXPECT_EQ(hp.l3_pct, 100);
+    EXPECT_EQ(hp.domain_threads, 0);
+    EXPECT_EQ(hp.int8_mr, 12);
+    EXPECT_EQ(hp.int8_cw_mask, nat::kNativeInt8CwAll);
+    EXPECT_EQ(hp.int8_l2_pct, 50);
+    EXPECT_EQ(hp.int8_kc, 0);
+    EXPECT_TRUE(hp.direct_store);
+    EXPECT_TRUE(hp.bias_in_dequant);
+    EXPECT_EQ(hp.copy_block, 64);
+    EXPECT_EQ(hp.bf16_copy_par_min, 0);
+    EXPECT_EQ(hp.int8_copy_par_min, 65536);
+    // Every rule is on.
+    EXPECT_EQ(hp.makespan, 1);
+    EXPECT_EQ(hp.min_gain_pct, 5);
+    EXPECT_EQ(hp.idle_pct, 10);
+    EXPECT_EQ(hp.decode_m, 128);
+    EXPECT_EQ(hp.l1_pass, 1);
+    EXPECT_EQ(hp.l1_pct, 100);
+    EXPECT_EQ(hp.l1_pass_max_mb, 64);
+    EXPECT_EQ(hp.traffic_groups, 1);
+    EXPECT_EQ(hp.bf16_alias, 1);
+    EXPECT_EQ(hp.bf16_narrow_n, 1);
+    EXPECT_EQ(hp.blocks, 1);
+}
+
+/// Quads per K pass of an INT8 tile cw columns wide and rows tall, max_mr
+/// rows per call, under budget bytes: all of K unless the tile takes more
+/// than one row call and the B slab plus one call's A rows exceed the
+/// budget; then the fewest equal passes that fit.
+int pass_quads_by_definition(
+        int k_quads, int cw, int rows, int max_mr, int64_t budget) {
+    const int64_t quad_bytes = static_cast<int64_t>(4) * (cw + max_mr);
+    if (rows <= max_mr || k_quads * quad_bytes <= budget) return k_quads;
+    const int64_t per = std::max<int64_t>(1, budget / quad_bytes);
+    const int64_t passes = (k_quads + per - 1) / per;
+    return static_cast<int>((k_quads + passes - 1) / passes);
+}
+
+TEST(NativeTuningPlan, Int8TileHelpers) {
+    report_t report;
+    for (int l2_kib : {256, 512, 1000, 1024, 2048}) {
+        nat::UarchParams uarch = nat::detect_uarch();
+        uarch.l2_bytes = l2_kib * 1024;
+        // Without the L1 pass rule the plan sets no pass of its own.
+        const nat::native_problem_t p = make_problem(
+                64, 256, 4096, nat::kNativeLayoutPackNr, 1, false, 0);
+        const nat::native_plan_t q = nat::heuristic_plan(p, uarch, rules_off());
+        ASSERT_EQ(q.int8_pass_quads, 0);
+        EXPECT_EQ(q.int8_pass_budget, uarch.l2_bytes / 2);
+        // A call is 32 columns wide when the mask allows it and 32 columns
+        // are left, else 16.
+        for (const uint8_t mask : {nat::kNativeInt8CwAll, nat::kNativeInt8Cw16,
+                     nat::kNativeInt8Cw32}) {
+            nat::native_plan_t m = q;
+            m.int8_cw_mask = mask;
+            for (int left = 16; left <= 256; left += 16) {
+                const int cw = nat::native_int8_col_width(m, left);
+                const int want
+                        = (mask & nat::kNativeInt8Cw32) != 0 && left >= 32 ? 32
+                                                                           : 16;
+                report.check(cw == want, [&] {
+                    return "mask " + std::to_string(mask) + ", "
+                            + std::to_string(left)
+                            + " columns left: call width " + std::to_string(cw);
+                });
+            }
+        }
+        // The rows per call of a per-channel call: int8_mr, at most the
+        // kernel's rows at each width; of a per-group call, at most the
+        // group kernel's.
+        nat::native_problem_t pg = p;
+        pg.int8_scheme = kPerGroup;
+        const nat::native_plan_t g
+                = nat::heuristic_plan(pg, uarch, rules_off());
+        for (int nv : {1, 2}) {
+            const int rows = nat::native_int8_call_rows(q, nv);
+            const int want = std::min(12, nat::native_int8_ukernel_max_mr(nv));
+            report.check(rows == want, [&] {
+                return "nv " + std::to_string(nv) + ": rows per call "
+                        + std::to_string(rows);
+            });
+            const int group_rows = nat::native_int8_call_rows(g, nv);
+            const int group_want
+                    = std::min(12, nat::native_int8_group_ukernel_max_mr(nv));
+            report.check(group_rows == group_want, [&] {
+                return "nv " + std::to_string(nv) + ": per-group rows per call "
+                        + std::to_string(group_rows);
+            });
+        }
+        // K quads up to the int32-exact bound of the INT8 layout.
+        for (int k_quads : {1, 2, 3, 63, 64, 255, 256, 1000, 1024, 1025, 1724,
+                     1725, 2048, 4096, 8192, 16449})
+            for (int cw : {16, 32})
+                for (int max_mr : {6, 12})
+                    for (int rows = 1; rows <= 192;
+                            rows += rows < 26 ? 1 : 11) {
+                        const int got = nat::native_int8_pass_quads(
+                                q, k_quads, cw, rows, max_mr);
+                        const int want = pass_quads_by_definition(
+                                k_quads, cw, rows, max_mr, q.int8_pass_budget);
+                        report.check(got == want, [&] {
+                            std::ostringstream os;
+                            os << "K pass quads, L2 " << l2_kib
+                               << " KiB k_quads " << k_quads << " cw " << cw
+                               << " rows " << rows << " max_mr " << max_mr
+                               << ": " << got << ", by definition " << want;
+                            return os.str();
+                        });
+                    }
+        // A pinned pass is kept, at most all of K.
+        nat::native_plan_t pinned = q;
+        for (int pin : {1, 7, 256, 1024, 20000}) {
+            pinned.int8_pass_quads = pin;
+            for (int k_quads : {1, 255, 1024, 16449}) {
+                const int got = nat::native_int8_pass_quads(
+                        pinned, k_quads, 32, 192, 12);
+                report.check(got == std::min(pin, k_quads), [&] {
+                    return "pinned " + std::to_string(pin) + " of "
+                            + std::to_string(k_quads)
+                            + " quads: " + std::to_string(got);
+                });
+            }
+        }
+    }
+    report.finish();
+}
+
+TEST(NativeTuningPlan, PlannerWithoutSettingsIsTheBuiltInPlan) {
+    for (const char *name : {"ZENDNNL_MATMUL_NATIVE_CONFIG",
+                 "ZENDNNL_MATMUL_NATIVE_TUNING_FILE"}) {
+        const char *value = std::getenv(name);
+        if (value != nullptr && *value != '\0')
+            GTEST_SKIP() << name << " is set in this process";
+    }
+    const std::unique_ptr<nat::native_planner_t> unset
+            = nat::make_native_planner(nullptr, nullptr);
+    const std::unique_ptr<nat::native_planner_t> empty
+            = nat::make_native_planner("", "");
+    ASSERT_NE(unset, nullptr);
+    ASSERT_NE(empty, nullptr);
+    const nat::native_planner_t *planners[]
+            = {&nat::native_planner(), unset.get(), empty.get()};
+    const char *names[] = {"native_planner()", "make_native_planner(nullptr)",
+            "make_native_planner(\"\")"};
+    for (size_t i = 0; i < std::size(planners); ++i)
+        EXPECT_FALSE(planners[i]->has_sources()) << names[i];
+
+    const nat::UarchParams &uarch = nat::native_plan_uarch();
     const std::vector<shape_t> shapes = grid_shapes();
     const std::vector<int> ms = grid_ms();
-    for (size_t si = 0; si < shapes.size(); ++si) {
-        if (shapes[si].N % pack_nr != 0) continue;
+    report_t report;
+    for (size_t si = 0; si < shapes.size(); ++si)
         for (size_t mi = 0; mi < ms.size(); ++mi)
             for (size_t ti = 0; ti < std::size(kThreads); ++ti)
-                for (bool bf16 : {true, false})
-                    check_built_in(make_problem(ms[mi], shapes[si].N,
-                                           shapes[si].K, pack_nr, kThreads[ti],
-                                           bf16, si * 5 + mi * 3 + ti),
-                            uarch, planner, report);
-    }
+                for (bool bf16 : {true, false}) {
+                    const nat::native_problem_t p
+                            = make_problem(ms[mi], shapes[si].N, shapes[si].K,
+                                    nat::kNativeLayoutPackNr, kThreads[ti],
+                                    bf16, si * 5 + mi * 3 + ti);
+                    const nat::native_plan_t want = nat::heuristic_plan(
+                            p, uarch, nat::heuristic_params_t {});
+                    for (size_t i = 0; i < std::size(planners); ++i) {
+                        const char *field
+                                = plan_diff(planners[i]->plan(p), want);
+                        report.check(field == nullptr, [&] {
+                            return describe(p) + ": " + names[i]
+                                    + " differs in " + field;
+                        });
+                    }
+                }
+    report.finish();
 }
 
 struct uarch_case_t {
@@ -517,145 +529,17 @@ nat::UarchParams uarch_of(const uarch_case_t &c) {
     return u;
 }
 
-class NativeTuningPlanFrozen : public ::testing::TestWithParam<uarch_case_t> {};
+class NativeTuningPlanHierarchy
+    : public ::testing::TestWithParam<uarch_case_t> {};
 
-TEST_P(NativeTuningPlanFrozen, BuiltInPlanMatchesFrozenCopy) {
+// The built-in plan and the plan with every rule switched off are legal on
+// each hierarchy, and a planner without sources returns the built-in plan.
+TEST_P(NativeTuningPlanHierarchy, PlansAreLegal) {
+    const nat::UarchParams &host = nat::detect_uarch();
     const nat::UarchParams uarch = uarch_of(GetParam());
     const nat::native_planner_t planner(uarch, nullptr, nullptr, nullptr);
-    report_t report;
-    check_grid(nat::kNativeLayoutPackNr, uarch, planner, report);
-    report.finish();
     EXPECT_FALSE(planner.has_sources());
-}
-
-INSTANTIATE_TEST_SUITE_P(NativeTuning, NativeTuningPlanFrozen,
-        ::testing::ValuesIn(uarch_cases()),
-        [](const ::testing::TestParamInfo<uarch_case_t> &info) {
-            return info.param.name;
-        });
-
-TEST(NativeTuningPlan, OtherPackWidthsMatchFrozenCopy) {
-    const nat::UarchParams &uarch = nat::native_plan_uarch();
-    const nat::native_planner_t planner(uarch, nullptr, nullptr, nullptr);
-    report_t report;
-    check_grid(16, uarch, planner, report);
-    report.finish();
-}
-
-TEST(NativeTuningPlan, DefaultParamsAreTheBuiltInConstants) {
-    const nat::heuristic_params_t hp;
-    EXPECT_EQ(hp.nr, 0);
-    EXPECT_EQ(hp.mr, 0);
-    EXPECT_EQ(hp.mb, 0);
-    EXPECT_EQ(hp.kc, 0);
-    EXPECT_EQ(hp.col_groups, -1);
-    EXPECT_EQ(hp.schedule, nat::native_schedule_t::automatic);
-    EXPECT_EQ(hp.traversal, nat::native_traversal_t::m_inner);
-    EXPECT_EQ(hp.threads_cap, 0);
-    EXPECT_EQ(hp.min_tiles_per_thread, 1);
-    EXPECT_EQ(hp.row_unit, frozen::kTallTileRows);
-    EXPECT_EQ(hp.tile_rows, frozen::kTileRows);
-    EXPECT_EQ(hp.tall_rows, frozen::kTallTileRows);
-    EXPECT_EQ(hp.block_rows, frozen::kBlockRows);
-    EXPECT_EQ(hp.min_tile_cols, frozen::kMinTileCols);
-    EXPECT_TRUE(hp.row_split);
-    EXPECT_EQ(hp.min_pass_k, frozen::kMinPassK);
-    EXPECT_EQ(hp.bf16_l2_pct, 50);
-    EXPECT_EQ(hp.kc_split, nat::native_kc_split_t::budget);
-    EXPECT_EQ(hp.l3_pct, 100);
-    EXPECT_EQ(hp.domain_threads, 0);
-    EXPECT_EQ(hp.int8_mr, frozen::kMaxTileMr);
-    EXPECT_EQ(hp.int8_cw_mask, nat::kNativeInt8CwAll);
-    EXPECT_EQ(hp.int8_l2_pct, 50);
-    EXPECT_EQ(hp.int8_kc, 0);
-    EXPECT_TRUE(hp.direct_store);
-    EXPECT_TRUE(hp.bias_in_dequant);
-    EXPECT_EQ(hp.copy_block, frozen::kCopyBlock);
-    EXPECT_EQ(hp.bf16_copy_par_min, 0);
-    EXPECT_EQ(hp.int8_copy_par_min, frozen::kInt8CopyParMin);
-    // The built-in plan is the v2 preset; its rules follow it.
-    EXPECT_EQ(hp.preset, nat::native_preset_t::v2);
-    EXPECT_EQ(hp.makespan, -1);
-    EXPECT_EQ(hp.min_gain_pct, 5);
-    EXPECT_EQ(hp.idle_pct, 10);
-    EXPECT_EQ(hp.decode_m, 128);
-    EXPECT_EQ(hp.l1_pass, -1);
-    EXPECT_EQ(hp.l1_pct, 100);
-    EXPECT_EQ(hp.l1_pass_max_mb, 64);
-    EXPECT_EQ(hp.traffic_groups, -1);
-}
-
-TEST(NativeTuningPlan, Int8HelpersMatchFrozenRules) {
-    // The rows per call the built-in plan reproduces.
-    EXPECT_EQ(frozen::int8_max_mr(1), 12);
-    EXPECT_EQ(frozen::int8_max_mr(2), 12);
-    report_t report;
-    for (int l2_kib : {256, 512, 1000, 1024, 2048}) {
-        nat::UarchParams uarch = nat::detect_uarch();
-        uarch.l2_bytes = l2_kib * 1024;
-        const nat::native_problem_t p = make_problem(
-                64, 256, 4096, nat::kNativeLayoutPackNr, 1, false, 0);
-        const nat::native_plan_t q
-                = nat::heuristic_plan(p, uarch, legacy_params());
-        for (int left = 16; left <= 256; left += 16) {
-            const int cw = nat::native_int8_col_width(q, left);
-            report.check(cw == frozen::int8_col_width(left), [&] {
-                return std::to_string(left) + " columns left: call width "
-                        + std::to_string(cw);
-            });
-        }
-        for (int nv : {1, 2}) {
-            const int rows = nat::native_int8_call_rows(q, nv);
-            report.check(rows == frozen::int8_max_mr(nv), [&] {
-                return "nv " + std::to_string(nv) + ": rows per call "
-                        + std::to_string(rows);
-            });
-        }
-        // K quads up to the int32-exact bound of the INT8 layout.
-        for (int k_quads : {1, 2, 3, 63, 64, 255, 256, 1000, 1024, 1025, 1724,
-                     1725, 2048, 4096, 8192, 16449})
-            for (int cw : {16, 32})
-                for (int max_mr : {6, 12})
-                    for (int rows = 1; rows <= 192;
-                            rows += rows < 26 ? 1 : 11) {
-                        const int got = nat::native_int8_pass_quads(
-                                q, k_quads, cw, rows, max_mr);
-                        const int want = frozen::k_pass_quads(
-                                k_quads, cw, rows, max_mr, uarch);
-                        report.check(got == want, [&] {
-                            std::ostringstream os;
-                            os << "K pass quads, L2 " << l2_kib
-                               << " KiB k_quads " << k_quads << " cw " << cw
-                               << " rows " << rows << " max_mr " << max_mr
-                               << ": " << got << ", reference copy " << want;
-                            return os.str();
-                        });
-                    }
-    }
-    report.finish();
-}
-
-TEST(NativeTuningPlan, PlannerWithoutSettingsIsTheBuiltInPlan) {
-    for (const char *name : {"ZENDNNL_MATMUL_NATIVE_CONFIG",
-                 "ZENDNNL_MATMUL_NATIVE_TUNING_FILE"}) {
-        const char *value = std::getenv(name);
-        if (value != nullptr && *value != '\0')
-            GTEST_SKIP() << name << " is set in this process";
-    }
-    const std::unique_ptr<nat::native_planner_t> unset
-            = nat::make_native_planner(nullptr, nullptr);
-    const std::unique_ptr<nat::native_planner_t> empty
-            = nat::make_native_planner("", "");
-    ASSERT_NE(unset, nullptr);
-    ASSERT_NE(empty, nullptr);
-    const nat::native_planner_t *planners[]
-            = {&nat::native_planner(), unset.get(), empty.get()};
-    const char *names[] = {"native_planner()", "make_native_planner(nullptr)",
-            "make_native_planner(\"\")"};
-    for (size_t i = 0; i < std::size(planners); ++i)
-        EXPECT_FALSE(planners[i]->has_sources()) << names[i];
-
-    const nat::UarchParams &uarch = nat::native_plan_uarch();
+    const nat::heuristic_params_t none = rules_off();
     const std::vector<shape_t> shapes = grid_shapes();
     const std::vector<int> ms = grid_ms();
     report_t report;
@@ -667,19 +551,40 @@ TEST(NativeTuningPlan, PlannerWithoutSettingsIsTheBuiltInPlan) {
                             = make_problem(ms[mi], shapes[si].N, shapes[si].K,
                                     nat::kNativeLayoutPackNr, kThreads[ti],
                                     bf16, si * 5 + mi * 3 + ti);
-                    const nat::native_plan_t want = nat::heuristic_plan(
+                    const nat::native_plan_t q = nat::heuristic_plan(
                             p, uarch, nat::heuristic_params_t {});
-                    for (size_t i = 0; i < std::size(planners); ++i) {
-                        const char *field
-                                = plan_diff(planners[i]->plan(p), want);
-                        report.check(field == nullptr, [&] {
-                            return describe(p) + ": " + names[i]
-                                    + " differs in " + field;
-                        });
+                    // The kernel registry offers a dtype only on a CPU with
+                    // its ISA.
+                    if (p.bf16() ? host.avx512bf16 : host.avx512vnni) {
+                        const nat::native_plan_t plans[]
+                                = {q, nat::heuristic_plan(p, uarch, none)};
+                        const char *const names[]
+                                = {"the built-in plan", "every rule off"};
+                        for (size_t i = 0; i < std::size(plans); ++i) {
+                            const char *why
+                                    = nat::validate_native_plan(plans[i], p);
+                            report.check(why == nullptr, [&] {
+                                return describe(p) + ": " + names[i]
+                                        + ": validate_native_plan rejects it: "
+                                        + why;
+                            });
+                        }
                     }
+                    const char *field = plan_diff(planner.plan(p), q);
+                    report.check(field == nullptr, [&] {
+                        return describe(p)
+                                + ": the planner without sources differs in "
+                                + field;
+                    });
                 }
     report.finish();
 }
+
+INSTANTIATE_TEST_SUITE_P(NativeTuning, NativeTuningPlanHierarchy,
+        ::testing::ValuesIn(uarch_cases()),
+        [](const ::testing::TestParamInfo<uarch_case_t> &info) {
+            return info.param.name;
+        });
 
 /// A machine with l3_threads logical CPUs on each L3 of l3_mib MiB, smt per
 /// core (0: unknown), whose CPU family gives ccx_cores.
@@ -746,8 +651,9 @@ TEST(NativeTuningPlanDomain, RowGroupsFollowTheDomain) {
     ASSERT_EQ(narrow.l3_domain_cores, 8);
     ASSERT_EQ(unknown.l3_domain_cores, 0);
     const nat::UarchParams &host = nat::detect_uarch();
-    const nat::heuristic_params_t legacy = legacy_params();
-    nat::heuristic_params_t pin8 = legacy, pin32 = legacy;
+    // The row-group rule of the plan with every rule switched off.
+    const nat::heuristic_params_t none = rules_off();
+    nat::heuristic_params_t pin8 = none, pin32 = none;
     pin8.domain_threads = 8;
     pin32.domain_threads = 32;
     const struct {
@@ -771,8 +677,8 @@ TEST(NativeTuningPlanDomain, RowGroupsFollowTheDomain) {
         SCOPED_TRACE(c.what);
         const nat::native_problem_t p = make_problem(
                 c.M, c.N, c.K, nat::kNativeLayoutPackNr, c.threads, c.bf16, 0);
-        const nat::native_plan_t w = nat::heuristic_plan(p, wide, legacy);
-        const nat::native_plan_t n = nat::heuristic_plan(p, narrow, legacy);
+        const nat::native_plan_t w = nat::heuristic_plan(p, wide, none);
+        const nat::native_plan_t n = nat::heuristic_plan(p, narrow, none);
         EXPECT_EQ(w.col_groups, c.wide_groups) << describe(p);
         EXPECT_EQ(n.col_groups, c.narrow_groups) << describe(p);
         if (p.bf16() ? host.avx512bf16 : host.avx512vnni) {
@@ -781,9 +687,9 @@ TEST(NativeTuningPlanDomain, RowGroupsFollowTheDomain) {
         }
         // The family's ccx_cores counts only when the domain is unknown.
         const char *field
-                = plan_diff(nat::heuristic_plan(p, wide_no_ccx, legacy), w);
+                = plan_diff(nat::heuristic_plan(p, wide_no_ccx, none), w);
         EXPECT_EQ(field, nullptr) << "ccx_cores 1 under a known domain";
-        field = plan_diff(nat::heuristic_plan(p, unknown, legacy), n);
+        field = plan_diff(nat::heuristic_plan(p, unknown, none), n);
         EXPECT_EQ(field, nullptr) << "unknown domain, ccx_cores 8";
         // domain_threads replaces the detected domain.
         field = plan_diff(nat::heuristic_plan(p, wide, pin8), n);
@@ -796,7 +702,8 @@ TEST(NativeTuningPlanDomain, RowGroupsFollowTheDomain) {
         EXPECT_EQ(field, nullptr) << "the planner over the wide domain";
         const nat::native_planner_t overridden(wide,
                 nat::make_native_override_source(
-                        "preset=legacy,domain_threads=8"),
+                        std::string(native_brgemm_test::kNativeRulesOff)
+                        + ",domain_threads=8"),
                 nullptr, nullptr);
         const nat::native_plan_t o = overridden.plan(p);
         EXPECT_EQ(o.col_groups, c.narrow_groups) << "the override key";
@@ -823,8 +730,8 @@ TEST(NativeTuningPlanDomain, LegalForEveryDomainAndTeam) {
                                 shapes[si].N, shapes[si].K,
                                 nat::kNativeLayoutPackNr, threads, bf16,
                                 si * 5 + mi * 3 + threads);
-                        const nat::native_plan_t q
-                                = nat::heuristic_plan(p, u, legacy_params());
+                        const nat::native_plan_t q = nat::heuristic_plan(
+                                p, u, nat::heuristic_params_t {});
                         const auto where = [&] {
                             return "domain " + std::to_string(domain) + " "
                                     + describe(p);
@@ -844,12 +751,7 @@ TEST(NativeTuningPlanDomain, LegalForEveryDomainAndTeam) {
                             return where() + ": col_groups "
                                     + std::to_string(q.col_groups);
                         });
-                        const first_mismatch_t m = compare_with_frozen(q, p, u);
-                        report.check(m.ok(),
-                                [&] { return where() + ": " + m.text(); });
-                        const char *field = plan_diff(planner.plan(p),
-                                nat::heuristic_plan(
-                                        p, u, nat::heuristic_params_t {}));
+                        const char *field = plan_diff(planner.plan(p), q);
                         report.check(field == nullptr, [&] {
                             return where() + ": the planner differs in "
                                     + field;

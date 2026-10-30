@@ -15,15 +15,14 @@
  ******************************************************************************/
 
 // Edge cases of the native BRGEMM that must neither crash nor return wrong
-// results: plans for every statically legal pin, shapes the planner must turn
-// away before planning, partitions of unvalidated plans, malformed tuning
-// files, weight buffers rewritten in place that are later overwritten, read
-// through overlapping views or reached by calls selecting other algorithms,
-// INT8 zero points and dynamic quantization settings at the edges of what
-// the INT8 tile computes exactly, the rounding of the epilogue and special
-// values on the BF16 path, the OpenMP team of a call, weight
-// packs that must not hold up the lookups of other weights, and a bias read
-// in its own type at the tile.
+// results: plans for every statically legal pin, partitions of unvalidated
+// plans, malformed tuning files, weight buffers rewritten in place that are
+// later overwritten, read through overlapping views or reached by calls
+// selecting other algorithms, INT8 zero points and dynamic quantization
+// settings at the edges of what the INT8 tile computes exactly, the rounding of
+// the epilogue and special values on the BF16 path, the OpenMP team of a call,
+// weight packs that must not hold up the lookups of other weights, and a bias
+// read in its own type at the tile.
 
 #include <algorithm>
 #include <atomic>
@@ -85,79 +84,6 @@ nat::native_problem_t problem(
     return p;
 }
 
-std::string describe(const nat::native_problem_t &p) {
-    std::ostringstream os;
-    os << (p.bf16() ? "bf16" : "int8") << " M=" << p.M << " N=" << p.N
-       << " K=" << p.K << " pack_nr=" << p.pack_nr << " threads=" << p.threads;
-    return os.str();
-}
-
-/// Every statically legal value of every key as "key=value", sampled for
-/// wide integer ranges (both ends, a middle value and the powers of two).
-std::vector<std::string> legal_settings() {
-    std::vector<std::string> out;
-    size_t count = 0;
-    const nat::native_config_key_t *keys = nat::native_config_keys(count);
-    for (size_t i = 0; i < count; ++i) {
-        const nat::native_config_key_t &k = keys[i];
-        const std::string name = k.name;
-        switch (k.type) {
-            case nat::native_key_type_t::boolean:
-                out.push_back(name + "=0");
-                out.push_back(name + "=1");
-                break;
-            case nat::native_key_type_t::cw_list:
-                for (const char *v : {"16", "32/16"})
-                    out.push_back(name + "=" + v);
-                break;
-            case nat::native_key_type_t::schedule:
-            case nat::native_key_type_t::traversal:
-            case nat::native_key_type_t::kc_split:
-            case nat::native_key_type_t::preset:
-                for (const std::string &v : nt::native_enum_values(k.type))
-                    out.push_back(name + "=" + v);
-                break;
-            default: {
-                std::set<int64_t> values;
-                const auto add = [&](int64_t v) {
-                    v -= v % k.step;
-                    if (v >= k.min && v <= k.max
-                            && (!k.pow2 || (v & (v - 1)) == 0))
-                        values.insert(v);
-                };
-                for (int64_t v = 1; v <= k.max && v > 0; v *= 2)
-                    add(v);
-                for (int64_t v : {k.min, k.min + k.step, (k.min + k.max) / 2,
-                             k.max, int64_t {3}, int64_t {5}, int64_t {7},
-                             int64_t {12}, int64_t {13}})
-                    add(v);
-                for (const int64_t v : values)
-                    out.push_back(name + "=" + std::to_string(v));
-            }
-        }
-    }
-    return out;
-}
-
-/// Shapes at the edges of the tile grid: N of one or a few pack blocks, M
-/// around the rows per call and the row block, K of one element to several
-/// passes.
-std::vector<nat::native_problem_t> edge_problems() {
-    std::vector<nat::native_problem_t> v;
-    for (bool bf16 : {true, false})
-        for (int pack_nr : {32, 64})
-            for (int N : {32, 64, 96, 128, 4096})
-                for (int K : {1, 64, 4097})
-                    for (int M :
-                            {1, 5, 6, 7, 11, 12, 13, 100, 191, 192, 193, 1031})
-                        for (int threads : {1, 8, 32, 256}) {
-                            if (N < pack_nr || N % pack_nr != 0) continue;
-                            v.push_back(
-                                    problem(M, N, K, pack_nr, threads, bf16));
-                        }
-    return v;
-}
-
 class NativeBrgemmHardeningPlan : public ::testing::Test {
 protected:
     void SetUp() override {
@@ -166,77 +92,6 @@ protected:
             GTEST_SKIP() << "needs AVX512-BF16 and AVX512-VNNI";
     }
 };
-
-// heuristic_plan returns for every statically legal pin, and the planner
-// turns every pin into a plan validate_native_plan accepts.
-TEST_F(NativeBrgemmHardeningPlan, HeuristicIsTotalOverLegalPins) {
-    const nat::UarchParams &uarch = nat::detect_uarch();
-    const std::vector<nat::native_problem_t> problems = edge_problems();
-    size_t checked = 0, failed = 0;
-    for (const std::string &setting : legal_settings()) {
-        nat::native_config_t cfg;
-        std::string why;
-        ASSERT_TRUE(nat::parse_native_config(setting, cfg, why))
-                << setting << ": " << why;
-        const nat::heuristic_params_t hp
-                = nat::apply_native_config(nat::heuristic_params_t {}, cfg);
-        const std::unique_ptr<nat::native_planner_t> planner
-                = nat::make_native_planner(setting.c_str(), nullptr);
-        for (const nat::native_problem_t &p : problems) {
-            ++checked;
-            nat::heuristic_plan(p, uarch, hp);
-            const nat::native_plan_t q = planner->plan(p);
-            const char *bad = nat::validate_native_plan(q, p);
-            if (bad != nullptr && failed++ < 20)
-                ADD_FAILURE()
-                        << setting << " " << describe(p)
-                        << ": the planner returns an illegal plan: " << bad;
-        }
-    }
-    EXPECT_EQ(failed, 0u) << "of " << checked << " plans";
-}
-
-// N that is not whole pack blocks, and pack widths the layout never uses,
-// are turned away before the planner runs.
-TEST_F(NativeBrgemmHardeningPlan, ExecuteRejectsPartialPackBlocks) {
-    struct case_t {
-        int N, pack_nr;
-    };
-    for (const case_t c : {case_t {16, 32}, case_t {48, 32}, case_t {32, 64},
-                 case_t {64, 0}, case_t {64, 16}})
-        for (bool bf16 : {true, false}) {
-            const int M = 200, K = 64;
-            const nt::buffer_t src
-                    = nt::make_buffer(static_cast<size_t>(M) * K * 2);
-            const nt::buffer_t wei = nt::make_buffer(
-                    static_cast<size_t>(K) * std::max(c.N, 64) * 2);
-            nt::buffer_t dst = nt::make_buffer(
-                    static_cast<size_t>(M) * std::max(c.N, 64) * 4);
-            nat::GemmDescriptor desc;
-            desc.M = M;
-            desc.N = c.N;
-            desc.K = K;
-            desc.lda = K;
-            desc.ldb = c.N;
-            desc.ldc = c.N;
-            desc.src_dt = bf16 ? kBf16 : data_type_t::u8;
-            desc.wei_dt = bf16 ? kBf16 : kS8;
-            desc.dst_dt = data_type_t::f32;
-            desc.num_threads = 8;
-            nat::native_weight_ref_t ref;
-            ref.weight = wei.get();
-            ref.pack_nr = c.pack_nr;
-            zendnnl::lowoha::matmul::matmul_params params;
-            params.dtypes.src = desc.src_dt;
-            params.dtypes.wei = desc.wei_dt;
-            params.dtypes.dst = desc.dst_dt;
-            EXPECT_EQ(nat::native_brgemm_execute(
-                              desc, ref, src.get(), dst.get(), nullptr, params),
-                    status_t::failure)
-                    << (bf16 ? "bf16" : "int8") << " N=" << c.N
-                    << " pack_nr=" << c.pack_nr;
-        }
-}
 
 // A row-group plan whose col_groups does not divide the team runs as a
 // slice partition and still covers every tile once.

@@ -193,6 +193,20 @@ float comparison_abs_bound(uint64_t k, float epsilon, float alpha, float beta,
 zendnnl::lowoha::matmul::native::native_plan_source_t top_source(
         const zendnnl::lowoha::matmul::native::native_plan_t &plan);
 
+/// ZENDNNL_MATMUL_NATIVE_CONFIG keys that turn every rule switch off: the
+/// plan of the pins, the narrowing, the row split, the K pass rules and the
+/// L3 row-group test, which traffic_groups=0 runs in place of the traffic
+/// rule (row groups when the source and one domain's B slabs exceed the
+/// l3_pct share of its L3 and the column tiles do not divide over the
+/// threads).
+inline constexpr const char *kNativeRulesOff
+        = "makespan=0,l1_pass=0,traffic_groups=0,bf16_alias=0,"
+          "bf16_narrow_n=0,blocks=0";
+
+/// The rule switches of the native planner's config: its int32 keys of range
+/// 0 .. 1, in key order.
+std::vector<std::string> native_rule_switches();
+
 /// The value names of an enum key type of the native planner's config, in
 /// enum order; empty for the other types.
 std::vector<std::string> native_enum_values(

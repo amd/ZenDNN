@@ -33,6 +33,7 @@
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_int8_tile.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_tuning_file.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_hw.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_utils.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -51,8 +52,15 @@ namespace {
 /// arrays.
 constexpr int kMaxCallRows = 12;
 
-/// Columns of the widest tile the kernels serve.
+/// Columns of one kernel call: the widest tile of the narrowing and the
+/// makespan grid.
 constexpr int kMaxTileCols = 32;
+
+/// Column tiles per unit of the blocks schedule without a pin.
+constexpr int kBlocksTiles = 1;
+
+/// The parameters of the built-in plan.
+constexpr heuristic_params_t kBuiltInParams {};
 
 /// Slots a lookup or an insert of the plan cache probes.
 constexpr size_t kCacheWindow = 16;
@@ -79,8 +87,20 @@ constexpr native_plan_source_t kLayers[] = {native_plan_source_t::rules,
         native_plan_source_t::table, native_plan_source_t::override};
 constexpr int kLayerCount = 3;
 
-int ceil_div(int a, int b) {
-    return (a + b - 1) / b;
+/// A BF16 tile of 64 or 128 columns: 32-column slabs, each inside one pack
+/// block (the kernel reads a slab with the block's stride), of whole blocks
+/// or of one block.
+bool bf16_wide_width(int nr, int pack_nr) {
+    return (nr == 64 || nr == kNativeBf16MaxTileCols) && pack_nr > 0
+            && pack_nr % native_bf16_slab_cols(nr) == 0
+            && (nr % pack_nr == 0 || pack_nr % nr == 0);
+}
+
+/// BF16 rows per call by tile width: tall_rows from 32 columns, else
+/// tile_rows; INT8 tile_rows.
+int call_rows(const heuristic_params_t &hp, bool bf16, int nr) {
+    if (hp.mr > 0) return hp.mr;
+    return bf16 && nr >= 32 ? hp.tall_rows : hp.tile_rows;
 }
 
 const char *source_name(native_plan_source_t s) {
@@ -107,20 +127,24 @@ void keep_layer(native_plan_t &plan, native_plan_source_t layer,
     }
 }
 
-/// The v2 rules a parameter set turns on.
-struct v2_rules_t {
+/// The rules a parameter set turns on.
+struct rule_switches_t {
     bool makespan = false;
     bool l1_pass = false;
     bool traffic = false;
+    bool bf16_alias = false;
+    bool bf16_narrow_n = false;
+    bool blocks = false;
 };
 
-v2_rules_t v2_rules(const heuristic_params_t &hp) {
-    const bool v2 = hp.preset == native_preset_t::v2;
-    const auto on = [v2](int s) { return s < 0 ? v2 : s != 0; };
-    v2_rules_t r;
-    r.makespan = on(hp.makespan);
-    r.l1_pass = on(hp.l1_pass);
-    r.traffic = on(hp.traffic_groups);
+rule_switches_t rule_switches(const heuristic_params_t &hp) {
+    rule_switches_t r;
+    r.makespan = hp.makespan != 0;
+    r.l1_pass = hp.l1_pass != 0;
+    r.traffic = hp.traffic_groups != 0;
+    r.bf16_alias = hp.bf16_alias != 0;
+    r.bf16_narrow_n = hp.bf16_narrow_n != 0;
+    r.blocks = hp.blocks != 0;
     return r;
 }
 
@@ -196,14 +220,14 @@ int64_t slice_makespan(const grid_t &g, int M, int workers, bool bytes,
     return busiest;
 }
 
-/// The grid of the makespan rule, from the legacy grid base.  Per tile
-/// width, the pinned nr, else the widest tile down by halves to the width of
-/// base (a narrower tile would leave the threads alternate cache lines of
-/// each weight block): the M block before the row split and, with the row
-/// split, the most row blocks that take each further round of the team.  The
-/// busiest worker's work decides: a candidate replaces base only below
-/// min_gain_pct percent less than base's work, and the earlier candidate
-/// wins a tie.
+/// The grid of the makespan rule, from base, the grid of the narrowing and
+/// the row split.  Per tile width, the pinned nr, else the widest tile down
+/// by halves to the width of base (a narrower tile would leave the threads
+/// alternate cache lines of each weight block): the M block before the row
+/// split and, with the row split, the most row blocks that take each further
+/// round of the team.  The busiest worker's work decides: a candidate
+/// replaces base only below min_gain_pct percent less than base's work, and
+/// the earlier candidate wins a tie.
 grid_t makespan_grid(const native_problem_t &p, const heuristic_params_t &hp,
         int threads, const grid_t &base) {
     const int M = p.M, N = p.N;
@@ -227,8 +251,7 @@ grid_t makespan_grid(const native_problem_t &p, const heuristic_params_t &hp,
         grid_t g;
         g.nr = nr;
         g.n_tiles = nr > 0 ? N / nr : 0;
-        g.mr = hp.mr > 0 ? hp.mr
-                         : (bf16 && nr == 32 ? hp.tall_rows : hp.tile_rows);
+        g.mr = call_rows(hp, bf16, nr);
         // A BF16 width counts only with kernels for its rows per call.
         const bool rows_served = !bf16
                 || native_kernel_registry().covers(
@@ -293,6 +316,19 @@ int64_t grid_work(const native_plan_t &q, int M, bool bytes) {
                     + tile_work(q.nr, last, bytes));
 }
 
+/// The work, per element of K, of the busiest worker of g column groups of
+/// the plan: the column tiles of its row group over the most rows a group
+/// takes, of the row_units row units of M.  The idle rule picks row groups
+/// by it and the narrow-N rule weighs them by it.
+int64_t row_group_work(
+        const native_plan_t &q, int g, int64_t row_units, int M, bool bytes) {
+    const int unit = std::max(1, q.row_unit);
+    const int64_t groups = q.threads / g;
+    const int64_t units = (row_units + groups - 1) / groups;
+    const int rows = static_cast<int>(std::min<int64_t>(M, units * unit));
+    return (q.n_tiles / g) * tile_work(q.nr, rows, bytes);
+}
+
 /// The row groups whose busiest worker has less work than bound, the most
 /// column groups on a tie: col_groups, or 0 when none.  Column groups divide
 /// the column tiles, the team and the L3 domain.
@@ -305,16 +341,25 @@ int idle_col_groups(
     int64_t best_work = bound;
     for (int g = top; g >= 1; --g) {
         if (top % g != 0) continue;
-        const int64_t groups = q.threads / g;
-        const int64_t units = (row_units + groups - 1) / groups;
-        const int rows = static_cast<int>(std::min<int64_t>(M, units * unit));
-        const int64_t work = (q.n_tiles / g) * tile_work(q.nr, rows, bytes);
+        const int64_t work = row_group_work(q, g, row_units, M, bytes);
         if (work < best_work) {
             best = g;
             best_work = work;
         }
     }
     return best;
+}
+
+/// The work of the busiest worker of the plan, per element of K: its slice,
+/// or the column tiles of its row group over the most rows a group takes.
+/// A plan of the blocks schedule is weighed as the slice of its grid.
+int64_t busiest_work(const native_plan_t &q, int M, bool bytes) {
+    const int g = q.col_groups;
+    if (g <= 0 || q.threads % g != 0 || q.n_tiles % g != 0)
+        return slice_makespan(grid_of(q), M, std::max(1, q.threads), bytes);
+    const int unit = std::max(1, q.row_unit);
+    const int64_t row_units = (static_cast<int64_t>(M) + unit - 1) / unit;
+    return row_group_work(q, g, row_units, M, bytes);
 }
 
 /// col_groups of the traffic rule, or 0 for the slice: when the source and
@@ -386,7 +431,8 @@ size_t hash_native_problem(const native_problem_t &p) noexcept {
 }
 
 native_problem_t make_native_problem(const GemmDescriptor &desc,
-        const matmul_params &params, const void *bias, int pack_nr) {
+        const matmul_params &params, const void *bias, int pack_nr,
+        const native_int8_decision_t &decision) {
     native_problem_t p;
     p.M = desc.M;
     p.N = desc.N;
@@ -402,9 +448,8 @@ native_problem_t make_native_problem(const GemmDescriptor &desc,
             && (desc.src_dt == data_type_t::bf16
                     || desc.src_dt == data_type_t::f32);
     p.has_bias = bias != nullptr;
-    const native_int8_decision_t int8_decision = int8
-            ? decide_int8_call(desc, params, bias)
-            : native_int8_decision_t {};
+    const native_int8_decision_t int8_decision
+            = int8 ? decision : native_int8_decision_t {};
     p.int8_scheme = int8_decision.scheme;
 
     bool postops = desc.alpha != 1.0f || desc.beta != 0.0f
@@ -429,7 +474,7 @@ native_plan_t heuristic_plan(const native_problem_t &p,
     const bool bf16 = p.bf16();
     const int threads = hp.threads_cap > 0 ? std::min(p.threads, hp.threads_cap)
                                            : p.threads;
-    const v2_rules_t v2 = v2_rules(hp);
+    const rule_switches_t on = rule_switches(hp);
     const bool bytes = M <= hp.decode_m;
     // Every division below has a positive divisor for any input, so a pin
     // that cannot serve the problem reaches validate_native_plan.
@@ -455,21 +500,29 @@ native_plan_t heuristic_plan(const native_problem_t &p,
         while (count() < threads && q.m_blocks == 1 && q.nr > hp.min_tile_cols
                 && narrower_has_mr())
             q.nr /= 2;
-    q.mr = hp.mr > 0 ? hp.mr
-                     : (bf16 && q.nr == 32 ? hp.tall_rows : hp.tile_rows);
+    q.mr = call_rows(hp, bf16, q.nr);
     if (hp.mb == 0 && hp.row_split && count() < threads && q.n_tiles > 0
             && q.mr > 0 && q.mb > q.mr) {
         const int blocks = ceil_div(threads, q.n_tiles);
         q.mb = std::max(q.mr, ceil_div(ceil_div(M, blocks), q.mr) * q.mr);
         count();
     }
-    if (v2.makespan) {
+    if (on.makespan) {
         const grid_t g = makespan_grid(p, hp, threads, grid_of(q));
         q.nr = g.nr;
         q.mr = g.mr;
         q.mb = g.mb;
         count();
     }
+    // Source rows K elements apart, a multiple of 4 KiB: the rows of one
+    // call map to one L1 set, so a block of more than bf16_alias_mr rows
+    // takes at most bf16_alias_mr rows per call (a block of 9 to 12 rows
+    // then takes two calls).  A row-major source counts as rows K apart (the
+    // problem carries no row stride).
+    constexpr int kAliasK = 4096 / static_cast<int>(sizeof(uint16_t));
+    if (bf16 && on.bf16_alias && hp.mr == 0 && K % kAliasK == 0
+            && M > hp.decode_m && q.nr >= 32 && q.mb > hp.bf16_alias_mr)
+        q.mr = std::min(q.mr, hp.bf16_alias_mr);
     q.threads = std::max(1,
             std::min(
                     threads, q.tiles() / std::max(1, hp.min_tiles_per_thread)));
@@ -489,7 +542,7 @@ native_plan_t heuristic_plan(const native_problem_t &p,
         // A block of a few row calls reads each pass's B slab from L1 after
         // its first call when the slab and one call's A rows fit the l1_pct
         // share of L1; the passes are equal.
-        if (v2.l1_pass && q.mr > 0 && 2 * q.mr <= q.mb
+        if (on.l1_pass && q.mr > 0 && 2 * q.mr <= q.mb
                 && q.mb <= hp.l1_pass_max_mb) {
             const int64_t l1 = static_cast<int64_t>(uarch.l1d_bytes) * hp.l1_pct
                     / 100
@@ -516,14 +569,35 @@ native_plan_t heuristic_plan(const native_problem_t &p,
             : uarch.l3_domain_cores > 0  ? uarch.l3_domain_cores
                                          : uarch.ccx_cores;
     q.row_unit = hp.row_unit;
+    const auto take_blocks = [&]() {
+        q.col_groups = 0;
+        q.unit_tiles = std::min(std::max(1, q.n_tiles),
+                hp.unit_tiles > 0 ? hp.unit_tiles : kBlocksTiles);
+        // BF16 K passes keep the accumulators of every tile of a unit, in the
+        // worker's scratch, which is kept for the thread's lifetime: the
+        // unit takes at most the tiles whose accumulators fit the
+        // bf16_l2_pct share of L2 that sizes the K pass, and at least one.
+        if (bf16 && q.kc < K && q.unit_tiles > 1) {
+            const int64_t tile_bytes = static_cast<int64_t>(q.mb) * q.nr
+                    * static_cast<int64_t>(sizeof(float));
+            const int64_t share = static_cast<int64_t>(uarch.l2_bytes)
+                    * hp.bf16_l2_pct / 100;
+            q.unit_tiles = static_cast<int>(std::max<int64_t>(1,
+                    std::min<int64_t>(q.unit_tiles,
+                            share / std::max<int64_t>(1, tile_bytes))));
+        }
+        q.domain_threads = std::max(1, dt);
+    };
     if (hp.col_groups >= 0) {
         q.col_groups = hp.col_groups;
     } else if (hp.schedule == native_schedule_t::row_groups) {
         q.col_groups = std::gcd(std::gcd(q.n_tiles, q.threads), dt);
+    } else if (hp.schedule == native_schedule_t::blocks) {
+        take_blocks();
     } else if (hp.schedule == native_schedule_t::automatic) {
         const int64_t l3_share = static_cast<int64_t>(uarch.l3_bytes_per_ccd)
                 * hp.l3_pct / 100;
-        if (v2.makespan && q.n_tiles > 0) {
+        if (on.makespan && q.n_tiles > 0) {
             const int64_t slice
                     = slice_makespan(grid_of(q), M, q.threads, bytes);
             const double team
@@ -533,7 +607,7 @@ native_plan_t heuristic_plan(const native_problem_t &p,
                 q.col_groups = idle_col_groups(q, M, std::max(1, dt), bytes,
                         gain_bound(slice, hp.min_gain_pct));
         }
-        if (q.col_groups == 0 && v2.traffic) {
+        if (q.col_groups == 0 && on.traffic) {
             if (dt > 1)
                 q.col_groups
                         = traffic_col_groups(q, M, N, K, bf16, dt, l3_share);
@@ -546,20 +620,48 @@ native_plan_t heuristic_plan(const native_problem_t &p,
                     && domain_bytes > l3_share)
                 q.col_groups = std::gcd(std::gcd(q.n_tiles, q.threads), dt);
         }
+        // Under the blocks schedule the workers of each L3 domain take the
+        // units of the domain's share of the row blocks from one counter, so
+        // the domain reads only those source rows.  When they fit the l3_pct
+        // share of its L3, it replaces the schedule of a BF16 plan whose B
+        // slab over all of K exceeds the bf16_l2_pct share of L2, and the
+        // slice of an INT8 plan.  The deal gives each domain row blocks in
+        // proportion to its workers, so a full domain's share is
+        // M * de / threads rows.
+        const int domains = ceil_div(q.threads, std::max(1, dt));
+        const int de = std::min(std::max(1, dt), q.threads);
+        const int64_t share_bytes
+                = (static_cast<int64_t>(M) * de + q.threads - 1) / q.threads * K
+                * (bf16 ? 2 : 1);
+        const int64_t slab_bytes = static_cast<int64_t>(q.nr) * K * 2;
+        if (on.blocks && domains > 1
+                && M >= (bf16 ? hp.bf16_blocks_min_m : hp.int8_blocks_min_m)
+                && (bf16 ? slab_bytes * 100
+                                        > static_cast<int64_t>(uarch.l2_bytes)
+                                                * hp.bf16_l2_pct
+                         : q.col_groups == 0)
+                && share_bytes <= l3_share)
+            take_blocks();
     }
     q.traversal = hp.traversal;
-    q.scratch_floats
-            = static_cast<size_t>(bf16 && q.kc >= K ? q.mr : q.mb) * q.nr;
-    q.int8_rows_nv1 = std::min(hp.int8_mr, native_int8_ukernel_max_mr(1));
-    q.int8_rows_nv2 = std::min(hp.int8_mr, native_int8_ukernel_max_mr(2));
+    q.scratch_floats = native_plan_scratch_floats(q, p);
+    // A per-group call runs the group kernel, with its own rows per call.
+    const bool group_kernel
+            = !bf16 && p.int8_scheme == native_int8_scheme_t::per_group;
+    const auto int8_max_mr = [group_kernel](int nv) {
+        return group_kernel ? native_int8_group_ukernel_max_mr(nv)
+                            : native_int8_ukernel_max_mr(nv);
+    };
+    q.int8_rows_nv1 = std::min(hp.int8_mr, int8_max_mr(1));
+    q.int8_rows_nv2 = std::min(hp.int8_mr, int8_max_mr(2));
     q.int8_cw_mask = hp.int8_cw_mask;
     q.int8_pass_budget
             = static_cast<int64_t>(uarch.l2_bytes) * hp.int8_l2_pct / 100;
     q.int8_pass_quads
             = hp.int8_kc > 0 ? std::min(hp.int8_kc / 4, ceil_div(K, 4)) : 0;
     // The INT8 form of the L1 pass, at the tile's call width and rows per
-    // call; equal passes in whole quads.
-    if (!bf16 && hp.int8_kc == 0 && v2.l1_pass && q.nr > 0) {
+    // call; equal passes in whole quads.  Only the per-channel tile reads it.
+    if (!bf16 && !group_kernel && hp.int8_kc == 0 && on.l1_pass && q.nr > 0) {
         const int cw = native_int8_col_width(q, q.nr);
         const int rows = native_int8_call_rows(q, cw / 16);
         if (rows > 0 && 2 * rows <= q.mb && q.mb <= hp.l1_pass_max_mb) {
@@ -583,6 +685,35 @@ native_plan_t heuristic_plan(const native_problem_t &p,
     q.int8_scheme = p.int8_scheme;
     q.copy_block = hp.copy_block;
     q.copy_par_min = bf16 ? hp.bf16_copy_par_min : hp.int8_copy_par_min;
+    // Few column tiles against the team: with fewer than two 32-column tiles
+    // per L3 domain in the slice, each domain reads from memory the source
+    // rows of its column tiles, and each row is read once per column tile,
+    // by up to all the domains.  BF16 tiles of several 32-column slabs that
+    // are fewer than the domains cut the domains that read each row.  The
+    // widest such tile whose plan, by these rules at its width, gives the
+    // busiest worker at most min_gain_pct percent more work replaces the
+    // 32-column plan.  The wide plan may take the blocks schedule; it is
+    // weighed as the slice of its grid.  The domains are those of the
+    // planned team.
+    const int team_domains = ceil_div(q.threads, std::max(1, dt));
+    if (bf16 && on.bf16_narrow_n && hp.nr == 0 && M >= hp.bf16_narrow_n_min_m
+            && q.nr == kMaxTileCols && q.col_groups == 0 && q.unit_tiles == 0
+            && q.n_tiles < 2 * team_domains) {
+        const int64_t work = busiest_work(q, M, bytes);
+        const int64_t most
+                = work + work * std::clamp(hp.min_gain_pct, 0, 100) / 100;
+        heuristic_params_t wide = hp;
+        for (int nr = kNativeBf16MaxTileCols; nr > q.nr; nr /= 2) {
+            if (N % nr != 0 || N / nr >= team_domains
+                    || !bf16_wide_width(nr, p.pack_nr))
+                continue;
+            wide.nr = nr;
+            const native_plan_t w = heuristic_plan(p, uarch, wide);
+            if (busiest_work(w, M, bytes) <= most
+                    && validate_native_plan(w, p) == nullptr)
+                return w;
+        }
+    }
     return q;
 }
 
@@ -590,8 +721,10 @@ const char *validate_native_plan(
         const native_plan_t &plan, const native_problem_t &p) {
     const native_plan_t &q = plan;
     const bool bf16 = p.bf16();
-    if ((q.nr != 16 && q.nr != 32) || q.nr > p.pack_nr || p.pack_nr % q.nr != 0)
-        return "nr is not 16 or 32 dividing pack_nr";
+    const bool narrow = (q.nr == 16 || q.nr == 32) && q.nr <= p.pack_nr
+            && p.pack_nr % q.nr == 0;
+    if (!narrow && !(bf16 && bf16_wide_width(q.nr, p.pack_nr)))
+        return "nr is not 16 or 32 dividing pack_nr, or for BF16 64 or 128";
     if (q.mb < 1 || q.mb > p.M || q.m_blocks != ceil_div(p.M, q.mb)
             || q.n_tiles < 1 || p.N % q.nr != 0 || q.n_tiles != p.N / q.nr)
         return "the tile grid does not match M, N, mb and nr";
@@ -608,6 +741,10 @@ const char *validate_native_plan(
                     && (q.threads % q.col_groups != 0
                             || q.n_tiles % q.col_groups != 0)))
         return "col_groups does not divide threads and n_tiles";
+    if (q.unit_tiles < 0 || q.unit_tiles > q.n_tiles || q.domain_threads < 1
+            || (q.unit_tiles > 0 && q.col_groups != 0))
+        return "unit_tiles is outside 0 .. n_tiles, domain_threads is below "
+               "1, or the blocks schedule has col_groups";
     if (q.row_unit < 1 || q.copy_block < 1 || q.copy_par_min < 0)
         return "row_unit, copy_block or copy_par_min is out of range";
     if (!bf16) {
@@ -626,10 +763,18 @@ const char *validate_native_plan(
         if (q.int8_pass_quads < 0 || q.int8_pass_budget < 0)
             return "int8_pass_quads or int8_pass_budget is negative";
     }
-    if (q.scratch_floats
-            != static_cast<size_t>(bf16 && q.kc >= p.K ? q.mr : q.mb) * q.nr)
+    if (q.scratch_floats != native_plan_scratch_floats(q, p))
         return "scratch_floats does not match the tile";
     return nullptr;
+}
+
+size_t native_plan_scratch_floats(
+        const native_plan_t &plan, const native_problem_t &p) {
+    const bool bf16 = p.bf16();
+    if (bf16 && plan.kc >= p.K) return static_cast<size_t>(plan.mr) * plan.nr;
+    // BF16 K passes keep the accumulators of every tile of a unit.
+    const int tiles = bf16 ? std::max(1, plan.unit_tiles) : 1;
+    return static_cast<size_t>(plan.mb) * plan.nr * tiles;
 }
 
 int native_int8_pass_quads(
@@ -673,7 +818,7 @@ native_planner_t::~native_planner_t() {
 }
 
 native_plan_t native_planner_t::plan(const native_problem_t &p) const noexcept {
-    if (!has_sources()) return heuristic_plan(p, uarch_, heuristic_params_t {});
+    if (!has_sources()) return heuristic_plan(p, uarch_, kBuiltInParams);
     if (p.M > kNativePlanCacheMaxM) return resolve(p);
     // Slots only ever go from empty to an immutable entry, and an insert takes
     // the first empty slot of the window: p is before any empty slot.
@@ -725,7 +870,7 @@ native_plan_t native_planner_t::resolve(
     // no memory for them gets the built-in plan.
     try {
         return resolve_layers(p);
-    } catch (...) { return heuristic_plan(p, uarch_, heuristic_params_t {}); }
+    } catch (...) { return heuristic_plan(p, uarch_, kBuiltInParams); }
 }
 
 native_plan_t native_planner_t::resolve_layers(
@@ -765,14 +910,14 @@ native_plan_t native_planner_t::resolve_layers(
         keep[i] = true;
     }
     if (!keep[0] && !keep[1] && !keep[2])
-        return heuristic_plan(p, uarch_, heuristic_params_t {});
+        return heuristic_plan(p, uarch_, kBuiltInParams);
 
     // The plan of a merged config, or nullptr with why set.
     std::string bad;
     const auto legal = [&](const native_config_t &cfg, native_plan_t &out) {
         if (!check_native_config(cfg, bad)) return bad.c_str();
         out = heuristic_plan(
-                p, uarch_, apply_native_config(heuristic_params_t {}, cfg));
+                p, uarch_, apply_native_config(kBuiltInParams, cfg));
         return validate_native_plan(out, p);
     };
     native_plan_t plan;
@@ -781,7 +926,7 @@ native_plan_t native_planner_t::resolve_layers(
         // plan with it under the layers kept above it is legal, so a lower
         // layer never removes a higher one.  No layer kept: the heuristic
         // plan, which is always legal.
-        plan = heuristic_plan(p, uarch_, heuristic_params_t {});
+        plan = heuristic_plan(p, uarch_, kBuiltInParams);
         native_config_t kept;
         for (int i = kLayerCount - 1; i >= 0; --i) {
             keep[i] = false;

@@ -21,7 +21,9 @@
 // overwrites, the native weight cache clear forgets the cached layouts and
 // the in-place images, lookups of other buffers go on while a buffer packs,
 // and no check of what is kept reads past the buffer of the call that makes
-// it.
+// it.  A call's check for an image is handed to its layout lookup, and what
+// a thread's calls were served stays right for its later calls across
+// concurrent first calls, images, stale layouts, clears and exited threads.
 
 #include <algorithm>
 #include <atomic>
@@ -46,6 +48,7 @@
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_hw.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_weight_cache.hpp"
+#include "lowoha_operators/matmul/matmul_native/native_layout_policy.hpp"
 #include "native_brgemm_test_utils.hpp"
 
 namespace {
@@ -413,6 +416,89 @@ TEST_F(NativeWeightLifetime, LayoutCachedBeforeAnInPlaceRewriteStays) {
             << "the cached layout and the image";
 }
 
+// The check of a call for an in-place image tells the image's layout when
+// the image starts at the weight, and the layout lookup serves that layout
+// from it without a check of its own when the call's check read the bytes
+// the lookup checks; a pointer inside the image is in place but not served,
+// and another layout of the buffer is packed from the image.
+TEST_F(NativeWeightLifetime, InPlaceCheckIsHandedToTheLookup) {
+    pin_native();
+    const int K = 64, N = 64;
+    const weight_t w = make_weight(kBf16, K, N, N, false, 341);
+    const weight_t raw = make_weight(kBf16, K, N, N, false, 342);
+    dense_t d(kBf16, K);
+    ASSERT_EQ(d.run(w, 2), status_t::success);
+    ASSERT_TRUE(in_place(w));
+
+    nat::native_image_check_t at_start;
+    ASSERT_TRUE(nat::native_weight_find_image(w.ptr(), w.buf.bytes, at_start));
+    ASSERT_TRUE(at_start.ready);
+    EXPECT_EQ(at_start.layout.weight, w.ptr());
+    EXPECT_EQ(at_start.layout.K, K);
+    EXPECT_EQ(at_start.layout.N, N);
+    EXPECT_EQ(at_start.layout.pack_nr, nat::kNativeLayoutPackNr);
+    EXPECT_EQ(at_start.checked_bytes, w.buf.bytes);
+
+    // A check the lookup cannot find again, on a buffer without an image:
+    // served as handed when it covers the bytes the lookup checks, looked up
+    // (and packed) when it covers fewer.
+    nat::native_image_check_t handed;
+    handed.ready = true;
+    handed.layout = raw_weight(raw.ptr(), K, N);
+    handed.checked_bytes = raw.buf.bytes;
+    for (int32_t wc : {0, 1, 2}) {
+        nat::native_layout_t out;
+        ASSERT_EQ(nat::get_native_layout(
+                          raw_weight(raw.ptr(), K, N), wc, 0, 1, out, &handed),
+                status_t::success)
+                << "wc=" << wc;
+        EXPECT_EQ(out.data, raw.ptr()) << "wc=" << wc;
+        EXPECT_EQ(out.owned, nullptr) << "wc=" << wc;
+    }
+    handed.checked_bytes = 0;
+    for (int32_t wc : {0, 1}) {
+        nat::native_layout_t out;
+        ASSERT_EQ(nat::get_native_layout(
+                          raw_weight(raw.ptr(), K, N), wc, 0, 1, out, &handed),
+                status_t::success)
+                << "wc=" << wc;
+        EXPECT_NE(out.data, raw.ptr()) << "wc=" << wc;
+        EXPECT_EQ(out.owned != nullptr, wc == 0) << "wc=" << wc;
+        nat::native_free_layout(out.owned);
+    }
+    EXPECT_FALSE(in_place(raw));
+
+    nat::native_image_check_t inside;
+    const auto *mid = w.buf.as<uint8_t>() + 256;
+    EXPECT_TRUE(nat::native_weight_find_image(mid, w.buf.bytes - 256, inside));
+    EXPECT_FALSE(inside.ready) << "an image is served from its start only";
+
+    nat::native_image_check_t none;
+    EXPECT_FALSE(nat::native_weight_find_image(raw.ptr(), raw.buf.bytes, none));
+    EXPECT_FALSE(none.ready);
+
+    for (int32_t wc : {0, 1, 2}) {
+        nat::native_layout_t out;
+        ASSERT_EQ(nat::get_native_layout(
+                          raw_weight(w.ptr(), K, N), wc, 0, 1, out, &at_start),
+                status_t::success)
+                << "wc=" << wc;
+        EXPECT_EQ(out.data, w.ptr()) << "wc=" << wc;
+        EXPECT_EQ(out.owned, nullptr) << "wc=" << wc;
+    }
+    // A narrower view of the buffer reads another layout: rebuilt from the
+    // image, which the view's capacity covers.
+    nat::native_layout_t view;
+    nat::native_raw_weight_t half = raw_weight(w.ptr(), K, N / 2);
+    half.ldb = N;
+    ASSERT_EQ(nat::get_native_layout(half, 1, w.buf.bytes, 1, view, &at_start),
+            status_t::success);
+    EXPECT_NE(view.data, w.ptr());
+    nat::native_free_layout(view.owned);
+    EXPECT_EQ(nt::native_layouts(w.ptr()), 2u)
+            << "the image and the layout of the view";
+}
+
 /// Joins the threads it holds as it goes, so a check that fails while they
 /// run leaves no joinable thread behind.
 struct joiner_t {
@@ -480,6 +566,245 @@ TEST_F(NativeWeightLifetime, OtherBuffersGoOnWhileABufferPacks) {
                 << "in " << kRaces << " races no call on another buffer "
                 << "completed during the pack";
     }
+}
+
+// ── The per-thread layout memo ───────────────────────────────────────────
+
+// Concurrent first calls on one weight share one layout, and every caller's
+// later calls, served from its memo, are served that layout.
+TEST_F(NativeWeightLifetime, ConcurrentFirstCallsShareOneLayoutAfterward) {
+    const int K = 256, N = 512, kCallers = 6, kCalls = 4;
+    for (int32_t wc : {1, 2}) {
+        SCOPED_TRACE("wc=" + std::to_string(wc));
+        ::reset_grp_matmul_caches();
+        if (wc == 2) pin_native();
+        const weight_t w = make_weight(kBf16, K, N, N, false, 601 + wc);
+        const weight_t w1 = clone(w);
+        std::vector<std::vector<const void *>> seen(
+                kCallers, std::vector<const void *>(kCalls, nullptr));
+        std::vector<int> wrong(kCallers, 0);
+        std::vector<size_t> memo(kCallers, 0);
+        std::atomic<int> ready {0};
+        {
+            joiner_t callers;
+            for (int t = 0; t < kCallers; ++t)
+                callers.threads.emplace_back([&, t] {
+                    ready.fetch_add(1);
+                    while (ready.load() < kCallers)
+                        std::this_thread::yield();
+                    for (int i = 0; i < kCalls; ++i) {
+                        nat::native_layout_t out;
+                        if (nat::get_native_layout(
+                                    raw_weight(w.ptr(), K, N), wc, 0, 1, out)
+                                != status_t::success)
+                            ++wrong[t];
+                        seen[t][i] = out.data;
+                    }
+                    dense_t d(kBf16, K);
+                    if (d.run(w, wc) != status_t::success || !d.matches(w1))
+                        ++wrong[t];
+                    memo[t] = nat::native_weight_memo_entries(w.ptr());
+                });
+        }
+        for (int t = 0; t < kCallers; ++t) {
+            EXPECT_EQ(wrong[t], 0) << "caller " << t;
+            EXPECT_GE(memo[t], 1u) << "caller " << t << " kept no memo entry";
+            for (int i = 0; i < kCalls; ++i)
+                EXPECT_EQ(seen[t][i], seen[0][0])
+                        << "caller " << t << " call " << i;
+        }
+        EXPECT_EQ(seen[0][0] == w.ptr(), wc == 2);
+        EXPECT_EQ(nt::native_layouts(w.ptr()), 1u);
+        mm::clear_matmul_native_weight_caches();
+    }
+}
+
+// A thread's later calls on an in-place image follow the buffer: other bytes
+// at its ends are read as the raw weight they are, the image's own bytes at
+// both ends are served the image until the native weight caches are
+// cleared.
+TEST_F(NativeWeightLifetime, RepeatedCallsOnAnImageFollowTheBuffer) {
+    pin_native();
+    const int K = 64, N = 64;
+    const weight_t w = make_weight(kBf16, K, N, N, false, 611);
+    const weight_t w1 = clone(w);
+    dense_t d(kBf16, K);
+    for (int i = 0; i < 3; ++i) {
+        ASSERT_EQ(d.run(w, 2), status_t::success);
+        EXPECT_TRUE(d.matches(w1)) << "call " << i;
+    }
+    ASSERT_TRUE(in_place(w));
+    const weight_t image = clone(w);
+
+    fill(w, 612);
+    const weight_t w2 = clone(w);
+    for (int i = 0; i < 3; ++i) {
+        ASSERT_EQ(d.run(w, 2), status_t::success);
+        EXPECT_TRUE(d.matches(w2)) << "call " << i << " on the new weight";
+    }
+    ASSERT_TRUE(in_place(w)) << "the new weight, rewritten in place";
+
+    const weight_t image2 = clone(w);
+    fill(w, 613);
+    keep_ends(w, image2.ptr());
+    const weight_t w3 = clone(w);
+    for (int i = 0; i < 2; ++i) {
+        ASSERT_EQ(d.run(w, 2), status_t::success);
+        EXPECT_FALSE(d.matches(w3)) << "call " << i << ": read as the image";
+    }
+    mm::clear_matmul_native_weight_caches();
+    ASSERT_EQ(d.run(w, 2), status_t::success);
+    EXPECT_TRUE(d.matches(w3));
+    EXPECT_NE(std::memcmp(image.ptr(), image2.ptr(), image.buf.bytes), 0);
+}
+
+// After either clear, a thread's next call on a buffer it was served from
+// is not served what it was: a new weight with the old bytes at both ends
+// is packed (or rewritten) again, for a cached layout and for an image.
+TEST_F(NativeWeightLifetime, ClearsEndWhatThreadsWereServed) {
+    pin_native();
+    const int K = 64, N = 64;
+    for (bool all : {false, true}) {
+        for (int32_t wc : {1, 2}) {
+            SCOPED_TRACE(std::string(all ? "clear_matmul_weight_caches"
+                                         : "clear_matmul_native_weight_caches")
+                    + " wc=" + std::to_string(wc));
+            ::reset_grp_matmul_caches();
+            const weight_t w = make_weight(kBf16, K, N, N, false, 621 + wc);
+            const weight_t w1 = clone(w);
+            dense_t d(kBf16, K);
+            for (int i = 0; i < 3; ++i) {
+                ASSERT_EQ(d.run(w, wc), status_t::success);
+                EXPECT_TRUE(d.matches(w1));
+            }
+            EXPECT_EQ(in_place(w), wc == 2);
+            EXPECT_GE(nat::native_weight_memo_entries(w.ptr()), 1u);
+            const weight_t served = clone(w);
+            if (all)
+                mm::clear_matmul_weight_caches();
+            else
+                mm::clear_matmul_native_weight_caches();
+            EXPECT_EQ(nat::native_weight_memo_entries(w.ptr()), 0u);
+            fill(w, 631 + wc);
+            keep_ends(w, served.ptr());
+            const weight_t w2 = clone(w);
+            for (int i = 0; i < 2; ++i) {
+                ASSERT_EQ(d.run(w, wc), status_t::success);
+                EXPECT_TRUE(d.matches(w2)) << "call " << i;
+            }
+            EXPECT_EQ(nt::native_layouts(w.ptr()), 1u);
+        }
+    }
+}
+
+// A layout one thread finds stale and packs again is not served to another
+// thread that was served the old layout, even when the buffer holds the old
+// bytes again.
+TEST_F(NativeWeightLifetime, StaleLayoutGoesForEveryThread) {
+    const int K = 64, N = 64;
+    for (data_type_t dt : {kBf16, kS8}) {
+        SCOPED_TRACE(dt == kBf16 ? "bf16" : "s8");
+        ::reset_grp_matmul_caches();
+        const weight_t w = make_weight(dt, K, N, N, false, 641);
+        const weight_t w1 = clone(w);
+        std::atomic<int> step {0};
+        int wrong = 0;
+        size_t memo_before = 0, memo_after = 1;
+        {
+            joiner_t other;
+            other.threads.emplace_back([&] {
+                dense_t d(dt, K);
+                for (int i = 0; i < 2; ++i)
+                    if (d.run(w, 1) != status_t::success || !d.matches(w1))
+                        ++wrong;
+                memo_before = nat::native_weight_memo_entries(w.ptr());
+                step.store(1);
+                while (step.load() != 2)
+                    std::this_thread::yield();
+                memo_after = nat::native_weight_memo_entries(w.ptr());
+                if (d.run(w, 1) != status_t::success || !d.matches(w1)) ++wrong;
+            });
+            while (step.load() != 1)
+                std::this_thread::yield();
+            fill(w, 642);
+            const weight_t w2 = clone(w);
+            dense_t d(dt, K);
+            EXPECT_EQ(d.run(w, 1), status_t::success);
+            EXPECT_TRUE(d.matches(w2)) << "packed again from the new bytes";
+            std::memcpy(w.buf.get(), w1.ptr(), w.buf.bytes);
+            step.store(2);
+        }
+        EXPECT_EQ(wrong, 0) << "the other thread was served a stale layout";
+        EXPECT_GE(memo_before, 1u) << "the other thread kept no memo entry";
+        EXPECT_EQ(memo_after, 0u)
+                << "the other thread's entry outlived the stale layout";
+        mm::clear_matmul_native_weight_caches();
+    }
+}
+
+// A thread whose calls are all packed for the call (weight cache mode 0 on
+// a raw weight) keeps no memo entry.
+TEST_F(NativeWeightLifetime, CallsPackedForTheCallKeepNoMemo) {
+    const int K = 64, N = 64;
+    for (data_type_t dt : {kBf16, kS8}) {
+        SCOPED_TRACE(dt == kBf16 ? "bf16" : "s8");
+        const weight_t w = make_weight(dt, K, N, N, false, 661);
+        const weight_t w1 = clone(w);
+        int wrong = 0;
+        size_t memo = 1;
+        {
+            joiner_t caller;
+            caller.threads.emplace_back([&] {
+                dense_t d(dt, K);
+                for (int i = 0; i < 3; ++i)
+                    if (d.run(w, 0) != status_t::success || !d.matches(w1))
+                        ++wrong;
+                memo = nat::native_weight_memo_entries(w.ptr());
+            });
+        }
+        EXPECT_EQ(wrong, 0);
+        EXPECT_EQ(memo, 0u);
+        EXPECT_EQ(nt::native_layouts(w.ptr()), 0u);
+    }
+}
+
+// Threads that were served layouts and exited leave nothing a later thread
+// or a clear meets: the next threads' calls, before and after a clear and a
+// new weight with the old ends, are served right.
+TEST_F(NativeWeightLifetime, ThreadsThatExitedLeaveNothingBehind) {
+    pin_native();
+    const int K = 64, N = 64;
+    const weight_t a = make_weight(kBf16, K, N, N, false, 651);
+    const weight_t b = make_weight(kS8, K, N, N, false, 652);
+    const weight_t a1 = clone(a), b1 = clone(b);
+    const auto served_right = [&](const weight_t &wa, const weight_t &wb) {
+        int wrong = 0;
+        for (int round = 0; round < 4; ++round) {
+            joiner_t t;
+            t.threads.emplace_back([&] {
+                dense_t da(kBf16, K), db(kS8, K);
+                for (int i = 0; i < 2; ++i) {
+                    if (da.run(a, 2) != status_t::success || !da.matches(wa))
+                        ++wrong;
+                    if (db.run(b, 1) != status_t::success || !db.matches(wb))
+                        ++wrong;
+                }
+            });
+        }
+        return wrong;
+    };
+    EXPECT_EQ(served_right(a1, b1), 0);
+    const weight_t image = clone(a);
+    mm::clear_matmul_native_weight_caches();
+    fill(a, 653);
+    keep_ends(a, image.ptr());
+    fill(b, 654);
+    keep_ends(b, b1.ptr());
+    const weight_t a2 = clone(a), b2 = clone(b);
+    EXPECT_EQ(served_right(a2, b2), 0);
+    dense_t d(kBf16, K);
+    ASSERT_EQ(d.run(a, 2), status_t::success);
+    EXPECT_TRUE(d.matches(a2));
 }
 
 #ifndef _WIN32

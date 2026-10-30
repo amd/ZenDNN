@@ -32,10 +32,12 @@ namespace native {
 /// (or a bf16 / f32 source quantized dynamically) x s8.  A call it turns
 /// away before any work returns unimplemented or isa_unsupported (the
 /// caller may take another route unless the weight is an in-place image);
-/// once work started, every error is failure.
+/// once work started, every error is failure.  desc.K, desc.N and
+/// weight.pack_nr must satisfy native_layout_fits (the layout rule's shape);
+/// a release build does not check them.
 status_t native_brgemm_execute(const GemmDescriptor &desc,
         const native_weight_ref_t &weight, const void *src, void *dst,
-        const void *bias, matmul_params &params);
+        const void *bias, const matmul_params &params);
 
 } // namespace native
 } // namespace matmul

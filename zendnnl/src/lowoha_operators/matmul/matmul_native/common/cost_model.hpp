@@ -35,8 +35,10 @@ struct UarchParams {
     bool avx512f;
     bool avx512bf16;
     bool avx512vnni;
-    /// Logical cores per CCX for M=1 GEMV OpenMP slice scheduling (AMD Zen ≈ 8).
-    /// When 1, column slices follow linear tid order.
+    /// Cores per L3 domain that the M=1 GEMV slice permutation assumes, and
+    /// the native BRGEMM plan's L3 domain when l3_domain_cores is 0: a fixed
+    /// count of physical cores (not SMT siblings), 8 on the CPU families
+    /// detect_uarch() recognizes, else 1 (column slices in linear tid order).
     int ccx_cores;
     /// Physical cores sharing one L3; 0 when unknown.  detect_uarch() leaves
     /// it 0: only the native BRGEMM plan reads it (native_plan_uarch).

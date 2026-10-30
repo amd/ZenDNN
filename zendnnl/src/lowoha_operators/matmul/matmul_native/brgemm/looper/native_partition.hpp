@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 
@@ -32,31 +33,62 @@ namespace lowoha {
 namespace matmul {
 namespace native {
 
-/// Rows m0 .. m0 + rows of the output by the plan's nr pack columns from n0,
-/// over all of K.
+/// Rows m0 .. m0 + rows of the output by tiles column tiles of the plan's nr
+/// pack columns from n0, over all of K.
 struct native_work_unit_t {
     int m0 = 0;
     int rows = 0;
     int n0 = 0;
+    int tiles = 1;
 };
 
-enum class native_partition_kind_t : uint8_t { slice, row_groups };
+enum class native_partition_kind_t : uint8_t { slice, row_groups, blocks };
 
-/// The tiles of column tiles c0 .. c1 of a plan, assigned statically to the
-/// workers of a team.  Units are generated, never stored.
+/// The counter of one domain of a blocks run: the next of its units, the
+/// row blocks r0 .. r0 + rows they cover, and their count.
+struct alignas(64) native_unit_cursor_t {
+    std::atomic<int64_t> next;
+    int64_t end;
+    int r0;
+    int rows;
+};
+
+/// Domains of a blocks run, hence counters, at most.
+inline constexpr int kNativeMaxUnitCursors = 64;
+
+/// The counters of one blocks run: each worker w takes units from counter
+/// w / domain_threads, then from the others in turn.
+struct native_unit_deal_t {
+    native_unit_cursor_t cursor[kNativeMaxUnitCursors];
+    int count = 0;
+    int domain_threads = 1;
+};
+
+/// The tiles of column tiles c0 .. c1 of a plan, assigned to the workers of
+/// a team: statically, or under the blocks schedule from counters.  Units
+/// are generated, never stored.
 class native_partition_t {
 public:
     native_partition_t(const native_plan_t &plan, int M, int c0, int c1);
-    /// row_groups when plan.col_groups > 0, workers == plan.threads and
-    /// col_groups divides workers and c1 - c0; slice otherwise.
+    /// blocks when plan.unit_tiles > 0; else row_groups when
+    /// plan.col_groups > 0, workers == plan.threads and col_groups divides
+    /// workers and c1 - c0; slice otherwise.
     native_partition_kind_t kind(int workers) const noexcept;
-    /// Tiles of the range: m_blocks times c1 - c0, the units of the slice
-    /// schedule.
+    /// Units of the range: m_blocks times c1 - c0 tiles, or under the blocks
+    /// schedule m_blocks times the groups of unit_tiles column tiles (the
+    /// last group may be narrower).
     int64_t units() const noexcept;
+    /// The counters of a blocks run of workers workers: each domain of
+    /// domain_threads adjacent workers counts the units of its share of the
+    /// row blocks, column group by column group.
+    void deal(int workers, native_unit_deal_t &deal) const noexcept;
     /// Calls f(unit) for every unit of worker w of workers, in execution
-    /// order.  Every unit of the range goes to exactly one worker.
+    /// order; a blocks run takes its units from deal, filled by deal() of
+    /// this partition for this run (a run drains it).  Every unit of the
+    /// range goes to exactly one worker.
     template <typename F>
-    void for_each(int w, int workers, F &&f) const;
+    void for_each(int w, int workers, F &&f,
+            native_unit_deal_t *deal = nullptr) const;
 
 private:
     /// Rows r0 .. r1 of row group rg of row_groups (whole row units).
@@ -71,6 +103,8 @@ private:
     int col_groups_;
     int threads_;
     int row_unit_;
+    int unit_tiles_;
+    int domain_threads_;
     native_traversal_t traversal_;
 };
 
@@ -92,11 +126,33 @@ status_t native_run_cpu_team(const native_partition_t &part, int workers,
         int team, size_t scratch_floats, Tile &&tile, int *team_used = nullptr);
 
 template <typename F>
-void native_partition_t::for_each(int w, int workers, F &&f) const {
+void native_partition_t::for_each(
+        int w, int workers, F &&f, native_unit_deal_t *deal) const {
     auto emit = [&](int m0, int rows, int tile) {
-        const native_work_unit_t u {m0, rows, tile * nr_};
+        const native_work_unit_t u {m0, rows, tile * nr_, 1};
         f(u);
     };
+    if (kind(workers) == native_partition_kind_t::blocks) {
+        assert(deal != nullptr && deal->count > 0);
+        const int count = deal->count;
+        const int first = std::min(w / deal->domain_threads, count - 1);
+        const int span = c1_ - c0_;
+        for (int k = 0; k < count; ++k) {
+            native_unit_cursor_t &c = deal->cursor[(first + k) % count];
+            for (;;) {
+                const int64_t i
+                        = c.next.fetch_add(1, std::memory_order_relaxed);
+                if (i >= c.end) break;
+                const int group = static_cast<int>(i / c.rows);
+                const int m0 = (c.r0 + static_cast<int>(i % c.rows)) * mb_;
+                const int t0 = group * unit_tiles_;
+                const native_work_unit_t u {m0, std::min(mb_, M_ - m0),
+                        (c0_ + t0) * nr_, std::min(unit_tiles_, span - t0)};
+                f(u);
+            }
+        }
+        return;
+    }
     if (kind(workers) == native_partition_kind_t::slice) {
         const int64_t tiles = units();
         const int64_t t1 = tiles * (w + 1) / workers;
@@ -131,13 +187,18 @@ template <typename Tile>
 status_t native_run_cpu_team(const native_partition_t &part, int workers,
         int team, size_t scratch_floats, Tile &&tile, int *team_used) {
     std::atomic<bool> no_scratch {false};
+    // The counters of a blocks run; the static schedules leave them unset.
+    native_unit_deal_t deal;
+    if (part.kind(workers) == native_partition_kind_t::blocks)
+        part.deal(std::max(1, workers), deal);
     auto run = [&](int w, int n) {
         float *acc = native_thread_scratch(scratch_floats);
         if (acc == nullptr) {
             no_scratch.store(true, std::memory_order_relaxed);
             return;
         }
-        part.for_each(w, n, [&](const native_work_unit_t &u) { tile(u, acc); });
+        part.for_each(w, n, [&](const native_work_unit_t &u) { tile(u, acc); },
+                &deal);
     };
     if (workers <= 1 || team <= 1) {
         run(0, 1);

@@ -24,8 +24,10 @@ namespace lowoha {
 namespace matmul {
 namespace native {
 
+/// Rows and columns of one kernel call, which the per-call buffers of the
+/// tiles hold: up to 12 rows, a width of 16 or the widest call width.
 inline constexpr int kMaxTileMr = 12;
-inline constexpr int kMaxTileNr = 64;
+inline constexpr int kMaxTileNr = kNativeInt8MaxCallCols;
 
 /// compute_int8_tile of a call with per-tensor or per-channel weight scales.
 void compute_channel_tile(const native_plan_t &plan,
@@ -33,11 +35,13 @@ void compute_channel_tile(const native_plan_t &plan,
         int mr, int n0, int nr, float *C, int ldc,
         const native_int8_out_t *out);
 
-/// compute_int8_tile of a call with per-group weight scales: C holds the sum
-/// of the scaled groups; alpha, beta and the bias are the epilogue's.
+/// compute_int8_tile of a call with per-group weight scales: C (or out) holds
+/// the sum of the scaled groups; alpha, beta and the bias are the
+/// epilogue's.
 void compute_group_tile(const native_plan_t &plan,
         const native_int8_call_t &call, const native_weight_view_t &w, int m0,
-        int mr, int n0, int nr, float *C, int ldc);
+        int mr, int n0, int nr, float *C, int ldc,
+        const native_int8_out_t *out);
 
 } // namespace native
 } // namespace matmul

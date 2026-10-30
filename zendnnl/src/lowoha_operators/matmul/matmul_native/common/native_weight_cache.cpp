@@ -35,7 +35,7 @@
 #include "common/zendnnl_compat.hpp"
 #include "common/zendnnl_global.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
-#include "lowoha_operators/matmul/matmul_native/common/native_aocl_unreorder.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_operator_bridge.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_pack.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_weight_ends.hpp"
 
@@ -133,6 +133,10 @@ struct native_cache_state_t {
     std::shared_ptr<const image_spans_t> spans;
     /// Bumped after spans changes.
     std::atomic<uint64_t> spans_gen {0};
+    /// Bumped, under the mutex held exclusively, before a cached layout or
+    /// an image record goes and whenever the images change: the memo entries
+    /// (thread_memo) of an older generation do not serve.
+    std::atomic<uint64_t> generation {1};
 };
 
 native_cache_state_t &cache_state() {
@@ -144,9 +148,16 @@ void *alloc_layout(size_t bytes) {
     return zendnnl_aligned_alloc(64, (bytes + 63) & ~size_t {63});
 }
 
+/// Under the mutex held exclusively: the memo entries made so far stop
+/// serving.
+void bump_generation_locked() {
+    cache_state().generation.fetch_add(1, std::memory_order_release);
+}
+
 /// Copies the spans of the images for the check without the mutex, under
 /// the mutex held exclusively.
 void publish_spans_locked() {
+    bump_generation_locked();
     native_cache_state_t &state = cache_state();
     std::shared_ptr<image_spans_t> spans;
     try {
@@ -510,6 +521,409 @@ status_t rewrite_in_place(exclusive_lock_t &lock, const native_raw_weight_t &w,
     return st;
 }
 
+// ── The per-thread layout memo ─────────────────────────────────────────
+
+/// Sets and ways of a thread's memo: at most kMemoSets * kMemoWays layouts.
+constexpr size_t kMemoSets = 128;
+constexpr size_t kMemoWays = 4;
+static_assert((kMemoSets & (kMemoSets - 1)) == 0,
+        "the set index is a mask of the hash");
+
+/// A layout a call of the thread found, and the digests its later calls on
+/// the key check before they are served it.
+struct memo_entry_t {
+    native_key_t key {};
+    native_layout_t layout; ///< never owned
+    /// The bytes at key.weight the digests cover: what the cached layout was
+    /// packed from, or the image.
+    size_t check_bytes = 0;
+    weight_ends_t ends;
+    /// The cache generation it was found in; 0 for an empty way.
+    uint64_t generation = 0;
+    /// layout is the buffer itself, rewritten in place.
+    bool image = false;
+};
+
+struct memo_set_t {
+    /// key.weight of each way, compared first.
+    const void *weights[kMemoWays] = {};
+    memo_entry_t ways[kMemoWays];
+    /// The way the next insert takes when every way holds a current entry.
+    uint32_t next = 0;
+};
+
+struct layout_memo_t {
+    memo_set_t sets[kMemoSets];
+};
+
+/// The memo of the calling thread, made when make is set (an entry is
+/// stored) and freed when the thread exits; nullptr before that, or when it
+/// cannot be allocated.
+layout_memo_t *thread_memo(bool make) {
+    thread_local std::unique_ptr<layout_memo_t> memo;
+    if (!memo && make) memo.reset(new (std::nothrow) layout_memo_t());
+    return memo.get();
+}
+
+/// The set of the thread's memo that holds the layouts of weight; nullptr
+/// while the thread has no memo, unless make makes it.
+memo_set_t *memo_set(const void *weight, bool make) {
+    layout_memo_t *memo = thread_memo(make);
+    if (memo == nullptr) return nullptr;
+    uint64_t h
+            = static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(weight));
+    h ^= h >> 33;
+    h *= 0xff51afd7ed558ccdull;
+    h ^= h >> 33;
+    return &memo->sets[h & (kMemoSets - 1)];
+}
+
+/// The thread's entry for key, of any generation, else nullptr: a key has
+/// one way in its set (memo_put_locked).
+const memo_entry_t *memo_find(const native_key_t &key) {
+    const memo_set_t *set = memo_set(key.weight, false);
+    if (set == nullptr) return nullptr;
+    for (size_t i = 0; i < kMemoWays; ++i)
+        if (set->weights[i] == key.weight && set->ways[i].key == key)
+            return &set->ways[i];
+    return nullptr;
+}
+
+/// Whether no cached layout or image record has gone, and no image changed,
+/// since an entry of generation gen was made, read after its digests: a
+/// rewrite in place bumps the generation before it writes the buffer, so an
+/// unchanged generation means the digests read no byte it wrote.
+bool memo_still_current(uint64_t gen) {
+    std::atomic_thread_fence(std::memory_order_acquire);
+    return cache_state().generation.load(std::memory_order_relaxed) == gen;
+}
+
+/// The thread's entry for an image that starts at weight, found in
+/// generation gen, else nullptr.
+const memo_entry_t *memo_find_image(const void *weight, uint64_t gen) {
+    const memo_set_t *set = memo_set(weight, false);
+    if (set == nullptr) return nullptr;
+    for (size_t i = 0; i < kMemoWays; ++i)
+        if (set->weights[i] == weight && set->ways[i].generation == gen
+                && set->ways[i].image)
+            return &set->ways[i];
+    return nullptr;
+}
+
+/// Remembers for the thread that key is served layout while the check_bytes
+/// at key.weight keep the digests ends, as found under the mutex in the
+/// cache generation of that moment.
+void memo_put_locked(const native_key_t &key, const native_layout_t &layout,
+        size_t check_bytes, const weight_ends_t &ends, bool image) {
+    memo_set_t *set = memo_set(key.weight, true);
+    if (set == nullptr) return;
+    const uint64_t gen
+            = cache_state().generation.load(std::memory_order_relaxed);
+    size_t way = kMemoWays;
+    for (size_t i = 0; i < kMemoWays && way == kMemoWays; ++i)
+        if (set->weights[i] == key.weight && set->ways[i].key == key) way = i;
+    for (size_t i = 0; i < kMemoWays && way == kMemoWays; ++i)
+        if (set->ways[i].generation != gen) way = i;
+    if (way == kMemoWays) {
+        way = set->next;
+        set->next = static_cast<uint32_t>((set->next + 1) % kMemoWays);
+    }
+    memo_entry_t &e = set->ways[way];
+    e.key = key;
+    e.layout = layout;
+    e.layout.owned = nullptr;
+    e.check_bytes = check_bytes;
+    e.ends = ends;
+    e.generation = gen;
+    e.image = image;
+    set->weights[way] = key.weight;
+}
+
+native_key_t key_of(const native_raw_weight_t &w) {
+    return {w.weight, w.K, w.N, w.ldb, w.pack_nr, w.transB,
+            w.interleave_split_halves, w.wei_dt, w.aocl_blocked};
+}
+
+native_raw_weight_t raw_of(const native_key_t &k) {
+    native_raw_weight_t w;
+    w.wei_dt = k.wei_dt;
+    w.weight = k.weight;
+    w.K = k.K;
+    w.N = k.N;
+    w.ldb = k.ldb;
+    w.transB = k.transB;
+    w.pack_nr = k.pack_nr;
+    w.interleave_split_halves = k.interleave;
+    w.aocl_blocked = k.aocl_blocked;
+    return w;
+}
+
+/// Remembers the cached layout of key for the thread, unless an in-place
+/// rewrite of its bytes runs.  Under the mutex.
+void memo_pack_locked(const native_key_t &key, const native_cached_pack_t &e) {
+    if (e.rewritten_by != nullptr) return;
+    native_layout_t layout;
+    layout.data = e.buf.get();
+    memo_put_locked(key, layout, e.source_bytes, e.source_ends, false);
+}
+
+/// Remembers for the thread that key is served from the image img at its
+/// start.  Under the mutex.
+void memo_image_locked(const native_key_t &key, const native_image_t &img) {
+    if (img.reserved) return;
+    native_layout_t layout;
+    layout.data = key.weight;
+    memo_put_locked(key, layout, img.bytes, img.ends, true);
+}
+
+/// A request of get_native_layout and what its stages share.
+struct layout_request_t {
+    const native_raw_weight_t &w;
+    int32_t weight_cache_mode;
+    size_t capacity_bytes;
+    int num_threads;
+    native_key_t key;
+    size_t bytes; ///< native_packed_bytes of the layout
+    /// The bytes the request reads at w.weight (the raw span, or the AOCL
+    /// prepack).
+    size_t extent;
+    /// The caller's buffer: extent, or the capacity it states when larger.
+    /// The checks read nothing outside it.
+    size_t owned;
+};
+
+layout_request_t make_request(const native_raw_weight_t &w,
+        int32_t weight_cache_mode, size_t capacity_bytes, int num_threads) {
+    const size_t extent = w.aocl_blocked
+            ? aocl_prepack_bytes(
+                      w.K, w.N, w.ldb, w.transB, w.wei_dt == data_type_t::s8)
+            : native_raw_weight_bytes(w.wei_dt, w.K, w.N, w.ldb, w.transB);
+    return {w, weight_cache_mode, capacity_bytes, num_threads, key_of(w),
+            native_packed_bytes(w.wei_dt, w.K, w.N, w.pack_nr), extent,
+            std::max(extent, capacity_bytes)};
+}
+
+void own_layout(std::unique_ptr<void, native_aligned_free_t> buf,
+        native_layout_t &out) {
+    out.owned = buf.release();
+    out.data = out.owned;
+}
+
+/// Packs r into a buffer the caller owns, from image when its buffer holds
+/// one.
+status_t pack_for_call(const layout_request_t &r, const native_image_t *image,
+        native_layout_t &out) {
+    std::unique_ptr<void, native_aligned_free_t> buf(alloc_layout(r.bytes));
+    if (!buf) {
+        // Nothing was written: another route can still serve a raw weight.
+        log_error("native weight: no buffer for a ", r.bytes, "-byte layout");
+        return status_t::unimplemented;
+    }
+    const status_t st
+            = pack_from_source(r.w, image, r.owned, buf.get(), r.num_threads);
+    if (st != status_t::success) return st;
+    log_pack(r.w, r.weight_cache_mode, "call");
+    own_layout(std::move(buf), out);
+    return status_t::success;
+}
+
+/// The layout the thread's memo holds for r, when its bytes still keep the
+/// digests: what the cache lookup would find, without the lock or the
+/// lookup.  A cached layout does not serve weight cache mode 0.
+bool find_layout_memo(const layout_request_t &r, native_layout_t &out) {
+    const memo_entry_t *e = memo_find(r.key);
+    if (e == nullptr || (!e->image && r.weight_cache_mode == 0)) return false;
+    const auto at = reinterpret_cast<std::uintptr_t>(r.w.weight);
+    if (!ends_hold(at, e->check_bytes, e->ends, at, r.owned)
+            || !memo_still_current(e->generation))
+        return false;
+    out = e->layout;
+    return true;
+}
+
+/// The cached layout (modes 1 / 2) or the in-place image (may_image) of r
+/// that still holds, under the mutex held shared once the buffer is not in
+/// packing; false when neither does.
+bool find_layout_shared(
+        const layout_request_t &r, bool may_image, native_layout_t &out) {
+    native_cache_state_t &state = cache_state();
+    std::shared_lock<std::shared_mutex> lock(state.mutex);
+    state.packed.wait(
+            lock, [&] { return state.packing.count(r.w.weight) == 0; });
+    if (r.weight_cache_mode != 0) {
+        const auto hit = state.packs.find(r.key);
+        if (hit != state.packs.end()
+                && pack_holds(hit->first, hit->second, r.owned)) {
+            out.data = hit->second.buf.get();
+            memo_pack_locked(r.key, hit->second);
+            return true;
+        }
+    }
+    if (may_image) {
+        bool interior = false, stale = false;
+        const auto it = image_at_locked(r.w.weight, r.owned, interior, stale);
+        if (it != state.images.end() && !interior && !stale
+                && same_layout(it->second.layout, r.w)) {
+            out.data = r.w.weight;
+            memo_image_locked(r.key, it->second);
+            return true;
+        }
+    }
+    return false;
+}
+
+enum class lookup_t { found, missing, failed };
+
+/// The lookup again under the mutex held exclusively: the cached layout that
+/// still holds (one that does not is dropped), else the in-place image, which
+/// serves r when it holds r's layout and is returned in image otherwise.
+/// failed when r starts inside an image or reads into one.
+lookup_t find_layout_exclusive(const layout_request_t &r, native_image_t &image,
+        bool &has_image, native_layout_t &out) {
+    native_cache_state_t &state = cache_state();
+    if (r.weight_cache_mode != 0) {
+        const auto hit = state.packs.find(r.key);
+        if (hit != state.packs.end()) {
+            if (pack_holds(hit->first, hit->second, r.owned)) {
+                out.data = hit->second.buf.get();
+                memo_pack_locked(r.key, hit->second);
+                return lookup_t::found;
+            }
+            apilog_info("native weight: the buffer at ", r.w.weight,
+                    " no longer holds the weight its cached layout was "
+                    "packed from; packed again from its bytes");
+            bump_generation_locked();
+            state.packs.erase(hit);
+        }
+    }
+    has_image = false;
+    if (state.image_count.load(std::memory_order_relaxed) != 0) {
+        bool interior = false, after = false;
+        const native_image_t *found = live_image_locked(
+                r.w.weight, r.extent, r.owned, interior, after);
+        if (interior) {
+            log_error("native weight: weight=", r.w.weight,
+                    " points inside an in-place image; the raw weight "
+                    "cannot be rebuilt from part of it");
+            return lookup_t::failed;
+        }
+        if (after) {
+            log_error("native weight: weight=", r.w.weight,
+                    " reads into a buffer an in-place pack rewrote; the raw "
+                    "weight of that part is gone");
+            return lookup_t::failed;
+        }
+        if (found != nullptr) {
+            image = *found;
+            has_image = true;
+        }
+    }
+    if (has_image && same_layout(image.layout, r.w)) {
+        out.data = r.w.weight;
+        memo_image_locked(r.key, image);
+        return lookup_t::found;
+    }
+    return lookup_t::missing;
+}
+
+/// Weight cache mode 2 on a buffer with no image: rewrites it in place when
+/// its layout fits it (an AOCL prepack, or a contiguous bf16 weight).  done
+/// is set when the buffer is rewritten; a failed AOCL rewrite returns its
+/// status, a failed bf16 one leaves r to the out-of-place pack.  With the
+/// mutex held exclusively (rewrite_in_place).
+status_t rewrite_if_fits(exclusive_lock_t &lock, const layout_request_t &r,
+        bool &done, native_layout_t &out) {
+    const native_raw_weight_t &w = r.w;
+    done = false;
+    const size_t used = native_block_bytes(w.wei_dt, w.K, w.pack_nr)
+            * static_cast<size_t>(w.N / w.pack_nr);
+    const size_t plain = static_cast<size_t>(w.K) * w.N
+            * zendnnl::common::size_of(w.wei_dt);
+    const bool contiguous = w.ldb == (w.transB ? w.K : w.N);
+    if (w.aocl_blocked) {
+        if (!contiguous || used > aocl_capacity(w, r.capacity_bytes))
+            return status_t::success;
+        const status_t st = rewrite_in_place(
+                lock, w, used, r.owned, r.bytes, true, r.num_threads);
+        if (st != status_t::success) return st;
+    } else {
+        if (w.wei_dt != data_type_t::bf16 || !contiguous
+                || !wei_inplace_fits(used, used, plain, r.capacity_bytes))
+            return status_t::success;
+        if (rewrite_in_place(
+                    lock, w, used, r.owned, r.bytes, false, r.num_threads)
+                != status_t::success)
+            return status_t::success;
+    }
+    log_pack(w, r.weight_cache_mode, "in_place");
+    out.data = w.weight;
+    done = true;
+    native_cache_state_t &state = cache_state();
+    const auto it
+            = state.images.find(reinterpret_cast<std::uintptr_t>(w.weight));
+    if (it != state.images.end()) memo_image_locked(r.key, it->second);
+    return status_t::success;
+}
+
+/// Packs r out of place, from image when its buffer holds one, outside the
+/// mutex, which the call holds exclusively on entry.  Modes 1 / 2 hold the
+/// buffer in packing until the layout is cached (or, past the cache
+/// capacity, owned by the caller); mode 0 packs for this call only.
+status_t pack_out_of_place(exclusive_lock_t &lock, const layout_request_t &r,
+        const native_image_t *image, native_layout_t &out) {
+    native_cache_state_t &state = cache_state();
+    const native_raw_weight_t &w = r.w;
+    if (r.weight_cache_mode == 0) {
+        lock.unlock();
+        return pack_for_call(r, image, out);
+    }
+    packing_t packing {state};
+    if (!packing.hold_locked(w.weight)) {
+        log_error("native weight: no memory to pack weight=", w.weight);
+        return status_t::failure;
+    }
+    lock.unlock();
+    std::unique_ptr<void, native_aligned_free_t> buf(alloc_layout(r.bytes));
+    if (!buf) {
+        // Nothing was written: another route can still serve a raw weight.
+        log_error("native weight: no buffer for a ", r.bytes, "-byte layout");
+        return status_t::unimplemented;
+    }
+    const size_t source_bytes = image != nullptr ? image->bytes : r.extent;
+    const weight_ends_t source_ends = image != nullptr
+            ? image->ends
+            : weight_ends_of(w.weight, r.extent);
+    const status_t st
+            = pack_from_source(w, image, r.owned, buf.get(), r.num_threads);
+    if (st != status_t::success) return st;
+    lock.lock();
+    if (state.packs.size() < get_weight_cache_capacity()) {
+        try {
+            auto slot = state.packs.try_emplace(r.key);
+            native_cached_pack_t &entry = slot.first->second;
+            if (slot.second) {
+                entry.buf.reset(static_cast<uint8_t *>(buf.release()));
+                entry.source_bytes = source_bytes;
+                entry.source_ends = source_ends;
+            }
+            packing.release_locked();
+            out.data = entry.buf.get();
+            memo_pack_locked(r.key, entry);
+            log_pack(w, r.weight_cache_mode, "cache");
+            return status_t::success;
+        } catch (const std::bad_alloc &) {
+            log_error("native weight: no memory for a cache entry");
+            packing.release_locked();
+            return status_t::failure;
+        }
+    }
+    packing.release_locked();
+    lock.unlock();
+    log_pack(w, r.weight_cache_mode, "call");
+    own_layout(std::move(buf), out);
+    return status_t::success;
+}
+
 } // namespace
 
 size_t native_raw_weight_bytes(
@@ -522,217 +936,116 @@ size_t native_raw_weight_bytes(
 
 status_t get_native_layout(const native_raw_weight_t &w,
         int32_t weight_cache_mode, size_t capacity_bytes, int num_threads,
-        native_layout_t &out) {
+        native_layout_t &out, const native_image_check_t *checked) {
     out = native_layout_t {};
-    const size_t bytes = native_packed_bytes(w.wei_dt, w.K, w.N, w.pack_nr);
-    if (bytes == 0 || w.weight == nullptr || w.ldb < (w.transB ? w.K : w.N)
+    if (w.weight == nullptr || w.ldb < (w.transB ? w.K : w.N)
             || weight_cache_mode < 0 || weight_cache_mode > 2) {
         log_error("native weight: no layout for wei=", dtype_info(w.wei_dt),
                 " K=", w.K, " N=", w.N, " ldb=", w.ldb, " pack_nr=", w.pack_nr,
                 " weight=", w.weight, " weight_cache_mode=", weight_cache_mode);
         return status_t::failure;
     }
-    native_cache_state_t &state = cache_state();
-    const native_key_t key {w.weight, w.K, w.N, w.ldb, w.pack_nr, w.transB,
-            w.interleave_split_halves, w.wei_dt, w.aocl_blocked};
-    // The caller's buffer: the bytes the request reads, or the capacity it
-    // states.  The checks below read nothing outside it.
-    const size_t extent = w.aocl_blocked
-            ? aocl_prepack_bytes(
-                      w.K, w.N, w.ldb, w.transB, w.wei_dt == data_type_t::s8)
-            : native_raw_weight_bytes(w.wei_dt, w.K, w.N, w.ldb, w.transB);
-    const size_t owned = std::max(extent, capacity_bytes);
-    const bool may_image = image_may_overlap(w.weight, extent);
-
-    // Hits, under the mutex held shared.
-    if (weight_cache_mode != 0 || may_image) {
-        std::shared_lock<std::shared_mutex> lock(state.mutex);
-        state.packed.wait(
-                lock, [&] { return state.packing.count(w.weight) == 0; });
-        if (weight_cache_mode != 0) {
-            const auto hit = state.packs.find(key);
-            if (hit != state.packs.end()
-                    && pack_holds(hit->first, hit->second, owned)) {
-                out.data = hit->second.buf.get();
-                return status_t::success;
-            }
-        }
-        if (may_image) {
-            bool interior = false, stale = false;
-            const auto it = image_at_locked(w.weight, owned, interior, stale);
-            if (it != state.images.end() && !interior && !stale
-                    && same_layout(it->second.layout, w)) {
-                out.data = w.weight;
-                return status_t::success;
-            }
-        }
-    } else {
-        // Mode 0 with no image at the buffer: packed for this call only.
-        std::unique_ptr<void, native_aligned_free_t> buf(alloc_layout(bytes));
-        if (!buf) {
-            log_error("native weight: no buffer for a ", bytes, "-byte layout");
-            return status_t::unimplemented;
-        }
-        const status_t st
-                = pack_from_source(w, nullptr, owned, buf.get(), num_threads);
-        if (st != status_t::success) return st;
-        log_pack(w, weight_cache_mode, "call");
-        out.owned = buf.release();
-        out.data = out.owned;
+    const layout_request_t r
+            = make_request(w, weight_cache_mode, capacity_bytes, num_threads);
+    // The call's own check found the image of this layout at the buffer,
+    // over every byte this lookup would check.
+    if (checked != nullptr && checked->ready
+            && checked->layout.weight == w.weight
+            && same_layout(checked->layout, w)
+            && checked->checked_bytes >= r.owned) {
+        out.data = w.weight;
         return status_t::success;
     }
+    if (find_layout_memo(r, out)) return status_t::success;
+    const bool may_image = image_may_overlap(w.weight, r.extent);
+    // Mode 0 with no image at the buffer: packed for this call only.
+    if (weight_cache_mode == 0 && !may_image)
+        return pack_for_call(r, nullptr, out);
+    if (find_layout_shared(r, may_image, out)) return status_t::success;
 
+    native_cache_state_t &state = cache_state();
     exclusive_lock_t lock(state.mutex);
     state.packed.wait(lock, [&] { return state.packing.count(w.weight) == 0; });
-    if (weight_cache_mode != 0) {
-        const auto hit = state.packs.find(key);
-        if (hit != state.packs.end()) {
-            if (pack_holds(hit->first, hit->second, owned)) {
-                out.data = hit->second.buf.get();
-                return status_t::success;
-            }
-            apilog_info("native weight: the buffer at ", w.weight,
-                    " no longer holds the weight its cached layout was "
-                    "packed from; packed again from its bytes");
-            state.packs.erase(hit);
-        }
-    }
     native_image_t image;
     bool has_image = false;
-    if (state.image_count.load(std::memory_order_relaxed) != 0) {
-        bool interior = false, after = false;
-        const native_image_t *found
-                = live_image_locked(w.weight, extent, owned, interior, after);
-        if (interior) {
-            log_error("native weight: weight=", w.weight,
-                    " points inside an in-place image; the raw weight "
-                    "cannot be rebuilt from part of it");
-            return status_t::failure;
-        }
-        if (after) {
-            log_error("native weight: weight=", w.weight,
-                    " reads into a buffer an in-place pack rewrote; the raw "
-                    "weight of that part is gone");
-            return status_t::failure;
-        }
-        if (found != nullptr) {
-            image = *found;
-            has_image = true;
-        }
+    switch (find_layout_exclusive(r, image, has_image, out)) {
+        case lookup_t::found: return status_t::success;
+        case lookup_t::failed: return status_t::failure;
+        case lookup_t::missing: break;
     }
-    if (has_image && same_layout(image.layout, w)) {
-        out.data = w.weight;
-        return status_t::success;
+    if (weight_cache_mode == 2 && !has_image) {
+        bool done = false;
+        const status_t st = rewrite_if_fits(lock, r, done, out);
+        if (done || st != status_t::success) return st;
     }
-
-    const size_t used = native_block_bytes(w.wei_dt, w.K, w.pack_nr)
-            * static_cast<size_t>(w.N / w.pack_nr);
-    const size_t plain = static_cast<size_t>(w.K) * w.N
-            * zendnnl::common::size_of(w.wei_dt);
-    const bool contiguous = w.ldb == (w.transB ? w.K : w.N);
-    if (weight_cache_mode == 2 && !has_image && w.aocl_blocked && contiguous
-            && used <= aocl_capacity(w, capacity_bytes)) {
-        const status_t st = rewrite_in_place(
-                lock, w, used, owned, bytes, true, num_threads);
-        if (st != status_t::success) return st;
-        log_pack(w, weight_cache_mode, "in_place");
-        out.data = w.weight;
-        return status_t::success;
-    }
-    if (weight_cache_mode == 2 && !has_image && !w.aocl_blocked
-            && w.wei_dt == data_type_t::bf16 && contiguous
-            && wei_inplace_fits(used, used, plain, capacity_bytes)) {
-        const status_t st = rewrite_in_place(
-                lock, w, used, owned, bytes, false, num_threads);
-        if (st == status_t::success) {
-            log_pack(w, weight_cache_mode, "in_place");
-            out.data = w.weight;
-            return status_t::success;
-        }
-    }
-
-    // The out-of-place pack runs outside the mutex; in modes 1 / 2 it holds
-    // the buffer in packing until its result is published.
-    packing_t packing {state};
-    if (weight_cache_mode != 0) {
-        if (!packing.hold_locked(w.weight)) {
-            log_error("native weight: no memory to pack weight=", w.weight);
-            return status_t::failure;
-        }
-    }
-    lock.unlock();
-    std::unique_ptr<void, native_aligned_free_t> buf(alloc_layout(bytes));
-    if (!buf) {
-        // Nothing was written: another route can still serve a raw weight.
-        log_error("native weight: no buffer for a ", bytes, "-byte layout");
-        return status_t::unimplemented;
-    }
-    size_t source_bytes = 0;
-    weight_ends_t source_ends;
-    if (weight_cache_mode != 0) {
-        source_bytes = has_image ? image.bytes : extent;
-        source_ends = has_image ? image.ends : weight_ends_of(w.weight, extent);
-    }
-    const status_t st = pack_from_source(
-            w, has_image ? &image : nullptr, owned, buf.get(), num_threads);
-    if (st != status_t::success) return st;
-    if (weight_cache_mode != 0) {
-        lock.lock();
-        if (state.packs.size() < get_weight_cache_capacity()) {
-            try {
-                auto slot = state.packs.try_emplace(key);
-                native_cached_pack_t &entry = slot.first->second;
-                if (slot.second) {
-                    entry.buf.reset(static_cast<uint8_t *>(buf.release()));
-                    entry.source_bytes = source_bytes;
-                    entry.source_ends = source_ends;
-                }
-                packing.release_locked();
-                out.data = entry.buf.get();
-                log_pack(w, weight_cache_mode, "cache");
-                return status_t::success;
-            } catch (const std::bad_alloc &) {
-                log_error("native weight: no memory for a cache entry");
-                packing.release_locked();
-                return status_t::failure;
-            }
-        }
-        packing.release_locked();
-        lock.unlock();
-    }
-    log_pack(w, weight_cache_mode, "call");
-    out.owned = buf.release();
-    out.data = out.owned;
-    return status_t::success;
+    return pack_out_of_place(lock, r, has_image ? &image : nullptr, out);
 }
 
 void native_free_layout(void *owned) {
     if (owned != nullptr) zendnnl_aligned_free(owned);
 }
 
-bool native_weight_packed_in_place(const void *weight, size_t owned_bytes) {
+namespace {
+
+/// What the image at it, which holds for the caller, tells a call on weight,
+/// remembered for the thread when it starts there.  Under the mutex.
+void note_image_locked(image_map_t::const_iterator it, bool interior,
+        native_image_check_t &found) {
+    if (interior || it->second.reserved) return;
+    found.ready = true;
+    found.layout = it->second.layout;
+    memo_image_locked(key_of(it->second.layout), it->second);
+}
+
+} // namespace
+
+bool native_weight_find_image(
+        const void *weight, size_t owned_bytes, native_image_check_t &found) {
+    found = native_image_check_t {};
+    found.checked_bytes = owned_bytes;
     if (weight == nullptr || !image_may_overlap(weight, 1)) return false;
     native_cache_state_t &state = cache_state();
+    const auto at = reinterpret_cast<std::uintptr_t>(weight);
+    const memo_entry_t *e = memo_find_image(
+            weight, state.generation.load(std::memory_order_acquire));
+    if (e != nullptr && ends_hold(at, e->check_bytes, e->ends, at, owned_bytes)
+            && memo_still_current(e->generation)) {
+        found.ready = true;
+        found.layout = raw_of(e->key);
+        return true;
+    }
     {
         std::shared_lock<std::shared_mutex> lock(state.mutex);
         bool interior = false, stale = false;
         const auto it = image_at_locked(weight, owned_bytes, interior, stale);
         if (it == state.images.end()) return false;
-        if (!stale) return true;
+        if (!stale) {
+            note_image_locked(it, interior, found);
+            return true;
+        }
     }
     exclusive_lock_t lock(state.mutex);
     bool interior = false, stale = false;
     const auto it = image_at_locked(weight, owned_bytes, interior, stale);
     if (it == state.images.end()) return false;
-    if (!stale) return true;
+    if (!stale) {
+        note_image_locked(it, interior, found);
+        return true;
+    }
     log_stale_image(it->second);
     erase_image_locked(it);
     return false;
 }
 
+bool native_weight_packed_in_place(const void *weight, size_t owned_bytes) {
+    native_image_check_t found;
+    return native_weight_find_image(weight, owned_bytes, found);
+}
+
 void clear_native_weight_caches() {
     native_cache_state_t &state = cache_state();
     exclusive_lock_t lock(state.mutex);
+    bump_generation_locked();
     state.packs.clear();
     state.images.clear();
     publish_spans_locked();
@@ -746,6 +1059,18 @@ size_t native_weight_layouts(const void *weight) {
     for (const auto &kv : state.packs)
         if (kv.first.weight == weight) ++n;
     return n + state.images.count(reinterpret_cast<std::uintptr_t>(weight));
+}
+
+size_t native_weight_memo_entries(const void *weight) {
+    if (weight == nullptr) return 0;
+    const memo_set_t *set = memo_set(weight, false);
+    if (set == nullptr) return 0;
+    const uint64_t gen
+            = cache_state().generation.load(std::memory_order_acquire);
+    size_t n = 0;
+    for (size_t i = 0; i < kMemoWays; ++i)
+        if (set->weights[i] == weight && set->ways[i].generation == gen) ++n;
+    return n;
 }
 
 } // namespace native

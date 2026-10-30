@@ -30,9 +30,11 @@ void compute_int8_tile(const native_plan_t &plan,
         int mr, int n0, int nr, float *C, int ldc,
         const native_int8_out_t *out) {
     assert(nr % 16 == 0 && w.wei_dt == data_type_t::s8);
+    // A direct store writes pack column n as output column n: a plain pack.
+    assert(out == nullptr || !w.interleaved);
     if (call.scheme == native_int8_scheme_t::per_group) {
-        assert(out == nullptr && call.src_signed && call.bias == nullptr);
-        compute_group_tile(plan, call, w, m0, mr, n0, nr, C, ldc);
+        assert(call.src_signed && call.bias == nullptr);
+        compute_group_tile(plan, call, w, m0, mr, n0, nr, C, ldc, out);
         return;
     }
     compute_channel_tile(plan, call, w, m0, mr, n0, nr, C, ldc, out);

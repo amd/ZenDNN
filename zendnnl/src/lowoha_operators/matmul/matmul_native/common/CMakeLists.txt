@@ -23,7 +23,7 @@ set(matmul_native_common_sources
   native_weight_cache.cpp
   native_weight_view.cpp
   native_epilogue.cpp
-  native_aocl_unreorder.cpp
+  native_operator_bridge.cpp
   native_hw.cpp)
 
 set(matmul_native_common_headers
@@ -32,7 +32,7 @@ set(matmul_native_common_headers
   native_weight_cache.hpp
   native_weight_view.hpp
   native_epilogue.hpp
-  native_aocl_unreorder.hpp
+  native_operator_bridge.hpp
   native_hw.hpp
   native_weight_ends.hpp
   native_int8_scheme.hpp

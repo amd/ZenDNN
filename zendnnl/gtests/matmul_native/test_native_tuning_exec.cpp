@@ -20,9 +20,9 @@
 // in a child process; the outputs under the built-in plan come from the
 // parent.  Every key whose schema bits are "same" must give the output bits
 // of the built-in plan, on BF16 and INT8 calls that reach the paths the keys
-// steer (narrowing, row split, K passes, row groups, the rules of preset v2,
-// INT8 call widths, rows and K passes, direct store, bias in the
-// dequantization, source copies, gated and softmax epilogues, alpha / beta);
+// steer (narrowing, row split, K passes, row groups, the rule switches, INT8
+// call widths, rows and K passes, direct store, bias in the dequantization,
+// source copies, gated and softmax epilogues, alpha / beta);
 // bias_in_dequant=0 must stay in the comparison band.  Tuning files (a table
 // with tree rules, ordered rules, and an override on top of a file) must
 // keep the bits too.  A bad input never fails a call: illegal or malformed
@@ -50,6 +50,7 @@
 
 #include "common/zendnnl_global.hpp"
 #include "gtest_utils.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_int8_call.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_planner.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_tuning_file.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_tuning_keys.hpp"
@@ -162,6 +163,11 @@ const char *const kSameBitsSettings[] = {"nr=16", "nr=32", "mr=1", "mr=4",
         "kc=64", "kc=1000", "kc=1073741824", "col_groups=0", "col_groups=1",
         "col_groups=2", "schedule=slice", "schedule=row_groups",
         "schedule=row_groups,domain_threads=2", "traversal=n_inner",
+        "unit_tiles=2,bf16_blocks_min_m=1,int8_blocks_min_m=1,domain_threads=2",
+        "schedule=blocks", "schedule=blocks,unit_tiles=1",
+        "schedule=blocks,unit_tiles=3", "schedule=blocks,unit_tiles=4096",
+        "schedule=blocks,unit_tiles=2,mb=7,kc=64",
+        "schedule=blocks,unit_tiles=3,domain_threads=2,threads_cap=7",
         "threads_cap=1", "threads_cap=3", "threads_cap=7",
         "min_tiles_per_thread=2", "min_tiles_per_thread=64", "row_unit=1",
         "row_unit=5", "row_unit=4096", "col_groups=2,row_unit=1", "tile_rows=1",
@@ -180,15 +186,19 @@ const char *const kSameBitsSettings[] = {"nr=16", "nr=32", "mr=1", "mr=4",
         "nr=16,mb=24,kc=64,traversal=n_inner,row_unit=6",
         "int8_mr=5,int8_cw=32/16,int8_kc=64,direct_store=0,copy_block=16",
         "l3_pct=1,domain_threads=32", "schedule=row_groups,domain_threads=64",
-        "preset=legacy", "preset=v2", "makespan=1", "l1_pass=1",
-        "traffic_groups=1", "preset=v2,makespan=0,l1_pass=0,traffic_groups=0",
-        "preset=v2,min_gain_pct=0", "preset=v2,min_gain_pct=100",
-        "preset=v2,idle_pct=1,min_gain_pct=0", "preset=v2,decode_m=0",
-        "preset=v2,decode_m=1073741824", "preset=v2,l1_pct=1",
-        "preset=v2,l1_pct=1000,l1_pass_max_mb=8192",
-        "preset=v2,l1_pass_max_mb=1", "preset=v2,min_pass_k=2,l1_pct=1",
-        "preset=v2,l3_pct=1,domain_threads=4",
-        "preset=v2,l3_pct=1,domain_threads=2,threads_cap=7"};
+        nt::kNativeRulesOff, "makespan=0,l1_pass=0,traffic_groups=0",
+        "min_gain_pct=0", "min_gain_pct=100", "idle_pct=1,min_gain_pct=0",
+        "decode_m=0", "decode_m=1073741824", "l1_pct=1",
+        "l1_pct=1000,l1_pass_max_mb=8192", "l1_pass_max_mb=1",
+        "min_pass_k=2,l1_pct=1", "makespan=0", "l1_pass=0",
+        "makespan=0,traffic_groups=0,l3_pct=1,domain_threads=4",
+        "l3_pct=1,domain_threads=2,threads_cap=7", "bf16_alias=0",
+        "makespan=0,l1_pass=0,traffic_groups=0,bf16_narrow_n=0,blocks=0,"
+        "bf16_alias=1",
+        "bf16_alias_mr=1", "bf16_narrow_n=0",
+        "bf16_narrow_n_min_m=1,domain_threads=1",
+        "makespan=0,l1_pass=0,traffic_groups=0,bf16_alias=0,blocks=0,"
+        "bf16_narrow_n=1,bf16_narrow_n_min_m=1,domain_threads=1"};
 
 uint32_t seed_of(const std::string &s) {
     uint32_t h = 2166136261u;
@@ -327,8 +337,9 @@ nat::native_problem_t problem_of(
     desc.is_weights_const = call.is_weights_const;
     desc.num_threads = call.params.num_threads;
     desc.gated_act = call.gated;
-    return nat::make_native_problem(
-            desc, call.params, call.bias, nat::kNativeLayoutPackNr);
+    return nat::make_native_problem(desc, call.params, call.bias,
+            nat::kNativeLayoutPackNr,
+            nat::decide_int8_call(desc, call.params, call.bias));
 }
 
 nat::native_problem_t make_problem(
@@ -699,6 +710,248 @@ TEST_F(NativeTuningExec, SameBitsOverrideKeysKeepTheBits) {
     }, "the same-bits settings");
 }
 
+// BF16 tiles of several 32-column slabs (with odd K, K passes, row tails, a
+// transposed source and a gated epilogue among the cases) keep the bits of
+// the built-in plan.  A setting runs on the BF16 cases it gives a legal plan,
+// as in SameBitsOverrideKeysKeepTheBits.
+TEST_F(NativeTuningExec, SameBitsBf16TileWidthsKeepTheBits) {
+    const char *const settings[] = {"nr=64", "nr=128", "nr=64,mr=4",
+            "nr=128,mr=2", "nr=64,mr=1", "nr=64,kc=64", "nr=128,kc=1000",
+            "nr=128,mr=3,kc=2", "nr=64,mb=7", "nr=128,schedule=row_groups",
+            "nr=64,traversal=n_inner", "nr=64,schedule=blocks,unit_tiles=2",
+            "nr=128,schedule=blocks,unit_tiles=3,kc=1000"};
+    constexpr int kSettings = static_cast<int>(std::size(settings));
+    std::vector<case_t> cases;
+    for (const case_t &c : served(all_cases()))
+        if (!c.int8()) cases.push_back(c);
+    if (cases.empty()) GTEST_SKIP() << "needs AVX512-BF16";
+    const auto k_of = [](const case_t &c, int j) { return c.K + 4 * j; };
+    std::vector<operands_t> ops;
+    for (const case_t &c : cases)
+        ops.push_back(make_operands(c, k_of(c, kSettings - 1), 0));
+    const nat::UarchParams &uarch = nat::native_plan_uarch();
+    const auto legal = [&](size_t i, int j) {
+        nat::native_config_t cfg;
+        std::string why;
+        if (!nat::parse_native_config(settings[j], cfg, why)) return false;
+        const nat::native_problem_t p
+                = problem_of(cases[i], ops[i], k_of(cases[i], j));
+        return nat::validate_native_plan(
+                       nat::heuristic_plan(
+                               p, uarch, nat::apply_native_config({}, cfg)),
+                       p)
+                == nullptr;
+    };
+    std::string entries;
+    std::vector<int> listed(kSettings, 0);
+    for (size_t i = 0; i < cases.size(); ++i)
+        for (int j = 0; j < kSettings; ++j) {
+            if (!legal(i, j)) continue;
+            ++listed[j];
+            nlohmann::json e;
+            e["id"] = std::string(cases[i].name) + "/" + settings[j];
+            e["match"]
+                    = match_of(problem_of(cases[i], ops[i], k_of(cases[i], j)));
+            e["config"] = config_json(settings[j]);
+            entries += (entries.empty() ? "" : ",\n") + e.dump();
+        }
+    for (int j = 0; j < kSettings; ++j)
+        EXPECT_GT(listed[j], 0) << "'" << settings[j] << "' serves no case";
+    const nt::temp_file_t file(
+            "same_bits_bf16.json", tuning_json("", entries, ""));
+    nt::child_buffers_t shared;
+    if (!nt::in_child()) {
+        std::unique_ptr<nat::native_planner_t> planner;
+        const std::string out = stdout_of([&] {
+            planner = nat::make_native_planner(nullptr, file.path().c_str());
+        });
+        ASSERT_TRUE(planner->has_sources());
+        if (warnings_on()) { EXPECT_FALSE(contains(out, " dropped: ")) << out; }
+        buffer_t digests
+                = nt::make_buffer(cases.size() * kSettings * sizeof(uint64_t));
+        for (size_t i = 0; i < cases.size(); ++i)
+            for (int j = 0; j < kSettings; ++j) {
+                const int K = k_of(cases[i], j);
+                ASSERT_TRUE(native_serves(
+                        cases[i], k_of(cases[i], kSettings - 1), K))
+                        << cases[i].name << " at K " << K;
+                if (legal(i, j)) {
+                    EXPECT_EQ(nt::top_source(planner->plan(
+                                      problem_of(cases[i], ops[i], K))),
+                            source_t::table)
+                            << cases[i].name << " " << settings[j];
+                }
+                const run_t r = run_call(cases[i], ops[i], K);
+                ASSERT_EQ(r.status, status_t::success) << cases[i].name;
+                digests.as<uint64_t>()[i * kSettings + j] = digest_of(r.dst);
+            }
+        shared.publish({digests});
+    }
+    nt::expect_in_child(
+            {{kConfig, nullptr}, {kTuningFile, file.path().c_str()}}, [&] {
+        child_report_t report;
+        const std::vector<buffer_t> &got = shared.buffers();
+        if (got.size() != 1
+                || got[0].bytes
+                        != cases.size() * kSettings * sizeof(uint64_t)) {
+            report.fail("the parent's outputs are missing");
+            return report.failures();
+        }
+        for (size_t i = 0; i < cases.size(); ++i)
+            for (int j = 0; j < kSettings; ++j) {
+                const run_t r = run_call(cases[i], ops[i], k_of(cases[i], j));
+                const bool same = r.status == status_t::success
+                        && digest_of(r.dst)
+                                == got[0].as<uint64_t>()[i * kSettings + j];
+                if (!same)
+                    report.fail(std::string(cases[i].name) + " at K "
+                            + std::to_string(k_of(cases[i], j)) + " with '"
+                            + settings[j] + "' differs from the built-in plan");
+            }
+        return report.failures();
+    }, "the BF16 tile widths");
+}
+
+/// Whether a plan with the BF16 aliasing rule (on) takes its rows per call,
+/// against the plan without it (off).
+bool takes_alias_rows(
+        const nat::native_plan_t &on, const nat::native_plan_t &off) {
+    return on.mr == nat::heuristic_params_t {}.bf16_alias_mr && off.mr > on.mr;
+}
+
+/// Whether a plan with the BF16 narrow-N rule (on) takes tiles of several
+/// slabs, against the plan without it (off).
+bool takes_wide_tiles(
+        const nat::native_plan_t &on, const nat::native_plan_t &off) {
+    return on.nr > off.nr;
+}
+
+/// A planner of setting over one cache hierarchy (48 KiB L1, 1 MiB L2,
+/// 32 MiB of L3 per 8 cores), so that the rules it runs take the same calls
+/// on any host.
+std::unique_ptr<nat::native_planner_t> fixed_planner(const char *setting) {
+    nat::UarchParams u = nat::detect_uarch();
+    u.l1d_bytes = 48 << 10;
+    u.l2_bytes = 1 << 20;
+    u.l3_bytes_per_ccd = 32 << 20;
+    u.ccx_cores = 8;
+    u.l3_domain_cores = 8;
+    return std::make_unique<nat::native_planner_t>(
+            u, nat::make_native_override_source(setting), nullptr, nullptr);
+}
+
+/// How many of cases the planners of on and off over the detected caches,
+/// which a child of expect_in_child plans with, find taken: where none is,
+/// both children would run the built-in plan.
+size_t taken_on_this_host(const fixture_t &f, const char *on, const char *off,
+        bool (*taken)(const nat::native_plan_t &, const nat::native_plan_t &)) {
+    const std::unique_ptr<nat::native_planner_t> with
+            = nat::make_native_planner(on, nullptr);
+    const std::unique_ptr<nat::native_planner_t> without
+            = nat::make_native_planner(off, nullptr);
+    size_t n = 0;
+    for (size_t i = 0; i < f.cases.size(); ++i) {
+        const nat::native_problem_t p = problem_of(f.cases[i], f.operands[i]);
+        n += taken(with->plan(p), without->plan(p)) ? 1 : 0;
+    }
+    return n;
+}
+
+// The BF16 rules keep the bits on the calls they take (one with a transposed
+// source, an epilogue and K passes): a planner of each rule's setting takes
+// every case, and a child with the rule and one without it both give the
+// outputs of the built-in plan.  The narrow-N rule takes them with L3 domains
+// of two threads.  A rule's children run only where the detected caches let
+// it take a case; the alias rule is on in the built-in plan, so only its
+// child without it runs.
+TEST_F(NativeTuningExec, Bf16RulesKeepTheBits) {
+    const post_op_type_t gelu = post_op_type_t::gelu_erf;
+    nt::child_buffers_t shared;
+    const fixture_t f = make_fixture(
+            {{"bf16_rows_4k_apart", src_t::bf16, 1100, 64, 2048, kBf16, 8},
+                    {"bf16_rows_4k_apart_trans", src_t::bf16, 1030, 128, 4096,
+                            kF32, 8, true, kF32, gelu}},
+            shared);
+    if (f.cases.empty()) GTEST_SKIP() << "needs AVX512-BF16";
+    const struct {
+        const char *on, *off;
+        bool (*taken)(const nat::native_plan_t &, const nat::native_plan_t &);
+        bool on_is_built_in;
+    } rules[] = {{"bf16_alias=1", "bf16_alias=0", takes_alias_rows, true},
+            {"domain_threads=2", "domain_threads=2,bf16_narrow_n=0",
+                    takes_wide_tiles, false}};
+    int compared = 0;
+    for (const auto &rule : rules) {
+        if (!nt::in_child()) {
+            const std::unique_ptr<nat::native_planner_t> on
+                    = fixed_planner(rule.on);
+            const std::unique_ptr<nat::native_planner_t> off
+                    = fixed_planner(rule.off);
+            for (size_t i = 0; i < f.cases.size(); ++i) {
+                const nat::native_problem_t p
+                        = problem_of(f.cases[i], f.operands[i]);
+                EXPECT_TRUE(rule.taken(on->plan(p), off->plan(p)))
+                        << f.cases[i].name << ": '" << rule.on
+                        << "' does not take the call";
+            }
+        }
+        if (taken_on_this_host(f, rule.on, rule.off, rule.taken) == 0) {
+            if (!nt::in_child())
+                std::printf(
+                        "'%s' takes no case over the detected caches: its "
+                        "children are skipped\n",
+                        rule.on);
+            continue;
+        }
+        ++compared;
+        for (const char *setting : {rule.on, rule.off})
+            if (setting != rule.on || !rule.on_is_built_in)
+                nt::expect_in_child(
+                        {{kConfig, setting}, {kTuningFile, nullptr}},
+                        [&] { return child_same_bits(f); }, setting);
+    }
+    if (compared == 0) GTEST_SKIP() << "the detected caches take no case";
+}
+
+bool takes_blocks(const nat::native_plan_t &on, const nat::native_plan_t &off) {
+    return on.unit_tiles > 0 && off.unit_tiles == 0;
+}
+
+// The blocks rule takes a BF16 call with K passes and an INT8 call the slice
+// serves, with domains of two threads and the rule's row bounds lowered;
+// with the rule and without it both give the outputs of the built-in plan,
+// where the detected caches let the rule take a case.
+TEST_F(NativeTuningExec, BlocksRuleKeepsTheBits) {
+    nt::child_buffers_t shared;
+    const fixture_t f = make_fixture(
+            {{"bf16_blocks_k_passes", src_t::bf16, 1100, 256, 3000, kBf16, 8},
+                    {"int8_blocks_slice", src_t::dyn_s8, 1100, 256, 512, kBf16,
+                            8}},
+            shared);
+    if (f.cases.empty()) GTEST_SKIP() << "needs AVX512-BF16 or AVX512-VNNI";
+    const char *const on
+            = "bf16_blocks_min_m=1,int8_blocks_min_m=1,"
+              "domain_threads=2,bf16_l2_pct=5";
+    const char *const off = "blocks=0,domain_threads=2,bf16_l2_pct=5";
+    if (!nt::in_child()) {
+        const std::unique_ptr<nat::native_planner_t> with = fixed_planner(on);
+        const std::unique_ptr<nat::native_planner_t> without
+                = fixed_planner(off);
+        for (size_t i = 0; i < f.cases.size(); ++i) {
+            const nat::native_problem_t p
+                    = problem_of(f.cases[i], f.operands[i]);
+            EXPECT_TRUE(takes_blocks(with->plan(p), without->plan(p)))
+                    << f.cases[i].name << ": the rule does not take the call";
+        }
+    }
+    // The children plan over the detected caches.
+    if (taken_on_this_host(f, on, off, takes_blocks) == 0)
+        GTEST_SKIP() << "the detected caches take no case";
+    for (const char *setting : {on, off})
+        nt::expect_in_child({{kConfig, setting}, {kTuningFile, nullptr}},
+                [&] { return child_same_bits(f); }, setting);
+}
+
 TEST_F(NativeTuningExec, BiasInDequantOffStaysInTheBand) {
     nt::child_buffers_t shared;
     const fixture_t f = make_fixture(all_cases(), shared);
@@ -882,14 +1135,16 @@ TEST_F(NativeTuningExec, IllegalOverrideFallsBackWithOneWarning) {
     nt::child_buffers_t shared;
     const fixture_t f = make_fixture(fallback_cases(), shared);
     // A BF16 row count without a kernel at nr 16; column groups that divide
-    // no team; an odd BF16 kc below K.  Under the legacy preset: v2 fits its
-    // grid to a column-group pin.
+    // no team; an odd BF16 kc below K; each with the rule switches off, since
+    // with them on the makespan rule would fit its grid to the column-group
+    // pin and make it legal.
     const illegal_t illegal[] = {{"nr=16,mr=12", kept_on_t::int8},
             {"col_groups=3", kept_on_t::none},
             {"kc=255", kept_on_t::int8_or_short_k}};
     for (const illegal_t &bad : illegal) {
         SCOPED_TRACE(bad.setting);
-        const std::string setting = std::string("preset=legacy,") + bad.setting;
+        const std::string setting
+                = std::string(nt::kNativeRulesOff) + "," + bad.setting;
         if (!nt::in_child()) {
             const std::unique_ptr<nat::native_planner_t> planner
                     = nat::make_native_planner(setting.c_str(), nullptr);

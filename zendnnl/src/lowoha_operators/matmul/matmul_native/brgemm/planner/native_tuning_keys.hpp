@@ -33,11 +33,10 @@ enum class native_key_type_t : uint8_t {
     int32,
     int64,
     boolean,
-    schedule, ///< auto, slice, row_groups
+    schedule, ///< auto, slice, row_groups, blocks
     traversal, ///< m_inner, n_inner
     kc_split, ///< budget, equal
     cw_list, ///< INT8 widths such as 32/16
-    preset, ///< legacy, v2
 };
 
 /// A key only a per-channel INT8 call applies.

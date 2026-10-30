@@ -58,7 +58,21 @@ struct native_layout_t {
     void *owned = nullptr;
 };
 
-/// Resolves w to its layout under weight cache mode 0, 1 or 2:
+/// What a call's check of its weight buffer for an in-place image found
+/// (native_weight_find_image), handed on so that its layout lookup does not
+/// check again.
+struct native_image_check_t {
+    /// The image starts at the weight, its rewrite is done and its ends hold
+    /// within the caller's buffer: layout is the layout it holds.
+    bool ready = false;
+    native_raw_weight_t layout;
+    /// The caller's buffer at the weight that the check read: the image's
+    /// ends outside it were not checked.
+    size_t checked_bytes = 0;
+};
+
+/// Resolves w, a weight native_layout_fits takes, to its layout under weight
+/// cache mode 0, 1 or 2:
 ///   0: packed for this call (owned);
 ///   1: the process cache, keyed by the weight pointer and the whole layout
 ///      request; packed for this call when ZENDNNL_LRU_CACHE_CAPACITY
@@ -76,6 +90,10 @@ struct native_layout_t {
 ///      AOCL prepack).  Other s8 weights are never rewritten.  The cached
 ///      layouts packed from bytes a rewrite overwrites stay cached: the
 ///      image holds the same weight.
+/// checked is the call's own check of the buffer for an image
+/// (native_weight_find_image), when it made one: an image ready there in w's
+/// layout is served without a second check when that check read at least
+/// the bytes this lookup checks.
 /// A buffer rewritten in place is never read as a raw or AOCL weight again
 /// while it holds the image: the same layout is served from it, another
 /// layout is packed from the raw weight rebuilt out of a bf16 image (an s8
@@ -99,9 +117,21 @@ struct native_layout_t {
 /// before the buffer is written, so a call that meets the buffer meanwhile
 /// sees an image.  A call whose weight lies in no image takes no lock for
 /// images while they have not changed since its thread last looked.
+/// Each calling thread keeps a memo of the cached layouts and images its
+/// calls were served, at most 512 (4 per set of 128 by weight pointer), about
+/// 50 KB, made when the thread stores its first entry (a cached layout or
+/// image a call was served, or an image its in-place check found) and freed
+/// when the thread exits: a later call of the thread on the same request is
+/// served from it, after the same digest check of the ends and without the
+/// lock or the lookup, as long as no cached layout or image record has gone
+/// and no image has been recorded since (a clear, a layout or image found
+/// stale, a rewrite in place).  A call served from the memo does not wait
+/// for a pack or rewrite of its buffer: it reads the cache generation after
+/// the digests, and a rewrite, which changes it before writing the buffer,
+/// sends the call to the lookup.
 status_t get_native_layout(const native_raw_weight_t &w,
         int32_t weight_cache_mode, size_t capacity_bytes, int num_threads,
-        native_layout_t &out);
+        native_layout_t &out, const native_image_check_t *checked = nullptr);
 
 /// Frees native_layout_t::owned; safe with nullptr.
 void native_free_layout(void *owned);
@@ -113,8 +143,13 @@ void native_free_layout(void *owned);
 /// as held.  No lock unless weight lies in an image: one atomic load while
 /// no buffer holds one, else a search of the spans of the images that the
 /// calling thread copied when they last changed; for a weight inside one,
-/// the shared cache lock, a map lookup and the digests of the image.
+/// the digests of the image, after the thread's memo or else the shared
+/// cache lock and a map lookup.
 bool native_weight_packed_in_place(const void *weight, size_t owned_bytes);
+
+/// native_weight_packed_in_place, which also tells found what it found.
+bool native_weight_find_image(
+        const void *weight, size_t owned_bytes, native_image_check_t &found);
 
 /// Drops every cached layout and every in-place record.  Same quiescence
 /// contract as clear_all_weight_caches, which calls it; a buffer that still
@@ -126,6 +161,11 @@ void clear_native_weight_caches();
 /// weight that the native BRGEMM served at weight cache mode 1 or 2 left.
 /// A diagnostic; no call reads it.
 size_t native_weight_layouts(const void *weight);
+
+/// The calling thread's memo entries for weight that can still serve (made
+/// in the current cache generation); 0 when the thread has no memo, which
+/// asking does not make.  A diagnostic; no call reads it.
+size_t native_weight_memo_entries(const void *weight);
 
 } // namespace native
 } // namespace matmul

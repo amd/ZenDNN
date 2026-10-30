@@ -241,9 +241,9 @@ const nat::native_plan_t &int8_plan() {
     static const nat::native_plan_t plan = [] {
         nat::native_problem_t p;
         p.M = 1;
-        p.N = nat::kNativeMinPackNr;
+        p.N = nat::kNativeLayoutPackNr;
         p.K = 4;
-        p.pack_nr = nat::kNativeMinPackNr;
+        p.pack_nr = nat::kNativeLayoutPackNr;
         p.src_dt = data_type_t::u8;
         p.wei_dt = data_type_t::s8;
         p.dst_dt = data_type_t::f32;
@@ -772,11 +772,16 @@ TEST(NativeBrgemmInt8Tile, AlphaBetaFollowReferenceOrder) {
     for (const bool sgn : {false, true}) {
         for (const Gran zp_gran : {Gran::none, Gran::tensor, Gran::row}) {
             for (const data_type_t dst_dt : {data_type_t::f32,
-                         data_type_t::bf16, data_type_t::u8, data_type_t::s8}) {
-                const AlphaBeta ab = coeffs[variant % 5];
+                         data_type_t::bf16, data_type_t::u8, data_type_t::s8,
+                         data_type_t::f16, data_type_t::s32}) {
                 const int K = (variant % 2) ? 63 : 100;
                 const int pack_nr = (variant % 3) ? 32 : 64;
                 const bool interleave = (variant % 4) == 1;
+                // An interleaved pack comes only with a gated activation,
+                // which no call with beta takes: alpha alone, other than 1.
+                const AlphaBeta ab = interleave
+                        ? AlphaBeta {variant % 8 == 1 ? 0.5f : -1.25f, 0.0f}
+                        : coeffs[variant % 5];
                 ++variant;
                 const int M = 13, N = 128, ldc = N + 3;
                 std::mt19937 rng(static_cast<uint32_t>(variant));
@@ -802,6 +807,14 @@ TEST(NativeBrgemmInt8Tile, AlphaBetaFollowReferenceOrder) {
                     else if (dst_dt == data_type_t::bf16) {
                         const bfloat16_t v(c_old[i]);
                         std::memcpy(dst.data() + 2 * i, &v, 2);
+                    } else if (dst_dt == data_type_t::f16) {
+                        const float16_t v(c_old[i]);
+                        std::memcpy(dst.data() + 2 * i, &v, 2);
+                    } else if (dst_dt == data_type_t::s32) {
+                        // Past 2^24, so that reading it as float rounds.
+                        const int32_t v
+                                = static_cast<int32_t>(c_old[i] * 16777216.0f);
+                        std::memcpy(dst.data() + 4 * i, &v, 4);
                     } else {
                         dst[i] = static_cast<uint8_t>(byte(rng));
                     }
@@ -868,6 +881,14 @@ TEST(NativeBrgemmInt8Tile, AlphaBetaFollowReferenceOrder) {
                                 bfloat16_t h;
                                 std::memcpy(&h, dst.data() + 2 * at, 2);
                                 c = static_cast<float>(h);
+                            } else if (dst_dt == data_type_t::f16) {
+                                float16_t h;
+                                std::memcpy(&h, dst.data() + 2 * at, 2);
+                                c = static_cast<float>(h);
+                            } else if (dst_dt == data_type_t::s32) {
+                                int32_t x;
+                                std::memcpy(&x, dst.data() + 4 * at, 4);
+                                c = static_cast<float>(x);
                             } else if (dst_dt == data_type_t::s8)
                                 c = static_cast<int8_t>(dst[at]);
                             else
@@ -2025,8 +2046,10 @@ TEST(NativeBrgemmInt8Decision, MatchesTheRules) {
                                 reference ? order_t::reference
                                           : order_t::fused);
                         EXPECT_EQ(d.bias_in_dequant, bias_moves);
+                        const bool plain = fused
+                                || (group && alpha == 1.0f && beta == 0.0f);
                         EXPECT_EQ(d.direct_store,
-                                fused && (dst == f32 || dst == bf16));
+                                plain && (dst == f32 || dst == bf16));
 
                         using class_t = nat::native_epilogue_class_t;
                         const class_t epilogue = alpha != 1.0f || beta != 0.0f
@@ -2034,7 +2057,8 @@ TEST(NativeBrgemmInt8Decision, MatchesTheRules) {
                                 : (b != nullptr && !bias_moves
                                                   ? class_t::bias
                                                   : class_t::store);
-                        EXPECT_EQ(nat::make_native_problem(desc, p, b, 32)
+                        EXPECT_EQ(nat::make_native_problem(desc, p, b, 32,
+                                          nat::decide_int8_call(desc, p, b))
                                           .epilogue,
                                 epilogue);
 

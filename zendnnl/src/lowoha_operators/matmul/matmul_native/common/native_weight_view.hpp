@@ -22,6 +22,7 @@
 
 #include "common/error_status.hpp"
 #include "lowoha_operators/matmul/lowoha_common.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_weight_cache.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -88,6 +89,9 @@ struct native_weight_ref_t {
     /// image an earlier native call rewrote in place): the raw weight is its
     /// AOCL inverse, rows transB ? K : N elements apart.
     bool aocl_blocked = false;
+    /// The call's check of the buffer for an in-place image, which the
+    /// layout lookup does not repeat (get_native_layout).
+    native_image_check_t image;
 };
 
 /// Owns a pack made for one call and frees it on scope exit.
@@ -105,8 +109,9 @@ private:
 };
 
 /// Resolves ref to a view through get_native_layout under its weight cache
-/// mode; a missing pack uses up to num_threads threads.  Fails rather than
-/// guessing when the buffer cannot be read as the layout.
+/// mode, for a weight native_layout_fits takes; a missing pack uses up to
+/// num_threads threads.  Fails rather than guessing when the buffer cannot be
+/// read as the layout.
 status_t acquire_native_weight(const native_weight_ref_t &ref,
         data_type_t wei_dt, int K, int N, int ldb, bool transB,
         native_weight_view_t &view, native_weight_lease_t &lease,

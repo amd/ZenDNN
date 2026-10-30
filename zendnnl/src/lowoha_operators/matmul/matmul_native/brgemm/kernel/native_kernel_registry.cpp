@@ -58,6 +58,18 @@ native_kernel_registry_t::native_kernel_registry_t(
         c.max_mr = full_rows(mask);
         if (c.max_mr > 0) all_.push_back(c);
     }
+    // Wider tiles run the slab kernels slab by slab.
+    const native_kernel_caps_t *slab
+            = caps(native_kernel_kind_t::bf16, kNativeBf16SlabCols);
+    if (slab != nullptr) {
+        const native_kernel_caps_t c32 = *slab;
+        for (int nr = 2 * kNativeBf16SlabCols; nr <= kNativeBf16MaxTileCols;
+                nr *= 2) {
+            native_kernel_caps_t c = c32;
+            c.nr = nr;
+            all_.push_back(c);
+        }
+    }
     for (int w = 0; int8_isa && w < kWidths; ++w) {
         native_kernel_caps_t c;
         c.kind = native_kernel_kind_t::int8;
@@ -71,9 +83,23 @@ native_kernel_registry_t::native_kernel_registry_t(
                 mask |= 1u << (mr - 1);
         }
         c.max_mr = full_rows(mask);
-        // The per-channel tile runs the kernel over its K passes, the
-        // per-group tile as the first pass over each group.
-        c.int8_schemes = kNativeInt8AllSchemes;
+        c.int8_schemes
+                = native_int8_scheme_bit(native_int8_scheme_t::per_channel);
+        if (c.max_mr > 0) all_.push_back(c);
+    }
+    for (int w = 0; int8_isa && w < kWidths; ++w) {
+        native_kernel_caps_t c;
+        c.kind = native_kernel_kind_t::int8;
+        c.nr = 16 << w;
+        const int nv = c.nr / 16;
+        uint32_t mask = 0;
+        for (int mr = 1; mr <= kMaxRows; ++mr) {
+            if (select_native_int8_group_ukernel(mr, nv) != nullptr)
+                mask |= 1u << (mr - 1);
+        }
+        c.max_mr = full_rows(mask);
+        c.int8_schemes
+                = native_int8_scheme_bit(native_int8_scheme_t::per_group);
         if (c.max_mr > 0) all_.push_back(c);
     }
 }
@@ -92,20 +118,26 @@ bool native_kernel_registry_t::covers(
     return c != nullptr && mr >= 1 && mr <= c->max_mr;
 }
 
-bool native_kernel_registry_t::covers_int8(
-        int mr, int nr, native_int8_scheme_t scheme) const noexcept {
+const native_kernel_caps_t *native_kernel_registry_t::int8_caps(
+        int nr, native_int8_scheme_t scheme) const noexcept {
     for (const native_kernel_caps_t &c : all_) {
         if (c.kind == native_kernel_kind_t::int8 && c.nr == nr
-                && c.serves(scheme) && mr >= 1 && mr <= c.max_mr)
-            return true;
+                && c.serves(scheme))
+            return &c;
     }
-    return false;
+    return nullptr;
+}
+
+bool native_kernel_registry_t::covers_int8(
+        int mr, int nr, native_int8_scheme_t scheme) const noexcept {
+    const native_kernel_caps_t *c = int8_caps(nr, scheme);
+    return c != nullptr && mr >= 1 && mr <= c->max_mr;
 }
 
 const bf16_brgemm_fn_t *native_kernel_registry_t::bf16_table(
         int nr) const noexcept {
     if (caps(native_kernel_kind_t::bf16, nr) == nullptr) return nullptr;
-    return bf16_[width_index(nr)];
+    return bf16_[width_index(native_bf16_slab_cols(nr))];
 }
 
 const native_kernel_registry_t &native_kernel_registry() {

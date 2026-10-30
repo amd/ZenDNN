@@ -832,6 +832,127 @@ TEST(NativeBrgemmEpilogue, StoresRoundHalfToEven) {
     }
 }
 
+// An epilogue with only the store (an f32 or bf16 dst, alpha 1, beta 0,
+// nothing else to apply) stores what the general path stores, byte for byte:
+// NaNs, infinities, signed zeros, subnormals and rounding ties included, at
+// every width and tail and scratch stride, and nothing outside the tile.
+TEST(NativeBrgemmEpilogue, StoreOnlyStoresTheGeneralPathsBytes) {
+    SKIP_WITHOUT_AVX512();
+    const float b = 1.0f / 256.0f;
+    const uint32_t nans[]
+            = {0x7FC00000u, 0xFFC00001u, 0x7F800001u, 0xFF812345u};
+    std::vector<float> specials = {0.0f, -0.0f, 1.0f, -1.0f, 1 + b, 1 + 3 * b,
+            -(1 + b), 1 + b + 1.0f / (1 << 20),
+            std::numeric_limits<float>::infinity(),
+            -std::numeric_limits<float>::infinity(),
+            std::numeric_limits<float>::denorm_min(),
+            -std::numeric_limits<float>::denorm_min(), 1e-40f, -3e-39f,
+            std::numeric_limits<float>::min(),
+            std::numeric_limits<float>::max(),
+            -std::numeric_limits<float>::max()};
+    for (const uint32_t bits : nans) {
+        float v;
+        std::memcpy(&v, &bits, sizeof(v));
+        specials.push_back(v);
+    }
+    std::mt19937 rng(20261028);
+    std::uniform_real_distribution<float> any(-4.0f, 4.0f);
+    for (const data_type_t dt : {data_type_t::bf16, data_type_t::f32})
+        for (const int nr : {1, 15, 16, 17, 31, 32, 48, 64})
+            for (const int mr : {1, 3}) {
+                SCOPED_TRACE(::testing::Message()
+                        << zendnnl::common::dtype_info(dt) << " nr " << nr
+                        << " mr " << mr);
+                constexpr int M = 5, N = 80, m0 = 1, n0 = 8;
+                const int ld = nr + 3;
+                std::vector<float> acc(static_cast<size_t>(mr) * ld);
+                for (size_t i = 0; i < acc.size(); ++i)
+                    acc[i] = i % 3 == 0 ? specials[(i / 3) % specials.size()]
+                                        : any(rng);
+                std::vector<float> acc2(acc);
+                const size_t bytes = static_cast<size_t>(M) * N * size_of(dt);
+                std::vector<uint8_t> fast(bytes, 0xA5), slow(bytes, 0xA5);
+                mm::matmul_params p;
+                p.dtypes.dst = dt;
+                nat::GemmDescriptor d;
+                d.M = M;
+                d.N = N;
+                d.ldc = N;
+                d.dst_dt = dt;
+                nat::native_epilogue_t e1, e2;
+                ASSERT_EQ(nat::prepare_epilogue(
+                                  d, p, nullptr, fast.data(), false, e1),
+                        status_t::success);
+                ASSERT_EQ(nat::prepare_epilogue(
+                                  d, p, nullptr, slow.data(), false, e2),
+                        status_t::success);
+                ASSERT_TRUE(e1.store_only);
+                e2.store_only = false;
+                nat::apply_epilogue_tile(e1, acc.data(), ld, m0, mr, n0, nr);
+                nat::apply_epilogue_tile(e2, acc2.data(), ld, m0, mr, n0, nr);
+                EXPECT_TRUE(fast == slow);
+                size_t written = 0;
+                for (size_t i = 0; i < bytes; ++i)
+                    written += fast[i] != 0xA5 ? 1 : 0;
+                EXPECT_LE(written, static_cast<size_t>(mr) * nr * size_of(dt));
+            }
+    // Anything to apply, or another dst type, takes the general path.
+    const auto store_only = [](nat::GemmDescriptor d, mm::matmul_params p,
+                                    const void *bias, bool interleaved) {
+        std::vector<uint8_t> dst(static_cast<size_t>(d.M) * d.ldc * 4);
+        nat::native_epilogue_t e;
+        EXPECT_EQ(nat::prepare_epilogue(d, p, bias, dst.data(), interleaved, e),
+                status_t::success);
+        return e.store_only;
+    };
+    nat::GemmDescriptor d;
+    d.M = 2;
+    d.N = 32;
+    d.ldc = 32;
+    d.dst_dt = data_type_t::bf16;
+    d.wei_dt = data_type_t::bf16;
+    mm::matmul_params p;
+    p.dtypes.dst = data_type_t::bf16;
+    EXPECT_TRUE(store_only(d, p, nullptr, false));
+    const std::vector<float> bias(32, 0.0f);
+    p.dtypes.bias = data_type_t::f32;
+    EXPECT_FALSE(store_only(d, p, bias.data(), false));
+    nat::GemmDescriptor a = d;
+    a.alpha = 2.0f;
+    EXPECT_FALSE(store_only(a, p, nullptr, false));
+    a = d;
+    a.beta = 1.0f;
+    EXPECT_FALSE(store_only(a, p, nullptr, false));
+    mm::matmul_params relu = p;
+    mm::matmul_post_op po;
+    po.po_type = post_op_type_t::relu;
+    relu.postop_ = {po};
+    EXPECT_FALSE(store_only(d, relu, nullptr, false));
+    a = d;
+    a.dst_dt = data_type_t::f16;
+    mm::matmul_params f16 = p;
+    f16.dtypes.dst = data_type_t::f16;
+    EXPECT_FALSE(store_only(a, f16, nullptr, false));
+    // A gated activation, of split or interleaved halves.
+    a = d;
+    a.gated_act = gated_t::swiglu_oai_mul;
+    EXPECT_FALSE(store_only(a, p, nullptr, false));
+    a.gated_act = gated_t::silu_and_mul;
+    EXPECT_FALSE(store_only(a, p, nullptr, true));
+    // An INT8 call's dst scale on an f32 dst, with nothing else to apply.
+    nat::GemmDescriptor q = d;
+    q.wei_dt = data_type_t::s8;
+    q.src_dt = data_type_t::u8;
+    q.dst_dt = data_type_t::f32;
+    mm::matmul_params requant;
+    requant.dtypes.dst = data_type_t::f32;
+    EXPECT_TRUE(store_only(q, requant, nullptr, false));
+    const float dst_scale = 0.5f;
+    requant.quant_params.dst_scale.buff = &dst_scale;
+    requant.quant_params.dst_scale.dt = data_type_t::f32;
+    EXPECT_FALSE(store_only(q, requant, nullptr, false));
+}
+
 // Where tanh(x) rounds to x, the tanh post-op returns x: tiny and subnormal
 // inputs keep their value, signed zeros their sign.  That is within one ulp
 // of the reference's tanhf, which rounds some of them away from x.

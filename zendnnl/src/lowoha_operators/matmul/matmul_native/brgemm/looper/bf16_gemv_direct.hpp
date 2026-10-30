@@ -30,7 +30,7 @@ namespace native {
 /// Bypasses Planner + Looper for eligible shapes: single-thread uses a global
 /// or thread-local packed B when it fits L2; multi-thread uses per-thread
 /// column slices (OpenMP team size capped by \c m1_gemv_cap_threads) with
-/// optional CCX-aware slice permutation on AMD Zen when \c nt % ccx_cores == 0.
+/// an optional slice permutation by L3 domain when \c nt % ccx_cores == 0.
 /// Falls back to bf16_brgemm_execute when gates fail.
 ///
 /// Returns true if the fast path handled the operation, false to fall back.

@@ -23,8 +23,8 @@
 #include <new>
 
 #include "common/zendnnl_compat.hpp"
-#include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/avx512_math.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_operator_bridge.hpp"
 #include "memory/memory_utils.hpp"
 
 namespace zendnnl {
@@ -411,6 +411,33 @@ inline __m512 pre(const native_epilogue_t &ep, const float *acc, int m, int p,
     return v;
 }
 
+/// The rows of a store_only epilogue: whole vectors stored unmasked, the
+/// values the general path stores.
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+void store_tile(const native_epilogue_t &ep, const float *C, int ldc_acc,
+        int m0, int mr, int n0, int nr) {
+    const bool bf16 = ep.dst_dt == data_type_t::bf16;
+    const int full = nr & ~15;
+    for (int i = 0; i < mr; ++i) {
+        const float *acc = C + static_cast<size_t>(i) * ldc_acc;
+        char *row = static_cast<char *>(dst_at(ep, m0 + i, n0));
+        for (int j = 0; j < full; j += 16) {
+            const __m512 v = _mm512_loadu_ps(acc + j);
+            if (bf16)
+                _mm256_storeu_si256(reinterpret_cast<__m256i *>(
+                                            row + static_cast<size_t>(j) * 2),
+                        avx512_f32_to_bf16_rne(v));
+            else
+                _mm512_storeu_ps(row + static_cast<size_t>(j) * 4, v);
+        }
+        if (full < nr) {
+            const __mmask16 k = lane_mask(nr - full);
+            store_f32(row + static_cast<size_t>(full) * ep.dst_esz, ep.dst_dt,
+                    _mm512_maskz_loadu_ps(k, acc + full), k);
+        }
+    }
+}
+
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,avx512dq,fma")
 inline __m512 gated_value(matmul_gated_act_t gated, __m512 g, __m512 u) {
     switch (gated) {
@@ -521,7 +548,7 @@ status_t prepare_epilogue(const GemmDescriptor &desc,
             case post_op_type_t::none: continue;
             case post_op_type_t::binary_add:
             case post_op_type_t::binary_mul: {
-                const int64_t count = checked_quant_param_num_elements(po.dims);
+                const int64_t count = quant_elements(po.dims);
                 const status_t st = make_operand(po.buff, po.dtype, count,
                         po.leading_dim, desc.M, ep.n_out, false, op.operand);
                 if (st != status_t::success) {
@@ -585,10 +612,9 @@ status_t prepare_epilogue(const GemmDescriptor &desc,
     ep.has_dst_zp = false;
     if (ep.requant) {
         status_t st = make_operand(qp.dst_scale.buff, qp.dst_scale.dt,
-                checked_quant_param_num_elements(qp.dst_scale.dims), 0, desc.M,
-                ep.n_out, false, ep.dst_scale);
-        const int64_t zp_count
-                = checked_quant_param_num_elements(qp.dst_zp.dims);
+                quant_elements(qp.dst_scale.dims), 0, desc.M, ep.n_out, false,
+                ep.dst_scale);
+        const int64_t zp_count = quant_elements(qp.dst_zp.dims);
         ep.has_dst_zp = qp.dst_zp.buff != nullptr && zp_count != 0;
         if (st == status_t::success && ep.has_dst_zp)
             st = make_operand(qp.dst_zp.buff, qp.dst_zp.dt, zp_count, 0, desc.M,
@@ -602,6 +628,11 @@ status_t prepare_epilogue(const GemmDescriptor &desc,
             return st;
         }
     }
+    ep.store_only = !is_gated && ep.alpha == 1.0f && ep.beta == 0.0f
+            && ep.bias == nullptr && ep.bias_raw == nullptr && ep.ops.empty()
+            && !ep.requant
+            && (ep.dst_dt == data_type_t::f32
+                    || ep.dst_dt == data_type_t::bf16);
     return status_t::success;
 }
 
@@ -609,6 +640,10 @@ ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,avx512dq,fma")
 void apply_epilogue_tile(const native_epilogue_t &ep, float *C, int ldc_acc,
         int m0, int mr, int n0, int nr) {
     if (mr <= 0 || nr <= 0) return;
+    if (ep.store_only) {
+        store_tile(ep, C, ldc_acc, m0, mr, n0, nr);
+        return;
+    }
     const bool gated = ep.gated != matmul_gated_act_t::none;
     const int width = gated ? nr / 2 : nr;
     const __m512i gate_lanes = _mm512_load_si512(kGateLanes);

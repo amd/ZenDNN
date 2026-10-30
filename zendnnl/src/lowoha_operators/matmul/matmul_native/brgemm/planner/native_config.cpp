@@ -82,13 +82,14 @@ constexpr int64_t kBig40 = int64_t {1} << 40;
 // name, type, min, max, step, pow2; a key that not every INT8 scheme applies
 // lists the schemes that do
 constexpr native_config_key_t kKeys[] = {
-        {"nr", key_type::int32, 16, 32, 1, true},
+        {"nr", key_type::int32, 16, 128, 1, true},
         {"mr", key_type::int32, 1, 12, 1, false},
         {"mb", key_type::int32, 1, 8192, 1, false},
         {"kc", key_type::int32, 2, kBig30, 1, false},
         {"col_groups", key_type::int32, 0, 1024, 1, false},
         {"schedule", key_type::schedule, 0, 0, 1, false},
         {"traversal", key_type::traversal, 0, 0, 1, false},
+        {"unit_tiles", key_type::int32, 1, 4096, 1, false},
         {"threads_cap", key_type::int32, 1, 4096, 1, false},
         {"min_tiles_per_thread", key_type::int32, 1, 64, 1, false},
         {"row_unit", key_type::int32, 1, 4096, 1, false},
@@ -108,8 +109,7 @@ constexpr native_config_key_t kKeys[] = {
         {"int8_l2_pct", key_type::int32, 1, 1000, 1, false,
                 kNativeKeyPerChannel},
         {"int8_kc", key_type::int32, 4, kBig20, 4, false, kNativeKeyPerChannel},
-        {"direct_store", key_type::boolean, 0, 1, 1, false,
-                kNativeKeyPerChannel},
+        {"direct_store", key_type::boolean, 0, 1, 1, false},
         // The bias then follows the dequantization instead of fusing with
         // it in one FMA.
         {"bias_in_dequant", key_type::boolean, 0, 1, 1, false,
@@ -117,7 +117,6 @@ constexpr native_config_key_t kKeys[] = {
         {"copy_block", key_type::int32, 1, 4096, 1, false},
         {"bf16_copy_par_min", key_type::int64, 0, kBig40, 1, false},
         {"int8_copy_par_min", key_type::int64, 0, kBig40, 1, false},
-        {"preset", key_type::preset, 0, 0, 1, false},
         {"makespan", key_type::int32, 0, 1, 1, false},
         {"min_gain_pct", key_type::int32, 0, 100, 1, false},
         {"idle_pct", key_type::int32, 1, 100, 1, false},
@@ -127,6 +126,13 @@ constexpr native_config_key_t kKeys[] = {
         {"l1_pass_max_mb", key_type::int32, 1, 8192, 1, false,
                 kNativeKeyPerChannel},
         {"traffic_groups", key_type::int32, 0, 1, 1, false},
+        {"bf16_alias", key_type::int32, 0, 1, 1, false},
+        {"bf16_alias_mr", key_type::int32, 1, 12, 1, false},
+        {"bf16_narrow_n", key_type::int32, 0, 1, 1, false},
+        {"bf16_narrow_n_min_m", key_type::int32, 1, kBig30, 1, false},
+        {"blocks", key_type::int32, 0, 1, 1, false},
+        {"bf16_blocks_min_m", key_type::int32, 1, kBig30, 1, false},
+        {"int8_blocks_min_m", key_type::int32, 1, kBig30, 1, false},
 };
 constexpr size_t kKeyCount = sizeof(kKeys) / sizeof(kKeys[0]);
 
@@ -138,8 +144,7 @@ struct binding_t {
 
 using field_t = std::variant<binding_t<int>, binding_t<int64_t>,
         binding_t<bool>, binding_t<uint8_t>, binding_t<native_schedule_t>,
-        binding_t<native_traversal_t>, binding_t<native_kc_split_t>,
-        binding_t<native_preset_t>>;
+        binding_t<native_traversal_t>, binding_t<native_kc_split_t>>;
 
 template <typename T>
 field_t bind(
@@ -159,6 +164,7 @@ const field_t *fields() {
             bind(&c::col_groups, &p::col_groups),
             bind(&c::schedule, &p::schedule),
             bind(&c::traversal, &p::traversal),
+            bind(&c::unit_tiles, &p::unit_tiles),
             bind(&c::threads_cap, &p::threads_cap),
             bind(&c::min_tiles_per_thread, &p::min_tiles_per_thread),
             bind(&c::row_unit, &p::row_unit),
@@ -181,7 +187,6 @@ const field_t *fields() {
             bind(&c::copy_block, &p::copy_block),
             bind(&c::bf16_copy_par_min, &p::bf16_copy_par_min),
             bind(&c::int8_copy_par_min, &p::int8_copy_par_min),
-            bind(&c::preset, &p::preset),
             bind(&c::makespan, &p::makespan),
             bind(&c::min_gain_pct, &p::min_gain_pct),
             bind(&c::idle_pct, &p::idle_pct),
@@ -190,15 +195,21 @@ const field_t *fields() {
             bind(&c::l1_pct, &p::l1_pct),
             bind(&c::l1_pass_max_mb, &p::l1_pass_max_mb),
             bind(&c::traffic_groups, &p::traffic_groups),
+            bind(&c::bf16_alias, &p::bf16_alias),
+            bind(&c::bf16_alias_mr, &p::bf16_alias_mr),
+            bind(&c::bf16_narrow_n, &p::bf16_narrow_n),
+            bind(&c::bf16_narrow_n_min_m, &p::bf16_narrow_n_min_m),
+            bind(&c::blocks, &p::blocks),
+            bind(&c::bf16_blocks_min_m, &p::bf16_blocks_min_m),
+            bind(&c::int8_blocks_min_m, &p::int8_blocks_min_m),
     };
     static_assert(sizeof(k) / sizeof(k[0]) == kKeyCount, "one field per key");
     return k;
 }
 
-const char *const kScheduleNames[] = {"auto", "slice", "row_groups"};
+const char *const kScheduleNames[] = {"auto", "slice", "row_groups", "blocks"};
 const char *const kTraversalNames[] = {"m_inner", "n_inner"};
 const char *const kKcSplitNames[] = {"budget", "equal"};
-const char *const kPresetNames[] = {"legacy", "v2"};
 
 /// "32/16" (any order, any subset) as a width mask.
 bool parse_cw(std::string_view s, uint8_t &mask) {
@@ -252,8 +263,6 @@ bool parse_value(std::string_view s, T &v) {
         return parse_enum(s, kTraversalNames, v);
     } else if constexpr (std::is_same_v<T, native_kc_split_t>) {
         return parse_enum(s, kKcSplitNames, v);
-    } else if constexpr (std::is_same_v<T, native_preset_t>) {
-        return parse_enum(s, kPresetNames, v);
     } else if constexpr (std::is_same_v<T, int>) {
         int64_t x = 0;
         if (!native_text_int64(s, x) || x < std::numeric_limits<int>::min()
@@ -285,8 +294,6 @@ std::string format_value(const T &v) {
         return enum_name(v, kTraversalNames);
     } else if constexpr (std::is_same_v<T, native_kc_split_t>) {
         return enum_name(v, kKcSplitNames);
-    } else if constexpr (std::is_same_v<T, native_preset_t>) {
-        return enum_name(v, kPresetNames);
     } else {
         return std::to_string(v);
     }
@@ -322,10 +329,6 @@ bool check_value(const native_config_key_t &key, const T &v, std::string &why) {
     } else if constexpr (std::is_same_v<T, native_kc_split_t>) {
         if (enum_ok(v, kKcSplitNames)) return true;
         why = "bad kc_split";
-        return false;
-    } else if constexpr (std::is_same_v<T, native_preset_t>) {
-        if (enum_ok(v, kPresetNames)) return true;
-        why = "bad preset";
         return false;
     } else {
         const int64_t x = v;
@@ -469,6 +472,10 @@ bool check_native_config(const native_config_t &cfg, std::string &why) {
         if (*cfg.schedule == native_schedule_t::row_groups
                 && *cfg.col_groups == 0) {
             why = "schedule=row_groups with col_groups=0";
+            return false;
+        }
+        if (*cfg.schedule == native_schedule_t::blocks) {
+            why = "schedule=blocks with col_groups";
             return false;
         }
     }

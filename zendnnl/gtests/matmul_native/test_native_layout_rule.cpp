@@ -28,9 +28,15 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <random>
 #include <string>
 #include <vector>
 #include <type_traits>
+
+#ifndef _WIN32
+#include <unistd.h>
+#include <sys/mman.h>
+#endif
 
 #include "gtest_utils.hpp"
 #include "lowoha_operators/matmul/aocl_unreorder_cache.hpp"
@@ -43,7 +49,7 @@
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_brgemm_looper.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
-#include "lowoha_operators/matmul/matmul_native/common/native_aocl_unreorder.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_operator_bridge.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_pack.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_weight_cache.hpp"
 #include "lowoha_operators/matmul/matmul_native/native_layout_policy.hpp"
@@ -115,6 +121,8 @@ void expect_native(const native::native_layout_query_t &q) {
     }
     EXPECT_TRUE(d.native) << d.reason << " (K=" << q.K << " N=" << q.N
                           << " ldb=" << q.ldb << ")";
+    EXPECT_TRUE(native::native_layout_fits(q.wei_dt, q.K, q.N, d.pack_nr))
+            << "the rule admitted a shape the layout cannot hold";
     EXPECT_EQ(d.pack_nr, kNr);
     EXPECT_STREQ(d.reason, "");
 }
@@ -318,6 +326,159 @@ TEST(NativeLayoutRulePack, Int8BytesEqualCustomKernelPackAt32) {
                             status_t::success);
                     EXPECT_EQ(std::memcmp(got.data(), want.data(), bytes), 0);
                 }
+}
+
+/// The layout of a K x N weight of wei, element by element as
+/// native_weight_view_t defines it: the reference of the pack.
+std::vector<uint8_t> reference_layout(data_type_t wei, const void *w, int K,
+        int N, int ldb, bool transB, bool interleave) {
+    const bool s8 = wei == data_type_t::s8;
+    const int per_group = s8 ? 4 : 2;
+    const size_t es = size_of(wei);
+    const int groups = native::native_k_groups(wei, K);
+    const size_t block = native::native_block_bytes(wei, K, kNr);
+    std::vector<uint8_t> out(block * static_cast<size_t>(N / kNr), 0);
+    const auto *src = static_cast<const uint8_t *>(w);
+    for (int p = 0; p < N; ++p) {
+        const int c = interleave ? ((p & 1) ? N / 2 + p / 2 : p / 2) : p;
+        uint8_t *blk = out.data() + static_cast<size_t>(p / kNr) * block;
+        int32_t sum = 0;
+        for (int k = 0; k < K; ++k) {
+            const size_t i = transB ? static_cast<size_t>(c) * ldb + k
+                                    : static_cast<size_t>(k) * ldb + c;
+            const size_t at
+                    = (static_cast<size_t>(k / per_group) * kNr + p % kNr)
+                            * per_group * es
+                    + (k % per_group) * es;
+            std::memcpy(blk + at, src + i * es, es);
+            if (s8) sum += static_cast<const int8_t *>(w)[i];
+        }
+        if (s8)
+            std::memcpy(blk + static_cast<size_t>(groups) * kNr * 4
+                            + static_cast<size_t>(p % kNr) * 4,
+                    &sum, sizeof(sum));
+    }
+    return out;
+}
+
+/// Random bytes for a weight buffer of the given size.
+std::vector<uint8_t> random_bytes(size_t n, uint32_t seed) {
+    std::mt19937 gen(seed);
+    std::vector<uint8_t> v(n);
+    for (auto &b : v)
+        b = static_cast<uint8_t>(gen());
+    return v;
+}
+
+// The pack writes the layout byte for byte (s8 column sums included) at
+// every K tail of the vector groups, N, padded ldb, transB and interleave,
+// on one and several threads, and nothing past it; the K from 1024 on and N
+// 544 cover the tiles of a bf16 [K, N] weight of many rows, the last of them
+// partial in K pairs and in blocks.
+TEST(NativeLayoutRulePack, PackEqualsTheLayoutAtEveryTail) {
+    if (!native::native_base_isa()) GTEST_SKIP() << "needs AVX-512 F / BW / VL";
+    uint32_t seed = 1;
+    size_t cases = 0, bad = 0;
+    for (data_type_t wei : {data_type_t::bf16, data_type_t::s8})
+        for (int K : {1, 2, 3, 4, 5, 7, 8, 15, 16, 17, 31, 32, 33, 63, 64, 65,
+                     127, 128, 129, 255, 256, 257, 1001, 1024, 1025, 1050})
+            for (int N : {32, 64, 96, 160, 544})
+                for (int pad : {0, 1, 37})
+                    for (bool transB : {false, true})
+                        for (bool interleave : {false, true})
+                            for (int threads : {1, 3}) {
+                                const int ldb = (transB ? K : N) + pad;
+                                const size_t es = size_of(wei);
+                                const std::vector<uint8_t> w = random_bytes(
+                                        static_cast<size_t>(transB ? N : K)
+                                                * ldb * es,
+                                        ++seed);
+                                const std::vector<uint8_t> want
+                                        = reference_layout(wei, w.data(), K, N,
+                                                ldb, transB, interleave);
+                                std::vector<uint8_t> got(
+                                        native::native_packed_bytes(
+                                                wei, K, N, kNr)
+                                                + 64,
+                                        0xA5);
+                                ++cases;
+                                const bool ok = native::native_pack_weight(wei,
+                                                        w.data(), K, N, ldb,
+                                                        kNr, transB, interleave,
+                                                        got.data(), threads)
+                                                == status_t::success
+                                        && std::memcmp(got.data(), want.data(),
+                                                   want.size())
+                                                == 0
+                                        && std::all_of(
+                                                got.begin() + want.size(),
+                                                got.end(), [](uint8_t b) {
+                                    return b == 0xA5;
+                                });
+                                if (!ok && bad++ < 10)
+                                    ADD_FAILURE()
+                                            << (wei == data_type_t::s8 ? "s8"
+                                                                       : "bf16")
+                                            << " K=" << K << " N=" << N
+                                            << " ldb=" << ldb
+                                            << " transB=" << transB
+                                            << " interleave=" << interleave
+                                            << " threads=" << threads;
+                            }
+    EXPECT_EQ(bad, 0u) << "of " << cases << " packs";
+}
+
+// The pack reads no byte past the weight: a weight that ends where
+// unreadable memory starts packs as from an ordinary buffer, with a tight
+// and a padded ldb (whose last row ends before a whole row stride).
+TEST(NativeLayoutRulePack, PackReadsNoBytePastTheWeight) {
+#ifdef _WIN32
+    GTEST_SKIP() << "needs mprotect";
+#else
+    if (!native::native_base_isa()) GTEST_SKIP() << "needs AVX-512 F / BW / VL";
+    const size_t page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+    uint32_t seed = 900;
+    for (data_type_t wei : {data_type_t::bf16, data_type_t::s8})
+        for (int K : {1, 3, 33, 63, 129, 1025})
+            for (bool transB : {false, true})
+                for (bool interleave : {false, true})
+                    for (int pad : {0, 5}) {
+                        SCOPED_TRACE(
+                                std::string(
+                                        wei == data_type_t::s8 ? "s8" : "bf16")
+                                + " K=" + std::to_string(K)
+                                + " transB=" + std::to_string(transB)
+                                + " interleave=" + std::to_string(interleave)
+                                + " pad=" + std::to_string(pad));
+                        const int N = 64;
+                        const int ldb = (transB ? K : N) + pad;
+                        const size_t bytes = native::native_raw_weight_bytes(
+                                wei, K, N, ldb, transB);
+                        const size_t mapped = (bytes + page - 1) / page * page;
+                        void *m = mmap(nullptr, mapped + page,
+                                PROT_READ | PROT_WRITE,
+                                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                        ASSERT_NE(m, MAP_FAILED);
+                        auto *base = static_cast<uint8_t *>(m);
+                        ASSERT_EQ(mprotect(base + mapped, page, PROT_NONE), 0);
+                        uint8_t *w = base + mapped - bytes;
+                        const std::vector<uint8_t> src
+                                = random_bytes(bytes, ++seed);
+                        std::memcpy(w, src.data(), bytes);
+                        const std::vector<uint8_t> want = reference_layout(
+                                wei, w, K, N, ldb, transB, interleave);
+                        std::vector<uint8_t> got(
+                                native::native_packed_bytes(wei, K, N, kNr), 0);
+                        EXPECT_EQ(
+                                native::native_pack_weight(wei, w, K, N, ldb,
+                                        kNr, transB, interleave, got.data(), 2),
+                                status_t::success);
+                        EXPECT_EQ(std::memcmp(
+                                          got.data(), want.data(), want.size()),
+                                0);
+                        munmap(m, mapped + page);
+                    }
+#endif
 }
 
 // ── ALGO 11 route ───────────────────────────────────────────────────

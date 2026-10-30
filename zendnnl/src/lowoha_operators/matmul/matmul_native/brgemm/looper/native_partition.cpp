@@ -19,19 +19,12 @@
 #include <memory>
 
 #include "common/zendnnl_compat.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_utils.hpp"
 
 namespace zendnnl {
 namespace lowoha {
 namespace matmul {
 namespace native {
-
-namespace {
-
-struct aligned_free_t {
-    void operator()(void *p) const { zendnnl_aligned_free(p); }
-};
-
-} // namespace
 
 native_partition_t::native_partition_t(
         const native_plan_t &plan, int M, int c0, int c1)
@@ -44,9 +37,12 @@ native_partition_t::native_partition_t(
     , col_groups_(plan.col_groups)
     , threads_(plan.threads)
     , row_unit_(plan.row_unit)
+    , unit_tiles_(plan.unit_tiles)
+    , domain_threads_(std::max(1, plan.domain_threads))
     , traversal_(plan.traversal) {}
 
 native_partition_kind_t native_partition_t::kind(int workers) const noexcept {
+    if (unit_tiles_ > 0) return native_partition_kind_t::blocks;
     return col_groups_ > 0 && workers == threads_ && workers % col_groups_ == 0
                     && (c1_ - c0_) % col_groups_ == 0
             ? native_partition_kind_t::row_groups
@@ -54,7 +50,31 @@ native_partition_kind_t native_partition_t::kind(int workers) const noexcept {
 }
 
 int64_t native_partition_t::units() const noexcept {
+    if (unit_tiles_ > 0)
+        return static_cast<int64_t>(m_blocks_)
+                * ceil_div(c1_ - c0_, unit_tiles_);
     return static_cast<int64_t>(m_blocks_) * (c1_ - c0_);
+}
+
+void native_partition_t::deal(
+        int workers, native_unit_deal_t &deal) const noexcept {
+    // Past kNativeMaxUnitCursors domains, wider ones.
+    deal.domain_threads = std::max(
+            domain_threads_, ceil_div(workers, kNativeMaxUnitCursors));
+    deal.count = ceil_div(workers, deal.domain_threads);
+    const int groups = ceil_div(c1_ - c0_, unit_tiles_);
+    // Each domain's row blocks in proportion to its workers.
+    for (int d = 0; d < deal.count; ++d) {
+        const int64_t w0 = static_cast<int64_t>(d) * deal.domain_threads;
+        const int64_t w1 = std::min<int64_t>(workers, w0 + deal.domain_threads);
+        const int r0 = static_cast<int>(m_blocks_ * w0 / workers);
+        const int r1 = static_cast<int>(m_blocks_ * w1 / workers);
+        native_unit_cursor_t &c = deal.cursor[d];
+        c.next.store(0, std::memory_order_relaxed);
+        c.r0 = r0;
+        c.rows = r1 - r0;
+        c.end = static_cast<int64_t>(c.rows) * groups;
+    }
 }
 
 void native_partition_t::row_range(
@@ -68,7 +88,7 @@ void native_partition_t::row_range(
 }
 
 float *native_thread_scratch(size_t floats) {
-    static thread_local std::unique_ptr<float, aligned_free_t> buf;
+    static thread_local std::unique_ptr<float, native_aligned_free_t> buf;
     static thread_local size_t cap = 0;
     if (cap < floats) {
         buf.reset(static_cast<float *>(zendnnl_aligned_alloc(

@@ -32,9 +32,13 @@ namespace native {
 /// tuning-file matching and rule features, the CPU identity only tuning-file
 /// matching.  A count that could not be detected is 0; an identity field,
 /// empty or -1.  A cache size CPUID does not report holds detect_uarch()'s
-/// default, which tuning-file matching treats as not reported.
+/// default, which tuning-file matching treats as not reported.  base_isa
+/// feeds only the ISA checks of the layout rule and of
+/// native_brgemm_execute.
 struct native_hw_t {
     UarchParams uarch; ///< detect_uarch()
+    /// AVX-512 F, BW, VL and DQ and FMA (native_base_isa).
+    bool base_isa = false;
     std::string vendor; ///< CPUID vendor string
     int family = -1; ///< CPUID family, extended family included
     int model = -1; ///< CPUID model, extended model included
@@ -45,8 +49,8 @@ struct native_hw_t {
     int l3_domain_threads = 0; ///< logical CPUs sharing the L3 of CPU 0
 };
 
-/// Detected once per process, on first use: by the first native BRGEMM plan,
-/// or earlier by a tuning file.
+/// Detected once per process, on first use: by the layout rule, a native
+/// BRGEMM plan or a tuning file.
 const native_hw_t &native_hw();
 
 /// What the native BRGEMM plan reads on hw: hw.uarch with l3_domain_cores =

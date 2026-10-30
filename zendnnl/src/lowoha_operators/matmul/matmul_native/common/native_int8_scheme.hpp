@@ -47,6 +47,18 @@ inline constexpr const char *native_int8_scheme_name(native_int8_scheme_t s) {
 /// operation, in the reference algorithm's order.
 enum class native_int8_order_t : uint8_t { fused, reference };
 
+/// What an INT8 call does where its scheme and order give a choice.
+struct native_int8_decision_t {
+    native_int8_scheme_t scheme = native_int8_scheme_t::per_channel;
+    int groups = 0; ///< G of a per-group call, 0 otherwise
+    native_int8_order_t order = native_int8_order_t::fused;
+    /// The bias may move into the dequantization (native_int8_call_t::bias).
+    bool bias_in_dequant = false;
+    /// The kernel may store the destination itself when the epilogue has
+    /// nothing else to do.
+    bool direct_store = false;
+};
+
 } // namespace native
 } // namespace matmul
 } // namespace lowoha

@@ -93,6 +93,19 @@ cpuid_topology_t cpuid_topology() {
     return t;
 }
 
+/// AVX-512 F (detect_uarch()'s, which includes the OS support check) with
+/// BW, VL and DQ (leaf 7 EBX) and FMA (leaf 1 ECX).
+bool cpuid_base_isa(const UarchParams &uarch) {
+    unsigned eax = 0, ebx = 0, ecx = 0, edx = 0;
+    zendnnl_cpuid(1, eax, ebx, ecx, edx);
+    const bool fma = (ecx >> 12) & 1u;
+    zendnnl_cpuid_count(7, 0, eax, ebx, ecx, edx);
+    const bool dq = (ebx >> 17) & 1u;
+    const bool bw = (ebx >> 30) & 1u;
+    const bool vl = (ebx >> 31) & 1u;
+    return uarch.avx512f && fma && dq && bw && vl;
+}
+
 /// Leaf 0's vendor string and leaf 1's family, model and stepping, with the
 /// extended fields folded in as the processor manuals define.  A vendor
 /// string with a byte that is not printable ASCII is dropped: logs print
@@ -219,6 +232,7 @@ int sysfs_l3_threads() {
 native_hw_t detect_hw() {
     native_hw_t hw;
     hw.uarch = detect_uarch();
+    hw.base_isa = cpuid_base_isa(hw.uarch);
     cpuid_identity(hw);
 #if defined(_WIN32)
     const os_topology_t os = os_topology();

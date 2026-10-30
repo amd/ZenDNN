@@ -28,8 +28,7 @@
 /// waste because the xmm footprint is 4× smaller than the 512-bit
 /// VDPBF16PS data path BKC uses.
 ///
-/// Throughput expectation on Zen 5 (1-thread, const weights,
-/// L2-resident B):
+/// Bounds (1 thread, const weights, L2-resident B):
 ///   * N=4: FMA-throughput limited → ~1 FP32/cycle per output lane.
 ///   * N=3: same as N=4 (one xmm FMA does 4 dot-products regardless).
 ///   * N=1, 2: same upper bound; lower effective lane utilisation.

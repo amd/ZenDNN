@@ -16,6 +16,8 @@
 
 #include "lowoha_operators/matmul/matmul_native/common/native_weight_view.hpp"
 
+#include <cassert>
+
 #include "common/zendnnl_global.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_pack.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_weight_cache.hpp"
@@ -40,14 +42,11 @@ status_t acquire_native_weight(const native_weight_ref_t &ref,
         data_type_t wei_dt, int K, int N, int ldb, bool transB,
         native_weight_view_t &view, native_weight_lease_t &lease,
         int num_threads) {
-    const bool s8 = wei_dt == data_type_t::s8;
     const int pack_nr = ref.pack_nr;
-    if ((!s8 && wei_dt != data_type_t::bf16) || ref.weight == nullptr || K < 1
-            || (pack_nr != kNativeMinPackNr && pack_nr != kNativeMaxPackNr)
-            || N < pack_nr || N % pack_nr != 0) {
-        log_error("native weight: no native layout for wei=",
-                zendnnl::common::dtype_info(wei_dt), " K=", K, " N=", N,
-                " pack_nr=", pack_nr, " weight=", ref.weight);
+    assert(native_layout_fits(wei_dt, K, N, pack_nr));
+    if (ref.weight == nullptr) {
+        log_error("native weight: no weight buffer for wei=",
+                zendnnl::common::dtype_info(wei_dt), " K=", K, " N=", N);
         return status_t::failure;
     }
 
@@ -77,7 +76,7 @@ status_t acquire_native_weight(const native_weight_ref_t &ref,
     raw.aocl_blocked = ref.aocl_blocked;
     native_layout_t layout;
     const status_t st = get_native_layout(raw, ref.weight_cache_mode,
-            ref.capacity_bytes, num_threads, layout);
+            ref.capacity_bytes, num_threads, layout, &ref.image);
     if (st != status_t::success) return st;
     lease.own(layout.owned);
     view.base = static_cast<const uint8_t *>(layout.data);

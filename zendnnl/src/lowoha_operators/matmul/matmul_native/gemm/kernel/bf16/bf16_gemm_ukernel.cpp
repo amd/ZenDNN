@@ -26,7 +26,7 @@
 //   - select_bf16_ukernel      Dispatch table: MR×NR → function pointer.
 //
 // ═══════════════════════════════════════════════════════════════════════════
-// ZMM Register Pressure Analysis (AMD Zen 5: 32 ZMM registers)
+// ZMM Register Pressure Analysis (AVX-512: 32 ZMM registers)
 // ═══════════════════════════════════════════════════════════════════════════
 //
 // Per-kernel register budget in the K-loop hot path:

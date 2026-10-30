@@ -14,11 +14,16 @@
  * limitations under the License.
  ******************************************************************************/
 
-#include "lowoha_operators/matmul/matmul_native/common/native_aocl_unreorder.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_operator_bridge.hpp"
+
+#include <utility>
 
 #include "common/zendnnl_compat.hpp"
 #include "common/zendnnl_global.hpp"
+#include "lowoha_operators/common/omp_thread_control.hpp"
+#include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
+#include "lowoha_operators/matmul/quantization/reorder_quantization.hpp"
 #include "lowoha_operators/reorder/lowoha_reorder.hpp"
 #include "lowoha_operators/reorder/prepack/lowoha_prepack.hpp"
 
@@ -26,6 +31,8 @@ namespace zendnnl {
 namespace lowoha {
 namespace matmul {
 namespace native {
+
+using zendnnl::common::size_of;
 
 namespace {
 
@@ -43,6 +50,10 @@ reorder::reorder_params_t aocl_prepack_params(
 }
 
 } // namespace
+
+bool aocl_prepacked_weight(const matmul_params &params) {
+    return is_aocl_prepacked_weight(params);
+}
 
 bool aocl_prepack_unreorderable(const matmul_params &params) {
 #if !ZENDNNL_DEPENDS_AOCLDLP
@@ -106,6 +117,104 @@ size_t aocl_prepack_bytes(int K, int N, int ldb, bool transB, bool int8_u8s8) {
         next = (next + 1) % kEntries;
     }
     return bytes;
+}
+
+bool custom_kernel_packed_in_place(const void *weight) {
+    return custom_kernel::weight_packed_in_place(weight);
+}
+
+int64_t quant_elements(const std::vector<int64_t> &dims) {
+    return checked_quant_param_num_elements(dims);
+}
+
+bool quant_dims_per_tensor(const std::vector<int64_t> &dims) {
+    return quant_param_dims_are_per_tensor(dims);
+}
+
+bool quant_per_channel(const quant_param_t &q, int N) {
+    return quant_param_is_per_channel(q, N);
+}
+
+bool quant_per_token(const quant_param_t &q, int M) {
+    return quant_param_is_per_token(q, M);
+}
+
+namespace {
+
+/// Hands the buffers back to the quantizer's own type, whose destructor frees
+/// them as the quantizer allocated them.
+void release_quant_buffers(void *rows, void *scales, void *zero_points) {
+    reorder_quant_buffers_t owner;
+    owner.src_buf = static_cast<uint8_t *>(rows);
+    owner.scale_buf = static_cast<uint8_t *>(scales);
+    owner.zp_buf = static_cast<uint8_t *>(zero_points);
+}
+
+} // namespace
+
+native_quant_buffers_t::~native_quant_buffers_t() {
+    release_quant_buffers(rows, scales, zero_points);
+}
+
+native_quant_buffers_t::native_quant_buffers_t(
+        native_quant_buffers_t &&o) noexcept
+    : rows(std::exchange(o.rows, nullptr))
+    , scales(std::exchange(o.scales, nullptr))
+    , zero_points(std::exchange(o.zero_points, nullptr)) {}
+
+native_quant_buffers_t &native_quant_buffers_t::operator=(
+        native_quant_buffers_t &&o) noexcept {
+    if (this != &o) {
+        release_quant_buffers(rows, scales, zero_points);
+        rows = std::exchange(o.rows, nullptr);
+        scales = std::exchange(o.scales, nullptr);
+        zero_points = std::exchange(o.zero_points, nullptr);
+    }
+    return *this;
+}
+
+status_t reorder_quantize_source(const matmul_params &params, const void *rows,
+        int rows_ld, int M, int K, int num_threads,
+        native_quant_buffers_t &buffers, const void *&quantized,
+        int &quantized_lda, const matmul_params *&q) {
+    // The quantization kernels size their thread teams from the nthreads ICV.
+    const thread_guard team(num_threads);
+    // What the quantizer reads, and rewrites for the quantized source.  One
+    // per thread: a call assigns into the storage of the last one instead of
+    // allocating copies of the dims.  Every field the quantizer reads is
+    // assigned whole: between calls the object keeps the last call's
+    // src_scale.buff / src_zp.buff, freed with that call's buffers, and the
+    // quantizer writes into a non-null buff as the caller's.
+    thread_local matmul_params quantizer;
+    quantizer.dtypes = params.dtypes;
+    quantizer.quant_params = params.quant_params;
+    quantizer.dynamic_quant = params.dynamic_quant;
+    quantizer.packing = params.packing;
+    quantized = rows;
+    quantized_lda = rows_ld;
+    size_t elem_size = size_of(params.dtypes.src);
+    matmul_batch_params_t batch;
+    reorder_quant_buffers_t held;
+    const status_t st = reorder_quantization_wrapper(quantized, rows_ld,
+            quantized_lda, elem_size, quantizer, batch, false, M, K,
+            num_threads, held);
+    // They live as long as the call.
+    native_quant_buffers_t made;
+    made.rows = std::exchange(held.src_buf, nullptr);
+    made.scales = std::exchange(held.scale_buf, nullptr);
+    made.zero_points = std::exchange(held.zp_buf, nullptr);
+    held.src_cap = held.scale_cap = held.zp_cap = 0;
+    buffers = std::move(made);
+    q = &quantizer;
+    return st;
+}
+
+std::string post_op_names_text(const matmul_params &params) {
+    return post_op_names_to_string(params);
+}
+
+std::string post_op_dtypes_text(const matmul_params &params) {
+    return post_op_data_types_to_string(params);
 }
 
 } // namespace native

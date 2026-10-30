@@ -481,13 +481,23 @@ nat::native_plan_source_t top_source(const nat::native_plan_t &plan) {
     return nat::native_plan_source_t::heuristic;
 }
 
+std::vector<std::string> native_rule_switches() {
+    std::vector<std::string> out;
+    size_t count = 0;
+    const nat::native_config_key_t *keys = nat::native_config_keys(count);
+    for (size_t i = 0; i < count; ++i)
+        if (keys[i].type == nat::native_key_type_t::int32 && keys[i].min == 0
+                && keys[i].max == 1)
+            out.push_back(keys[i].name);
+    return out;
+}
+
 std::vector<std::string> native_enum_values(nat::native_key_type_t type) {
     switch (type) {
         case nat::native_key_type_t::schedule:
-            return {"auto", "slice", "row_groups"};
+            return {"auto", "slice", "row_groups", "blocks"};
         case nat::native_key_type_t::traversal: return {"m_inner", "n_inner"};
         case nat::native_key_type_t::kc_split: return {"budget", "equal"};
-        case nat::native_key_type_t::preset: return {"legacy", "v2"};
         default: return {};
     }
 }
