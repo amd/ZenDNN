@@ -10,7 +10,7 @@ description: >-
 Run gtests from the repository documentation, using only commands it documents.
 Paths are relative to the ZenDNN checkout.
 
-1. Follow `zendnnl/gtests/Readme.md`.
+1. Follow `gtests/Readme.md`.
 2. A gtest build is described in `docs/zendnnl_build.md`. Use that when the
    suite has not been built. Confirm with the user before replacing an
    existing build directory.

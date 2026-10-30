@@ -11,7 +11,7 @@ This README is the maintainer's first stop: it answers "what's tested, how the f
 | Question | Answer |
 |---|---|
 | What gets tested? | The reorder surface reachable from the reorder helper shims in `reorder_test_helpers.{hpp,cpp}`: the legacy regular reorder + matmul path (`reorder_kernel_test` + the shared `matmul_kernel_test`) and the LOWOHA reorder path (`lowoha_reorder_kernel_test`) covering static quant/dequant, dynamic quant, strided sources, and floating-point type conversion (FP32/BF16/F16, incl. FP16-typed scale buffers). |
-| What isn't tested here? | Operator-agnostic infrastructure and other operators (`test_matmul.cpp`, `test_batchmatmul.cpp`, etc.) live at the parent `zendnnl/gtests/` level. Shared RNG / tensor factory stay in `gtest_utils.{hpp,cpp}`; the reorder param struct, kernel shims, and comparators were lifted into `reorder_test_helpers.{hpp,cpp}` (see §4). |
+| What isn't tested here? | Operator-agnostic infrastructure and other operators (`test_matmul.cpp`, `test_batchmatmul.cpp`, etc.) live at the parent `gtests/` level. Shared RNG / tensor factory stay in `gtest_utils.{hpp,cpp}`; the reorder param struct, kernel shims, and comparators were lifted into `reorder_test_helpers.{hpp,cpp}` (see §4). |
 | Single binary? | Yes. All files in this folder compile into the same `gtests` executable produced by the parent CMakeLists (via `add_subdirectory(reorder)` + `target_sources`). Filter via `--gtest_filter=Reorder/TestReorder.*`. |
 | One fixture or many? | **One.** Every reorder `TEST_P` shares the single `TestReorder` fixture (defined in `reorder_test_common.hpp`) and the `Reorder` instantiation prefix. Splitting `TEST_P` for one fixture across translation units is fully supported by GoogleTest as long as exactly one `INSTANTIATE_TEST_SUITE_P` exists (it lives in `test_reorder_regular.cpp`). This keeps every existing `--gtest_filter=Reorder/TestReorder.*` invocation working unchanged. |
 
@@ -20,7 +20,7 @@ This README is the maintainer's first stop: it answers "what's tested, how the f
 ## 2. File layout
 
 ```
-zendnnl/gtests/reorder/
+gtests/reorder/
   CMakeLists.txt                  target_sources(...) into the parent gtests target
   README.md                       this file
   reorder_test_common.hpp         shared TestReorder fixture (SetUp/TearDown,

@@ -14,7 +14,7 @@ comprehensive test coverage implementation.
 PROMPT 1: BUILD COMPLETE ZENDNNL TEST INFRASTRUCTURE FROM SCRATCH
 ================================================================================
 
-Create a comprehensive parameterized Google Test infrastructure for ZenDNNL library at <path>/ZenDNN/zendnnl/gtests/ai_gtests with the following components:
+Create a comprehensive parameterized Google Test infrastructure for ZenDNNL library at <path>/ZenDNN/gtests/ai_gtests with the following components:
 
 ** Functionality ***
 1. Tests should focus on accuracy testing, boundary/edge case testing and invalid case testing.

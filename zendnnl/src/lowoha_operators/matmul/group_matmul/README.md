@@ -79,5 +79,5 @@ o-block-outer decisions; and `prepack/prepack.cpp`, which includes
 7. `fused_moe/` may also include `selection/`.
 8. The entry point, `group_matmul_direct.cpp`, may include everything.
 
-Tests in `zendnnl/gtests/group_matmul/` mirror this tree and may include
+Tests in `gtests/group_matmul/` mirror this tree and may include
 anything.

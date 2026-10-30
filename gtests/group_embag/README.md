@@ -20,7 +20,7 @@ The single-table fixtures `TestEmbedding` (`gtests/test_embedding.cpp`) and `Tes
 ## 2. File layout
 
 ```text
-zendnnl/gtests/group_embag/
+gtests/group_embag/
   CMakeLists.txt                  target_sources(...) into the parent gtests target
   README.md                       this file
   group_embag_test_helpers.hpp    declarations: GroupEmbagType, group_embag_test extern,

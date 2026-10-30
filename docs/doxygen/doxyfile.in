@@ -1003,7 +1003,7 @@ INPUT                  = @PROJECT_SOURCE_DIR@/README.md \
                          @PROJECT_SOURCE_DIR@/examples/examples.dox \
                          @PROJECT_SOURCE_DIR@/docs/doxygen \
                          @PROJECT_SOURCE_DIR@/zendnnl/src \
-                         @PROJECT_SOURCE_DIR@/zendnnl/gtests
+                         @PROJECT_SOURCE_DIR@/gtests
 
 # This tag can be used to specify the character encoding of the source files
 # that Doxygen parses. Internally Doxygen uses the UTF-8 encoding. Doxygen uses

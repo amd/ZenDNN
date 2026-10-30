@@ -100,7 +100,7 @@ if(ZENDNNL_BUILD_GTEST)
   add_subdirectory(matmul_native)
 
   target_include_directories(gtests
-    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src"
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../zendnnl/src"
     PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
     PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/group_matmul"
     PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/group_embag"

@@ -121,7 +121,11 @@ add_subdirectory(src)
 add_subdirectory(tensor_helper)
 
 # build gtests
-add_subdirectory(gtests)
+# TODO: Build gtests as an ExternalProject instead of add_subdirectory, so the
+# test tree is not configured as part of the zendnnl project.
+add_subdirectory(
+  "${ZENDNNL_SOURCE_DIR}/gtests"
+  "${CMAKE_CURRENT_BINARY_DIR}/gtests")
 
 # create version file
 set(ZENDNNL_VERSION_FILE "${CMAKE_BINARY_DIR}/zendnnl_version.hpp")

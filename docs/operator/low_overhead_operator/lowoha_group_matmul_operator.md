@@ -215,7 +215,7 @@ User-facing knobs that affect `group_matmul_direct` behaviour.  All are read onc
 > writes. Use weight-cache mode `1`, remove the phase override, or select global
 > ALGO `0`.
 
-Additional tuning knobs (`ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_NR`, `_SUBTILE_PER_EXPERT`, `_N_TILE`, `_AOCL_STABLE_NTILE`, etc.) are documented in `group_matmul_parallel_common.hpp` and the [group_matmul gtests README](../../../zendnnl/gtests/group_matmul/README.md) (§5).
+Additional tuning knobs (`ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_NR`, `_SUBTILE_PER_EXPERT`, `_N_TILE`, `_AOCL_STABLE_NTILE`, etc.) are documented in `group_matmul_parallel_common.hpp` and the [group_matmul gtests README](../../../gtests/group_matmul/README.md) (§5).
 
 ## Custom microkernel (ALGO 3)
 
@@ -262,7 +262,7 @@ ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=1
   && both sub-toggles = 1                  → all three families on (subject to per-family ISA gates)
 ```
 
-See `custom_kernel/dispatch.hpp` for the full `resolve_variant()` truth table and `prepare_for_call()` gate cascade.  Direct-surface and e2e test coverage lives in [group_matmul gtests README](../../../zendnnl/gtests/group_matmul/README.md) (§4.6).
+See `custom_kernel/dispatch.hpp` for the full `resolve_variant()` truth table and `prepare_for_call()` gate cascade.  Direct-surface and e2e test coverage lives in [group_matmul gtests README](../../../gtests/group_matmul/README.md) (§4.6).
 
 ## MoE post-op (parallel mode only)
 

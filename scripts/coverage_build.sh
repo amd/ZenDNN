@@ -229,7 +229,7 @@ function run_and_generate_coverage_report() {
   EXCLUDE_PATTERNS=(
     '/usr/*'              # System headers
     '*/gtest/*'           # Google Test framework
-    '*/gtests/*'          # Test files (zendnnl/gtests and ai_gtests)
+    '*/gtests/*'          # Test files (gtests and ai_gtests)
     '*/build/*'           # Build artifacts
     '*/reorder*'
     '*/matmul_native*'

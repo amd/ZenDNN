@@ -45,12 +45,12 @@ ZenDNN
 |- cmake        : contains CMake modules.
 |- dependencies : to download all dependencies.
 |- examples     : contains tutorial examples illustrating how to use ZenDNN APIs.
+|- gtests       : contains GoogleTest files.
 |- scripts      : contains supporting shell scripts.
 |- docs         : contains documentation files.
 |   |- doxygen  : doxygen config file and additional pages.
 |
 |- zendnnl      : contains library code.
-|   |- gtests   : GoogleTest files.
 |   |- src      : contains library code.
 |   |   |- common : high level utilities needed by the library.
 |   |   |- memory : implements the tensor_t class and tensor storage/quantization/options.
@@ -124,7 +124,7 @@ GTests are found in `install/gtests`, and can be executed as follows:
 ./install/gtests/gtests
 ```
 
-For detailed usage instructions, refer to the [zendnn gtests documentation](zendnnl/gtests/Readme.md).
+For detailed usage instructions, refer to the [zendnn gtests documentation](gtests/Readme.md).
 
 ## 3.3. BenchDNN
 

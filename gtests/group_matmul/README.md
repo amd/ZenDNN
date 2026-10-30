@@ -19,7 +19,7 @@ consume, and which bug class does each test lock down".
 | Question | Answer |
 |---|---|
 | What gets tested? | `group_matmul_direct(...)` plus the routed-MoE W8/W4 APIs: scheduler ALGOs `{1,2,3,5,6}`, phase-aware W8A8 interception, native routed execution, custom microkernels, fused-MoE, gated activations, weighted reduction, prepack, and quantization. |
-| What isn't tested here? | Operator-agnostic infrastructure tests (`test_matmul.cpp`, `test_batchmatmul.cpp`, etc.) live at the parent `zendnnl/gtests/` level. The AI-gtests framework (`ai_gtests/`) is its own subsystem. |
+| What isn't tested here? | Operator-agnostic infrastructure tests (`test_matmul.cpp`, `test_batchmatmul.cpp`, etc.) live at the parent `gtests/` level. The AI-gtests framework (`ai_gtests/`) is its own subsystem. |
 | Single binary? | Yes. All test files in this folder compile into the same `gtests` executable produced by the parent CMakeLists. Filter via `--gtest_filter=*Prepack*`, `--gtest_filter=*FusedMoE*`, etc. |
 | Helpers reuse policy? | One sibling header (`moe_test_utils.hpp`) for cross-file helpers; one helper TU (`group_matmul_test_helpers.{hpp,cpp}`) for the dispatch shim + quant fixture. File-local helpers stay in anonymous namespaces inside their owning `.cpp`. |
 
@@ -28,7 +28,7 @@ consume, and which bug class does each test lock down".
 ## 2. File layout
 
 ```
-zendnnl/gtests/group_matmul/
+gtests/group_matmul/
   CMakeLists.txt                    target_sources(...) into the parent gtests target
   README.md                         this file
   moe_test_utils.hpp                shared test helpers (data fills, TypedBuffers,

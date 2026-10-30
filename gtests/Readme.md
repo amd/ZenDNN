@@ -168,7 +168,7 @@ The following post-operations are supported for matmul and its variations:
 
 ## **Directory Structure**
 
-The `zendnnl/gtests/` directory contains all test-related files and subdirectories. Below is the structure:
+The `gtests/` directory contains all test-related files and subdirectories. Below is the structure:
 
 ```plaintext
 gtests/
@@ -427,7 +427,7 @@ Matmul / batch matmul only:
 
 `ZENDNNL_MATMUL_ALGO=11` (or a `native_brgemm` kernel) runs the BF16 / INT8 cases the native BRGEMM qualifies for on
 it, in the native VNNI layout; the other cases run on AOCL-DLP (or the one-op group route), as `matmul_direct` does
-under ALGO 11. In `zendnnl/gtests/matmul_native/`, `NativeLayoutRule*` covers the layout rule and the route,
+under ALGO 11. In `gtests/matmul_native/`, `NativeLayoutRule*` covers the layout rule and the route,
 `NativeBrgemm*` the native BRGEMM, `NativeConfig*` and `NativeTuning*` its planner and tuning inputs, and
 `NativeWeightLifetime*` its weight lifetime.
 
