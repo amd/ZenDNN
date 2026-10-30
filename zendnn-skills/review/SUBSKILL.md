@@ -20,4 +20,5 @@ for a pull-request URL it runs the GitHub review.
 - [linux](linux/SUBSKILL.md) and [windows](windows/SUBSKILL.md): platform-only
   checks.
 - `<operator>.md`: one operator's own checks, named after its directory under
-  `zendnnl/src/lowoha_operators/`. Today: [group_matmul](group_matmul.md).
+  `zendnnl/src/lowoha_operators/`. Today: [group_matmul](group_matmul.md),
+  [matmul](matmul.md).
