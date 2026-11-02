@@ -90,7 +90,13 @@ size_t scale_bytes(const custom_kernel::CallContext &kctx) {
 /// compensation, or W4A8's per-group compensation and weight scale.
 int64_t wei_col_extra_bytes(
         const custom_kernel::CallContext &kctx, kernel_type_t fam, int64_t K) {
-    if (fam == kernel_type_t::kInt8) return 4;
+    if (fam == kernel_type_t::kInt8) {
+        // Per-group Q8 stores one int32 compensation row per group.
+        if (kctx.group_size > 0 && K > 0 && (K % kctx.group_size) == 0)
+            return (K / kctx.group_size)
+                    * static_cast<int64_t>(sizeof(int32_t));
+        return static_cast<int64_t>(sizeof(int32_t));
+    }
     if (fam != kernel_type_t::kW4a8 || kctx.group_size <= 0) return 0;
     return K / kctx.group_size * static_cast<int64_t>(4 + scale_bytes(kctx));
 }
@@ -256,6 +262,10 @@ void prompt_tile_execute(custom_kernel::CallContext &kctx, const CallView &call,
     // Per-row source and per-channel weight scales only: static U8xS8, whose
     // epilogue requantizes and applies post-ops, stays on the round executor.
     const custom_kernel::Int8EpilogueConfig int8_epilogue {};
+    // Q8 source scales are one per K-group. W4A8 also uses group 32 and
+    // keeps one source scale per row, so it must not take this stride.
+    const bool q8_src_groups = kctx.group_size == 32
+            && custom_kernel::is_int8_variant(kctx.variant);
 
     auto run_tile = [&](const Tile &t) {
         const int e = t.e;
@@ -264,12 +274,21 @@ void prompt_tile_execute(custom_kernel::CallContext &kctx, const CallView &call,
                 + m0 * call.ldc[e] * dst_elem;
         if (quant != nullptr) {
             const QuantizedInputView &q = quant[e];
+            custom_kernel::Int8EpilogueConfig epi = int8_epilogue;
+            int src_groups = 1;
+            if (q8_src_groups) {
+                epi.group_k = 32;
+                epi.src_row_groups = call.K[e] / 32;
+                epi.wei_group_stride = call.N[e];
+                src_groups = epi.src_row_groups;
+            }
             custom_kernel::dispatch_tile(kctx, e, t.rows, call.K[e], t.ncols,
                     t.n0, static_cast<const char *>(q.src) + m0 * q.lda, q.lda,
                     call.bias[e], d, call.ldc[e],
-                    static_cast<const char *>(q.src_scale) + m0 * scale_elem,
+                    static_cast<const char *>(q.src_scale)
+                            + m0 * static_cast<size_t>(src_groups) * scale_elem,
                     q.src_zp != nullptr ? q.src_zp + m0 : nullptr, q.wei_scale,
-                    int8_epilogue);
+                    epi);
             return;
         }
         const auto *a = static_cast<const char *>(call.src[e])

@@ -79,6 +79,7 @@
 #include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
 #include "lowoha_operators/matmul/group_matmul/multi_expert/multi_expert_policy.hpp"
 #include "lowoha_operators/matmul/quantization/reorder_quantization.hpp"
+#include "n_tile_admission.hpp"
 #include "prompt_tile/prompt_tile_executor.hpp"
 
 namespace zendnnl {
@@ -892,8 +893,8 @@ inline void GroupNTileContext::execute_tile(const GroupNTilePlan &plan, int e,
         const int32_t *src_zp_ptr = nullptr;
         const void *wei_scale_ptr = nullptr;
         const custom_kernel::Int8EpilogueConfig default_int8_epilogue {};
-        const custom_kernel::Int8EpilogueConfig *int8_epilogue
-                = &default_int8_epilogue;
+        custom_kernel::Int8EpilogueConfig tile_epi = default_int8_epilogue;
+        const custom_kernel::Int8EpilogueConfig *int8_epilogue = &tile_epi;
         // For the DQ-INT8 family the CK ukernel consumes an s8/u8 byte
         // stream — the bf16 caller src must be substituted with the
         // hoisted s8 reorder result that `n_tile_execute`'s pre-OMP loop
@@ -946,7 +947,13 @@ inline void GroupNTileContext::execute_tile(const GroupNTilePlan &plan, int e,
                 ck_src_ptr = h.src_ptr;
                 ck_src_lda = h.lda;
                 wei_scale_ptr = h.wei_scale_view;
-                int8_epilogue = &h.epilogue;
+                tile_epi = h.epilogue;
+                if (kctx->group_size == 32) {
+                    tile_epi.group_k = 32;
+                    tile_epi.src_row_groups = K[e] / 32;
+                    tile_epi.wei_group_stride = N[e];
+                }
+                int8_epilogue = &tile_epi;
             } else {
                 int8_hoist_ok = false;
                 // A fused call must never reach the AOCL fall-through: it
@@ -4591,6 +4598,28 @@ void n_tile_execute(const std::vector<char> &layout,
     int ck_s4_group_size = 0;
     int ck_s4_wei_scale_grp_stride = 0;
     bool ck_s4_src_per_group = false;
+    int ck_s8_group_size = 0;
+    int ck_s8_wei_scale_grp_stride = 0;
+    // One group mode is shared by the call. Use the Q8 pack only when
+    // every active expert is that shape; a mixed call keeps the
+    // per-group exclusion below and stays on AOCL.
+    bool q8_uniform = false;
+    if (q8_per_group_ck_expert(params[rep], K[rep], N[rep])) {
+        q8_uniform = true;
+        for (int i = 0; i < num_ops; ++i) {
+            if (static_cast<size_t>(i) == rep || M[i] <= 0) continue;
+            if (static_cast<size_t>(i) >= params.size()
+                    || !q8_per_group_ck_expert(
+                            params[static_cast<size_t>(i)], K[i], N[i])) {
+                q8_uniform = false;
+                break;
+            }
+        }
+        if (q8_uniform) {
+            ck_s8_group_size = 32;
+            ck_s8_wei_scale_grp_stride = N[rep];
+        }
+    }
     if (params[rep].dtypes.wei == data_type_t::s4) {
         const auto &ws = params[rep].quant_params.wei_scale;
         if (ws.dims.size() == 2 && ws.dims[0] > 0 && K[rep] > 0) {
@@ -4633,7 +4662,33 @@ void n_tile_execute(const std::vector<char> &layout,
     // layout that may rewrite a weight, so the pack stays out-of-place
     // unless the dispatcher licensed this call (`ck_inplace_licence`), whose
     // weights no AOCL reorder rewrites.
-    if (!ck_s4_src_per_group
+    std::vector<size_t> ck_wei_caps(static_cast<size_t>(num_ops), 0);
+    for (int i = 0; i < num_ops && static_cast<size_t>(i) < params.size();
+            ++i) {
+        ck_wei_caps[static_cast<size_t>(i)]
+                = params[static_cast<size_t>(i)].wei_buffer_capacity_bytes;
+    }
+    const bool q8_ck_inplace = ck_s8_group_size == 32;
+    // A {G, N} s8 weight that is not group-32 is an AOCL shape. Preparing
+    // it here can write a full-K pack into the caller's buffer before the
+    // per-group guard below drops the call off the custom kernel.
+    // Uniform Q8 never enters this scan.
+    bool grouped_s8_not_q8 = false;
+    if (!q8_uniform) {
+        for (int i = 0; i < num_ops; ++i) {
+            if (M[i] <= 0 || static_cast<size_t>(i) >= params.size()) continue;
+            const auto &p = params[static_cast<size_t>(i)];
+            const auto &ws = p.quant_params.wei_scale;
+            if (p.dtypes.wei != data_type_t::s8 || ws.dims.size() != 2
+                    || ws.dims[0] <= 1)
+                continue;
+            if (!q8_per_group_ck_expert(p, K[i], N[i])) {
+                grouped_s8_not_q8 = true;
+                break;
+            }
+        }
+    }
+    if (!ck_s4_src_per_group && !grouped_s8_not_q8
             && group_matmul_custom_kernel_candidate(params, M, N, custom_act)) {
         prepare_n_tile_custom_kernel(custom_act,
                 /*src_dtype=*/params[rep].dtypes.src,
@@ -4642,11 +4697,14 @@ void n_tile_execute(const std::vector<char> &layout,
                 /*bias_dtype=*/params[rep].dtypes.bias, transA, transB, M, N, K,
                 ldb, alpha, beta, weight, is_weights_const, kctx,
                 ck_dynamic_quant, ck_compute_dtype, weights_prepacked,
-                ck_s4_group_size, ck_s4_wei_scale_grp_stride,
+                ck_s8_group_size > 0 ? ck_s8_group_size : ck_s4_group_size,
+                ck_s8_group_size > 0 ? ck_s8_wei_scale_grp_stride
+                                     : ck_s4_wei_scale_grp_stride,
                 weights_aocl_prepacked, num_threads, ck_weight_cache_mode,
                 /*allow_in_place=*/(!fused_epilogue || tight_fused_epilogue)
-                        && (ck_inplace_licence
-                                || !is_grp_auto_mixed_inplace_active()));
+                        && (q8_ck_inplace || ck_inplace_licence
+                                || !is_grp_auto_mixed_inplace_active()),
+                ck_wei_caps);
     }
     custom_kernel::Bf16DecodeRoute qwen_bf16_route
             = custom_kernel::Bf16DecodeRoute::none;
@@ -4712,9 +4770,14 @@ void n_tile_execute(const std::vector<char> &layout,
                     && !is_weights_const[e])
                 active_weights_const = false;
         }
+        // A Q8_0 group scale is consumed once per 32 K values. Widening the
+        // constant BF16 {G,N} table to F32 doubles its decode bandwidth and
+        // cache/TLB footprint; let the ukernel widen the loaded 16-lane panel
+        // instead. Per-channel DA8W8 keeps the cached F32 view because that
+        // scale is reused across the whole K reduction.
         const bool force_bf16_wei_scale_f32 = ck_int8_variant
-                && wdt == data_type_t::bf16 && active_weights_const
-                && ck_weight_cache_mode != 0;
+                && kctx.group_size != 32 && wdt == data_type_t::bf16
+                && active_weights_const && ck_weight_cache_mode != 0;
         // W4A8 dense shapes benefit from widening the constant {G,N} BF16
         // weight scale once instead of widening the same lanes inside every
         // S4 microkernel call.  Set ZENDNNL_GRP_MATMUL_S4_BF16_SCALE_F32=0
@@ -4772,6 +4835,7 @@ void n_tile_execute(const std::vector<char> &layout,
         // old form fell through for those, so one tail entry carrying a
         // `{G, N}` scale disqualified the custom kernel for the whole call.
         if (i >= M.size() || M[i] <= 0) continue;
+        if (q8_uniform) continue;
         const auto &scale = ck_s4_variant ? params[i].quant_params.src_scale
                                           : params[i].quant_params.wei_scale;
         const bool per_group = ck_s4_variant
@@ -5014,7 +5078,18 @@ void n_tile_execute(const std::vector<char> &layout,
     // rejects) all route to ALGO 1 instead.
     // Rows in the weight-scale view: G for W4A8, 1 elsewhere.  Read
     // per-expert, since an inactive expert may carry no scale at all.
+    const auto ck_src_scale_count = [&](int e) -> int {
+        if (kctx.group_size == 32
+                && custom_kernel::is_int8_variant(kctx.variant)) {
+            return M[e] * (K[e] / 32);
+        }
+        return M[e];
+    };
     const auto ck_wei_scale_groups = [&](int e) -> int {
+        if (kctx.group_size == 32
+                && custom_kernel::is_int8_variant(kctx.variant)) {
+            return K[e] / 32;
+        }
         if (!custom_kernel::is_w4a8_variant(kctx.variant)) return 1;
         const auto &ws = params[e].quant_params.wei_scale;
         if (ws.dims.size() != 2 || ws.dims[0] <= 1) return 1;
@@ -5081,7 +5156,8 @@ void n_tile_execute(const std::vector<char> &layout,
                 } else {
                     hoisted[e].src_scale_view = materialise_f32_scale(
                             hoisted[e].src_scale.buff, hoisted[e].src_scale.dt,
-                            M[e], hoisted[e].src_scale_f32_owned);
+                            ck_src_scale_count(e),
+                            hoisted[e].src_scale_f32_owned);
                 }
                 if (hoisted[e].epilogue.wei_scale_per_tensor) {
                     hoisted[e].valid = hoisted[e].valid
@@ -5178,7 +5254,8 @@ void n_tile_execute(const std::vector<char> &layout,
                 } else {
                     hoisted[e].src_scale_view = materialise_f32_scale(
                             hoisted[e].src_scale.buff, hoisted[e].src_scale.dt,
-                            M[e], hoisted[e].src_scale_f32_owned);
+                            ck_src_scale_count(e),
+                            hoisted[e].src_scale_f32_owned);
                     hoisted[e].wei_scale_view
                             = materialise_f32_wei_scale_cached(weight[e],
                                     params[e].quant_params.wei_scale.buff,

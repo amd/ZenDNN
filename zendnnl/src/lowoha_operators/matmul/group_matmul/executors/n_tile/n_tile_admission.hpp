@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "lowoha_operators/matmul/group_matmul/common/grp_matmul_constants.hpp"
+#include "lowoha_operators/matmul/lowoha_common.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -34,6 +35,47 @@ bool n_tile_supported(const std::vector<int> &M, const std::vector<int> &N,
         grp_matmul_gated_act_t fused_act);
 
 } // namespace detail
+
+/// Q8_0 custom-kernel shape: s8 weight, symmetric, K-group 32, N packable
+/// by the NR=32 kernel, plain layout. Source is either still f32/bf16 with
+/// dynamic_quant, or already s8 with a `{M, K/32}` scale.
+inline bool q8_per_group_ck_expert(const matmul_params &p, int K, int N) {
+    if (p.dtypes.wei != data_type_t::s8 || p.mem_format_b != 'n') return false;
+    if (p.dtypes.compute != data_type_t::s8) return false;
+    if (p.quant_params.src_zp.buff != nullptr
+            || p.quant_params.wei_zp.buff != nullptr)
+        return false;
+    if (K <= 0 || N <= 0 || (K % 32) != 0 || (N % 32) != 0) return false;
+    const auto &ws = p.quant_params.wei_scale;
+    if (ws.buff == nullptr || ws.dims.size() != 2 || ws.dims[0] <= 1
+            || ws.dims[1] != N)
+        return false;
+    if ((K % static_cast<int>(ws.dims[0])) != 0) return false;
+    if (K / static_cast<int>(ws.dims[0]) != 32) return false;
+    if (p.dynamic_quant) {
+        return p.dtypes.src == data_type_t::f32
+                || p.dtypes.src == data_type_t::bf16;
+    }
+    if (p.dtypes.src != data_type_t::s8) return false;
+    const auto &ss = p.quant_params.src_scale;
+    return ss.buff != nullptr && ss.dims.size() == 2
+            && ss.dims[1] == ws.dims[0];
+}
+
+inline bool q8_per_group_ck_call(const std::vector<int> &M,
+        const std::vector<int> &N, const std::vector<int> &K,
+        const std::vector<matmul_params> &params) {
+    bool any = false;
+    const int n = static_cast<int>(std::min(
+            M.size(), std::min(N.size(), std::min(K.size(), params.size()))));
+    for (int i = 0; i < n; ++i) {
+        if (M[i] <= 0) continue;
+        if (!q8_per_group_ck_expert(params[static_cast<size_t>(i)], K[i], N[i]))
+            return false;
+        any = true;
+    }
+    return any;
+}
 } // namespace matmul
 } // namespace lowoha
 } // namespace zendnnl

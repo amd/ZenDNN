@@ -87,7 +87,7 @@ status_t warm_pack_all_custom_kernel_experts(
         const std::vector<bool> &is_weights_const, int total_count,
         PackProbeStats &stats, bool interleave_split_halves,
         WarmDtypeFamily dtype_family, int group_size, int32_t weight_cache_type,
-        bool in_place) {
+        bool in_place, const std::vector<size_t> *wei_capacities) {
 
     // Every exit reports: a silent bail is indistinguishable from
     // "warmed nothing" in the PREPACK summary, which is how a missing
@@ -263,11 +263,17 @@ status_t warm_pack_all_custom_kernel_experts(
         status_t pst = status_t::success;
         if (dtype_family == WarmDtypeFamily::kINT8) {
             const int8_t *packed_ignored = nullptr;
+            size_t cap = 0;
+            if (wei_capacities != nullptr && i < wei_capacities->size()) {
+                cap = (*wei_capacities)[i];
+            }
+            const bool ip = in_place && group_size == 32 && cap > 0;
             pst = ck::get_or_pack_weight_int8(
                     static_cast<const int8_t *>(weight[i]), K[i], N[i], ldb[i],
                     pack_nr, transB_c[i] != 0,
                     /*interleave_split_halves=*/interleave_split_halves,
-                    &packed_ignored, &was_hit);
+                    &packed_ignored, &was_hit, /*disable_cache=*/false, ip, cap,
+                    group_size == 32 ? 32 : 0);
         } else if (dtype_family == WarmDtypeFamily::kS4) {
             // `group_size` is in the cache key, so this warms exactly
             // the slab `prepare_for_call` later looks up.  An expert

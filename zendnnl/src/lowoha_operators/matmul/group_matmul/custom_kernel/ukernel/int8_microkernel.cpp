@@ -54,9 +54,11 @@
 #include "int8_microkernel.hpp"
 #include "common/zendnnl_compat.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <type_traits>
 
 #include <immintrin.h>
@@ -182,9 +184,15 @@ static inline __m512 dequant_finish(__m512i acc_s32, __m512i correction,
 
 static inline float load_int8_scale(
         const void *scale, ScaleKind kind, int index) {
-    return (kind == ScaleKind::kBf16)
-            ? static_cast<float>(static_cast<const bfloat16_t *>(scale)[index])
-            : static_cast<const float *>(scale)[index];
+    if (kind != ScaleKind::kBf16)
+        return static_cast<const float *>(scale)[index];
+    uint16_t raw;
+    std::memcpy(
+            &raw, static_cast<const bfloat16_t *>(scale) + index, sizeof(raw));
+    const uint32_t bits = static_cast<uint32_t>(raw) << 16;
+    float value;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
 }
 
 template <int NV>
@@ -1098,6 +1106,455 @@ static void ukernel_accum_nv2_sym_scalar(const uint8_t *__restrict A, int lda,
 }
 #undef ZENDNNL_INT8_ACCUM_BARRIER
 
+// Q8_0: one source scale and one weight scale per K-group of 32.
+// The pack stores one int32 compensation row per group, after the
+// VNNI weight bytes, in packed column order.
+//
+// The running sum is f32 because each group has its own scales, but
+// those f32 vectors must not stay live next to the int32 dpbusd
+// accumulators: MR 12 would then need 48 zmm and spill through the
+// K loop.  Groups reduce in named int32 registers (seeded with the
+// -128 * sum correction) and only then update an f32 buffer.  MR 1
+// keeps four groups in flight so a decode dot hides dpbusd latency.
+template <int MR, ActivationKind Act, OutputType Dst>
+ZENDNNL_TARGET_NOINLINE("avx512f,avx512vnni,avx512bw,avx512vl,avx512dq,fma")
+static void ukernel_q8_group_nv2(const uint8_t *__restrict A, int lda,
+        const int8_t *__restrict Bpacked, const void *__restrict src_scale,
+        const int32_t *__restrict /*src_zp*/, const void *__restrict wei_scale,
+        ScaleKind scale_kind, const Int8EpilogueConfig &epilogue,
+        const void *__restrict bias, BiasKind bias_kind,
+        void *__restrict Cout_void, int ldc, void *__restrict Cout_tight_void,
+        int ldc_tight, int K) {
+    static_assert(MR >= 1 && MR <= 4, "Q8 group kernel covers MR 1..4");
+    static_assert(Act == ActivationKind::none || Dst == OutputType::kBf16,
+            "gated Q8 group output is BF16");
+    constexpr int NV = 2;
+    constexpr int kGroup = 32;
+    constexpr int kQuads = kGroup / kVNNIInt8Quad;
+    constexpr int kq_stride_bytes = NV * 16 * kVNNIInt8Quad;
+    constexpr int v_stride_bytes = 16 * kVNNIInt8Quad;
+    constexpr int kPackNr = NV * 16;
+    // Each group is weight quads followed by its compensation row.
+    constexpr int kGroupBytes = kQuads * kq_stride_bytes
+            + kPackNr * static_cast<int>(sizeof(int32_t));
+    const int G = K / kGroup;
+    const int src_rows
+            = epilogue.src_row_groups > 0 ? epilogue.src_row_groups : G;
+    const int wei_stride = epilogue.wei_group_stride > 0
+            ? epilogue.wei_group_stride
+            : kPackNr;
+    const size_t scale_elem = (scale_kind == ScaleKind::kBf16)
+            ? sizeof(bfloat16_t)
+            : sizeof(float);
+    const __m512i s8_to_u8
+            = _mm512_set1_epi32(static_cast<int32_t>(0x80808080U));
+    // One f32 panel, MR rows by 32 columns.  High-MR specializations
+    // spill here between groups instead of inside dpbusd.
+    alignas(64) float running[MR][kPackNr];
+    for (int r = 0; r < MR; ++r) {
+        _mm512_store_ps(running[r], _mm512_setzero_ps());
+        _mm512_store_ps(running[r] + 16, _mm512_setzero_ps());
+    }
+
+    (void)lda;
+#define ZENDNNL_Q8_SEED(gg, n0, n1) \
+    do { \
+        const int32_t *q8_comp = reinterpret_cast<const int32_t *>(Bpacked \
+                + static_cast<size_t>(gg) * kGroupBytes \
+                + kQuads * kq_stride_bytes); \
+        (n0) = _mm512_load_si512(reinterpret_cast<const __m512i *>(q8_comp)); \
+        (n1) = _mm512_load_si512( \
+                reinterpret_cast<const __m512i *>(q8_comp + 16)); \
+    } while (0)
+
+    if constexpr (MR == 1) {
+        // Split one group across four independent accumulators per output
+        // vector. This fills Zen's VPDPBUSD pipeline while keeping B as one
+        // sequential stream; interleaving several groups instead creates
+        // four distant streams and defeats the hardware prefetcher.
+        __m512 f0 = _mm512_setzero_ps();
+        __m512 f1 = _mm512_setzero_ps();
+        for (int g = 0; g < G; ++g) {
+            __m512i c00, c10;
+            ZENDNNL_Q8_SEED(g, c00, c10);
+            const __m512i zi = _mm512_setzero_si512();
+            __m512i c01 = zi, c02 = zi, c03 = zi;
+            __m512i c11 = zi, c12 = zi, c13 = zi;
+            const int8_t *bg = Bpacked + static_cast<size_t>(g) * kGroupBytes;
+#define ZENDNNL_Q8_GEMV_STEP(ol, clo, chi) \
+    do { \
+        const int8_t *bp = bg + (ol) * kq_stride_bytes; \
+        const __m512i b0 \
+                = _mm512_load_si512(reinterpret_cast<const __m512i *>(bp)); \
+        const __m512i b1 = _mm512_load_si512( \
+                reinterpret_cast<const __m512i *>(bp + v_stride_bytes)); \
+        uint32_t a_quad; \
+        std::memcpy(&a_quad, \
+                A + (static_cast<size_t>(g) * kQuads + (ol)) * kVNNIInt8Quad, \
+                sizeof(a_quad)); \
+        const __m512i av = _mm512_xor_si512( \
+                _mm512_set1_epi32(static_cast<int32_t>(a_quad)), s8_to_u8); \
+        clo = _mm512_dpbusd_epi32(clo, av, b0); \
+        chi = _mm512_dpbusd_epi32(chi, av, b1); \
+    } while (0)
+            ZENDNNL_Q8_GEMV_STEP(0, c00, c10);
+            ZENDNNL_Q8_GEMV_STEP(1, c01, c11);
+            ZENDNNL_Q8_GEMV_STEP(2, c02, c12);
+            ZENDNNL_Q8_GEMV_STEP(3, c03, c13);
+            ZENDNNL_Q8_GEMV_STEP(4, c00, c10);
+            ZENDNNL_Q8_GEMV_STEP(5, c01, c11);
+            ZENDNNL_Q8_GEMV_STEP(6, c02, c12);
+            ZENDNNL_Q8_GEMV_STEP(7, c03, c13);
+#undef ZENDNNL_Q8_GEMV_STEP
+            c00 = _mm512_add_epi32(
+                    _mm512_add_epi32(c00, c01), _mm512_add_epi32(c02, c03));
+            c10 = _mm512_add_epi32(
+                    _mm512_add_epi32(c10, c11), _mm512_add_epi32(c12, c13));
+            const float ss = load_int8_scale(src_scale, scale_kind, g);
+            const void *wei_g = static_cast<const char *>(wei_scale)
+                    + static_cast<size_t>(g) * static_cast<size_t>(wei_stride)
+                            * scale_elem;
+            __m512 wscale[NV];
+            load_int8_weight_scales<NV>(wei_g, scale_kind, false, wscale);
+            const __m512 ssv = _mm512_set1_ps(ss);
+            f0 = _mm512_fmadd_ps(
+                    _mm512_cvtepi32_ps(c00), _mm512_mul_ps(ssv, wscale[0]), f0);
+            f1 = _mm512_fmadd_ps(
+                    _mm512_cvtepi32_ps(c10), _mm512_mul_ps(ssv, wscale[1]), f1);
+        }
+        _mm512_store_ps(running[0], f0);
+        _mm512_store_ps(running[0] + 16, f1);
+    } else if constexpr (MR <= 4) {
+        const __m512 zf = _mm512_setzero_ps();
+        __m512 f00 = zf, f01 = zf, f10 = zf, f11 = zf;
+        __m512 f20 = zf, f21 = zf, f30 = zf, f31 = zf;
+        for (int g = 0; g < G; ++g) {
+            __m512i n0, n1;
+            ZENDNNL_Q8_SEED(g, n0, n1);
+            __m512i c00 = n0, c01 = n1, c10 = n0, c11 = n1;
+            __m512i c20 = n0, c21 = n1, c30 = n0, c31 = n1;
+            const int8_t *bg = Bpacked + static_cast<size_t>(g) * kGroupBytes;
+#pragma GCC unroll 8
+            for (int ol = 0; ol < kQuads; ++ol) {
+                const int kq = g * kQuads + ol;
+                const int8_t *bp = bg + ol * kq_stride_bytes;
+                const __m512i b0 = _mm512_load_si512(
+                        reinterpret_cast<const __m512i *>(bp));
+                const __m512i b1 = _mm512_load_si512(
+                        reinterpret_cast<const __m512i *>(bp + v_stride_bytes));
+#define ZENDNNL_Q8_ROW4(r) \
+    if constexpr (MR > r) { \
+        uint32_t a_quad; \
+        std::memcpy(&a_quad, \
+                A + static_cast<size_t>(r) * lda + kq * kVNNIInt8Quad, \
+                sizeof(a_quad)); \
+        const __m512i av = _mm512_xor_si512( \
+                _mm512_set1_epi32(static_cast<int32_t>(a_quad)), s8_to_u8); \
+        c##r##0 = _mm512_dpbusd_epi32(c##r##0, av, b0); \
+        c##r##1 = _mm512_dpbusd_epi32(c##r##1, av, b1); \
+    }
+                ZENDNNL_Q8_ROW4(0)
+                ZENDNNL_Q8_ROW4(1)
+                ZENDNNL_Q8_ROW4(2)
+                ZENDNNL_Q8_ROW4(3)
+#undef ZENDNNL_Q8_ROW4
+            }
+            __m512 wscale[NV];
+            const void *wei_g = static_cast<const char *>(wei_scale)
+                    + static_cast<size_t>(g) * static_cast<size_t>(wei_stride)
+                            * scale_elem;
+            load_int8_weight_scales<NV>(wei_g, scale_kind, false, wscale);
+#define ZENDNNL_Q8_FOLD4(r, flo, fhi) \
+    if constexpr (MR > r) { \
+        const __m512 ssv = _mm512_set1_ps( \
+                load_int8_scale(src_scale, scale_kind, r * src_rows + g)); \
+        flo = _mm512_fmadd_ps(_mm512_cvtepi32_ps(c##r##0), \
+                _mm512_mul_ps(ssv, wscale[0]), flo); \
+        fhi = _mm512_fmadd_ps(_mm512_cvtepi32_ps(c##r##1), \
+                _mm512_mul_ps(ssv, wscale[1]), fhi); \
+    }
+            ZENDNNL_Q8_FOLD4(0, f00, f01)
+            ZENDNNL_Q8_FOLD4(1, f10, f11)
+            ZENDNNL_Q8_FOLD4(2, f20, f21)
+            ZENDNNL_Q8_FOLD4(3, f30, f31)
+#undef ZENDNNL_Q8_FOLD4
+        }
+        _mm512_store_ps(running[0], f00);
+        _mm512_store_ps(running[0] + 16, f01);
+        if constexpr (MR > 1) {
+            _mm512_store_ps(running[1], f10);
+            _mm512_store_ps(running[1] + 16, f11);
+        }
+        if constexpr (MR > 2) {
+            _mm512_store_ps(running[2], f20);
+            _mm512_store_ps(running[2] + 16, f21);
+        }
+        if constexpr (MR > 3) {
+            _mm512_store_ps(running[3], f30);
+            _mm512_store_ps(running[3] + 16, f31);
+        }
+    }
+
+    const bool has_bias = (bias != nullptr && bias_kind != BiasKind::none);
+    alignas(64) float bias_slab[NV * 16];
+    const float *bias_f32 = static_cast<const float *>(bias);
+    if (has_bias && bias_kind != BiasKind::fp32) {
+        for (int v = 0; v < NV; ++v) {
+            _mm512_store_ps(
+                    bias_slab + v * 16, load_bias_f32(bias, bias_kind, v));
+        }
+        bias_f32 = bias_slab;
+    }
+    for (int m = 0; m < MR; ++m) {
+        __m512 lo = _mm512_load_ps(running[m]);
+        __m512 hi = _mm512_load_ps(running[m] + 16);
+        if (has_bias) {
+            lo = _mm512_add_ps(lo, _mm512_loadu_ps(bias_f32));
+            hi = _mm512_add_ps(hi, _mm512_loadu_ps(bias_f32 + 16));
+        }
+        if constexpr (Act == ActivationKind::none) {
+            if constexpr (Dst == OutputType::kF32) {
+                auto *dst = static_cast<float *>(Cout_void)
+                        + static_cast<size_t>(m) * ldc;
+                _mm512_storeu_ps(dst, lo);
+                _mm512_storeu_ps(dst + 16, hi);
+            } else {
+                auto *dst = static_cast<bfloat16_t *>(Cout_void)
+                        + static_cast<size_t>(m) * ldc;
+                _mm256_storeu_si256(
+                        reinterpret_cast<__m256i *>(dst), f32_to_bf16x16(lo));
+                _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst + 16),
+                        f32_to_bf16x16(hi));
+            }
+        } else {
+            bfloat16_t *dst = static_cast<bfloat16_t *>(Cout_tight_void)
+                    + static_cast<size_t>(m) * ldc_tight;
+            if constexpr (Act == ActivationKind::swiglu_oai_mul) {
+                swiglu_oai_store_pair_int(lo, hi, dst);
+            } else if constexpr (Act == ActivationKind::silu_and_mul) {
+                silu_and_mul_store_pair_int(lo, hi, dst);
+            } else {
+                gelu_and_mul_store_pair_int(lo, hi, dst);
+            }
+        }
+    }
+}
+#undef ZENDNNL_Q8_SEED
+
+// NR=64 Q8 group kernel.  Four VPDPBUSD chains per row, and for a
+// decode row the next group's bytes are prefetched as non-temporal
+// so the one-shot weight stream does not thrash L2.
+template <int MR, ActivationKind Act, OutputType Dst>
+ZENDNNL_TARGET_NOINLINE("avx512f,avx512vnni,avx512bw,avx512vl,avx512dq,fma")
+static void ukernel_q8_group_nv4(const uint8_t *__restrict A, int lda,
+        const int8_t *__restrict Bpacked, const void *__restrict src_scale,
+        const int32_t *__restrict /*src_zp*/, const void *__restrict wei_scale,
+        ScaleKind scale_kind, const Int8EpilogueConfig &epilogue,
+        const void *__restrict bias, BiasKind bias_kind,
+        void *__restrict Cout_void, int ldc, void *__restrict Cout_tight_void,
+        int ldc_tight, int K) {
+    static_assert(MR >= 1 && MR <= 4, "Q8 NV=4 kernel covers MR 1..4");
+    static_assert(Act == ActivationKind::none || Dst == OutputType::kBf16,
+            "gated Q8 group output is BF16");
+    constexpr int NV = 4;
+    constexpr int kGroup = 32;
+    constexpr int kQuads = kGroup / kVNNIInt8Quad;
+    constexpr int kq_stride_bytes = NV * 16 * kVNNIInt8Quad;
+    constexpr int v_stride_bytes = 16 * kVNNIInt8Quad;
+    constexpr int kPackNr = NV * 16;
+    constexpr int kGroupBytes = kQuads * kq_stride_bytes
+            + kPackNr * static_cast<int>(sizeof(int32_t));
+    const int G = K / kGroup;
+    const int src_rows
+            = epilogue.src_row_groups > 0 ? epilogue.src_row_groups : G;
+    const int wei_stride = epilogue.wei_group_stride > 0
+            ? epilogue.wei_group_stride
+            : kPackNr;
+    const size_t scale_elem = (scale_kind == ScaleKind::kBf16)
+            ? sizeof(bfloat16_t)
+            : sizeof(float);
+    const __m512i s8_to_u8
+            = _mm512_set1_epi32(static_cast<int32_t>(0x80808080U));
+    const __m512 zf = _mm512_setzero_ps();
+    (void)lda;
+
+    alignas(64) float running[MR][kPackNr];
+    for (int r = 0; r < MR; ++r) {
+        _mm512_store_ps(running[r] + 0, zf);
+        _mm512_store_ps(running[r] + 16, zf);
+        _mm512_store_ps(running[r] + 32, zf);
+        _mm512_store_ps(running[r] + 48, zf);
+    }
+
+    for (int g = 0; g < G; ++g) {
+        const int8_t *bg = Bpacked + static_cast<size_t>(g) * kGroupBytes;
+        const int32_t *comp = reinterpret_cast<const int32_t *>(
+                bg + kQuads * kq_stride_bytes);
+        const __m512i n0
+                = _mm512_load_si512(reinterpret_cast<const __m512i *>(comp));
+        const __m512i n1 = _mm512_load_si512(
+                reinterpret_cast<const __m512i *>(comp + 16));
+        const __m512i n2 = _mm512_load_si512(
+                reinterpret_cast<const __m512i *>(comp + 32));
+        const __m512i n3 = _mm512_load_si512(
+                reinterpret_cast<const __m512i *>(comp + 48));
+        __m512i c00 = n0, c01 = n1, c02 = n2, c03 = n3;
+        __m512i c10 = n0, c11 = n1, c12 = n2, c13 = n3;
+        __m512i c20 = n0, c21 = n1, c22 = n2, c23 = n3;
+        __m512i c30 = n0, c31 = n1, c32 = n2, c33 = n3;
+        if constexpr (MR == 1) {
+            if (g + 1 < G) {
+                const char *nxt
+                        = reinterpret_cast<const char *>(bg + kGroupBytes);
+                for (int off = 0; off < kGroupBytes; off += 256)
+                    _mm_prefetch(nxt + off, _MM_HINT_NTA);
+            }
+        }
+#pragma GCC unroll 8
+        for (int ol = 0; ol < kQuads; ++ol) {
+            const int kq = g * kQuads + ol;
+            const int8_t *bp = bg + ol * kq_stride_bytes;
+            const __m512i b0
+                    = _mm512_load_si512(reinterpret_cast<const __m512i *>(bp));
+            const __m512i b1 = _mm512_load_si512(
+                    reinterpret_cast<const __m512i *>(bp + v_stride_bytes));
+            const __m512i b2 = _mm512_load_si512(
+                    reinterpret_cast<const __m512i *>(bp + 2 * v_stride_bytes));
+            const __m512i b3 = _mm512_load_si512(
+                    reinterpret_cast<const __m512i *>(bp + 3 * v_stride_bytes));
+#define ZENDNNL_Q8_NV4_ROW(r) \
+    if constexpr (MR > r) { \
+        uint32_t a_quad; \
+        std::memcpy(&a_quad, \
+                A + static_cast<size_t>(r) * lda + kq * kVNNIInt8Quad, \
+                sizeof(a_quad)); \
+        const __m512i av = _mm512_xor_si512( \
+                _mm512_set1_epi32(static_cast<int32_t>(a_quad)), s8_to_u8); \
+        c##r##0 = _mm512_dpbusd_epi32(c##r##0, av, b0); \
+        c##r##1 = _mm512_dpbusd_epi32(c##r##1, av, b1); \
+        c##r##2 = _mm512_dpbusd_epi32(c##r##2, av, b2); \
+        c##r##3 = _mm512_dpbusd_epi32(c##r##3, av, b3); \
+    }
+            ZENDNNL_Q8_NV4_ROW(0)
+            ZENDNNL_Q8_NV4_ROW(1)
+            ZENDNNL_Q8_NV4_ROW(2)
+            ZENDNNL_Q8_NV4_ROW(3)
+#undef ZENDNNL_Q8_NV4_ROW
+        }
+        __m512 wscale[NV];
+        const void *wei_g = static_cast<const char *>(wei_scale)
+                + static_cast<size_t>(g) * static_cast<size_t>(wei_stride)
+                        * scale_elem;
+        load_int8_weight_scales<NV>(wei_g, scale_kind, false, wscale);
+#define ZENDNNL_Q8_NV4_FOLD(r) \
+    if constexpr (MR > r) { \
+        const __m512 ssv = _mm512_set1_ps( \
+                load_int8_scale(src_scale, scale_kind, r * src_rows + g)); \
+        float *dst = running[r]; \
+        _mm512_store_ps(dst + 0, \
+                _mm512_fmadd_ps(_mm512_cvtepi32_ps(c##r##0), \
+                        _mm512_mul_ps(ssv, wscale[0]), \
+                        _mm512_load_ps(dst + 0))); \
+        _mm512_store_ps(dst + 16, \
+                _mm512_fmadd_ps(_mm512_cvtepi32_ps(c##r##1), \
+                        _mm512_mul_ps(ssv, wscale[1]), \
+                        _mm512_load_ps(dst + 16))); \
+        _mm512_store_ps(dst + 32, \
+                _mm512_fmadd_ps(_mm512_cvtepi32_ps(c##r##2), \
+                        _mm512_mul_ps(ssv, wscale[2]), \
+                        _mm512_load_ps(dst + 32))); \
+        _mm512_store_ps(dst + 48, \
+                _mm512_fmadd_ps(_mm512_cvtepi32_ps(c##r##3), \
+                        _mm512_mul_ps(ssv, wscale[3]), \
+                        _mm512_load_ps(dst + 48))); \
+    }
+        ZENDNNL_Q8_NV4_FOLD(0)
+        ZENDNNL_Q8_NV4_FOLD(1)
+        ZENDNNL_Q8_NV4_FOLD(2)
+        ZENDNNL_Q8_NV4_FOLD(3)
+#undef ZENDNNL_Q8_NV4_FOLD
+    }
+
+    const bool has_bias = (bias != nullptr && bias_kind != BiasKind::none);
+    alignas(64) float bias_slab[kPackNr];
+    const float *bias_f32 = static_cast<const float *>(bias);
+    if (has_bias && bias_kind != BiasKind::fp32) {
+        for (int v = 0; v < NV; ++v) {
+            _mm512_store_ps(
+                    bias_slab + v * 16, load_bias_f32(bias, bias_kind, v));
+        }
+        bias_f32 = bias_slab;
+    }
+    for (int m = 0; m < MR; ++m) {
+        __m512 v0 = _mm512_load_ps(running[m] + 0);
+        __m512 v1 = _mm512_load_ps(running[m] + 16);
+        __m512 v2 = _mm512_load_ps(running[m] + 32);
+        __m512 v3 = _mm512_load_ps(running[m] + 48);
+        if (has_bias) {
+            v0 = _mm512_add_ps(v0, _mm512_loadu_ps(bias_f32 + 0));
+            v1 = _mm512_add_ps(v1, _mm512_loadu_ps(bias_f32 + 16));
+            v2 = _mm512_add_ps(v2, _mm512_loadu_ps(bias_f32 + 32));
+            v3 = _mm512_add_ps(v3, _mm512_loadu_ps(bias_f32 + 48));
+        }
+        if constexpr (Act == ActivationKind::none) {
+            if constexpr (Dst == OutputType::kF32) {
+                auto *dst = static_cast<float *>(Cout_void)
+                        + static_cast<size_t>(m) * ldc;
+                _mm512_storeu_ps(dst + 0, v0);
+                _mm512_storeu_ps(dst + 16, v1);
+                _mm512_storeu_ps(dst + 32, v2);
+                _mm512_storeu_ps(dst + 48, v3);
+            } else {
+                auto *dst = static_cast<bfloat16_t *>(Cout_void)
+                        + static_cast<size_t>(m) * ldc;
+                _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst + 0),
+                        f32_to_bf16x16(v0));
+                _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst + 16),
+                        f32_to_bf16x16(v1));
+                _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst + 32),
+                        f32_to_bf16x16(v2));
+                _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst + 48),
+                        f32_to_bf16x16(v3));
+            }
+        } else {
+            bfloat16_t *dst = static_cast<bfloat16_t *>(Cout_tight_void)
+                    + static_cast<size_t>(m) * ldc_tight;
+            if constexpr (Act == ActivationKind::swiglu_oai_mul) {
+                swiglu_oai_store_pair_int(v0, v1, dst);
+                swiglu_oai_store_pair_int(v2, v3, dst + 16);
+            } else if constexpr (Act == ActivationKind::silu_and_mul) {
+                silu_and_mul_store_pair_int(v0, v1, dst);
+                silu_and_mul_store_pair_int(v2, v3, dst + 16);
+            } else {
+                gelu_and_mul_store_pair_int(v0, v1, dst);
+                gelu_and_mul_store_pair_int(v2, v3, dst + 16);
+            }
+        }
+    }
+}
+
+template <ActivationKind Act, OutputType Dst>
+static int8_ukernel_fn_t select_q8_group_nv4(int MR) {
+    switch (MR) {
+        case 1: return ukernel_q8_group_nv4<1, Act, Dst>;
+        case 2: return ukernel_q8_group_nv4<2, Act, Dst>;
+        case 3: return ukernel_q8_group_nv4<3, Act, Dst>;
+        case 4: return ukernel_q8_group_nv4<4, Act, Dst>;
+        default: return nullptr;
+    }
+}
+
+template <ActivationKind Act, OutputType Dst>
+static int8_ukernel_fn_t select_q8_group_nv2(int MR) {
+    switch (MR) {
+        case 1: return ukernel_q8_group_nv2<1, Act, Dst>;
+        case 2: return ukernel_q8_group_nv2<2, Act, Dst>;
+        case 3: return ukernel_q8_group_nv2<3, Act, Dst>;
+        case 4: return ukernel_q8_group_nv2<4, Act, Dst>;
+        default: return nullptr;
+    }
+}
+
 } // namespace
 
 // ── Function-pointer table dispatch ─────────────────────────────
@@ -1345,6 +1802,57 @@ int8_ukernel_fn_t select_int8_ukernel(int MR, int NV, IntCompute compute,
         }
     }
     return nullptr;
+}
+
+int8_ukernel_fn_t select_int8_q8_group_ukernel(
+        int MR, int NV, ActivationKind act, OutputType dst_dt) {
+    if (act != ActivationKind::none && dst_dt != OutputType::kBf16)
+        return nullptr;
+    if (NV == 4) {
+        if (act == ActivationKind::none) {
+            if (dst_dt == OutputType::kF32)
+                return select_q8_group_nv4<ActivationKind::none,
+                        OutputType::kF32>(MR);
+            if (dst_dt == OutputType::kBf16)
+                return select_q8_group_nv4<ActivationKind::none,
+                        OutputType::kBf16>(MR);
+            return nullptr;
+        }
+        switch (act) {
+            case ActivationKind::swiglu_oai_mul:
+                return select_q8_group_nv4<ActivationKind::swiglu_oai_mul,
+                        OutputType::kBf16>(MR);
+            case ActivationKind::silu_and_mul:
+                return select_q8_group_nv4<ActivationKind::silu_and_mul,
+                        OutputType::kBf16>(MR);
+            case ActivationKind::gelu_and_mul:
+                return select_q8_group_nv4<ActivationKind::gelu_and_mul,
+                        OutputType::kBf16>(MR);
+            default: return nullptr;
+        }
+    }
+    if (NV != 2) return nullptr;
+    if (act == ActivationKind::none) {
+        if (dst_dt == OutputType::kF32)
+            return select_q8_group_nv2<ActivationKind::none, OutputType::kF32>(
+                    MR);
+        if (dst_dt == OutputType::kBf16)
+            return select_q8_group_nv2<ActivationKind::none, OutputType::kBf16>(
+                    MR);
+        return nullptr;
+    }
+    switch (act) {
+        case ActivationKind::swiglu_oai_mul:
+            return select_q8_group_nv2<ActivationKind::swiglu_oai_mul,
+                    OutputType::kBf16>(MR);
+        case ActivationKind::silu_and_mul:
+            return select_q8_group_nv2<ActivationKind::silu_and_mul,
+                    OutputType::kBf16>(MR);
+        case ActivationKind::gelu_and_mul:
+            return select_q8_group_nv2<ActivationKind::gelu_and_mul,
+                    OutputType::kBf16>(MR);
+        default: return nullptr;
+    }
 }
 
 } // namespace custom_kernel

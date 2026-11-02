@@ -37,6 +37,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -44,6 +45,8 @@
 #include <vector>
 
 #include "ck_test_helpers.hpp"
+#include "common/bfloat16.hpp"
+#include "common/float16.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/ukernel/int8_microkernel.hpp"
 
@@ -202,6 +205,71 @@ TEST(CkInt8Pack, LayoutAndCompensationAtPackNr64) {
                     << " v=" << vv;
         }
     }
+}
+
+TEST(CkInt8Pack, Q8PerGroupInPlaceMatchesOutOfPlace) {
+    INT8_CK_SKIP_IF_NO_VNNI();
+    ck::clear_custom_kernel_pack_cache_int8();
+    constexpr int K = 128, N = 64, pack_nr = 32, group_size = 32;
+    constexpr int G = K / group_size;
+    constexpr size_t raw_bytes = static_cast<size_t>(K) * N;
+    constexpr size_t group_bytes = static_cast<size_t>(group_size) * pack_nr
+            + static_cast<size_t>(pack_nr) * sizeof(int32_t);
+    constexpr size_t packed_bytes
+            = static_cast<size_t>(N / pack_nr) * G * group_bytes;
+
+    // transB=true caller layout: N contiguous rows of K.
+    std::vector<int8_t> source(raw_bytes);
+    std::mt19937 rng(320);
+    std::uniform_int_distribution<int> wd(-127, 127);
+    for (auto &w : source)
+        w = static_cast<int8_t>(wd(rng));
+
+    const int8_t *reference = nullptr;
+    ASSERT_EQ(ck::get_or_pack_weight_int8(source.data(), K, N, K, pack_nr,
+                      /*transB=*/true, /*interleave_split_halves=*/false,
+                      &reference, nullptr, /*disable_cache=*/true,
+                      /*in_place=*/false, /*capacity=*/0, group_size),
+            status_t::success);
+    ASSERT_NE(reference, nullptr);
+
+    // The kernel requires a 64-byte-aligned image. std::vector does not
+    // provide that, so align the storage the way the unpack buffer does.
+    std::vector<int8_t> inplace_storage(packed_bytes + 63);
+    auto *inplace = reinterpret_cast<int8_t *>(
+            (reinterpret_cast<uintptr_t>(inplace_storage.data()) + 63u)
+            & ~uintptr_t {63});
+    std::memcpy(inplace, source.data(), raw_bytes);
+    const int8_t *packed = nullptr;
+    ASSERT_EQ(ck::get_or_pack_weight_int8(inplace, K, N, K, pack_nr,
+                      /*transB=*/true, /*interleave_split_halves=*/false,
+                      &packed, nullptr, /*disable_cache=*/false,
+                      /*in_place=*/true, packed_bytes, group_size),
+            status_t::success);
+    ASSERT_EQ(packed, inplace);
+    EXPECT_EQ(std::memcmp(packed, reference, packed_bytes), 0);
+
+    // The Q8 group pack stores the final signed-source correction.
+    for (int ob = 0; ob < N / pack_nr; ++ob) {
+        const auto *blk = packed + static_cast<size_t>(ob) * G * group_bytes;
+        for (int g = 0; g < G; ++g) {
+            const auto *comp = reinterpret_cast<const int32_t *>(blk
+                    + static_cast<size_t>(g) * group_bytes
+                    + static_cast<size_t>(group_size) * pack_nr);
+            for (int n = 0; n < pack_nr; ++n) {
+                int32_t sum = 0;
+                const int col = ob * pack_nr + n;
+                for (int k = 0; k < group_size; ++k) {
+                    sum += source[static_cast<size_t>(col) * K + g * group_size
+                            + k];
+                }
+                EXPECT_EQ(comp[n], -128 * sum);
+            }
+        }
+    }
+
+    ck::free_owned_packed_weight_int8(reference);
+    ck::clear_custom_kernel_pack_cache_int8();
 }
 
 // `disable_cache=true` must return a fresh caller-owned buffer on

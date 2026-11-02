@@ -337,6 +337,11 @@ void free_owned_packed_weight_f16(const float16_t *packed);
 // down to K] is zero) and stored as one int32 per column —
 // `comp[v_col] = sum_{k=0}^{K-1} wei_s8[k, v_col]`.
 //
+// With `group_size > 0`, each group's weight quads are immediately followed
+// by its compensation row. For symmetric Q8 that row stores the final
+// correction `-128 * sum_group(weight)`, so the group microkernel seeds its
+// VPDPBUSD accumulator directly.
+//
 // Cache: SEPARATE singleton from the BF16 pack — different value
 // type (`int8_t *`) and different cache-key marker bit prevent
 // collision.  The cache-key `extra_hash` ORs `kCustomKernelInt8Marker`
@@ -374,7 +379,7 @@ status_t get_or_pack_weight_int8(const int8_t *weight, int K, int N, int ldb,
         int pack_nr, bool transB, bool interleave_split_halves,
         const int8_t **out_packed, bool *was_hit_out = nullptr,
         bool disable_cache = false, bool in_place = false,
-        size_t wei_buffer_capacity_bytes = 0);
+        size_t wei_buffer_capacity_bytes = 0, int group_size = 0);
 
 /// Free a packed-weight buffer returned by
 /// `get_or_pack_weight_int8(..., disable_cache=true)`.  Safe with

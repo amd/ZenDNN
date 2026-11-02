@@ -1017,7 +1017,7 @@ inline custom_kernel::PackProbeStats warm_custom(const PrepackRequest &p) {
     custom_kernel::warm_pack_all_custom_kernel_experts(*p.weight, *p.K, *p.N,
             *p.ldb, *p.transB, iwc, p.num_ops_total, st,
             interleave_split_halves, family, p.group_size, p.weight_cache_type,
-            p.ck_in_place);
+            p.ck_in_place, &p.wei_capacities);
     return st;
 }
 
@@ -1505,17 +1505,12 @@ inline bool ck_eligible_bf16(const PrepackRequest &p) {
 inline bool ck_eligible_int8(const PrepackRequest &p) {
     if (!p.custom_kernel_on) { return false; }
     if (!get_grp_matmul_custom_kernel_int8()) { return false; }
-    // Per-group (group_size > 0) is AOCL-only on this path: the runtime
-    // forces the AOCL DLP `execute_tile` sym-quant GEMM for a per-group `{G, N}`
-    // wei scale (`ck_per_group` in group_matmul_n_tile.cpp sets
-    // use_custom=false — the custom int8 microkernel slices the source scale
-    // one-scalar-per-row, i.e. per-token only).  So the prepack must NOT
-    // warm the custom-kernel pack for per-group; return false here and let
-    // `int8_aocl_warm_candidate` route the warm to the AOCL sym-quant per-
-    // tile LRU (keyed on the same K/G the runtime `execute_tile` reads).  Mirrors
-    // the runtime executor exactly.  (When the custom kernel gains per-group
-    // support, this guard and the runtime `ck_per_group` guard lift together.)
-    if (p.group_size > 0) { return false; }
+    // Q8_0 is group 32 on both the source and the weight. That shape has a
+    // custom-kernel pack. Every other per-group int8 shape stays on AOCL.
+    if (p.group_size > 0 && p.group_size != 32) { return false; }
+    if (p.group_size == 32 && p.compute_dtype != data_type_t::s8) {
+        return false;
+    }
     // Three int8 entry forms reach the CK microkernel (mirror
     // resolve_variant in custom_kernel/dispatch.cpp):
     //   * runtime hoist     — `dynamic_quant=true` with bf16 or f32 src;
@@ -2005,6 +2000,15 @@ inline void cross_warm(const PrepackRequest &p, matmul_algo_t inner_kernel,
             }
             return;
         }
+        // Q8 group-32 owns the unpack buffer as its one in-place CK image and
+        // both automatic phases route to ALGO 3. An AOCL cross-warm here
+        // would write its full-weight layout over that same buffer after the
+        // CK warm, while the CK cache sentinel still points at it.
+        if (p.group_size == 32 && p.wei_dtype == data_type_t::s8
+                && p.compute_dtype == data_type_t::s8 && p.ck_in_place) {
+            return;
+        }
+
         // `!primary_did_aocl_fw` for the same reason as the two branches
         // below: the narrow-N escape may already have run this exact
         // full-weight warm, and repeating it re-walks every expert through

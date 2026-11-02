@@ -175,6 +175,14 @@ enum class Int8UnaryPostOp : uint8_t {
 struct Int8EpilogueConfig {
     bool src_quant_per_tensor = false;
     bool wei_scale_per_tensor = false;
+    /// Q8_0 per-group K.  0 keeps the per-token source / per-channel weight
+    /// epilogue.  32 applies `src_scale[m, g] * wei_scale[g, n]` on every
+    /// group of 32 K, using the per-group compensation rows in the pack.
+    int group_k = 0;
+    /// Elements between source-scale rows (`G` for `{M, G}`).
+    int src_row_groups = 0;
+    /// Elements between weight-scale groups (`N` for `{G, N}`).
+    int wei_group_stride = 0;
     float dst_scale = 1.0f;
     int32_t dst_zp = 0;
     const float *binary_mul = nullptr;
@@ -281,6 +289,11 @@ void finish_int8_accum_nv2_sym_bf16(const int32_t *C, int ldc_c, int M,
 /// `Act = none`; gated activations remain BF16-only.
 int8_ukernel_fn_t select_int8_ukernel(int MR, int NV, IntCompute compute,
         ActivationKind act, OutputType dst_dt);
+
+/// Q8_0 per-group (K-group 32) symmetric s8 kernel. NV is 2 (NR=32)
+/// or 4 (NR=64); MR is 1..4.
+int8_ukernel_fn_t select_int8_q8_group_ukernel(
+        int MR, int NV, ActivationKind act, OutputType dst_dt);
 
 } // namespace custom_kernel
 } // namespace matmul

@@ -408,11 +408,15 @@ status_t fill_kernel_table(int NV, int max_mr, ActivationKind act_kind,
 // mis-resolved f32 gated variant refuses here rather than at runtime.
 status_t fill_kernel_table_int8(int NV, IntCompute compute,
         ActivationKind act_kind, OutputType dst_dt,
-        int8_ukernel_fn_t (&kernel_table)[kMaxMR + 1]) {
-    const int max_mr = max_mr_for_nv_int8(NV, compute);
+        int8_ukernel_fn_t (&kernel_table)[kMaxMR + 1], int group_k = 0) {
+    const bool q8_group = group_k == 32 && compute == IntCompute::kS8_Sym
+            && (NV == 2 || NV == 4);
+    const int max_mr = q8_group ? std::min(max_mr_for_nv_int8(NV, compute), 4)
+                                : max_mr_for_nv_int8(NV, compute);
     for (int mr = 1; mr <= max_mr; ++mr) {
-        kernel_table[mr]
-                = select_int8_ukernel(mr, NV, compute, act_kind, dst_dt);
+        kernel_table[mr] = q8_group
+                ? select_int8_q8_group_ukernel(mr, NV, act_kind, dst_dt)
+                : select_int8_ukernel(mr, NV, compute, act_kind, dst_dt);
         if (kernel_table[mr] == nullptr) return status_t::failure;
     }
     return status_t::success;
@@ -473,7 +477,8 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
         const std::vector<bool> &weights_prepacked, int group_size,
         int wei_scale_grp_stride,
         const std::vector<bool> &weights_aocl_prepacked, int32_t num_threads,
-        int32_t weight_cache_mode, bool allow_in_place) {
+        int32_t weight_cache_mode, bool allow_in_place,
+        const std::vector<size_t> &wei_capacities) {
 
     // Reset the full CallContext to defaults on entry.  Callers may
     // reuse a single context across calls (e.g. an OMP region that
@@ -966,7 +971,8 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
             : is_int8_variant(variant)
             ? max_mr_for_nv_int8(out.NV, out.compute_int)
             : max_mr_for_nv(out.NV);
-    if (is_w4a8_variant(variant)) {
+    if (is_w4a8_variant(variant)
+            || (is_int8_variant(variant) && group_size == 32)) {
         out.group_size = group_size;
         out.wei_scale_grp_stride = wei_scale_grp_stride;
     }
@@ -977,6 +983,10 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
     out.f16_prompt = se_f16_prompt(out.single_expert, out.NV, m_max, variant);
     out.base_max_mr = (bf16_prompt || out.f16_prompt) ? out.max_mr : 0;
     out.max_mr = se_prompt_max_mr(out.max_mr, bf16_prompt, out.f16_prompt);
+    // Q8 per-group keeps an f32 sum beside the int32 dpbusd accumulators.
+    // MR 4 fits both in zmm; a wider row tile spills the K loop.
+    if (out.group_size == 32 && is_int8_variant(out.variant))
+        out.max_mr = std::min(out.max_mr, 4);
     // Map framework activation → CK ActivationKind.  Order matters: refusal
     // gate above guarantees `act` is one of {none, swiglu_oai_mul,
     // silu_and_mul, gelu_and_mul} at this point.
@@ -1010,7 +1020,7 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
     if (is_int8_variant(out.variant)) {
         const OutputType dst_dt = dst_dt_for_variant(out.variant);
         if (fill_kernel_table_int8(out.NV, out.compute_int, out.act_kind,
-                    dst_dt, out.kernel_table_int8)
+                    dst_dt, out.kernel_table_int8, out.group_size)
                 != status_t::success) {
             return refuse("kernel_table_int8_fill_failed",
                     "no DQ-INT8 microkernel for this (NV, compute, "
@@ -1263,6 +1273,11 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
             // The int8 pack writes both the VNNI-quad weight slab and the
             // per-column compensation row; the microkernel reads both
             // through a single `int8_t *`.
+            const size_t expert_cap
+                    = (i < static_cast<int>(wei_capacities.size()))
+                    ? wei_capacities[static_cast<size_t>(i)]
+                    : 0;
+            const int pack_group = (group_size == 32) ? 32 : 0;
             status_t pst = get_or_pack_weight_int8(
                     static_cast<const int8_t *>(ck_weight), K[i], N[i], ck_ldb,
                     pack_nr,
@@ -1271,15 +1286,8 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
                     &out.packed_ptrs_int8[i],
                     /*was_hit_out=*/&was_hit_unused,
                     /*disable_cache=*/cache_off,
-                    /*in_place=*/ck_in_place,
-                    // `prepare_for_call` does not receive `matmul_params`, so
-                    // the caller-declared capacity cannot reach here yet; 0
-                    // keeps the int8 in-place branch inert (its packed image
-                    // always exceeds the logical extent by the compensation
-                    // rows).  bf16 is unaffected -- it qualifies on exact size
-                    // equality and needs no declaration.  Plumb the per-expert
-                    // value through `prepare_for_call` to switch int8 on.
-                    /*wei_buffer_capacity_bytes=*/0);
+                    /*in_place=*/ck_in_place && expert_cap > 0, expert_cap,
+                    pack_group);
             if (pst != status_t::success) {
                 return refuse("weight_pack_failed",
                         "get_or_pack_weight_int8 returned failure — "
@@ -1511,9 +1519,12 @@ inline void dispatch_tile_int8(const CallContext &ctx, int expert_idx, int M,
     // compensation row.  Mirror of the pack-time
     // `bytes_per_oblock` expression in pack.cpp; the two MUST stay
     // in lockstep.
+    const int comp_rows = (ctx.group_size > 0 && (K % ctx.group_size) == 0)
+            ? (K / ctx.group_size)
+            : 1;
     const size_t o_blk_stride_bytes
             = static_cast<size_t>(K_quad) * ctx.pack_nr * kVNNIInt8Quad
-            + static_cast<size_t>(ctx.pack_nr) * sizeof(int32_t);
+            + static_cast<size_t>(comp_rows) * ctx.pack_nr * sizeof(int32_t);
 
     const int subtile_cols = (ctx.subtile_cols_per_expert[expert_idx] > 0)
             ? ctx.subtile_cols_per_expert[expert_idx]
@@ -1536,7 +1547,6 @@ inline void dispatch_tile_int8(const CallContext &ctx, int expert_idx, int M,
     const size_t scale_elem_bytes = (ctx.scale_kind == ScaleKind::kBf16)
             ? sizeof(bfloat16_t)
             : sizeof(float);
-
     const bool oblk_outer = se_oblock_outer(ctx.single_expert, n_calls);
     const auto mr_of = [mr_base, n_big](int c) {
         return (c < n_big) ? mr_base + 1 : mr_base;
@@ -1577,11 +1587,14 @@ inline void dispatch_tile_int8(const CallContext &ctx, int expert_idx, int M,
 
                 const uint8_t *A_chunk
                         = A_bytes + static_cast<size_t>(m_off) * lda;
+                const int src_row
+                        = epilogue.group_k > 0 ? epilogue.src_row_groups : 1;
                 const void *src_scale_chunk
                         = static_cast<const char *>(src_scale_full)
                         + (epilogue.src_quant_per_tensor
                                         ? 0
                                         : static_cast<size_t>(m_off)
+                                                * static_cast<size_t>(src_row)
                                                 * scale_elem_bytes);
                 const int32_t *src_zp_chunk = (src_zp_full != nullptr)
                         ? src_zp_full
@@ -1649,11 +1662,14 @@ inline void dispatch_tile_int8(const CallContext &ctx, int expert_idx, int M,
             const int8_ukernel_fn_t kfn = ctx.kernel_table_int8[mr_now];
 
             const uint8_t *A_chunk = A_bytes + static_cast<size_t>(m_off) * lda;
+            const int src_row
+                    = epilogue.group_k > 0 ? epilogue.src_row_groups : 1;
             const void *src_scale_chunk
                     = static_cast<const char *>(src_scale_full)
                     + (epilogue.src_quant_per_tensor
                                     ? 0
                                     : static_cast<size_t>(m_off)
+                                            * static_cast<size_t>(src_row)
                                             * scale_elem_bytes);
             const int32_t *src_zp_chunk = (src_zp_full != nullptr)
                     ? src_zp_full + (epilogue.src_quant_per_tensor ? 0 : m_off)
@@ -2559,8 +2575,10 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
                 = static_cast<int64_t>(K) * 32 + 32 * sizeof(int32_t);
         const bool int8_kblock_policy
                 = grp_matmul_int8_kblock_enabled(ctx.kblock_auto);
-        const bool int8_kblock_shape
-                = ctx.variant == KernelVariant::kS8_S8_BF16_SYM
+        // group_size 0 is the full-K compensation row this kernel reads.
+        // Q8 (group_size 32) stores a compensation row after every group.
+        const bool int8_kblock_shape = ctx.group_size == 0
+                && ctx.variant == KernelVariant::kS8_S8_BF16_SYM
                 && ctx.compute_int == IntCompute::kS8_Sym && ctx.pack_nr == 32
                 && ctx.act_kind == ActivationKind::none && bias == nullptr
                 && src_zp == nullptr && simple_dynamic_epilogue
@@ -2881,8 +2899,9 @@ bool block_api_supported(const CallContext &ctx, const void *bias,
         const void *src_zp, const Int8EpilogueConfig &int8_epilogue) {
     if (ctx.act_kind != ActivationKind::none || bias != nullptr) return false;
     if (ctx.variant == KernelVariant::kS8_S8_BF16_SYM)
-        return ctx.compute_int == IntCompute::kS8_Sym && ctx.pack_nr == kNRMin
-                && src_zp == nullptr && !int8_epilogue.src_quant_per_tensor
+        return ctx.group_size == 0 && ctx.compute_int == IntCompute::kS8_Sym
+                && ctx.pack_nr == kNRMin && src_zp == nullptr
+                && !int8_epilogue.src_quant_per_tensor
                 && !int8_epilogue.wei_scale_per_tensor
                 && int8_epilogue.binary_mul == nullptr
                 && int8_epilogue.binary_add == nullptr

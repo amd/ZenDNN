@@ -297,7 +297,17 @@ inline bool group_matmul_custom_kernel_candidate(const ParamsVec &params,
             continue;
         }
         const auto &ws = params[i].quant_params.wei_scale;
-        if (ws.dims.size() == 2 && ws.dims[0] > 1) { return false; }
+        if (ws.dims.size() == 2 && ws.dims[0] > 1) {
+            // Q8_0 group-32 is served by the per-group s8 kernel. Other
+            // {G, N} int8 shapes stay on AOCL.
+            const bool q8 = expert_d.wei == data_type_t::s8
+                    && expert_d.compute == data_type_t::s8
+                    && params[i].mem_format_b == 'n' && (N[i] % 32) == 0
+                    && ws.dims[1] == N[i]
+                    && params[i].quant_params.src_zp.buff == nullptr
+                    && params[i].quant_params.wei_zp.buff == nullptr;
+            if (!q8) { return false; }
+        }
     }
     return true;
 }

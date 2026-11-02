@@ -309,6 +309,11 @@ struct PrepackRequest {
     /// full-weight warm reorder IN PLACE instead of materialising a second
     /// copy the runtime would then hit and keep resident.
     size_t wei_buffer_capacity_bytes = 0;
+    /// Per-expert writable extent. The scalar above stays the minimum so a
+    /// shared AOCL warm cannot overrun a short expert. The custom-kernel
+    /// int8 warm uses this vector so each Q8_0 expert packs into its own
+    /// buffer.
+    std::vector<size_t> wei_capacities;
 
     /// The custom kernel runs this call and may write its BF16 or FP16 pack
     /// into the caller's buffer (`prepare_for_call`'s in-place rule), so the
@@ -453,8 +458,12 @@ inline PrepackRequest build_prepack_params(
         // which is exactly "no declared capacity" and keeps the whole warm
         // out-of-place.
         size_t cap = params[0].wei_buffer_capacity_bytes;
-        for (size_t i = 1; i < params.size() && cap != 0; ++i) {
-            cap = std::min(cap, params[i].wei_buffer_capacity_bytes);
+        p.wei_capacities.resize(params.size());
+        for (size_t i = 0; i < params.size(); ++i) {
+            p.wei_capacities[i] = params[i].wei_buffer_capacity_bytes;
+            if (i > 0 && cap != 0) {
+                cap = std::min(cap, params[i].wei_buffer_capacity_bytes);
+            }
         }
         p.wei_buffer_capacity_bytes = cap;
 
@@ -595,6 +604,12 @@ inline PrepackRequest build_prepack_params(
     } else {
         p.dynamic_quant = dynamic_quant;
         p.compute_dtype = compute_dtype;
+    }
+    // Q8_0 group-32 is packed in place into the unpack buffer. The warm
+    // must use that same layout or the first lookup keeps an extra copy.
+    if (p.group_size == 32 && p.wei_dtype == data_type_t::s8
+            && p.compute_dtype == data_type_t::s8 && p.weight_cache_type == 2) {
+        p.ck_in_place = true;
     }
 
     // W4A8 group_size from wei scale dims; ignore dynamic_quant (group DQ clears it).

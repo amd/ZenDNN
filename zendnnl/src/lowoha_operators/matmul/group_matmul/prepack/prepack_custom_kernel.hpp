@@ -177,7 +177,8 @@ status_t warm_pack_all_custom_kernel_experts(
         PackProbeStats &stats, bool interleave_split_halves = false,
         WarmDtypeFamily dtype_family = WarmDtypeFamily::kBF16,
         int group_size = 0, int32_t weight_cache_type = -1,
-        bool in_place = false);
+        bool in_place = false,
+        const std::vector<size_t> *wei_capacities = nullptr);
 
 } // namespace custom_kernel
 } // namespace group_matmul_prepack

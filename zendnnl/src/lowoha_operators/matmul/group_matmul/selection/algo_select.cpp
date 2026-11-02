@@ -288,6 +288,20 @@ static int auto_select_algo(const std::vector<int> &M,
         return pick(se.algo, se.reason, se.want);
     }
 
+    // Q8_0 per-group runs the custom kernel on ALGO 3 in both phases, so
+    // prompt and decode share one in-place pack. This has to precede the
+    // few-expert occupancy rule: the fused K/V decode call has two active
+    // operations, and its {M, K/32} source scales are CK-servable even when
+    // 2 * kDecodeNTileThreadFactor is smaller than the team size. An
+    // explicit phase pin still wins.
+    if (!phase_env_pinned && n_tile_safe
+            && q8_per_group_ck_call(M, N, K, params)) {
+        return pick(3,
+                is_decode ? "auto_q8_per_group_ck_decode"
+                          : "auto_q8_per_group_ck_prompt",
+                3);
+    }
+
     // Rule 0.5 — DECODE-ONLY few-expert occupancy arrow. Prompt
     // few-expert calls are handled by Rule 0.7 below. There are only two
     // outcomes: ALGO 3 or ALGO 1; the rule is deliberately independent of

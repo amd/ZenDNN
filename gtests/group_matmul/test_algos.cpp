@@ -51,6 +51,7 @@
 // decision matrix without spinning up the full GEMM stack.
 #include "lowoha_operators/matmul/group_matmul/common/group_matmul_parallel_common.hpp"
 #include "lowoha_operators/matmul/group_matmul/executors/m_tile/group_matmul_m_tile.hpp"
+#include "lowoha_operators/matmul/group_matmul/selection/algo_select.hpp"
 
 // `GroupNTileStrategy` enum + `test_api::PhaseBSnapshot` /
 // `s_capture_phase_b` / `s_last_phase_b_snapshot` — used by
@@ -3349,6 +3350,51 @@ TEST(TestGroupMatmulAutoPhaseEnv, DefaultDecodeRoutesToAlgo3) {
             << "AUTO_DECODE_ALGO default (=3) must route decode → ALGO 3";
 }
 
+// GGML Q8_0 unpack produces per-group source and weight scales, both with
+// K/32 groups. Its fused K/V decode call has two active operations, which
+// would otherwise take Rule 0.5's ALGO 1 occupancy arm at 32 threads. The
+// group-32 custom kernel supports this layout, so it must take ALGO 3 before
+// that rule and retain one shared in-place pack across prompt and decode.
+TEST(TestGroupMatmulAutoPhaseEnv,
+        Q8PerGroupFusedKVDecodeRoutesToAlgo3BeforeOccupancy) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+
+    constexpr int E = 2;
+    constexpr int M = 1;
+    constexpr int K = 4096;
+    constexpr int N = 1024;
+    constexpr int G = K / 32;
+    static float scale = 1.0f;
+
+    std::vector<char> layout(E, 'r');
+    std::vector<int> rows(E, M), cols(E, N), depth(E, K);
+    std::vector<matmul_params> params(E);
+    for (auto &p : params) {
+        p.dtypes.src = data_type_t::f32;
+        p.dtypes.wei = data_type_t::s8;
+        p.dtypes.dst = data_type_t::f32;
+        p.dtypes.compute = data_type_t::s8;
+        p.dynamic_quant = true;
+        p.mem_format_a = 'n';
+        p.mem_format_b = 'n';
+        p.quant_params.src_scale.buff = &scale;
+        p.quant_params.src_scale.dt = data_type_t::bf16;
+        p.quant_params.src_scale.dims = {M, G};
+        p.quant_params.wei_scale.buff = &scale;
+        p.quant_params.wei_scale.dt = data_type_t::bf16;
+        p.quant_params.wei_scale.dims = {G, N};
+    }
+
+    GroupMatmulAlgoTrace trace;
+    EXPECT_EQ(group_matmul_algo_select(layout, rows, cols, depth, params,
+                      /*threads=*/32, &trace),
+            3);
+    EXPECT_STREQ(trace.reason, "auto_q8_per_group_ck_decode");
+}
+
 // ── Rule 0.6a — decode AUTO_DECODE_ALGO=5 pin qualifier ──────────────
 // AUTO never emits ALGO 5 on its own; an operator opts in with the explicit
 // `AUTO_DECODE_ALGO=5` pin.  With the qualifier gate ON (default) that pin is
@@ -6347,9 +6393,11 @@ TEST(TestGroupMatmulAutoPhaseEnv, CrossWarmReachableFollowsLayerScope) {
     }
 }
 
-// A per-group `{G, N}` INT8 weight keeps the shape rules: its prompt runs on
-// ALGO 1 (Rule 0.7) and its decode by Rule 0.5's occupancy test or the ALGO 3
-// decode default.  A per-channel one (`groups == 1`) is an ALGO-3 MoE layer.
+// Group-32 symmetric int8 (K / groups == 32) is the Q8 custom-kernel shape
+// and selects ALGO 3 in both phases. A different group size keeps the old
+// shape rules: prompt on ALGO 1 (Rule 0.7), few-active decode on Rule 0.5,
+// and a larger decode on the ALGO 3 default. A per-channel weight
+// (`groups == 1`) is an ALGO-3 MoE layer.
 TEST(TestGroupMatmulAutoPhaseEnv, PerGroupInt8KeepsShapeRules) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
@@ -6367,9 +6415,14 @@ TEST(TestGroupMatmulAutoPhaseEnv, PerGroupInt8KeepsShapeRules) {
     const bool vnni
             = zendnnl::lowoha::matmul::custom_kernel::avx512vnni_available();
     for (const auto &c :
-            {layer_case {90, 4, prompt_m, 1, "auto_rule07_prompt_seq"},
-                    layer_case {90, 4, 2, 1, "auto_rule05_few_active"},
-                    layer_case {90, 16, 2, 3, "auto_phase_env"},
+            {layer_case {90, 4, prompt_m, 3, "auto_q8_per_group_ck_prompt"},
+                    layer_case {90, 4, 2, 3, "auto_q8_per_group_ck_decode"},
+                    layer_case {90, 16, 2, 3, "auto_q8_per_group_ck_decode"},
+                    // K=2880 and 80 groups is group size 36, so the Q8 rule
+                    // does not apply and the previous shape rules remain.
+                    layer_case {80, 4, prompt_m, 1, "auto_rule07_prompt_seq"},
+                    layer_case {80, 4, 2, 1, "auto_rule05_few_active"},
+                    layer_case {80, 16, 2, 3, "auto_phase_env"},
                     vnni ? layer_case {1, 4, prompt_m, 3, "auto_algo3"}
                          : layer_case {1, 4, prompt_m, 1,
                                    "auto_rule07_prompt_seq"}}) {

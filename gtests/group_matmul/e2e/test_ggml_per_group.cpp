@@ -443,27 +443,13 @@ TEST(GroupMatmulGgmlPerGroup, NtileDlpEngagesBF16) {
                "regressed (n_tile_supported rejected a reordered weight)";
 }
 
-// ── N-tile (ALGO 3) that ACTUALLY splits each expert's N ───────────────────
-// `NtileDlpEngagesBF16` above pins ALGO 3 but its narrow N=64 trips the
-// planner's F3_narrow_N_escape (`stable > max_N / nr_align`) and runs the
-// Sequential fallback (one full-weight reorder per expert), so it proves
-// ALGO-3 *engagement* but never a real per-tile split.  To exercise the
-// strict-stable FixedTeamRounds split we must instead satisfy
-// `stable <= max_N / nr_align`, where `stable = aocl_stable_n_thr(num_threads)`
-// (= num_threads / ZENDNNL_GRP_MATMUL_AOCL_TARGET_SLOTS) and `nr_align = 32`
-// (the s8 sym-quant AOCL N-block).  `stable` is thread-count-derived and the
-// dispatcher reads it from the same cached `thread_guard::max_threads()` this
-// test queries, so size N to the live OMP team: N = stable * 32 * 2 yields
-// `stable` column tiles per expert (2x slot margin).  A genuine split needs
-// stable >= 2 (>= 2*TARGET_SLOTS hardware threads); smaller boxes can only run
-// one thread per expert (no intra-expert N split), so skip there.
-//
-// Signal: on the tiled path the ALGO-3 prepack warms the sym-quant reorder
-// cache PER N-TILE (`aocl_per_tile_sym_quant`), so `aocl.total_attempted ==
-// num_experts * stable`; the Sequential fallback warms it once per expert
-// (`aocl_full_weight_sym_quant`, == num_experts).  Hence total_attempted >
-// num_experts proves N was actually tiled, not sequentially fallen back.
-TEST(GroupMatmulGgmlPerGroup, NtileDlpActuallyTilesNBF16) {
+// ── Q8 custom-kernel ALGO 3 really splits each expert's N ──────────────────
+// Size N from the live thread team so the planner has enough 32-column blocks
+// for a non-sequential split. The custom pack is one full-weight image shared
+// by all N tiles; unlike the former DLP route, no per-tile AOCL warm count is
+// required. When WC=2 remains enabled, production also suppresses an AOCL
+// cross-warm so it cannot overwrite the in-place CK image.
+TEST(GroupMatmulGgmlPerGroup, NtileCustomKernelActuallyTilesNBF16) {
     namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
 
     // s8 sym-quant AOCL N-block == the runtime `nr_align` on this path
@@ -503,41 +489,18 @@ TEST(GroupMatmulGgmlPerGroup, NtileDlpActuallyTilesNBF16) {
     ASSERT_TRUE(stats.valid)
             << "prepack_n_tile must run for the GGML per-group call";
     EXPECT_EQ(stats.group_schedule, 3);
-    if (moe_test_utils::k_grp_matmul_aocl_dlp_compiled) {
-        // total_attempted > num_experts means the sym-quant cache was warmed per
-        // N-tile (num_experts * stable), i.e. n_tile_execute actually split N — not the
-        // Sequential fallback's one-full-weight-reorder-per-expert (== num_experts).
-        EXPECT_GT(stats.aocl.total_attempted, E)
-                << "planner took the Sequential fallback (no real N-tile "
-                   "split): "
-                   "stable="
-                << stable << " N=" << N << " num_threads=" << num_threads;
-        // AUTO-only cross-warm must AOT-warm the OTHER layout class (full-weight,
-        // used by ALGO 1/2/5/6) alongside the per-tile ALGO-3 primary above.
-        EXPECT_NE(stats.cross_warm_regime, prepack::CrossWarmRegime::none)
-                << "cross-warm did not fire under AUTO (env_algo=0)";
-    } else {
-        // Without AOCL-DLP, `resolve_matmul_backend()` returns reference so the AOCL
-        // prepack warmers are not invoked (see test_prepack.cpp).  The planner
-        // and executor still run ALGO 3 — verify a real N-tile split via the
-        // published execution_path rather than AOCL probe counters.
-        const char *mode
-                = zendnnl::lowoha::matmul::test_api::
-                          s_last_group_matmul_direct_execution_path.load(
-                                  std::memory_order_relaxed);
-        ASSERT_NE(mode, nullptr)
-                << "group_matmul_direct must publish execution_path for ALGO 3";
-        EXPECT_STRNE(mode, "flat_n_tile_sequential")
-                << "planner took the Sequential fallback (no real N-tile "
-                   "split): "
-                   "stable="
-                << stable << " N=" << N << " num_threads=" << num_threads
-                << " execution_path=" << mode;
-        // cross_warm is gated on the AOCL-DLP inner kernel; wiring is covered
-        // in TestPrepackCrossWarmRegimes under ZENDNNL_DEPENDS_AOCLDLP=ON builds.
-        EXPECT_EQ(stats.cross_warm_regime, prepack::CrossWarmRegime::none)
-                << "without AOCL-DLP, cross-warm is a no-op by design";
-    }
+    EXPECT_GT(stats.ck.cache_misses + stats.ck.cache_hits, 0)
+            << "Q8 group-32 ALGO 3 must warm the custom-kernel image";
+
+    const char *mode = zendnnl::lowoha::matmul::test_api::
+                               s_last_group_matmul_direct_execution_path.load(
+                                       std::memory_order_relaxed);
+    ASSERT_NE(mode, nullptr)
+            << "group_matmul_direct must publish execution_path for ALGO 3";
+    EXPECT_STRNE(mode, "flat_n_tile_sequential")
+            << "planner took the Sequential fallback (no real N-tile split)";
+    EXPECT_NE(std::strstr(mode, "custom"), nullptr)
+            << "Q8 per-group decode must execute the custom kernel";
 }
 
 // ── Full-pool warm: cold (unrouted) experts are unpacked + cached too ──────

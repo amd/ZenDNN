@@ -40,6 +40,7 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <vector>
 
 #include "common/zendnnl_global.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
@@ -407,7 +408,7 @@ std::mutex &pack_mutex_singleton() {
 // Cleared with the pack cache, for the same reason the AOCL mutation
 // registry is: once the entries are gone a later allocation can reuse an
 // address and must not inherit a stale verdict.
-enum class InPlaceImageFamily : uint8_t { kBf16, kF16 };
+enum class InPlaceImageFamily : uint8_t { kBf16, kF16, kS8 };
 
 struct InPlaceImage {
     int K = 0;
@@ -614,13 +615,10 @@ status_t pack_f16_from_source(const float16_t *weight, int K, int N, int ldb,
 //     where `K_quad = ceil(K / 4)` and the trailing K-quad is
 //     zero-padded so a 4-byte VPDPBUSD broadcast on the source
 //     side is always safe.
-//   * `pack_nr × 4` bytes (= `pack_nr` × `int32_t`) of per-column
-//     compensation.  Entry `v_col` carries
-//     `sum_{k=0}^{K-1} wei_s8[k, v_col]` — the running column sum
-//     consumed by the int8 microkernel epilogue to undo the
-//     XOR-by-0x80 (sym) or src-zp (asym) input bias.  The pad rows
-//     contribute zero, so the sum is the same whether you walk K
-//     or K_pad.
+//   * compensation: one raw full-K column-sum row when `group_size == 0`;
+//     otherwise one row immediately after each group's weight quads, storing
+//     `-128 * sum_group(weight)` for the symmetric Q8 group kernel. The pad
+//     rows contribute zero.
 //
 // `Interleave` parameter has the same gate / silu / gelu semantic
 // as the bf16 sibling: when true, pack output column `2i+0` reads
@@ -631,8 +629,12 @@ status_t pack_f16_from_source(const float16_t *weight, int K, int N, int ldb,
 // `v_col` slot.
 template <bool Interleave>
 inline void pack_int8_vnni_impl(const int8_t *weight, int K, int N, int ldb,
-        int pack_nr, bool transB, int8_t *packed) {
+        int pack_nr, bool transB, int8_t *packed, int group_size) {
     const int K_quad = (K + kVNNIInt8Quad - 1) / kVNNIInt8Quad;
+    const bool per_group = group_size > 0;
+    const int G = per_group ? (K / group_size) : 1;
+    const int quads_per_group
+            = per_group ? (group_size / kVNNIInt8Quad) : K_quad;
     const int n_blocks = N / pack_nr;
     const size_t ldb_z = static_cast<size_t>(ldb);
     const int I = N / 2;
@@ -643,15 +645,11 @@ inline void pack_int8_vnni_impl(const int8_t *weight, int K, int N, int ldb,
     // (`pack_nr * kVNNIPair`) — both express "one B-load worth of
     // packed weight bytes".
     const size_t kq_stride_bytes = static_cast<size_t>(pack_nr) * kVNNIInt8Quad;
-    // Per-o-block byte footprint: weight bytes + compensation row
-    // (`pack_nr * sizeof(int32_t)` = `pack_nr * 4`).  The kernel
-    // reads compensation as `int32_t *(Bpacked + weight_bytes)` so
-    // any change here must move in lockstep with the consumer
-    // expression in int8_microkernel.cpp.
+    // Per-o-block byte footprint: weight bytes plus G compensation rows.
     const size_t weight_bytes_in_oblock
             = static_cast<size_t>(K_quad) * kq_stride_bytes;
-    const size_t comp_bytes_in_oblock
-            = static_cast<size_t>(pack_nr) * sizeof(int32_t);
+    const size_t comp_bytes_in_oblock = static_cast<size_t>(G)
+            * static_cast<size_t>(pack_nr) * sizeof(int32_t);
     const size_t bytes_per_oblock
             = weight_bytes_in_oblock + comp_bytes_in_oblock;
 
@@ -668,8 +666,21 @@ inline void pack_int8_vnni_impl(const int8_t *weight, int K, int N, int ldb,
         // the `n` loop.
         for (int kq = 0; kq < K_quad; ++kq) {
             const int k_base = kq * kVNNIInt8Quad;
-            int8_t *kq_base
-                    = blk_base + static_cast<size_t>(kq) * kq_stride_bytes;
+            // Per-group packs keep that group's compensation row directly
+            // after its weight quads.  The byte total matches the flat
+            // layout (all quads, then every compensation row).
+            int8_t *kq_base;
+            if (per_group) {
+                const int g = kq / quads_per_group;
+                const int ol = kq - g * quads_per_group;
+                const size_t group_bytes
+                        = static_cast<size_t>(quads_per_group) * kq_stride_bytes
+                        + static_cast<size_t>(pack_nr) * sizeof(int32_t);
+                kq_base = blk_base + static_cast<size_t>(g) * group_bytes
+                        + static_cast<size_t>(ol) * kq_stride_bytes;
+            } else {
+                kq_base = blk_base + static_cast<size_t>(kq) * kq_stride_bytes;
+            }
             const int k_remain = K - k_base; // ≥1 since kq < K_quad
 
             for (int n = 0; n < pack_nr; ++n) {
@@ -726,31 +737,86 @@ inline void pack_int8_vnni_impl(const int8_t *weight, int K, int N, int ldb,
         // Equivalent to summing the source weight column directly, but
         // avoids re-applying the permutation logic and naturally
         // ignores the zero-padded tail.
-        int32_t *comp_row = reinterpret_cast<int32_t *>(
+        const size_t group_bytes
+                = static_cast<size_t>(quads_per_group) * kq_stride_bytes
+                + static_cast<size_t>(pack_nr) * sizeof(int32_t);
+        int32_t *comp_base = reinterpret_cast<int32_t *>(
                 blk_base + weight_bytes_in_oblock);
-        for (int n = 0; n < pack_nr; ++n) {
-            int32_t sum = 0;
-            for (int kq = 0; kq < K_quad; ++kq) {
-                const int8_t *quad = blk_base
-                        + static_cast<size_t>(kq) * kq_stride_bytes
-                        + static_cast<size_t>(n) * kVNNIInt8Quad;
-                sum += static_cast<int32_t>(quad[0])
-                        + static_cast<int32_t>(quad[1])
-                        + static_cast<int32_t>(quad[2])
-                        + static_cast<int32_t>(quad[3]);
+        for (int g = 0; g < G; ++g) {
+            const int kq_begin = g * quads_per_group;
+            const int kq_end = per_group ? kq_begin + quads_per_group : K_quad;
+            int32_t *comp_row = per_group
+                    ? reinterpret_cast<int32_t *>(blk_base
+                              + static_cast<size_t>(g) * group_bytes
+                              + static_cast<size_t>(quads_per_group)
+                                      * kq_stride_bytes)
+                    : comp_base + static_cast<size_t>(g) * pack_nr;
+            for (int n = 0; n < pack_nr; ++n) {
+                int32_t sum = 0;
+                for (int kq = kq_begin; kq < kq_end; ++kq) {
+                    const int ol = kq - kq_begin;
+                    const int8_t *quad = per_group
+                            ? blk_base + static_cast<size_t>(g) * group_bytes
+                                    + static_cast<size_t>(ol) * kq_stride_bytes
+                                    + static_cast<size_t>(n) * kVNNIInt8Quad
+                            : blk_base
+                                    + static_cast<size_t>(kq) * kq_stride_bytes
+                                    + static_cast<size_t>(n) * kVNNIInt8Quad;
+                    sum += static_cast<int32_t>(quad[0])
+                            + static_cast<int32_t>(quad[1])
+                            + static_cast<int32_t>(quad[2])
+                            + static_cast<int32_t>(quad[3]);
+                }
+                // A per-group Q8 kernel always consumes symmetric s8 A.
+                // Store the final recenter correction so the hot kernel can
+                // seed its accumulator with one load instead of executing
+                // vpmulld(-128) plus vpsubd for every group and panel.
+                comp_row[n] = per_group ? (-128 * sum) : sum;
             }
-            comp_row[n] = sum;
         }
     }
 }
 
 void pack_int8_vnni(const int8_t *weight, int K, int N, int ldb, int pack_nr,
-        bool transB, bool interleave_split_halves, int8_t *packed) {
+        bool transB, bool interleave_split_halves, int8_t *packed,
+        int group_size = 0) {
     if (interleave_split_halves) {
-        pack_int8_vnni_impl<true>(weight, K, N, ldb, pack_nr, transB, packed);
+        pack_int8_vnni_impl<true>(
+                weight, K, N, ldb, pack_nr, transB, packed, group_size);
     } else {
-        pack_int8_vnni_impl<false>(weight, K, N, ldb, pack_nr, transB, packed);
+        pack_int8_vnni_impl<false>(
+                weight, K, N, ldb, pack_nr, transB, packed, group_size);
     }
+}
+
+// True in-place transform for the Q8 row-major (transB) layout. Expanding
+// each output-column panel shifts every later panel toward higher addresses,
+// so packing panels from last to first never destroys an unread earlier
+// panel. Only one pack_nr*K thread-local panel is needed; there is no second
+// full-weight image. Gated interleave is excluded because a later packed
+// panel can contain canonical rows from both halves.
+bool pack_int8_vnni_inplace_reverse(int8_t *weight, int K, int N, int ldb,
+        int pack_nr, bool transB, bool interleave_split_halves, int group_size,
+        size_t bytes_per_oblock) {
+    if (weight == nullptr || !transB || interleave_split_halves || ldb != K
+            || K <= 0 || N <= 0 || pack_nr <= 0 || (N % pack_nr) != 0)
+        return false;
+    static thread_local std::vector<int8_t> panel;
+    panel.resize(static_cast<size_t>(K) * static_cast<size_t>(pack_nr));
+    const int n_blocks = N / pack_nr;
+    for (int ob = n_blocks - 1; ob >= 0; --ob) {
+        for (int n = 0; n < pack_nr; ++n) {
+            const int col = ob * pack_nr + n;
+            std::memcpy(panel.data() + static_cast<size_t>(n) * K,
+                    weight + static_cast<size_t>(col) * K,
+                    static_cast<size_t>(K));
+        }
+        pack_int8_vnni(panel.data(), K, pack_nr, K, pack_nr,
+                /*transB=*/true, /*interleave_split_halves=*/false,
+                weight + static_cast<size_t>(ob) * bytes_per_oblock,
+                group_size);
+    }
+    return true;
 }
 
 // ── W4A8 S4 nibble pack ───────────────────────────────────────────
@@ -1659,7 +1725,7 @@ void clear_custom_kernel_pack_cache_bf16() {
 status_t get_or_pack_weight_int8(const int8_t *weight, int K, int N, int ldb,
         int pack_nr, bool transB, bool interleave_split_halves,
         const int8_t **out_packed, bool *was_hit_out, bool disable_cache,
-        bool in_place, size_t wei_buffer_capacity_bytes) {
+        bool in_place, size_t wei_buffer_capacity_bytes, int group_size) {
 
     if (was_hit_out != nullptr) *was_hit_out = false;
 
@@ -1688,18 +1754,20 @@ status_t get_or_pack_weight_int8(const int8_t *weight, int K, int N, int ldb,
         return status_t::failure;
     }
 
-    // Buffer size: weight slab + compensation row per o-block.  Mirror
-    // of the bf16 K_pair × pack_nr × 2 formula, scaled to K_quad ×
-    // pack_nr × 4 (= same byte volume per K-element since 4 × 1B
-    // = 2 × 2B) plus the per-block `pack_nr` int32 comp row.
+    // Buffer size: weight slab + compensation row(s) per o-block.
+    // group_size 0 keeps one full-K row. Q8_0 (group_size 32) stores one
+    // row per K-group so the kernel can scale each group on its own.
     const int K_quad = (K + kVNNIInt8Quad - 1) / kVNNIInt8Quad;
     const int n_blocks = N / pack_nr;
+    const int comp_groups
+            = (group_size > 0 && (K % group_size) == 0) ? (K / group_size) : 1;
     const size_t weight_bytes_per_oblock
             = static_cast<size_t>(K_quad) * pack_nr * kVNNIInt8Quad;
-    const size_t comp_bytes_per_oblock
-            = static_cast<size_t>(pack_nr) * sizeof(int32_t);
-    const size_t bytes = static_cast<size_t>(n_blocks)
-            * (weight_bytes_per_oblock + comp_bytes_per_oblock);
+    const size_t comp_bytes_per_oblock = static_cast<size_t>(comp_groups)
+            * static_cast<size_t>(pack_nr) * sizeof(int32_t);
+    const size_t bytes_per_oblock
+            = weight_bytes_per_oblock + comp_bytes_per_oblock;
+    const size_t bytes = static_cast<size_t>(n_blocks) * bytes_per_oblock;
     const size_t alignment = 64;
     const size_t bytes_aligned = (bytes + alignment - 1) & ~(alignment - 1);
 
@@ -1722,7 +1790,8 @@ status_t get_or_pack_weight_int8(const int8_t *weight, int K, int N, int ldb,
             return status_t::failure;
         }
         pack_int8_vnni(weight, K, N, ldb, pack_nr, transB,
-                interleave_split_halves, static_cast<int8_t *>(raw));
+                interleave_split_halves, static_cast<int8_t *>(raw),
+                group_size);
         *out_packed = static_cast<const int8_t *>(raw);
         return status_t::success;
     }
@@ -1756,9 +1825,14 @@ status_t get_or_pack_weight_int8(const int8_t *weight, int K, int N, int ldb,
     static_assert(kCustomKernelInt8Marker != kCustomKernelAlgoMarkerBF16,
             "INT8 cache-key marker must differ from BF16 marker so the "
             "two pack families never alias.");
+    // group_size in bits 8..14. pack_nr uses bits 0..6, so ORing the raw
+    // value 32 would alias pack_nr 32.
     const uint32_t variant_bits = static_cast<uint32_t>(pack_nr)
             | (transB ? kTransBMarker : 0u)
-            | (interleave_split_halves ? kInterleaveSplitMarker : 0u);
+            | (interleave_split_halves ? kInterleaveSplitMarker : 0u)
+            | ((static_cast<uint32_t>(comp_groups == 1 ? 0 : group_size)
+                       & 0x7Fu)
+                    << 8);
     const size_t extra_hash
             = static_cast<size_t>(kCustomKernelInt8Marker | variant_bits);
     Key_matmul key(weight, static_cast<unsigned>(N), static_cast<unsigned>(K),
@@ -1806,40 +1880,34 @@ status_t get_or_pack_weight_int8(const int8_t *weight, int K, int N, int ldb,
         }
 
         log_miss();
-        // In-place write-back, mirroring `get_or_pack_weight_bf16`: same
-        // `wei_inplace_fits` rule, same contiguity requirement, same interim ->
-        // memcpy -> nullptr-sentinel shape.  The int8 pack is `N*K_pad` weight
-        // bytes PLUS a `pack_nr` int32 compensation row per output block, so it
-        // never equals the logical extent and only a caller-declared capacity
-        // can admit it -- see `wei_inplace_fits` in lowoha_common.hpp for why
-        // that row is mandatory rather than droppable.  The copy takes the
-        // whole packed image, so the interleaved rows keep the exact offsets
-        // the microkernel reads them from.
+        // The int8 pack is larger than N*K because each group carries a
+        // compensation row. A caller-declared capacity admits the reverse
+        // panel transform below; it uses one bounded thread-local panel,
+        // never a second full-weight image.
         const size_t plain_bytes = static_cast<size_t>(K)
                 * static_cast<size_t>(N) * sizeof(int8_t);
         const bool inplace_layout_ok = (ldb == (transB ? K : N));
-        if (inplace_layout_ok
+        // The Q8 kernel loads this image with aligned 64-byte reads.
+        // A short or strided buffer, and an unaligned one, keep the
+        // aligned out-of-place pack below. The GGUF unpack buffer is
+        // allocated at this alignment, so that path stays in place.
+        const bool weight_aligned
+                = (reinterpret_cast<uintptr_t>(weight) & 63u) == 0;
+        if (weight_aligned && inplace_layout_ok
                 && wei_inplace_fits(
                         bytes, bytes, plain_bytes, wei_buffer_capacity_bytes)) {
-            void *tmp = zendnnl_aligned_alloc(alignment, bytes_aligned);
-            if (tmp != nullptr) {
-                pack_int8_vnni(weight, K, N, ldb, pack_nr, transB,
-                        interleave_split_halves, static_cast<int8_t *>(tmp));
-                // const_cast under the same WC=2 contract the bf16 path
-                // documents: the caller opted in to a mutable single-consumer
-                // weight buffer.
-                std::memcpy(const_cast<int8_t *>(weight), tmp, bytes);
-                zendnnl_aligned_free(tmp);
+            auto *mutable_weight = const_cast<int8_t *>(weight);
+            if (pack_int8_vnni_inplace_reverse(mutable_weight, K, N, ldb,
+                        pack_nr, transB, interleave_split_halves, group_size,
+                        bytes_per_oblock)) {
                 pack_cache.add(key, nullptr); // pack lives in `weight`
+                record_in_place_image(weight,
+                        InPlaceImage {K, N, ldb, pack_nr, transB,
+                                interleave_split_halves, bytes,
+                                InPlaceImageFamily::kS8});
                 *out_packed = weight;
                 return status_t::success;
             }
-            // Interim alloc failed -- fall through to out-of-place, leaving the
-            // caller's buffer unmutated (so no sentinel is cached).
-            log_error(
-                    "custom_kernel pack int8 (in-place): interim "
-                    "aligned_alloc failed for ",
-                    bytes_aligned, " bytes; falling back to out-of-place");
         }
 
         void *raw = zendnnl_aligned_alloc(alignment, bytes_aligned);
@@ -1849,7 +1917,8 @@ status_t get_or_pack_weight_int8(const int8_t *weight, int K, int N, int ldb,
             return status_t::failure;
         }
         pack_int8_vnni(weight, K, N, ldb, pack_nr, transB,
-                interleave_split_halves, static_cast<int8_t *>(raw));
+                interleave_split_halves, static_cast<int8_t *>(raw),
+                group_size);
         pack_cache.add(key, raw);
         *out_packed = static_cast<const int8_t *>(raw);
         return status_t::success;
@@ -1873,7 +1942,8 @@ status_t get_or_pack_weight_int8(const int8_t *weight, int K, int N, int ldb,
         }
 
         pack_int8_vnni(weight, K, N, ldb, pack_nr, transB,
-                interleave_split_halves, static_cast<int8_t *>(raw));
+                interleave_split_halves, static_cast<int8_t *>(raw),
+                group_size);
         pack_cache.add(key, raw);
         *out_packed = static_cast<const int8_t *>(raw);
         return status_t::success;
@@ -1889,6 +1959,7 @@ void clear_custom_kernel_pack_cache_int8() {
     std::lock_guard<std::mutex> lock(pack_mutex_singleton_int8());
     auto &pack_cache = pack_cache_singleton_int8();
     pack_cache.clear();
+    clear_in_place_images(InPlaceImageFamily::kS8);
     static const bool s_pack_log = apilog_verbose_enabled();
     if (s_pack_log) {
         apilog_verbose("[GRP_MATMUL.PACK cleared INT8] Pack cache cleared");

@@ -149,8 +149,8 @@ size_t ggml_scale_bytes(int64_t N, int64_t K, bool use_bf16_scales) {
             * (use_bf16_scales ? sizeof(uint16_t) : sizeof(float)));
 }
 
-// Decode custom-kernel INT8 pack size (weight slab + compensation row).
-// Mirrors get_or_pack_weight_int8.  0 when N is not CK-packable.
+// Custom-kernel INT8 pack size. Q8_0 (K multiple of 32, N multiple of 32)
+// stores one compensation row per K-group.  0 when N is not CK-packable.
 static size_t ggml_ck_int8_pack_bytes(int64_t N, int64_t K) {
     if (N <= 0 || K <= 0) return 0;
     constexpr int k_nr_min = 32;
@@ -165,23 +165,27 @@ static size_t ggml_ck_int8_pack_bytes(int64_t N, int64_t K) {
         return 0;
     const int K_quad = (static_cast<int>(K) + k_vnni - 1) / k_vnni;
     const int n_blocks = static_cast<int>(N) / pack_nr;
+    const int comp_rows
+            = ((K % 32) == 0 && (N % 32) == 0) ? static_cast<int>(K / 32) : 1;
     const size_t weight_bytes_per_oblock = static_cast<size_t>(K_quad)
             * static_cast<size_t>(pack_nr) * static_cast<size_t>(k_vnni);
-    const size_t comp_bytes_per_oblock
-            = static_cast<size_t>(pack_nr) * sizeof(int32_t);
+    const size_t comp_bytes_per_oblock = static_cast<size_t>(comp_rows)
+            * static_cast<size_t>(pack_nr) * sizeof(int32_t);
     return static_cast<size_t>(n_blocks)
             * (weight_bytes_per_oblock + comp_bytes_per_oblock);
 }
 
-// Writable weight capacity for the unpack buffer.  Large enough for the
-// decode custom-kernel INT8 pack (the in-place mutator) and for an AOCL
-// sym-quant blocked image (which stays out-of-place for library-owned
-// buffers).  Scales sit AFTER this capacity.
+// Writable weight capacity for the unpack buffer. Q8_0 that the custom
+// kernel can pack (N and K multiples of 32) is sized for that one in-place
+// image. Anything else also reserves the AOCL blocked image. Scales sit
+// AFTER this capacity.
 static size_t ggml_sym_quant_weight_capacity(int64_t N, int64_t K) {
     const size_t weight_bytes = static_cast<size_t>(N) * static_cast<size_t>(K);
     size_t capacity = weight_bytes;
     const size_t ck_bytes = ggml_ck_int8_pack_bytes(N, K);
+    const bool q8_ck = ck_bytes > 0 && (K % 32) == 0 && (N % 32) == 0;
     if (ck_bytes > 0) { capacity = std::max(capacity, align_up(ck_bytes)); }
+    if (q8_ck) { return capacity; }
 #if ZENDNNL_DEPENDS_AOCLDLP
     dlp_metadata_t symq_meta {};
     dlp_quant_op_t symq_b_quant_op {};

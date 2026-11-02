@@ -266,7 +266,8 @@ inline void prepare_n_tile_custom_kernel(grp_matmul_gated_act_t act,
         int32_t num_threads = 0, int32_t weight_cache_mode = -1,
         // Forwarded to `prepare_for_call`: false when the call will not
         // run the kernel even if the context prepares.
-        bool allow_in_place = true) {
+        bool allow_in_place = true,
+        const std::vector<size_t> &wei_capacities = {}) {
     if (!get_grp_matmul_custom_kernel()) { return; }
     // Master CK env is ON; gate the DQ-INT8 sub-toggle separately so
     // operators can toggle int8 without disabling bf16.  The int8 CK path
@@ -295,7 +296,7 @@ inline void prepare_n_tile_custom_kernel(grp_matmul_gated_act_t act,
             weight, is_weights_const, kctx, dynamic_quant, compute_dtype,
             weights_prepacked, group_size, wei_scale_grp_stride,
             weights_aocl_prepacked, num_threads, weight_cache_mode,
-            allow_in_place);
+            allow_in_place, wei_capacities);
 }
 
 /// Effective N-column alignment for the per-thread split:

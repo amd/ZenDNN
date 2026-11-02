@@ -755,7 +755,8 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
         // on this context (e.g. a wide fused epilogue the kernel cannot
         // write).  The packs then stay out of place under WEIGHT_CACHE=2,
         // since the caller's fallback reads the raw weight.
-        bool allow_in_place = true);
+        bool allow_in_place = true,
+        const std::vector<size_t> &wei_capacities = {});
 
 // (`PackProbeStats` and `warm_pack_all_custom_kernel_experts` moved
 // to `group_matmul/prepack/prepack_custom_kernel.{hpp,cpp}` so the
