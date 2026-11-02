@@ -17,68 +17,21 @@
 /// HSTU attention: the causal row band against the mask predicate, both
 /// kernels against an FP64 transcription of `pytorch_hstu_mha` /
 /// `pytorch_cached_hstu_mha`, the bitwise determinism of the tiled kernel and
-/// its fast silu (ZENDNNL_HSTU_ATTENTION_FAST_SILU).
+/// its fast silu (ZENDNNL_HSTU_ATTENTION_FAST_SILU), padding, kernel
+/// selection, the tiled planning and driver helpers, and argument
+/// validation. Dynamic INT8 is in test_hstu_attention_int8.cpp.
 
-#include "common/zendnnl_global.hpp"
-#include "lowoha_operators/hstu_attention/common/hstu_attention_pad.hpp"
-#include "lowoha_operators/hstu_attention/common/hstu_attention_plan.hpp"
-#include "lowoha_operators/hstu_attention/common/hstu_attention_tiled_driver.hpp"
-#include "lowoha_operators/hstu_attention/hstu_attention_mask.hpp"
-#include "lowoha_operators/hstu_attention/lowoha_hstu_attention.hpp"
-#include "lowoha_operators/hstu_attention/tiled/hstu_attention_tiled.hpp"
+#include "hstu_attention_test_utils.hpp"
+#include "lowoha_operators/hstu_attention/common/lowoha_hstu_select.hpp"
+#include "lowoha_operators/hstu_attention/tiled/lowoha_hstu_tiled_driver.hpp"
 
 #include <omp.h>
-#include <gtest/gtest.h>
 
-#include <algorithm>
-#include <cmath>
-#include <cstdint>
-#include <cstdlib>
-#include <cstring>
-#include <limits>
-#include <ostream>
-#include <random>
-#include <string>
-#include <vector>
 #include <initializer_list>
 
 namespace {
 
-using zendnnl::common::bfloat16_t;
-using zendnnl::common::data_type_t;
-using zendnnl::common::status_t;
-namespace ha = zendnnl::lowoha::hstu_attention;
-using kernel_t = ha::hstu_attention_kernel_t;
-
-bool has_bf16() {
-    const auto &pi = zendnnl::common::zendnnl_platform_info();
-    return pi.get_avx512_bf16_status() && pi.get_avx512_bw_vl_status();
-}
-
-/// `_get_valid_attn_mask` of generative-recommenders for one sequence;
-/// `targets` < 0 means no num_targets tensor.
-bool oracle_valid(int64_t n, int64_t targets, int64_t ctx, int64_t window,
-        int64_t min_full, bool causal, int64_t i, int64_t j) {
-    int64_t max_ids = n;
-    if (ctx > 0) max_ids = max_ids - ctx + 1;
-    if (targets >= 0) max_ids -= targets;
-    auto id = [&](int64_t x) {
-        if (ctx > 0) x = std::max<int64_t>(0, x - ctx + 1);
-        if (targets >= 0) x = std::min(x, max_ids);
-        return x;
-    };
-    int64_t d = id(i) - id(j);
-    if (!causal) d = std::abs(d);
-    bool ok = i == j || d > 0;
-    if (window > 0) {
-        if (min_full > 0)
-            ok = ok && (d <= window || id(i) >= max_ids - min_full);
-        else
-            ok = ok && d <= window;
-    }
-    if (ctx > 0) ok = ok || (id(i) == 0 && id(j) < max_ids);
-    return ok;
-}
+using namespace hstu_test;
 
 using i64_list = std::initializer_list<int64_t>;
 
@@ -139,343 +92,6 @@ TEST(HstuAttentionMask, NonCausalPredicate) {
                     }
 }
 
-/// Kernel selection and validation can be forced through the environment,
-/// which would change what these tests exercise.
-bool env_overrides_kernel() {
-    const char *k = std::getenv("ZENDNNL_HSTU_ATTENTION_KERNEL");
-    return k && *k;
-}
-
-struct hstu_case {
-    std::string name;
-    std::vector<int64_t> lens;
-    int64_t heads = 2, qk_dim = 32, v_dim = 48;
-    std::vector<int64_t> targets; ///< empty: no num_targets
-    int64_t window = 0, ctx = 0, min_full = 0;
-    bool causal = true;
-    int64_t delta = 0;
-    data_type_t in_dt = data_type_t::bf16, out_dt = data_type_t::bf16;
-    bool fused_uvqk = false; ///< q/k/v as head slices of one [L, W] buffer
-    bool per_token_scale = false;
-    bool has_scale = false; ///< scalar attn_scale = scale_value
-    float scale_value = 0.f;
-    int64_t base = 0; ///< seq_offsets[0]; rows before it must stay untouched
-    float input_scale = 1.f; ///< inputs are bf16(2 * input_scale * U(-1, 1))
-    int64_t head_gap = 0; ///< unused elements after each head of Q/K/V, out
-};
-
-std::ostream &operator<<(std::ostream &os, const hstu_case &c) {
-    return os << c.name;
-}
-
-std::vector<hstu_case> make_cases() {
-    std::vector<hstu_case> cs;
-    auto add = [&](hstu_case c) { cs.push_back(std::move(c)); };
-    add({"causal", {1, 7, 64, 130, 257}});
-    add({"targets", {50, 200, 129, 3}, 2, 32, 48, {5, 0, 129, 3}});
-    {
-        hstu_case c {"window", {300, 129, 64}, 2, 32, 48, {7, 0, 9}};
-        c.window = 17;
-        add(c);
-        c.name = "window_min_full";
-        c.min_full = 9;
-        add(c);
-    }
-    {
-        hstu_case c {"contextual", {90, 260, 8}, 2, 32, 48, {6, 31, 0}};
-        c.ctx = 3;
-        add(c);
-        c.name = "contextual_window";
-        c.window = 20;
-        add(c);
-    }
-    {
-        hstu_case c {"noncausal", {70, 131}, 2, 32, 48, {4, 10}};
-        c.causal = false;
-        add(c);
-    }
-    {
-        hstu_case c {"delta", {40, 300, 129}, 2, 32, 48, {16, 4, 0}};
-        c.delta = 16;
-        add(c);
-        c.name = "delta_window";
-        c.window = 25;
-        add(c);
-    }
-    {
-        hstu_case c {"f32", {33, 150}, 2, 16, 24, {3, 20}};
-        c.in_dt = data_type_t::f32;
-        c.out_dt = data_type_t::f32;
-        add(c);
-    }
-    {
-        hstu_case c {"bf16_in_f32_out", {33, 150}, 2, 16, 24, {3, 20}};
-        c.out_dt = data_type_t::f32;
-        add(c);
-    }
-    add({"odd_dims", {65, 300, 31}, 3, 33, 41, {7, 0, 31}});
-    {
-        hstu_case c {"head_gap", {65, 300, 0, 31}, 3, 32, 48, {7, 0, 0, 31}};
-        c.head_gap = 8;
-        add(c);
-        c.name = "head_gap_fused_uvqk";
-        c.fused_uvqk = true;
-        add(c);
-    }
-    {
-        hstu_case c {"per_token_scale", {77, 140}, 2, 32, 32, {5, 0}};
-        c.per_token_scale = true;
-        add(c);
-    }
-    {
-        // Several query tiles per sequence in delta mode (delta > 32, not a
-        // multiple of 32).
-        hstu_case c {
-                "delta_multi_tile", {300, 1100, 900}, 2, 32, 48, {16, 300, 0}};
-        c.delta = 200;
-        add(c);
-        hstu_case w {"delta_multi_tile_window", {700, 1100, 650}, 2, 32, 48,
-                {50, 600, 10}};
-        w.delta = 600;
-        w.window = 300;
-        add(w);
-    }
-    {
-        hstu_case c {"window_long", {1100, 700}, 2, 32, 48, {64, 10}};
-        c.window = 300;
-        add(c);
-    }
-    for (float sv : {0.37f, 0.f, -0.5f}) {
-        hstu_case c {sv > 0 ? "scale_positive"
-                            : (sv == 0 ? "scale_zero" : "scale_negative"),
-                {77, 140}, 2, 32, 32, {5, 0}};
-        c.has_scale = true;
-        c.scale_value = sv;
-        add(c);
-    }
-    {
-        hstu_case c {"empty_sequences_offset_base", {0, 300, 0, 5, 257}, 2, 32,
-                48, {0, 20, 0, 5, 1}};
-        c.base = 37;
-        add(c);
-        c.name = "empty_sequences_offset_base_window";
-        c.window = 40;
-        add(c);
-    }
-    {
-        hstu_case c {"dlrm_shape_fused_uvqk", {700, 1100, 260}, 4, 128, 128,
-                {64, 32, 0}};
-        c.fused_uvqk = true;
-        add(c);
-    }
-    return cs;
-}
-
-/// Tensors of one case; `values` holds the inputs as the kernel sees them
-/// (rounded to bf16 for bf16 inputs).
-struct hstu_problem {
-    explicit hstu_problem(const hstu_case &c) : cs(c) {
-        const int64_t B = c.lens.size(), H = c.heads;
-        offsets.assign(B + 1, c.base);
-        for (int64_t b = 0; b < B; ++b)
-            offsets[b + 1] = offsets[b] + c.lens[b];
-        const int64_t L = offsets[B];
-        max_len = *std::max_element(c.lens.begin(), c.lens.end()) + 5;
-        q_rows = c.delta > 0 ? B * c.delta : L;
-        first_row = c.delta > 0 ? 0 : c.base;
-
-        // Q rows live in their own buffer in delta mode; K and V (and Q in
-        // full mode) are slices of one buffer when fused_uvqk.
-        const int64_t qk = H * (c.qk_dim + c.head_gap),
-                      hv = H * (c.v_dim + c.head_gap);
-        if (c.fused_uvqk) {
-            width = 2 * hv + 2 * qk + 8; // u, v, q, k and padding
-            v_off = hv;
-            q_off = 2 * hv;
-            k_off = 2 * hv + qk;
-        } else {
-            width = qk + qk + hv;
-            q_off = 0;
-            k_off = qk;
-            v_off = 2 * qk;
-        }
-        std::mt19937 gen(1234);
-        std::uniform_real_distribution<float> dist(-1.f, 1.f);
-        values.resize(L * width);
-        for (float &x : values)
-            x = round(2.f * c.input_scale * dist(gen));
-        if (c.delta > 0) {
-            dq.resize(q_rows * qk);
-            for (float &x : dq)
-                x = round(2.f * c.input_scale * dist(gen));
-        }
-        if (c.per_token_scale) {
-            scale.resize(L);
-            for (float &x : scale)
-                x = 0.01f + 0.02f * (dist(gen) + 1.f);
-        }
-        alpha = 1.f / std::sqrt(static_cast<float>(c.qk_dim));
-        o_stride_t = H * (c.v_dim + c.head_gap) + 16; // gaps are canaries
-    }
-
-    float round(float x) const {
-        return cs.in_dt == data_type_t::bf16 ? static_cast<float>(bfloat16_t(x))
-                                             : x;
-    }
-
-    float q_at(int64_t row, int64_t h, int64_t d) const {
-        if (cs.delta > 0) return dq[(row * cs.heads + h) * cs.qk_dim + d];
-        return values[row * width + q_off + h * (cs.qk_dim + cs.head_gap) + d];
-    }
-    float k_at(int64_t row, int64_t h, int64_t d) const {
-        return values[row * width + k_off + h * (cs.qk_dim + cs.head_gap) + d];
-    }
-    float v_at(int64_t row, int64_t h, int64_t d) const {
-        return values[row * width + v_off + h * (cs.v_dim + cs.head_gap) + d];
-    }
-
-    /// FP64 output [q_rows, H, v_dim].
-    std::vector<double> oracle() const {
-        const int64_t B = cs.lens.size(), H = cs.heads;
-        std::vector<double> out(q_rows * H * cs.v_dim, 0.0);
-        for (int64_t b = 0; b < B; ++b) {
-            const int64_t n = cs.lens[b], base = offsets[b];
-            const int64_t t = cs.targets.empty() ? -1 : cs.targets[b];
-            const int64_t nq = cs.delta > 0 ? cs.delta : n;
-            const int64_t pos0 = cs.delta > 0 ? n - cs.delta : 0;
-            const int64_t qrow0 = cs.delta > 0 ? b * cs.delta : base;
-            for (int64_t h = 0; h < H; ++h)
-                for (int64_t r = 0; r < nq; ++r) {
-                    const int64_t i = pos0 + r;
-                    const double sc = cs.per_token_scale ? scale[base + i]
-                            : cs.has_scale               ? cs.scale_value
-                                           : 1.0 / static_cast<double>(max_len);
-                    double *o = &out[((qrow0 + r) * H + h) * cs.v_dim];
-                    for (int64_t j = 0; j < n; ++j) {
-                        if (!oracle_valid(n, t, cs.ctx, cs.window, cs.min_full,
-                                    cs.causal, i, j))
-                            continue;
-                        double s = 0.0;
-                        for (int64_t d = 0; d < cs.qk_dim; ++d)
-                            s += double(q_at(qrow0 + r, h, d))
-                                    * k_at(base + j, h, d);
-                        const double x = alpha * s;
-                        const double w = x / (1.0 + std::exp(-x)) * sc;
-                        for (int64_t d = 0; d < cs.v_dim; ++d)
-                            o[d] += w * v_at(base + j, h, d);
-                    }
-                }
-        }
-        return out;
-    }
-
-    /// Runs the op; returns the output as float [q_rows, H, v_dim] (rows
-    /// before first_row as 0) and whether every canary (rows before
-    /// first_row, row padding) is untouched. `fast_silu` >= 0 calls the tiled
-    /// kernel directly with that silu, bypassing the environment. `varlen`
-    /// is params.is_varlen.
-    status_t run(kernel_t kernel, std::vector<float> &result,
-            int32_t num_threads = 0, bool *canary_ok = nullptr,
-            int fast_silu = -1, bool varlen = true) const {
-        const int64_t H = cs.heads;
-        const bool bf = cs.in_dt == data_type_t::bf16;
-        std::vector<bfloat16_t> kv_bf, dq_bf;
-        if (bf) {
-            kv_bf.assign(values.begin(), values.end());
-            dq_bf.assign(dq.begin(), dq.end());
-        }
-        const size_t esz = bf ? sizeof(bfloat16_t) : sizeof(float);
-        const char *kv = bf ? reinterpret_cast<const char *>(kv_bf.data())
-                            : reinterpret_cast<const char *>(values.data());
-        const char *qbuf = cs.delta > 0
-                ? (bf ? reinterpret_cast<const char *>(dq_bf.data())
-                      : reinterpret_cast<const char *>(dq.data()))
-                : kv + q_off * esz;
-
-        ha::hstu_attention_params p;
-        p.num_seqs = cs.lens.size();
-        p.num_heads = H;
-        p.qk_dim = cs.qk_dim;
-        p.v_dim = cs.v_dim;
-        p.max_seq_len = max_len;
-        p.seq_offsets = offsets.data();
-        p.delta_size = cs.delta;
-        p.causal = cs.causal;
-        p.num_targets = cs.targets.empty() ? nullptr : cs.targets.data();
-        p.max_attn_len = cs.window;
-        p.contextual_seq_len = cs.ctx;
-        p.min_full_attn_seq_len = cs.min_full;
-        p.alpha = alpha;
-        p.attn_scale_per_token = cs.per_token_scale ? scale.data() : nullptr;
-        p.has_attn_scale = cs.has_scale;
-        p.attn_scale = cs.scale_value;
-        p.num_threads = num_threads;
-        p.q_stride_t = cs.delta > 0 ? H * cs.qk_dim : width;
-        p.q_stride_h = cs.delta > 0 ? cs.qk_dim : cs.qk_dim + cs.head_gap;
-        p.k_stride_t = width;
-        p.k_stride_h = cs.qk_dim + cs.head_gap;
-        p.v_stride_t = width;
-        p.v_stride_h = cs.v_dim + cs.head_gap;
-        p.o_stride_t = o_stride_t;
-        p.o_stride_h = cs.v_dim + cs.head_gap;
-        p.qkv_dt = cs.in_dt;
-        p.out_dt = cs.out_dt;
-        p.kernel = kernel;
-        p.is_varlen = varlen;
-
-        const size_t out_elems = q_rows * o_stride_t;
-        std::vector<float> out_f(out_elems, -7.f);
-        std::vector<bfloat16_t> out_b(out_elems, bfloat16_t(-7.f));
-        void *out = cs.out_dt == data_type_t::f32
-                ? static_cast<void *>(out_f.data())
-                : static_cast<void *>(out_b.data());
-        const status_t st = fast_silu < 0
-                ? ha::hstu_attention_direct(
-                          qbuf, kv + k_off * esz, kv + v_off * esz, out, p)
-                : ha::hstu_attention_tiled(qbuf, kv + k_off * esz,
-                          kv + v_off * esz, out, p, fast_silu == 1);
-        auto at = [&](size_t i) {
-            return cs.out_dt == data_type_t::f32 ? out_f[i]
-                                                 : static_cast<float>(out_b[i]);
-        };
-        bool untouched = true;
-        result.assign(q_rows * H * cs.v_dim, 0.f);
-        const int64_t hs = cs.v_dim + cs.head_gap;
-        for (int64_t r = 0; r < q_rows; ++r) {
-            for (int64_t e = 0; e < o_stride_t; ++e) {
-                const float x = at(r * o_stride_t + e);
-                const int64_t h = e / hs, d = e % hs;
-                if (r < first_row || h >= H || d >= cs.v_dim)
-                    untouched = untouched && x == -7.f;
-                else
-                    result[(r * H + h) * cs.v_dim + d] = x;
-            }
-        }
-        if (canary_ok) *canary_ok = untouched;
-        return st;
-    }
-
-    const hstu_case &cs;
-    std::vector<int64_t> offsets;
-    int64_t max_len = 0, q_rows = 0, first_row = 0, width = 0;
-    int64_t q_off = 0, k_off = 0, v_off = 0, o_stride_t = 0;
-    float alpha = 1.f;
-    std::vector<float> values, dq, scale;
-};
-
-/// max |got - want| / max |want|; +inf when any value is not finite.
-double rel_error(
-        const std::vector<float> &got, const std::vector<double> &want) {
-    double err = 0.0, mag = 1e-30;
-    for (size_t i = 0; i < want.size(); ++i) {
-        if (!std::isfinite(got[i]) || !std::isfinite(want[i]))
-            return std::numeric_limits<double>::infinity();
-        err = std::max(err, std::abs(got[i] - want[i]));
-        mag = std::max(mag, std::abs(want[i]));
-    }
-    return err / mag;
-}
-
 class HstuAttentionKernels : public ::testing::TestWithParam<hstu_case> {};
 
 TEST_P(HstuAttentionKernels, MatchOracle) {
@@ -520,18 +136,6 @@ INSTANTIATE_TEST_SUITE_P(Cases, HstuAttentionKernels,
         [](const ::testing::TestParamInfo<hstu_case> &info) {
             return info.param.name;
         });
-
-hstu_case find_case(const std::string &name) {
-    for (const hstu_case &c : make_cases())
-        if (c.name == name) return c;
-    ADD_FAILURE() << "no case " << name;
-    return {};
-}
-
-bool bitwise_equal(const std::vector<float> &a, const std::vector<float> &b) {
-    return a.size() == b.size()
-            && std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0;
-}
 
 /// Rows are independent and P columns outside a row's band are exact zeros,
 /// so the tiled output does not depend on the tile size or thread count.
@@ -584,66 +188,38 @@ TEST(HstuAttentionTiled, RepeatedCallsReuseScratch) {
     }
 }
 
-TEST(HstuAttentionFastSilu, ParsesEnv) {
-    EXPECT_EQ(ha::parse_fast_silu_env(nullptr), -1);
-    EXPECT_EQ(ha::parse_fast_silu_env(""), -1);
-    EXPECT_EQ(ha::parse_fast_silu_env("2"), -1);
-    EXPECT_EQ(ha::parse_fast_silu_env("fast"), -1);
-    for (const char *on : {"1", "true", "TRUE", "on", "yes"})
-        EXPECT_EQ(ha::parse_fast_silu_env(on), 1) << on;
-    for (const char *off : {"0", "false", "Off", "no"})
-        EXPECT_EQ(ha::parse_fast_silu_env(off), 0) << off;
-}
-
-TEST(HstuAttentionVarlen, ParsesEnv) {
-    EXPECT_EQ(ha::parse_varlen_env(nullptr), -1);
-    EXPECT_EQ(ha::parse_varlen_env(""), -1);
-    EXPECT_EQ(ha::parse_varlen_env("pad"), -1);
-    for (const char *on : {"1", "true", "ON", "yes"})
-        EXPECT_EQ(ha::parse_varlen_env(on), 1) << on;
-    for (const char *off : {"0", "false", "Off", "no"})
-        EXPECT_EQ(ha::parse_varlen_env(off), 0) << off;
-}
-
 /// Padding every sequence to max_seq_len (is_varlen = false) gives the
 /// variable-length output bit for bit, on every case (delta mode stays
 /// variable-length) and kernel, and leaves the canaries untouched.
 TEST(HstuAttentionVarlen, PaddedMatchesVarlen) {
     if (env_overrides_kernel()) GTEST_SKIP();
+    // BF16, and with INT8 the per-block scales of the padded layout.
+    std::vector<std::pair<bool, bool>> quant {{false, false}};
+    if (has_int8())
+        quant.insert(quant.end(), {{true, false}, {true, true}, {false, true}});
     for (const hstu_case &c : make_cases()) {
         const hstu_problem prob(c);
         for (kernel_t kernel : {kernel_t::none, kernel_t::reference})
-            for (int32_t threads : {1, 5}) {
-                std::vector<float> var, pad;
-                bool var_ok = false, pad_ok = false;
-                ASSERT_EQ(prob.run(kernel, var, threads, &var_ok),
-                        status_t::success)
-                        << c.name;
-                ASSERT_EQ(prob.run(kernel, pad, threads, &pad_ok, -1, false),
-                        status_t::success)
-                        << c.name;
-                EXPECT_TRUE(pad_ok) << c.name;
-                EXPECT_TRUE(bitwise_equal(var, pad))
-                        << c.name << ", kernel " << ha::kernel_to_string(kernel)
-                        << ", threads " << threads;
-            }
+            for (int32_t threads : {1, 5})
+                for (const auto &[qk, pv] : quant) {
+                    // The reference kernel ignores the flags.
+                    if ((qk || pv) && kernel == kernel_t::reference) continue;
+                    std::vector<float> var, pad;
+                    bool var_ok = false, pad_ok = false;
+                    ASSERT_EQ(prob.run(kernel, var, threads, &var_ok, qk, pv),
+                            status_t::success)
+                            << c.name;
+                    ASSERT_EQ(prob.run(kernel, pad, threads, &pad_ok, qk, pv,
+                                      -1, false),
+                            status_t::success)
+                            << c.name;
+                    EXPECT_TRUE(pad_ok) << c.name;
+                    EXPECT_TRUE(bitwise_equal(var, pad))
+                            << c.name << ", kernel "
+                            << ha::kernel_to_string(kernel) << ", threads "
+                            << threads << ", qk " << qk << ", pv " << pv;
+                }
     }
-}
-
-/// The tiled cases, plus scores large enough (|alpha q.k| beyond 100) that
-/// exp(-x) saturates to 0 and inf.
-std::vector<hstu_case> fast_silu_cases() {
-    std::vector<hstu_case> cs;
-    for (const hstu_case &c : make_cases()) {
-        if (c.causal && c.in_dt == data_type_t::bf16) cs.push_back(c);
-    }
-    hstu_case big {"large_scores", {300, 129}, 2, 32, 48, {7, 0}};
-    big.input_scale = 4.f;
-    cs.push_back(big);
-    big.name = "large_scores_f32_out";
-    big.out_dt = data_type_t::f32;
-    cs.push_back(big);
-    return cs;
 }
 
 /// The fast silu adds at most 1.2e-4 relative error to P before its BF16
@@ -654,13 +230,14 @@ TEST(HstuAttentionFastSilu, MatchesOracle) {
         const hstu_problem prob(c);
         const std::vector<double> want = prob.oracle();
         std::vector<float> base, got;
-        ASSERT_EQ(prob.run(kernel_t::tiled, base, 0, nullptr, 0),
+        ASSERT_EQ(prob.run(kernel_t::tiled, base, 0, nullptr, false, false, 0),
                 status_t::success);
         const double base_err = rel_error(base, want);
         EXPECT_LT(base_err, 1.5e-2) << c.name << ", default silu";
         for (int32_t threads : {0, 1, 5, 64}) {
             bool canary = false;
-            ASSERT_EQ(prob.run(kernel_t::tiled, got, threads, &canary, 1),
+            ASSERT_EQ(prob.run(kernel_t::tiled, got, threads, &canary, false,
+                              false, 1),
                     status_t::success);
             const double err = rel_error(got, want);
             EXPECT_LT(err, 1.5e-2) << c.name << ", threads=" << threads;
@@ -672,33 +249,95 @@ TEST(HstuAttentionFastSilu, MatchesOracle) {
     }
 }
 
-/// The default path is the explicit `fast_silu = false` one, bit for bit
-/// (the golden dumps of the harness pin it across commits); the fast path is
-/// deterministic across thread counts and differs from it.
-TEST(HstuAttentionFastSilu, DefaultPathUnchanged) {
-    if (env_overrides_kernel() || !has_bf16()) GTEST_SKIP();
-    const char *env = std::getenv("ZENDNNL_HSTU_ATTENTION_FAST_SILU");
-    const bool env_fast = ha::parse_fast_silu_env(env) == 1;
-    for (const hstu_case &c : fast_silu_cases()) {
-        const hstu_problem prob(c);
-        std::vector<float> slow, fast, got;
-        ASSERT_EQ(prob.run(kernel_t::tiled, slow, 1, nullptr, 0),
-                status_t::success);
-        ASSERT_EQ(prob.run(kernel_t::tiled, fast, 1, nullptr, 1),
-                status_t::success);
-        for (int32_t threads : {0, 5, 64}) {
-            ASSERT_EQ(
-                    prob.run(kernel_t::none, got, threads), status_t::success);
-            EXPECT_TRUE(bitwise_equal(got, env_fast ? fast : slow))
-                    << c.name << ", threads=" << threads;
-            ASSERT_EQ(prob.run(kernel_t::tiled, got, threads, nullptr, 1),
-                    status_t::success);
-            EXPECT_TRUE(bitwise_equal(got, fast))
-                    << c.name << ", fast, threads=" << threads;
-        }
-        if (c.name == "dlrm_shape_fused_uvqk" || c.name == "large_scores") {
-            EXPECT_FALSE(bitwise_equal(fast, slow)) << c.name;
-        }
+TEST(HstuAttentionSelect, ChoosesKernel) {
+    using ha::choose_kernel;
+    const kernel_t none = kernel_t::none, tiled = kernel_t::tiled,
+                   ref = kernel_t::reference;
+    struct row {
+        kernel_t requested;
+        bool tiled_ok, quant, vnni;
+        kernel_t kernel;
+        bool int8;
+    };
+    const row rows[] = {
+            {none, true, false, true, tiled, false},
+            {none, true, true, true, tiled, true},
+            // No VNNI: the BF16 tiled kernel.
+            {none, true, true, false, tiled, false},
+            {tiled, true, true, false, tiled, false},
+            {none, false, true, true, ref, false},
+            // A forced reference ignores the flags.
+            {ref, true, true, true, ref, false},
+            // A forced tiled on an unsupported call (the caller returns
+            // unimplemented).
+            {tiled, false, true, true, tiled, false},
+    };
+    for (const row &r : rows) {
+        const ha::kernel_choice_t c
+                = choose_kernel(r.requested, r.tiled_ok, r.quant, r.vnni);
+        EXPECT_EQ(c.kernel, r.kernel)
+                << int(r.requested) << r.tiled_ok << r.quant << r.vnni;
+        EXPECT_EQ(c.int8, r.int8)
+                << int(r.requested) << r.tiled_ok << r.quant << r.vnni;
+    }
+}
+
+/// ZENDNNL_HSTU_ATTENTION_INT8_QK / _PV, _FAST_SILU and _VARLEN: unset,
+/// empty or not a boolean is -1, else 0 or 1, in any case.
+TEST(HstuAttentionSelect, ParsesBoolEnv) {
+    for (const char *bad : {static_cast<const char *>(nullptr), "", "2", "fast",
+                 "pad", "maybe"})
+        EXPECT_EQ(ha::parse_bool_env(bad), -1) << (bad ? bad : "nullptr");
+    for (const char *on : {"1", "true", "TRUE", "on", "ON", "yes"})
+        EXPECT_EQ(ha::parse_bool_env(on), 1) << on;
+    for (const char *off : {"0", "false", "Off", "no"})
+        EXPECT_EQ(ha::parse_bool_env(off), 0) << off;
+}
+
+TEST(HstuAttentionSelect, Int8Environment) {
+    for (bool param : {false, true}) {
+        EXPECT_EQ(ha::resolve_int8_flag(-1, param), param);
+        EXPECT_TRUE(ha::resolve_int8_flag(1, param));
+        EXPECT_FALSE(ha::resolve_int8_flag(0, param));
+    }
+}
+
+/// The flags a call runs with: QK and PV overrides are independent and win
+/// in both directions; f32 q/k/v drop both; qk_dim past kInt8MaxQkDim drops
+/// INT8 Q*K^T only.
+TEST(HstuAttentionSelect, QuantFlags) {
+    const data_type_t bf16 = data_type_t::bf16, f32 = data_type_t::f32;
+    const int64_t d = 128, big = ha::kInt8MaxQkDim + 1;
+    struct row_t {
+        bool qk, pv;
+        data_type_t dt;
+        int64_t qk_dim;
+        int env_qk, env_pv;
+        bool want_qk, want_pv, dtype, qk_dim_drop;
+    };
+    const row_t rows[] = {
+            {false, false, bf16, d, -1, -1, false, false, false, false},
+            {true, false, bf16, d, -1, -1, true, false, false, false},
+            {false, true, bf16, d, -1, -1, false, true, false, false},
+            {false, false, bf16, d, 1, -1, true, false, false, false},
+            {false, false, bf16, d, -1, 1, false, true, false, false},
+            {true, true, bf16, d, 0, -1, false, true, false, false},
+            {true, true, bf16, d, -1, 0, true, false, false, false},
+            {true, true, f32, d, -1, -1, false, false, true, false},
+            {false, false, f32, d, 1, 1, false, false, true, false},
+            {true, true, bf16, ha::kInt8MaxQkDim, -1, -1, true, true, false,
+                    false},
+            {true, true, bf16, big, -1, -1, false, true, false, true},
+            {false, true, bf16, big, -1, -1, false, true, false, false},
+    };
+    for (const row_t &r : rows) {
+        const ha::quant_flags_t f = ha::resolve_quant_flags(
+                r.qk, r.pv, r.dt, r.qk_dim, r.env_qk, r.env_pv);
+        const std::string at = std::to_string(&r - rows);
+        EXPECT_EQ(f.qk, r.want_qk) << "row " << at;
+        EXPECT_EQ(f.pv, r.want_pv) << "row " << at;
+        EXPECT_EQ(f.dropped_dtype, r.dtype) << "row " << at;
+        EXPECT_EQ(f.dropped_qk_dim, r.qk_dim_drop) << "row " << at;
     }
 }
 
@@ -976,15 +615,18 @@ TEST(HstuAttentionApi, KeepsTheCallersThreadCount) {
     const int before = omp_get_max_threads();
     for (kernel_t kernel : {kernel_t::reference, kernel_t::tiled}) {
         if (kernel == kernel_t::tiled && !has_bf16()) continue;
-        for (int32_t nt : {0, 2}) {
-            omp_set_num_threads(3);
-            api_fixture f;
-            f.p.kernel = kernel;
-            f.p.num_threads = nt;
-            EXPECT_EQ(f.run(), status_t::success);
-            EXPECT_EQ(omp_get_max_threads(), 3)
-                    << "kernel " << static_cast<int>(kernel) << " nt " << nt;
-        }
+        for (bool quant : {false, true})
+            for (int32_t nt : {0, 2}) {
+                omp_set_num_threads(3);
+                api_fixture f;
+                f.p.kernel = kernel;
+                f.p.num_threads = nt;
+                f.p.is_qk_quant = f.p.is_pv_quant = quant;
+                EXPECT_EQ(f.run(), status_t::success);
+                EXPECT_EQ(omp_get_max_threads(), 3)
+                        << "kernel " << static_cast<int>(kernel) << " nt " << nt
+                        << " quant " << quant;
+            }
     }
     omp_set_num_threads(before);
 }

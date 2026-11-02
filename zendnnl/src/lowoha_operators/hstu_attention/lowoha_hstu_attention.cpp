@@ -23,9 +23,10 @@
 #include <sstream>
 #include "common/logging.hpp"
 #include "common/zendnnl_global.hpp"
-#include "lowoha_operators/hstu_attention/common/hstu_attention_pad.hpp"
-#include "lowoha_operators/hstu_attention/reference/hstu_attention_reference.hpp"
-#include "lowoha_operators/hstu_attention/tiled/hstu_attention_tiled.hpp"
+#include "lowoha_operators/hstu_attention/common/lowoha_hstu_pad.hpp"
+#include "lowoha_operators/hstu_attention/common/lowoha_hstu_select.hpp"
+#include "lowoha_operators/hstu_attention/reference/lowoha_hstu_ref_kernel.hpp"
+#include "lowoha_operators/hstu_attention/tiled/lowoha_hstu_tiled.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -118,7 +119,7 @@ hstu_attention_kernel_t requested_kernel(const hstu_attention_params &p) {
 bool fast_silu_requested() {
     static const bool on = [] {
         const char *s = std::getenv("ZENDNNL_HSTU_ATTENTION_FAST_SILU");
-        const int v = parse_fast_silu_env(s);
+        const int v = parse_bool_env(s);
         if (v < 0 && s && *s)
             log_warning(
                     "hstu_attention_direct: ignoring "
@@ -134,7 +135,7 @@ bool fast_silu_requested() {
 bool varlen_in_effect(const hstu_attention_params &p) {
     static const int env = [] {
         const char *s = std::getenv("ZENDNNL_HSTU_ATTENTION_VARLEN");
-        const int v = parse_varlen_env(s);
+        const int v = parse_bool_env(s);
         if (v < 0 && s && *s)
             log_warning(
                     "hstu_attention_direct: ignoring "
@@ -155,33 +156,87 @@ bool varlen_in_effect(const hstu_attention_params &p) {
     return varlen;
 }
 
+/// `params` with the quant flags in effect (resolve_quant_flags; the
+/// environment is read once), with a warning for each flag dropped.
+hstu_attention_params resolve_quant(const hstu_attention_params &params) {
+    static const int env_qk
+            = parse_bool_env(std::getenv("ZENDNNL_HSTU_ATTENTION_INT8_QK"));
+    static const int env_pv
+            = parse_bool_env(std::getenv("ZENDNNL_HSTU_ATTENTION_INT8_PV"));
+    const quant_flags_t f = resolve_quant_flags(params.is_qk_quant,
+            params.is_pv_quant, params.qkv_dt, params.qk_dim, env_qk, env_pv);
+    if (f.dropped_dtype) {
+        static std::once_flag warned;
+        std::call_once(warned, [] {
+            log_warning(
+                    "hstu_attention_direct: ignoring is_qk_quant / "
+                    "is_pv_quant; dynamic INT8 quantization needs bf16 "
+                    "q/k/v");
+        });
+    }
+    if (f.dropped_qk_dim) {
+        static std::once_flag warned;
+        std::call_once(warned, [] {
+            log_warning(
+                    "hstu_attention_direct: ignoring is_qk_quant; INT8 "
+                    "Q*K^T supports qk_dim <= ",
+                    kInt8MaxQkDim);
+        });
+    }
+    hstu_attention_params p = params;
+    p.is_qk_quant = f.qk;
+    p.is_pv_quant = f.pv;
+    return p;
+}
+
 } // namespace
 
 status_t hstu_attention_direct(const void *query, const void *key,
-        const void *value, void *output, const hstu_attention_params &params) {
+        const void *value, void *output,
+        const hstu_attention_params &user_params) {
     zendnnl::profile::profiler_t profiler;
     const bool is_profile = is_profile_enabled();
     if (is_profile) profiler.tbp_start();
 
-    status_t st = validate(query, key, value, output, params);
+    status_t st = validate(query, key, value, output, user_params);
     if (st != status_t::success) return st;
-    if (params.num_seqs == 0) return status_t::success;
+    if (user_params.num_seqs == 0) return status_t::success;
 
-    hstu_attention_kernel_t kernel = requested_kernel(params);
+    hstu_attention_params params = resolve_quant(user_params);
+    const bool quant = params.is_qk_quant || params.is_pv_quant;
+    const hstu_attention_kernel_t requested = requested_kernel(params);
     const bool tiled_ok = hstu_attention_tiled_supported(params);
-    if (kernel == hstu_attention_kernel_t::none) {
-        kernel = tiled_ok ? hstu_attention_kernel_t::tiled
-                          : hstu_attention_kernel_t::reference;
-        if (!tiled_ok) {
+    const kernel_choice_t choice = choose_kernel(requested, tiled_ok, quant,
+            quant && hstu_attention_tiled_int8_isa());
+    const hstu_attention_kernel_t kernel = choice.kernel;
+    if (requested == hstu_attention_kernel_t::none && !tiled_ok) {
+        static std::once_flag warned;
+        std::call_once(warned, [] {
+            log_warning(
+                    "hstu_attention_direct: using the scalar reference "
+                    "kernel (the tiled kernel needs a causal mask, "
+                    "bf16 q/k/v and AVX512-BF16); it is 1-2 orders of "
+                    "magnitude slower");
+        });
+    }
+    if (quant && !choice.int8) {
+        if (kernel == hstu_attention_kernel_t::reference) {
+            static std::once_flag noted;
+            std::call_once(noted, [] {
+                log_info(
+                        "hstu_attention_direct: the reference kernel ignores "
+                        "is_qk_quant / is_pv_quant");
+            });
+        } else if (kernel == hstu_attention_kernel_t::tiled && tiled_ok) {
             static std::once_flag warned;
             std::call_once(warned, [] {
                 log_warning(
-                        "hstu_attention_direct: using the scalar reference "
-                        "kernel (the tiled kernel needs a causal mask, "
-                        "bf16 q/k/v and AVX512-BF16); it is 1-2 orders of "
-                        "magnitude slower");
+                        "hstu_attention_direct: dynamic INT8 quantization "
+                        "needs AVX512-VNNI; running the tiled kernel on "
+                        "bf16");
             });
         }
+        params.is_qk_quant = params.is_pv_quant = false;
     }
 
     hstu_attention_run_t run;
@@ -193,10 +248,13 @@ status_t hstu_attention_direct(const void *query, const void *key,
                         "causal mask, bf16 q/k/v and AVX512-BF16");
                 return status_t::unimplemented;
             }
-            run = [](const void *q, const void *k, const void *v, void *o,
+            run = [int8 = choice.int8](const void *q, const void *k,
+                          const void *v, void *o,
                           const hstu_attention_params &p) {
-                return hstu_attention_tiled(
-                        q, k, v, o, p, fast_silu_requested());
+                return int8 ? hstu_attention_tiled_int8(
+                                      q, k, v, o, p, fast_silu_requested())
+                            : hstu_attention_tiled_bf16(
+                                      q, k, v, o, p, fast_silu_requested());
             };
             break;
         case hstu_attention_kernel_t::reference:
@@ -236,6 +294,8 @@ status_t hstu_attention_direct(const void *query, const void *key,
            << ", alpha=" << params.alpha
            << ", qkv_dt=" << dtype_info(params.qkv_dt)
            << ", out_dt=" << dtype_info(params.out_dt)
+           << ", is_qk_quant=" << (params.is_qk_quant ? "true" : "false")
+           << ", is_pv_quant=" << (params.is_pv_quant ? "true" : "false")
            << ", kernel=" << kernel_to_string(kernel);
         if (kernel == hstu_attention_kernel_t::tiled && fast_silu_requested())
             ss << ", fast_silu=true";

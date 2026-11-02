@@ -17,23 +17,15 @@
 /// Attention without variable-length support (is_varlen = false): every
 /// sequence padded to max_seq_len.
 
-#ifndef LOWOHA_HSTU_ATTENTION_PAD_HPP
-#define LOWOHA_HSTU_ATTENTION_PAD_HPP
+#ifndef LOWOHA_HSTU_PAD_HPP
+#define LOWOHA_HSTU_PAD_HPP
 
 #include <functional>
-#include "common/config_params.hpp"
 #include "lowoha_operators/hstu_attention/lowoha_hstu_attention.hpp"
 
 namespace zendnnl {
 namespace lowoha {
 namespace hstu_attention {
-
-/// ZENDNNL_HSTU_ATTENTION_VARLEN: -1 when `value` is unset, empty or not a
-/// boolean (0/false/off/no, 1/true/on/yes), else 0 or 1.
-inline int parse_varlen_env(const char *value) {
-    bool on = false;
-    return zendnnl::common::parse_cache_bool(value, on) ? int(on) : -1;
-}
 
 /// A kernel call on (Q, K, V, out, params).
 using hstu_attention_run_t = std::function<status_t(const void *, const void *,
@@ -66,4 +58,4 @@ status_t hstu_attention_padded(const void *query, const void *key,
 } // namespace lowoha
 } // namespace zendnnl
 
-#endif // LOWOHA_HSTU_ATTENTION_PAD_HPP
+#endif // LOWOHA_HSTU_PAD_HPP

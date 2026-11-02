@@ -17,13 +17,13 @@
 /// Work decomposition of the tiled HSTU attention kernels: which key blocks
 /// are packed, the query tile height and the work items.
 
-#ifndef LOWOHA_HSTU_ATTENTION_PLAN_HPP
-#define LOWOHA_HSTU_ATTENTION_PLAN_HPP
+#ifndef LOWOHA_HSTU_TILED_PLAN_HPP
+#define LOWOHA_HSTU_TILED_PLAN_HPP
 
 #include <algorithm>
 #include <cstdint>
 #include <vector>
-#include "lowoha_operators/hstu_attention/hstu_attention_mask.hpp"
+#include "lowoha_operators/hstu_attention/common/lowoha_hstu_mask.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -122,4 +122,4 @@ private:
 } // namespace lowoha
 } // namespace zendnnl
 
-#endif // LOWOHA_HSTU_ATTENTION_PLAN_HPP
+#endif // LOWOHA_HSTU_TILED_PLAN_HPP

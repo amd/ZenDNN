@@ -16,15 +16,15 @@
 
 /// Scratch memory of the tiled HSTU attention kernels.
 
-#ifndef LOWOHA_HSTU_ATTENTION_SCRATCH_HPP
-#define LOWOHA_HSTU_ATTENTION_SCRATCH_HPP
+#ifndef LOWOHA_HSTU_TILED_SCRATCH_HPP
+#define LOWOHA_HSTU_TILED_SCRATCH_HPP
 
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <vector>
-#include "lowoha_operators/hstu_attention/common/hstu_attention_plan.hpp"
-#include "lowoha_operators/hstu_attention/hstu_attention_mask.hpp"
+#include "lowoha_operators/hstu_attention/common/lowoha_hstu_mask.hpp"
+#include "lowoha_operators/hstu_attention/tiled/lowoha_hstu_tiled_plan.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -62,12 +62,12 @@ inline size_t round_up(size_t bytes) {
 }
 
 /// The calling thread's arenas for packed K / V and for the per-thread
-/// tiles, shared by every tiled kernel and output type.
+/// tiles, shared by every policy and output type.
 arena_t &packed_arena();
 arena_t &tile_arena();
 
 /// Packed K and V of every (block, head): a block of nb keys has one slot of
-/// slot_bytes(nb) bytes per head, laid out by the kernel. Only the blocks in
+/// slot_bytes(nb) bytes per head, laid out by the policy. Only the blocks in
 /// `kv_blocks_t::jobs()` are packed (and touched).
 class packed_kv_t {
 public:
@@ -93,7 +93,7 @@ private:
     char *base_ = nullptr;
 };
 
-/// Per-thread scratch of one query tile; the kernel lays out `q` (the tile's
+/// Per-thread scratch of one query tile; the policy lays out `q` (the tile's
 /// queries) and `p` (P for one key block).
 struct tile_t {
     void *q;
@@ -148,4 +148,4 @@ private:
 } // namespace lowoha
 } // namespace zendnnl
 
-#endif // LOWOHA_HSTU_ATTENTION_SCRATCH_HPP
+#endif // LOWOHA_HSTU_TILED_SCRATCH_HPP

@@ -16,20 +16,20 @@
 
 /// The data-type independent part of the tiled HSTU attention kernels: the
 /// parallel loops, the per-tile row and key windows and the output store.
-/// The data type lives in a kernel policy (see run_tiled), so each kernel
+/// The data type lives in a policy (see run_tiled), so each policy
 /// is its own translation unit and the hot loop has no indirection.
 
-#ifndef LOWOHA_HSTU_ATTENTION_TILED_DRIVER_HPP
-#define LOWOHA_HSTU_ATTENTION_TILED_DRIVER_HPP
+#ifndef LOWOHA_HSTU_TILED_DRIVER_HPP
+#define LOWOHA_HSTU_TILED_DRIVER_HPP
 
 #include <algorithm>
 #include <cstdint>
 #include <omp.h>
 #include "lowoha_operators/common/omp_thread_control.hpp"
-#include "lowoha_operators/hstu_attention/common/hstu_attention_plan.hpp"
-#include "lowoha_operators/hstu_attention/common/hstu_attention_scratch.hpp"
-#include "lowoha_operators/hstu_attention/common/hstu_attention_store.hpp"
-#include "lowoha_operators/hstu_attention/hstu_attention_mask.hpp"
+#include "lowoha_operators/hstu_attention/common/lowoha_hstu_mask.hpp"
+#include "lowoha_operators/hstu_attention/tiled/lowoha_hstu_tiled_plan.hpp"
+#include "lowoha_operators/hstu_attention/tiled/lowoha_hstu_tiled_scratch.hpp"
+#include "lowoha_operators/hstu_attention/tiled/lowoha_hstu_tiled_store.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -67,7 +67,7 @@ inline key_range_t prepare_rows(
 /// The window of block g, keys [k0, k0 + nb), for rows [0, rows) with `bands`;
 /// false when no row reads the block. plo and phi are rounded out to
 /// multiples of key_align (phi to at most nb), so packed V groups stay
-/// whole; the kernel writes P for every key of the window.
+/// whole; the policy writes P for every key of the window.
 template <int64_t key_align>
 inline bool block_window(const row_band_t *bands, int64_t rows, int64_t g,
         int64_t k0, int64_t nb, block_window_t &bw) {
@@ -111,12 +111,14 @@ inline void chunk_bounds(const row_band_t *bands, int64_t ra, int64_t rb,
  * the key blocks of its rows' bands; the diagonal of a row outside its band
  * is added separately, and O is stored in the output type.
  *
- * `kernel_t` is the data-type policy; its members are inlined:
+ * `policy_t` is the data-type policy; its members are inlined:
  *   static constexpr int64_t kKeyAlign;   key group of packed V
  *   static size_t q_bytes(int64_t bm, int64_t d);   Q tile of bm rows
  *   static size_t p_bytes(int64_t bm);              P tile, bm x kBlockN
  *   size_t slot_bytes(int64_t nb) const;            packed K/V, nb keys, 1 head
- *   void pack(const kv_block_t &, int64_t h, char *slot) const;
+ *   // `scratch`: the thread's tile, free while packing
+ *   void pack(const kv_block_t &, int64_t h, char *slot,
+ *           const tile_t &scratch) const;
  *   void load_q(const work_item_t &, const tile_t &) const;
  *   // P of rows [ra, rb) x keys [plo, phi), then O[ra, rb) += P V
  *   void qk(const block_window_t &, const char *slot, const tile_t &) const;
@@ -124,9 +126,9 @@ inline void chunk_bounds(const row_band_t *bands, int64_t ra, int64_t rb,
  *   // o += the diagonal term of row r
  *   void diag(const work_item_t &, int64_t r, const tile_t &, float *o) const;
  */
-template <typename kernel_t, typename out_t>
+template <typename policy_t, typename out_t>
 void run_tiled(
-        const hstu_attention_params &p, const kernel_t &kernel, out_t *out) {
+        const hstu_attention_params &p, const policy_t &policy, out_t *out) {
     const int64_t H = p.num_heads, Dv = p.v_dim;
 
     // The live ICV, not thread_guard::max_threads(): restoring the count cached
@@ -138,9 +140,9 @@ void run_tiled(
     const int64_t BM = choose_block_m(p, nt);
     const kv_blocks_t blocks(p, key_ranges(p));
     const packed_kv_t packed(blocks, H,
-            [&](int64_t nb) { return kernel.slot_bytes(nb); }, packed_arena());
-    const tile_pool_t pool(nt, BM, kernel_t::q_bytes(BM, p.qk_dim),
-            kernel_t::p_bytes(BM), Dv, tile_arena());
+            [&](int64_t nb) { return policy.slot_bytes(nb); }, packed_arena());
+    const tile_pool_t pool(nt, BM, policy_t::q_bytes(BM, p.qk_dim),
+            policy_t::p_bytes(BM), Dv, tile_arena());
     const work_plan_t plan(p, BM);
     const int64_t num_jobs = static_cast<int64_t>(blocks.jobs().size());
 
@@ -148,7 +150,8 @@ void run_tiled(
     for (int64_t j = 0; j < num_jobs * H; ++j) {
         const kv_block_t blk = blocks.block(blocks.jobs()[j / H]);
         const int64_t h = j % H;
-        kernel.pack(blk, h, packed.slot(blk.g, h));
+        policy.pack(
+                blk, h, packed.slot(blk.g, h), pool.get(omp_get_thread_num()));
     }
 
     // Dynamic rather than SDPA's static schedule: under a causal mask the
@@ -158,22 +161,22 @@ void run_tiled(
     for (int64_t z = 0; z < plan.size(); ++z) {
         const work_item_t w = plan.item(z);
         const tile_t t = pool.get(omp_get_thread_num());
-        kernel.load_q(w, t);
+        policy.load_q(w, t);
         const key_range_t keys = prepare_rows(p, w, t);
         for (int64_t k0 = keys.lo / kBlockN * kBlockN; k0 < keys.hi;
                 k0 += kBlockN) {
             block_window_t bw;
-            if (!block_window<kernel_t::kKeyAlign>(t.bands, w.rows,
+            if (!block_window<policy_t::kKeyAlign>(t.bands, w.rows,
                         blocks.first_block(w.b) + k0 / kBlockN, k0,
                         std::min(kBlockN, w.s.len - k0), bw))
                 continue;
             const char *slot = packed.slot(bw.g, w.h);
-            kernel.qk(bw, slot, t);
-            kernel.pv(bw, slot, t);
+            policy.qk(bw, slot, t);
+            policy.pv(bw, slot, t);
         }
         for (int64_t r = 0; r < w.rows; ++r) {
             float *o = t.o + r * Dv;
-            if (t.bands[r].extra_diag) kernel.diag(w, r, t, o);
+            if (t.bands[r].extra_diag) policy.diag(w, r, t, o);
             store_row(o, Dv,
                     out + (w.s.q_row + w.row0 + r) * p.o_stride_t
                             + w.h * p.o_stride_h);
@@ -187,4 +190,4 @@ void run_tiled(
 } // namespace lowoha
 } // namespace zendnnl
 
-#endif // LOWOHA_HSTU_ATTENTION_TILED_DRIVER_HPP
+#endif // LOWOHA_HSTU_TILED_DRIVER_HPP

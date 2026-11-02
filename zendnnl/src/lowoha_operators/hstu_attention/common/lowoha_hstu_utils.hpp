@@ -14,13 +14,12 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-/// Row masks and the output store of the tiled HSTU attention kernels.
+/// Helpers shared by the HSTU attention kernels, GEMMs and quantizers.
 
-#ifndef LOWOHA_HSTU_ATTENTION_STORE_HPP
-#define LOWOHA_HSTU_ATTENTION_STORE_HPP
+#ifndef LOWOHA_HSTU_UTILS_HPP
+#define LOWOHA_HSTU_UTILS_HPP
 
 #include <cstdint>
-#include "common/bfloat16.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -33,12 +32,8 @@ inline uint64_t range_bits(int64_t lo, int64_t hi) {
     return upto & ~((1ull << lo) - 1);
 }
 
-/// dst[0, n) = o[0, n) in the output data type (BF16: AVX512-BF16).
-void store_row(const float *o, int64_t n, zendnnl::common::bfloat16_t *dst);
-void store_row(const float *o, int64_t n, float *dst);
-
 } // namespace hstu_attention
 } // namespace lowoha
 } // namespace zendnnl
 
-#endif // LOWOHA_HSTU_ATTENTION_STORE_HPP
+#endif // LOWOHA_HSTU_UTILS_HPP

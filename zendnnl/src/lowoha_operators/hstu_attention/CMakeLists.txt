@@ -14,19 +14,27 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-# common/: work decomposition, scratch, output store and the per-tile driver
-# shared by the tiled kernels (internal headers, not installed); tiled/: the
-# BF16 kernel policy; reference/: the scalar kernel; hstu_gemm_ck/: HSTU's own
-# custom-kernel GEMMs (laid out like sdpa/sdpa_gemm_ck/).
+# lowoha_hstu_attention*: the public API; every internal file is
+# lowoha_hstu_<component> (internal headers are not installed).
+# common/: internal helpers of the dispatcher and the kernels (mask, kernel
+# selection, padded mode, utils); reference/: the scalar kernel; tiled/: the
+# tiled kernel's data-type independent driver, planning, scratch, store and
+# shared policy blocks, with one policy per data type in tiled/<dtype>/
+# (bf16/, int8/); hstu_gemm_ck/: HSTU's own custom-kernel GEMMs, one folder
+# per data type (laid out like sdpa/sdpa_gemm_ck/); hstu_quant/: HSTU's own
+# dynamic quantizers.
 set(lowoha_hstu_attention_sources
     lowoha_hstu_attention.cpp
-    common/hstu_attention_pad.cpp
-    common/hstu_attention_plan.cpp
-    common/hstu_attention_scratch.cpp
-    common/hstu_attention_store.cpp
+    common/lowoha_hstu_pad.cpp
     hstu_gemm_ck/bf16/lowoha_hstu_ck_bf16.cpp
-    reference/hstu_attention_reference.cpp
-    tiled/hstu_attention_tiled.cpp)
+    hstu_gemm_ck/int8/lowoha_hstu_ck_int8.cpp
+    hstu_quant/lowoha_hstu_quant.cpp
+    reference/lowoha_hstu_ref_kernel.cpp
+    tiled/lowoha_hstu_tiled_plan.cpp
+    tiled/lowoha_hstu_tiled_scratch.cpp
+    tiled/lowoha_hstu_tiled_store.cpp
+    tiled/bf16/lowoha_hstu_tiled_bf16.cpp
+    tiled/int8/lowoha_hstu_tiled_int8.cpp)
 
 set(lowoha_hstu_attention_public_headers
     lowoha_hstu_attention.hpp

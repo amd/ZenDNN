@@ -14,33 +14,24 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-#include "lowoha_operators/hstu_attention/common/hstu_attention_store.hpp"
+/// The output store of the tiled HSTU attention kernels.
 
-#include <algorithm>
-#include <cstring>
-#include <immintrin.h>
-#include "common/zendnnl_global.hpp"
+#ifndef LOWOHA_HSTU_TILED_STORE_HPP
+#define LOWOHA_HSTU_TILED_STORE_HPP
+
+#include <cstdint>
+#include "common/bfloat16.hpp"
 
 namespace zendnnl {
 namespace lowoha {
 namespace hstu_attention {
 
-using zendnnl::common::bfloat16_t;
-
-ZENDNNL_TARGET_NOINLINE("avx512f,avx512bw,avx512vl,avx512bf16,fma")
-void store_row(const float *o, int64_t n, bfloat16_t *dst) {
-    for (int64_t c = 0; c < n; c += 16) {
-        const __mmask16 m
-                = __mmask16(range_bits(0, std::min<int64_t>(16, n - c)));
-        _mm256_mask_storeu_epi16(dst + c, m,
-                (__m256i)_mm512_cvtneps_pbh(_mm512_maskz_loadu_ps(m, o + c)));
-    }
-}
-
-void store_row(const float *o, int64_t n, float *dst) {
-    std::memcpy(dst, o, n * sizeof(float));
-}
+/// dst[0, n) = o[0, n) in the output data type (BF16: AVX512-BF16).
+void store_row(const float *o, int64_t n, zendnnl::common::bfloat16_t *dst);
+void store_row(const float *o, int64_t n, float *dst);
 
 } // namespace hstu_attention
 } // namespace lowoha
 } // namespace zendnnl
+
+#endif // LOWOHA_HSTU_TILED_STORE_HPP

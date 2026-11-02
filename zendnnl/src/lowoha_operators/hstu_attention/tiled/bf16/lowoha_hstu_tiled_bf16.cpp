@@ -14,18 +14,17 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-#include "lowoha_operators/hstu_attention/tiled/hstu_attention_tiled.hpp"
+#include "lowoha_operators/hstu_attention/tiled/lowoha_hstu_tiled.hpp"
 
 #include <algorithm>
 #include <array>
-#include <cmath>
 #include <cstring>
 #include <immintrin.h>
 #include <utility>
 #include "common/bfloat16.hpp"
 #include "common/zendnnl_global.hpp"
-#include "lowoha_operators/hstu_attention/common/hstu_attention_tiled_driver.hpp"
-#include "lowoha_operators/hstu_attention/hstu_gemm_ck/lowoha_hstu_ck.hpp"
+#include "lowoha_operators/hstu_attention/tiled/lowoha_hstu_tiled_common.hpp"
+#include "lowoha_operators/hstu_attention/tiled/lowoha_hstu_tiled_driver.hpp"
 #include "lowoha_operators/matmul/group_matmul/common/group_matmul_act_avx512.hpp"
 
 namespace zendnnl {
@@ -36,30 +35,6 @@ namespace {
 
 using zendnnl::common::bfloat16_t;
 namespace act = zendnnl::lowoha::matmul::group_matmul_act_avx512;
-
-/// Rows of a Q*K^T tile: 8 x 32 columns or 6 x 64 columns (two packed blocks).
-constexpr int kMR1 = 8;
-constexpr int kMR2 = 6;
-
-/// silu(x) * s for x = alpha * acc, with t_mul = -alpha * log2(e) and
-/// y_mul = alpha * s (ZENDNNL_HSTU_ATTENTION_FAST_SILU): x * sigmoid(x) with
-/// exp(-x) = 2^t from a degree-3 minimax polynomial of 2^frac(t) and
-/// vscalefps for 2^floor(t) (no clamp: it saturates to 0 or inf, and
-/// sigmoid to 1 or 0), and rcp14 without a Newton step. Relative error at
-/// most 1.2e-4 (`act::silu_avx512`: 5e-5), well below the 2^-9 rounding of
-/// BF16 P.
-HSTU_AVX512_INLINE inline __m512 fast_silu_scaled(
-        __m512 acc, __m512 t_mul, __m512 y_mul) {
-    const __m512 t = _mm512_mul_ps(acc, t_mul);
-    const __m512 f = _mm512_sub_ps(t,
-            _mm512_roundscale_ps(t, _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC));
-    __m512 e = _mm512_fmadd_ps(
-            _mm512_set1_ps(0.07802371f), f, _mm512_set1_ps(0.22606677f));
-    e = _mm512_fmadd_ps(e, f, _mm512_set1_ps(0.69583452f));
-    e = _mm512_fmadd_ps(e, f, _mm512_set1_ps(0.99992502f));
-    const __m512 d = _mm512_add_ps(_mm512_set1_ps(1.f), _mm512_scalef_ps(e, t));
-    return _mm512_mul_ps(_mm512_mul_ps(acc, y_mul), _mm512_rcp14_ps(d));
-}
 
 /// One tile of the fused Q*K^T over NB packed blocks of K^T:
 /// P[MR][nv] = BF16(mask * silu(alpha * A * B) * scale), silu from
@@ -145,39 +120,11 @@ template <bool FastSilu>
 constexpr auto kQkTiles2
         = qk_tiles<2, FastSilu>(std::make_integer_sequence<int, kMR2>());
 
-/// a . b over n BF16 elements, FP32 accumulation.
-HSTU_AVX512_NOINLINE float dot_bf16(
-        const bfloat16_t *a, const bfloat16_t *b, int64_t n) {
-    __m512 acc = _mm512_setzero_ps();
-    for (int64_t c = 0; c < n; c += 32) {
-        const __mmask32 m
-                = __mmask32(range_bits(0, std::min<int64_t>(32, n - c)));
-        acc = _mm512_dpbf16_ps(acc,
-                (__m512bh)_mm512_maskz_loadu_epi16(m, a + c),
-                (__m512bh)_mm512_maskz_loadu_epi16(m, b + c));
-    }
-    return _mm512_reduce_add_ps(acc);
-}
-
-/// y[0, n) += w * x[0, n).
-HSTU_AVX512_NOINLINE void axpy_bf16(
-        float w, const bfloat16_t *x, int64_t n, float *y) {
-    const __m512 vw = _mm512_set1_ps(w);
-    for (int64_t c = 0; c < n; c += 16) {
-        const __mmask16 m
-                = __mmask16(range_bits(0, std::min<int64_t>(16, n - c)));
-        const __m512 xf = _mm512_castsi512_ps(_mm512_slli_epi32(
-                _mm512_cvtepu16_epi32(_mm256_maskz_loadu_epi16(m, x + c)), 16));
-        _mm512_mask_storeu_ps(y + c, m,
-                _mm512_fmadd_ps(vw, xf, _mm512_maskz_loadu_ps(m, y + c)));
-    }
-}
-
-/// The BF16 kernel policy of `run_tiled`: K^T and V packed by
+/// The BF16 policy of `run_tiled`: K^T and V packed by
 /// `ck::bf16::pack_b`, BF16 Q and P tiles, Q*K^T on the fused silu tile kernels
 /// above (FastSilu: `fast_silu_scaled`) and P*V on `ck::bf16::gemm_block`.
 template <bool FastSilu>
-struct bf16_kernel_t {
+struct bf16_policy_t {
     using p_t = bfloat16_t;
     /// Packed V holds key pairs.
     static constexpr int64_t kKeyAlign = 2;
@@ -186,7 +133,7 @@ struct bf16_kernel_t {
     }
     static size_t p_bytes(int64_t bm) { return bm * kBlockN * sizeof(p_t); }
 
-    bf16_kernel_t(const hstu_attention_params &p, const bfloat16_t *q,
+    bf16_policy_t(const hstu_attention_params &p, const bfloat16_t *q,
             const bfloat16_t *k, const bfloat16_t *v)
         : p(p)
         , q(q)
@@ -202,7 +149,8 @@ struct bf16_kernel_t {
                 * sizeof(bfloat16_t);
     }
 
-    void pack(const kv_block_t &blk, int64_t h, char *slot) const {
+    void pack(const kv_block_t &blk, int64_t h, char *slot,
+            const tile_t &) const {
         const int64_t k0 = p.seq_offsets[blk.b] + blk.k0;
         auto *pk = reinterpret_cast<bfloat16_t *>(slot);
         ck::bf16::pack_b(D, blk.nb, k + k0 * p.k_stride_t + h * p.k_stride_h,
@@ -244,36 +192,21 @@ struct bf16_kernel_t {
         }
     }
 
-    /// O += P[:, plo:phi] V[plo:phi], one packed 32-column V block at a time
-    /// ([ceil(nb/2)][32][2] per block).
     void pv(const block_window_t &bw, const char *slot, const tile_t &t) const {
-        const bfloat16_t *pv = reinterpret_cast<const bfloat16_t *>(slot)
-                + ck::bf16::packed_size(D, bw.nb);
-        const auto *p_tile = static_cast<const p_t *>(t.p);
-        const int64_t v_block = (bw.nb + 1) / 2 * 2 * kNR;
-        for (int64_t c = 0; c < Dv; c += kNR)
-            ck::bf16::gemm_block(bw.rb - bw.ra,
-                    int(std::min<int64_t>(kNR, Dv - c)), bw.phi - bw.plo,
-                    p_tile + bw.ra * kBlockN + bw.plo, kBlockN,
-                    pv + c / kNR * v_block + bw.plo * kNR, t.o + bw.ra * Dv + c,
-                    Dv);
+        bf16_pv(bw, static_cast<const p_t *>(t.p),
+                reinterpret_cast<const bfloat16_t *>(slot)
+                        + ck::bf16::packed_size(D, bw.nb),
+                Dv, t.o);
     }
 
-    /// The weight is rounded to BF16 like P; its silu is exact in both
-    /// policies.
+    /// `diag_bf16` from the staged Q row.
     void diag(
             const work_item_t &w, int64_t r, const tile_t &t, float *o) const {
         const int64_t i = w.s.q_pos + w.row0 + r;
-        const float x = p.alpha
-                * dot_bf16(static_cast<const bfloat16_t *>(t.q) + r * D,
-                        k + (w.s.kv_row + i) * p.k_stride_t
-                                + w.h * p.k_stride_h,
-                        D);
-        const float weight = static_cast<float>(
-                bfloat16_t(x / (1.f + std::exp(-x)) * t.scales[r]));
-        axpy_bf16(weight,
-                v + (w.s.kv_row + i) * p.v_stride_t + w.h * p.v_stride_h, Dv,
-                o);
+        diag_bf16(static_cast<const bfloat16_t *>(t.q) + r * D,
+                k + (w.s.kv_row + i) * p.k_stride_t + w.h * p.k_stride_h,
+                v + (w.s.kv_row + i) * p.v_stride_t + w.h * p.v_stride_h, D, Dv,
+                p.alpha, t.scales[r], o);
     }
 
     const hstu_attention_params &p;
@@ -300,19 +233,19 @@ namespace {
 template <bool FastSilu>
 void run_bf16(const void *query, const void *key, const void *value,
         void *output, const hstu_attention_params &params) {
-    const bf16_kernel_t<FastSilu> kernel(params,
+    const bf16_policy_t<FastSilu> policy(params,
             static_cast<const bfloat16_t *>(query),
             static_cast<const bfloat16_t *>(key),
             static_cast<const bfloat16_t *>(value));
     if (params.out_dt == data_type_t::f32)
-        run_tiled(params, kernel, static_cast<float *>(output));
+        run_tiled(params, policy, static_cast<float *>(output));
     else
-        run_tiled(params, kernel, static_cast<bfloat16_t *>(output));
+        run_tiled(params, policy, static_cast<bfloat16_t *>(output));
 }
 
 } // namespace
 
-status_t hstu_attention_tiled(const void *query, const void *key,
+status_t hstu_attention_tiled_bf16(const void *query, const void *key,
         const void *value, void *output, const hstu_attention_params &params,
         bool fast_silu) {
     if (!hstu_attention_tiled_supported(params)) return status_t::unimplemented;

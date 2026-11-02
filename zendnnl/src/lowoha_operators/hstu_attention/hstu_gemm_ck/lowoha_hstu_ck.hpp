@@ -55,6 +55,42 @@ void gemm_block(int64_t m, int nv, int64_t k, const bfloat16_t *a, int64_t lda,
 
 } // namespace bf16
 
+/// INT8: blocks of [ceil(K/4)][32][4] int8 (four K values of each column
+/// side by side, as `vpdpbusd` reads them, zero padded past K and N);
+/// tiles of MR rows x 32 int32 accumulators fed by broadcast U8 A quads.
+namespace int8 {
+
+/// Bytes of a packed op(B) of K x N.
+size_t packed_size(int64_t k, int64_t n);
+
+/// Packs S8 K^T from N x K row-major K (rows `ldk` bytes apart). With
+/// `colsum` (round_up(N, 32) entries), writes the sum of each column over K
+/// (0 past N).
+void pack_kt(int64_t k, int64_t n, const int8_t *b, int64_t ldk, int8_t *packed,
+        int32_t *colsum);
+
+/// Packs S8 V from K x N row-major V (rows `ldv` bytes apart), with the
+/// column sums as in `pack_kt`.
+void pack_kn(int64_t k, int64_t n, const int8_t *b, int64_t ldv, int8_t *packed,
+        int32_t *colsum);
+
+/// The sums over K of the N <= 32 columns of one packed block (32 entries).
+/// `b` may start at any quad of the block, so K can be a key window of it
+/// that ends on a quad (K % 4 == 0) or at the block's last key.
+void packed_colsum(int64_t k, int64_t n, const int8_t *b, int32_t *colsum);
+
+/// C[M, nv] += (A * B - 128 * colsum[n]) * row_scale[m] * col_scale[n] for
+/// U8 A (an S8 matrix plus 128; M x K, rows `lda` apart) and one packed
+/// block `b` (nv <= 32, starting at any quad of the block). `colsum` covers
+/// the same keys as A, and K ends on a quad or at the block's last key: A
+/// reads as 0 past K in the last quad, which only the pack's zero padding
+/// past the block's keys cancels.
+void gemm_block(int64_t m, int nv, int64_t k, const uint8_t *a, int64_t lda,
+        const int8_t *b, const int32_t *colsum, const float *row_scale,
+        const float *col_scale, float *c, int64_t ldc);
+
+} // namespace int8
+
 } // namespace ck
 } // namespace hstu_attention
 } // namespace lowoha

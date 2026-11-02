@@ -14,14 +14,14 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-#include "lowoha_operators/hstu_attention/reference/hstu_attention_reference.hpp"
+#include "lowoha_operators/hstu_attention/reference/lowoha_hstu_ref_kernel.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <vector>
 #include "common/bfloat16.hpp"
 #include "lowoha_operators/common/omp_thread_control.hpp"
-#include "lowoha_operators/hstu_attention/hstu_attention_mask.hpp"
+#include "lowoha_operators/hstu_attention/common/lowoha_hstu_mask.hpp"
 
 namespace zendnnl {
 namespace lowoha {

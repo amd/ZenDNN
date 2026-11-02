@@ -28,7 +28,8 @@ using zendnnl::common::data_type_t;
 
 enum class hstu_attention_kernel_t : int32_t {
     none = -1, ///< Pick the fastest kernel that supports the call.
-    tiled = 0, ///< Tiled GEMM kernel (causal, BF16 Q/K/V, AVX512-BF16).
+    tiled = 0, ///< Tiled GEMM kernel (causal, BF16 Q/K/V, AVX512-BF16;
+    ///< INT8 GEMMs with is_qk_quant / is_pv_quant).
     reference = 1 ///< Scalar multithreaded kernel; supports every call.
 };
 
@@ -114,6 +115,15 @@ struct hstu_attention_params {
     /// output; full mode only, ignored in delta mode). For comparisons;
     /// ZENDNNL_HSTU_ATTENTION_VARLEN=0|1 overrides it.
     bool is_varlen = true;
+
+    // Dynamic INT8 quantization inside the tiled kernel (BF16 Q/K/V and
+    // AVX512-VNNI; otherwise ignored with a warning); see the operator doc.
+    // ZENDNNL_HSTU_ATTENTION_INT8_QK / _PV override them when set.
+    /// Q and K to S8 per token and head; Q*K^T on INT8 (VNNI).
+    bool is_qk_quant = false;
+    /// V to S8 per (256-key block, channel) and P to S8 per (row, 256-key
+    /// block); P*V on INT8 (VNNI). Independent of is_qk_quant.
+    bool is_pv_quant = false;
 
     /// Requested kernel; ZENDNNL_HSTU_ATTENTION_KERNEL=tiled|reference
     /// overrides it.

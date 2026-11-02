@@ -14,20 +14,32 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-#include "lowoha_operators/hstu_attention/common/hstu_attention_scratch.hpp"
+#include "lowoha_operators/hstu_attention/tiled/lowoha_hstu_tiled_store.hpp"
+
+#include <algorithm>
+#include <cstring>
+#include <immintrin.h>
+#include "common/zendnnl_global.hpp"
+#include "lowoha_operators/hstu_attention/common/lowoha_hstu_utils.hpp"
 
 namespace zendnnl {
 namespace lowoha {
 namespace hstu_attention {
 
-arena_t &packed_arena() {
-    thread_local arena_t arena;
-    return arena;
+using zendnnl::common::bfloat16_t;
+
+ZENDNNL_TARGET_NOINLINE("avx512f,avx512bw,avx512vl,avx512bf16,fma")
+void store_row(const float *o, int64_t n, bfloat16_t *dst) {
+    for (int64_t c = 0; c < n; c += 16) {
+        const __mmask16 m
+                = __mmask16(range_bits(0, std::min<int64_t>(16, n - c)));
+        _mm256_mask_storeu_epi16(dst + c, m,
+                (__m256i)_mm512_cvtneps_pbh(_mm512_maskz_loadu_ps(m, o + c)));
+    }
 }
 
-arena_t &tile_arena() {
-    thread_local arena_t arena;
-    return arena;
+void store_row(const float *o, int64_t n, float *dst) {
+    std::memcpy(dst, o, n * sizeof(float));
 }
 
 } // namespace hstu_attention

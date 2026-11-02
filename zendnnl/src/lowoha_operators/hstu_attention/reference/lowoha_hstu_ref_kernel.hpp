@@ -14,8 +14,8 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-#ifndef LOWOHA_HSTU_ATTENTION_REFERENCE_HPP
-#define LOWOHA_HSTU_ATTENTION_REFERENCE_HPP
+#ifndef LOWOHA_HSTU_REF_KERNEL_HPP
+#define LOWOHA_HSTU_REF_KERNEL_HPP
 
 #include "lowoha_operators/hstu_attention/lowoha_hstu_attention.hpp"
 
@@ -32,4 +32,4 @@ status_t hstu_attention_reference(const void *query, const void *key,
 } // namespace lowoha
 } // namespace zendnnl
 
-#endif // LOWOHA_HSTU_ATTENTION_REFERENCE_HPP
+#endif // LOWOHA_HSTU_REF_KERNEL_HPP

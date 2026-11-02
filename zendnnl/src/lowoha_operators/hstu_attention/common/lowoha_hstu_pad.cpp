@@ -14,7 +14,7 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-#include "lowoha_operators/hstu_attention/common/hstu_attention_pad.hpp"
+#include "lowoha_operators/hstu_attention/common/lowoha_hstu_pad.hpp"
 
 #include <algorithm>
 #include <cstring>

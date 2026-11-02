@@ -14,7 +14,7 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-#include "lowoha_operators/hstu_attention/common/hstu_attention_plan.hpp"
+#include "lowoha_operators/hstu_attention/tiled/lowoha_hstu_tiled_plan.hpp"
 
 namespace zendnnl {
 namespace lowoha {

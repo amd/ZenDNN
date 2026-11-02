@@ -14,8 +14,12 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-#ifndef LOWOHA_HSTU_ATTENTION_MASK_HPP
-#define LOWOHA_HSTU_ATTENTION_MASK_HPP
+/// The HSTU attention mask of generative-recommenders (causal, target aware,
+/// window, contextual prefix) as a predicate and as per-row key bands, and the
+/// rows and output scales of a sequence; shared by every kernel.
+
+#ifndef LOWOHA_HSTU_MASK_HPP
+#define LOWOHA_HSTU_MASK_HPP
 
 #include <algorithm>
 #include <cstdint>
@@ -154,4 +158,4 @@ inline float row_scale(
 } // namespace lowoha
 } // namespace zendnnl
 
-#endif // LOWOHA_HSTU_ATTENTION_MASK_HPP
+#endif // LOWOHA_HSTU_MASK_HPP
