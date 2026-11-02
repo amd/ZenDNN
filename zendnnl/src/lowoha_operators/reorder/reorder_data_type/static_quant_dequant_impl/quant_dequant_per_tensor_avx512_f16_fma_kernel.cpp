@@ -180,7 +180,7 @@ void quantize_f16_to_uint8_avx512fp16(const uint16_t *input, uint8_t *output,
         const __m512h vinv = _mm512_set1_ph(inv_scale_f16);
 
         // Manual clamp BEFORE VPMOVUSDB. _mm512_cvtusepi32_epi8 interprets
-        // its input as UNSIGNED (per the Intel Intrinsics Guide), so a
+        // its input as UNSIGNED (an unsigned saturating narrow), so a
         // negative s32 (e.g. -1) would wrap to 0xFFFFFFFF and saturate to
         // 255 instead of clamping to 0. Clamp to [0, 255] in signed s32
         // first; after that any cvtepi32_epi8-family narrow gives the same

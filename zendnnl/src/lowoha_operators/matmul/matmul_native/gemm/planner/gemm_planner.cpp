@@ -72,9 +72,9 @@ BlockPlan plan_blocks(const GemmDescriptor &desc, const UarchParams &uarch) {
     int nb_from_l2 = l2_budget / (plan.KB * elem);
     int nb_from_l3 = nb_from_l2;
     if (nt > 1) {
-        int cores_per_ccd = std::min(uarch.num_cores, 8);
-        int threads_sharing_l3 = std::min(nt, cores_per_ccd);
-        int l3_budget = static_cast<int>(0.5 * uarch.l3_bytes_per_ccd);
+        int cores_per_l3 = std::min(uarch.num_cores, 8);
+        int threads_sharing_l3 = std::min(nt, cores_per_l3);
+        int l3_budget = static_cast<int>(0.5 * uarch.l3_domain_bytes);
         nb_from_l3 = l3_budget / (threads_sharing_l3 * plan.KB * elem);
     }
     int nb_max = std::min(nb_from_l2, nb_from_l3);

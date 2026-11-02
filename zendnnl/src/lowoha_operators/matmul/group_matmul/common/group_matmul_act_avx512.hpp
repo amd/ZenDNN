@@ -267,7 +267,7 @@ static inline __m512 erf_avx512(__m512 x) {
     // `_mm512_andnot_ps`) — no int-bit constants, no
     // implementation-defined `0x80000000u → int` conversions.  The
     // VANDPS / VANDNPS instructions are the same micro-op family as
-    // the int variants on Zen / Skylake, so codegen is unchanged.
+    // the int variants on AVX-512 CPUs, so codegen is unchanged.
     const __m512 sign_mask = _mm512_set1_ps(-0.0f);
     __m512 sign = _mm512_and_ps(x, sign_mask);
     __m512 absx = _mm512_andnot_ps(sign_mask, x);

@@ -55,7 +55,7 @@ struct BmmConfig {
 
 // Output of the BMM planner — blocking and parallelization strategy.
 //
-// Analogous to BlockPlan / BrgemmPlan: the looper consumes this to
+// Analogous to BlockPlan: the looper consumes this to
 // set up its parallel region and tile iteration bounds.
 struct BmmPlan {
     int M_block;

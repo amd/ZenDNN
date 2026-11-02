@@ -52,7 +52,7 @@ using zendnnl::common::data_type_t;
 //   FP32 path: 4 vmovups(src) + 4 vfmadd231ps = 8 instructions.
 //   BF16 path: 4 (vmovdqu + vpmovzxwd + vpslld) + 4 vfmadd231ps = 16 instr.
 //   F16  path: 4 (vmovdqu + vcvtph2ps)          + 4 vfmadd231ps = 12 instr.
-//   FMA-bound (Zen4, 2 FMA ports): 4 fmadd / 2 = 2 cycles/iter (best case).
+//   FMA-bound (2 FMA ports): 4 fmadd / 2 = 2 cycles/iter (best case).
 //   128 FP32 FLOPs / 2 cycles = 64 FLOPs/cycle.
 //   Cleanup: 1×16 loop + masked tail (no perf impact, runs once).
 //
@@ -223,7 +223,7 @@ static inline void rms_norm_row_avx512(const void *__restrict in_row,
 //              + 4 vfmadd231ps = 20 instructions.
 //   BF16/F16 path: 4 narrow_load(in) + 4 narrow_load(res) + 4 vaddps
 //                  + 4 narrow_store(res) + 4 vfmadd231ps = 20 high-level ops.
-//   FMA-bound (Zen4): 4 fmadd / 2 ports = 2 cycles (best case).
+//   FMA-bound (2 FMA ports): 4 fmadd / 2 ports = 2 cycles (best case).
 //   Store-bound: 4 stores / 1 store port = 4 cycles (likely bottleneck).
 //   Effective: ~4–5 cycles/iter.  256 FP32 FLOPs / 5 = 51 FLOPs/cycle.
 //   Cleanup: 1×16 loop + masked tail.

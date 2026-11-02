@@ -37,6 +37,7 @@ set(lowoha_matmul_public_headers
   lowoha_common.hpp
   lowoha_matmul.hpp
   lowoha_matmul_utils.hpp
+  lowoha_quant_layout.hpp
   ${lowoha_group_matmul_public_headers}
   ${lowoha_routed_moe_public_headers})
 

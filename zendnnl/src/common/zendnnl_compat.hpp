@@ -24,7 +24,7 @@
  * __attribute__((target(...))), which lets one translation unit hold functions
  * compiled for different instruction sets. MSVC has no per-function equivalent:
  * it compiles a whole translation unit for one ISA via /arch (ZenDNN builds the
- * kernels with /arch:AVX512, its Zen 4+ baseline). So on MSVC the target
+ * kernels with /arch:AVX512, its baseline ISA). So on MSVC the target
  * attribute expands to nothing and the ISA comes from the command-line flag.
  *
  * These are genuine COMPILER-language features (not platform/ABI), so the gate

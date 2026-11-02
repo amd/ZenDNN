@@ -55,7 +55,7 @@ using zendnnl::common::reduce_add_ph_to_fp32;
 //     zmm8  - zmm11 : 4 data loads (s0–s3, 32 FP16 lanes each)
 //
 //   4 vmovdqu64(src) + 4 vaddph(sum) + 4 vfmadd231ph(sq) = 12 instructions.
-//   FMA-bound (Zen5 / SPR 2 FP16 FMA ports): 4 fmadd / 2 = 2 cycles/iter.
+//   FMA-bound (2 FP16 FMA ports): 4 fmadd / 2 = 2 cycles/iter.
 //
 //   Reductions of sum and sum-of-squares are widened to FP32 once before the
 //   horizontal sum (see reduce_add_ph_to_fp32) to avoid FP16 precision loss

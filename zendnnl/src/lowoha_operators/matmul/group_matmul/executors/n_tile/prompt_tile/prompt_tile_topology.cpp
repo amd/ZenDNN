@@ -42,8 +42,8 @@ namespace prompt_tile {
 namespace {
 
 int fallback_team_size() {
-    const int ccx = native::detect_uarch().ccx_cores;
-    return ccx > 1 ? ccx : 8;
+    const int cores = native::detect_uarch().family_l3_cores;
+    return cores > 1 ? cores : 8;
 }
 
 #if defined(__linux__)
@@ -127,8 +127,8 @@ std::vector<int> contiguous_domains(int num_threads, int size) {
 TeamMap detect(int num_threads, int team_override, int subteam, bool nested) {
     const auto &ua = native::detect_uarch();
     int64_t l2 = ua.l2_bytes > 0 ? ua.l2_bytes : (int64_t(1) << 20);
-    int64_t l3 = ua.l3_bytes_per_ccd > 0 ? ua.l3_bytes_per_ccd
-                                         : (int64_t(32) << 20);
+    int64_t l3
+            = ua.l3_domain_bytes > 0 ? ua.l3_domain_bytes : (int64_t(32) << 20);
     if (team_override > 0)
         return make_contiguous_team_map(num_threads, team_override, l2, l3);
     const auto fallback = [&]() {

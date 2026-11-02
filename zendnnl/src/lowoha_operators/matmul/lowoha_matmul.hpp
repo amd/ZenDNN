@@ -98,17 +98,24 @@ void matmul_execute(const char layout, const bool transA, const bool transB,
  *       @c quant_params.src_scale.buff / @c quant_params.src_zp.buff) are
  *       thread-local, or left nullptr so the library allocates per-call scratch.
  *
- * @note ZENDNNL_MATMUL_ALGO=11, or @c lowoha_algo == native_brgemm for the
- *       call: the native BRGEMM serves the calls it qualifies for over the
- *       native VNNI weight layout; the others keep their route: the one-op
- *       group route, else AOCL-DLP at weight cache mode at most 1, never the
- *       other native kernels.  A weight buffer it rewrote in place (weight
- *       cache mode 2, ZENDNNL_MATMUL_ALGO=11 only) has it as its only
- *       reader.  Every call on one weight buffer must take the same route
- *       (the same API and algorithm selection): the native BRGEMM reads a
- *       buffer that another route rewrote in place as a raw weight.
+ * @note ZENDNNL_MATMUL_ALGO=11 (for a call without @c lowoha_algo), or
+ *       @c lowoha_algo == native_brgemm for the call: the call asks for the
+ *       native BRGEMM, which serves it over the native VNNI weight layout or
+ *       returns an error status for it (unimplemented for what it does not
+ *       implement, isa_unsupported for a CPU without the instruction set the
+ *       call's data types need, failure for a weight buffer it cannot
+ *       read), with dst untouched and one error line naming the reason; no
+ *       other backend runs the call.  A weight buffer it rewrote in place
+ *       (weight cache mode 2, ZENDNNL_MATMUL_ALGO=11 only) has it as its
+ *       only reader.  Every call on one weight buffer must take the same
+ *       route (the same API and algorithm selection): the native BRGEMM
+ *       reads a buffer that another route rewrote in place as a raw weight.
  *
- * @return status_t::success on successful execution, status_t::failure otherwise
+ * @return status_t::success on successful execution; otherwise an error
+ *         status: status_t::isa_unsupported on a CPU without the instruction
+ *         set the call needs (AVX512-FP16 for f16 data, or the native
+ *         BRGEMM's above), status_t::unimplemented for a call the selected
+ *         kernel does not implement, status_t::failure for any other error.
  */
 
 ZENDNNL_API status_t matmul_direct(const char layout, const bool transA,
@@ -118,6 +125,28 @@ ZENDNNL_API status_t matmul_direct(const char layout, const bool transA,
         const int ldc, const bool is_weights_const,
         const matmul_batch_params_t &batch_params, const matmul_params &params,
         const matmul_gated_act_params *gated_act = nullptr);
+
+/**
+ * @brief The error status matmul_direct returns for a call because the
+ *        native BRGEMM takes it and does not serve it, without running it.
+ *
+ * For a call that passes matmul_direct's input checks and that the native
+ * BRGEMM takes (one that asks for it, or on a buffer it rewrote in place):
+ * the status matmul_direct returns for it when the native BRGEMM does not
+ * serve it, with @p reason (when not null) naming why, as its error line
+ * does.  success for any other call.  Takes the arguments of
+ * matmul_direct.  Writes none of the caller's buffers: a bf16 / f32 source
+ * it quantizes goes into buffers of its own, with its scales and zero
+ * points.
+ */
+status_t native_brgemm_refusal(const char layout, const bool transA,
+        const bool transB, const int M, const int N, const int K,
+        const float alpha, const void *src, const int lda, const void *weight,
+        const int ldb, const void *bias, const float beta, void *dst,
+        const int ldc, const bool is_weights_const,
+        const matmul_batch_params_t &batch_params, const matmul_params &params,
+        const matmul_gated_act_params *gated_act = nullptr,
+        const char **reason = nullptr);
 
 /**
  * @brief Execute group matmul operations (e.g. MoE experts)

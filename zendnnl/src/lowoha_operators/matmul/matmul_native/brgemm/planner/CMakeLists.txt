@@ -1,12 +1,10 @@
-# BRGEMM planner: base blocking parameters and the native BRGEMM plan
+# BRGEMM planner: the native BRGEMM plan
 set(sources
-  brgemm_planner.cpp
   native_config.cpp
   native_planner.cpp
   native_tuning_file.cpp)
 
 set(headers
-  brgemm_planner.hpp
   native_config.hpp
   native_planner.hpp
   native_tuning_file.hpp

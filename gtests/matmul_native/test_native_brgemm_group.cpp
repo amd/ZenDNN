@@ -24,9 +24,11 @@
 /// points, per-channel weight scales, bias, a binary post-op) are also
 /// checked against an integer reference, BF16 experts against a double one.
 ///
-/// A matmul_direct call the native BRGEMM declines under ALGO 11 runs on AOCL
-/// DLP with the bits of the call with the algorithm unset, and its weight is
-/// not rewritten in place.
+/// A matmul_direct call that asks for the native BRGEMM and that it does not
+/// serve returns its error, with dst untouched and its weight not rewritten
+/// in place; a call on a weight whose N is not a multiple of 32 runs on it
+/// over a padded layout packed out of place.  The same calls with the
+/// algorithm unset run on AOCL DLP.
 
 #include <gtest/gtest.h>
 
@@ -42,6 +44,7 @@
 #include <vector>
 
 #include "group_matmul/moe_test_utils.hpp"
+#include "gtest_native_refusal.hpp"
 #include "lowoha_operators/matmul/group_matmul/common/grp_matmul_expert_slice.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 #include "lowoha_operators/matmul/matmul_native/native_matmul.hpp"
@@ -830,22 +833,22 @@ status_t run_direct(expert_t &e, algo_mode_t mode,
             e.dst.get(), e.c.N, true, batch, p);
 }
 
-/// Calls the native BRGEMM declines.  The one-row BF16 call with an f32 dst,
-/// the one-row f32 call and the f32 call with a long K would write other bits
-/// on the other native kernels; the widest f32 call has a weight the AOCL
-/// route may reorder in place at weight cache mode 2.
-std::vector<case_t> declined_cases() {
+/// Calls of weights whose N is not a multiple of the native layout's
+/// blocks, which the native BRGEMM serves over a padded layout.  The widest
+/// f32 call has a weight the AOCL route may reorder in place at weight cache
+/// mode 2.
+std::vector<case_t> padded_cases() {
     std::vector<case_t> v;
     v.push_back(float_case(8, 48, 96, bf16, bf16, no_po, bf16, 91));
     v.push_back(float_case(5, 40, 64, bf16, f32, add_po, f32, 92));
     v.back().transB = true;
     v.push_back(float_case(1, 48, 512, bf16, bf16, no_po, f32, 86));
     v.push_back(float_case(8, 48, 96, f32, f32, no_po, f32, 93));
-    v.push_back(float_case(6, 64, 64, f32, no_dt, add_po, f32, 94));
+    v.push_back(float_case(6, 40, 64, f32, no_dt, add_po, f32, 94));
     v.push_back(float_case(1, 80, 96, f32, f32, no_po, f32, 87));
     v.push_back(float_case(4, 48, 2048, f32, f32, no_po, f32, 88));
     v.back().transB = true;
-    v.push_back(float_case(8, 128, 256, f32, no_dt, no_po, f32, 85));
+    v.push_back(float_case(8, 112, 256, f32, no_dt, no_po, f32, 85));
     v.push_back(int8_case(8, 48, 96, u8, grain_t::tensor, f32, grain_t::tensor,
             s32, f32, add_po, false, f32, 95));
     v.push_back(int8_case(4, 40, 64, s8, grain_t::tensor, f32, grain_t::none,
@@ -853,11 +856,11 @@ std::vector<case_t> declined_cases() {
     return v;
 }
 
-/// A declined call whose weight the AOCL route rewrites in place at weight
+/// A call of such a weight that the AOCL route rewrites in place at weight
 /// cache mode 2 when the scalar custom-kernel route is off: an s8 source
 /// with per-token scales, which the kernel selection itself turns to
 /// AOCL-DLP blocked, with room for the blocked image.
-case_t in_place_declined_case() {
+case_t in_place_padded_case() {
     case_t c = int8_case(4, 48, 128, s8, grain_t::token, f32, grain_t::none,
             s32, no_dt, no_po, false, f32, 98);
     c.capacity = 4 * 48 * 128 + 4096;
@@ -881,65 +884,55 @@ private:
     bool prev_;
 };
 
-// A matmul_direct call the native BRGEMM declines (a weight off the native
-// layout, an f32 call) runs on AOCL DLP: the bits of the call with the
-// algorithm unset, no native BRGEMM call, and the weight is not rewritten in
-// place, also when the kernel selection turns the call to AOCL-DLP blocked
-// by itself.  A lowoha_algo = native_brgemm under dynamic dispatch runs the
-// same way.  The unset run of the in-place case rewrites its weight, which
-// shows the declined runs keep theirs raw on purpose.  A call the native
-// BRGEMM serves still runs on it.
-TEST(NativeBrgemmDeclinedRoute, RunsOnAoclAsUnset) {
+// A matmul_direct call that asks for the native BRGEMM with a weight whose
+// N is not a multiple of 32 runs on the native BRGEMM over a padded layout
+// packed out of place: within the reference band, with a native layout and
+// the weight not rewritten in place, also when the kernel selection would
+// turn the call to AOCL-DLP blocked by itself and under dynamic dispatch (a
+// lowoha_algo = native_brgemm); with the algorithm unset the call runs on
+// AOCL DLP, whose run of the in-place case rewrites its weight.  The calls
+// on the layout's blocks (BF16 and FP32) run on the native BRGEMM too.
+TEST(NativeBrgemmPaddedRoute, CallsRunOnTheNativeBrgemm) {
     SKIP_WITHOUT_NATIVE_ISA();
     mm::clear_matmul_weight_caches();
     WeightCacheGuard cache(2);
     alive_t alive;
-    {
-        const case_t c = in_place_declined_case();
-        SCOPED_TRACE("in place " + c.str());
-        const ck_route_t route(false);
-        for (algo_mode_t mode : kModes) {
+    std::vector<case_t> cases = padded_cases();
+    cases.push_back(in_place_padded_case());
+    const ck_route_t route(false);
+    for (const case_t &c : cases) {
+        SCOPED_TRACE(c.str());
+        {
             expert_t e = make_expert(c);
             compute_reference(e, e.src.get(), e.lda());
-            ASSERT_EQ(run_direct(e, mode), status_t::success)
-                    << mode_name(mode);
-            EXPECT_TRUE(matches(e)) << mode_name(mode);
-            EXPECT_EQ(weight_kept(e), mode != algo_mode_t::unset)
-                    << mode_name(mode);
+            ASSERT_EQ(run_direct(e, algo_mode_t::unset), status_t::success);
+            EXPECT_TRUE(matches(e));
             alive.push_back(std::move(e));
         }
-    }
-    for (const case_t &c : declined_cases()) {
-        SCOPED_TRACE(c.str());
-        std::vector<expert_t> runs;
-        for (algo_mode_t mode : kModes) {
+        for (algo_mode_t mode : {algo_mode_t::algo11, algo_mode_t::per_call}) {
             expert_t e = make_expert(c);
             compute_reference(e, e.src.get(), e.lda());
-            ASSERT_EQ(run_direct(e, mode), status_t::success)
+            EXPECT_EQ(run_direct(e, mode), status_t::success)
                     << mode_name(mode);
-            EXPECT_EQ(nbt::native_layouts(e.wei.get()), 0u) << mode_name(mode);
-            if (mode != algo_mode_t::unset) {
-                EXPECT_TRUE(weight_kept(e)) << mode_name(mode);
-            }
-            runs.push_back(std::move(e));
+            EXPECT_TRUE(matches(e)) << mode_name(mode);
+            EXPECT_EQ(nbt::native_layouts(e.wei.get()), 1u) << mode_name(mode);
+            EXPECT_TRUE(weight_kept(e)) << mode_name(mode);
+            alive.push_back(std::move(e));
         }
         {
             expert_t e = make_expert(c);
-            ASSERT_EQ(run_direct(e, algo_mode_t::per_call,
+            compute_reference(e, e.src.get(), e.lda());
+            EXPECT_EQ(run_direct(e, algo_mode_t::per_call,
                               matmul_algo_t::dynamic_dispatch),
                     status_t::success);
+            EXPECT_TRUE(matches(e)) << "under dynamic dispatch";
             EXPECT_TRUE(weight_kept(e)) << "under dynamic dispatch";
-            EXPECT_TRUE(same_bits(runs[0], e)) << "under dynamic dispatch";
             alive.push_back(std::move(e));
         }
-        EXPECT_TRUE(matches(runs[0]));
-        for (size_t r = 1; r < runs.size(); ++r)
-            EXPECT_TRUE(same_bits(runs[0], runs[r])) << mode_name(kModes[r]);
-        for (expert_t &e : runs)
-            alive.push_back(std::move(e));
     }
-    {
-        const case_t c = float_case(8, 64, 96, bf16, bf16, no_po, bf16, 97);
+    for (const case_t &c : {float_case(8, 64, 96, bf16, bf16, no_po, bf16, 97),
+                 float_case(6, 64, 64, f32, no_dt, add_po, f32, 99),
+                 float_case(8, 128, 256, f32, no_dt, no_po, f32, 100)}) {
         SCOPED_TRACE("served " + c.str());
         expert_t e = make_expert(c);
         compute_reference(e, e.src.get(), e.lda());
@@ -951,40 +944,54 @@ TEST(NativeBrgemmDeclinedRoute, RunsOnAoclAsUnset) {
     mm::clear_matmul_weight_caches();
 }
 
-// A batched call: the native BRGEMM takes only single calls, and the batched
-// route does not depend on ZENDNNL_MATMUL_ALGO.
-TEST(NativeBrgemmDeclinedRoute, BatchedCallRunsAsUnset) {
+// A batched call: the native BRGEMM serves only single calls.  A batched
+// call that names it (lowoha_algo native_brgemm) returns unimplemented,
+// with dst untouched; one with no lowoha_algo takes its kernel from
+// ZENDNNL_BMM_ALGO, so under ZENDNNL_MATMUL_ALGO=11, which selects the
+// kernel of single calls, it runs on its batched route with the bits it has
+// with the algorithm unset, and the weight stays raw.
+TEST(NativeBrgemmDeclinedRoute, BatchedCallsAskForTheNativeBrgemmOnlyByName) {
     SKIP_WITHOUT_NATIVE_ISA();
     mm::clear_matmul_weight_caches();
     const int batch = 3, M = 6, N = 64, K = 96;
     for (data_type_t dt : {bf16, f32}) {
         SCOPED_TRACE(dtype_info(dt));
         const size_t es = nbt::dt_bytes(dt);
+        const size_t dst_bytes = static_cast<size_t>(batch) * M * N * es;
         const nbt::buffer_t src = nbt::random_buffer(
                 dt, static_cast<size_t>(batch) * M * K, 101, -1.0f, 1.0f);
+        const nbt::buffer_t raw = nbt::random_buffer(
+                dt, static_cast<size_t>(batch) * K * N, 102, -0.5f, 0.5f);
         std::vector<nbt::buffer_t> wei, dst;
-        for (algo_mode_t mode : {algo_mode_t::unset, algo_mode_t::algo11}) {
-            wei.push_back(nbt::kept_until_exit(nbt::random_buffer(
-                    dt, static_cast<size_t>(batch) * K * N, 102, -0.5f, 0.5f)));
-            dst.push_back(
-                    nbt::make_buffer(static_cast<size_t>(batch) * M * N * es));
+        for (algo_mode_t mode : kModes) {
+            SCOPED_TRACE(mode_name(mode));
+            wei.push_back(nbt::kept_until_exit(nbt::make_buffer(raw.bytes)));
+            std::memcpy(wei.back().get(), raw.get(), raw.bytes);
+            dst.push_back(nbt::make_buffer(dst_bytes));
             const nbt::algo_pin_t pin(pinned_algo(mode));
             mm::matmul_params p;
             p.dtypes.src = p.dtypes.wei = p.dtypes.dst = dt;
+            if (mode == algo_mode_t::per_call)
+                p.lowoha_algo = matmul_algo_t::native_brgemm;
             mm::matmul_batch_params_t bp;
             bp.Batch_A = batch;
             bp.Batch_B = batch;
-            ASSERT_EQ(mm::matmul_direct('r', false, false, M, N, K, 1.0f,
+            const bool named = mode == algo_mode_t::per_call;
+            EXPECT_EQ(mm::native_brgemm_refusal('r', false, false, M, N, K,
+                              1.0f, src.get(), K, wei.back().get(), N, nullptr,
+                              0.0f, dst.back().get(), N, true, bp, p),
+                    named ? status_t::unimplemented : status_t::success);
+            EXPECT_EQ(run_matmul_direct('r', false, false, M, N, K, 1.0f,
                               src.get(), K, wei.back().get(), N, nullptr, 0.0f,
                               dst.back().get(), N, true, bp, p),
-                    status_t::success)
-                    << mode_name(mode);
-            EXPECT_EQ(nbt::native_layouts(wei.back().get()), 0u)
-                    << mode_name(mode);
+                    named ? status_t::unimplemented : status_t::success);
+            EXPECT_EQ(native_refusal_checked(), named);
+            EXPECT_EQ(nbt::native_layouts(wei.back().get()), 0u);
+            EXPECT_EQ(std::memcmp(wei.back().get(), raw.get(), raw.bytes), 0)
+                    << "the weight was rewritten";
         }
-        EXPECT_EQ(std::memcmp(dst[0].get(), dst[1].get(),
-                          static_cast<size_t>(batch) * M * N * es),
-                0);
+        EXPECT_EQ(std::memcmp(dst[0].get(), dst[1].get(), dst_bytes), 0)
+                << "ZENDNNL_MATMUL_ALGO=11 changed the batched call's bits";
     }
     mm::clear_matmul_weight_caches();
 }

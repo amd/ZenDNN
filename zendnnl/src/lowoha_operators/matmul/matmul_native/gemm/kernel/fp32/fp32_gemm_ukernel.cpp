@@ -536,11 +536,17 @@ void avx512_tail_kernel(const float *__restrict pa, int a_stride,
     const __mmask16 rem_mask = rem ? static_cast<__mmask16>((1u << rem) - 1)
                                    : static_cast<__mmask16>(0);
 
-    __m512 acc[12][4] = {};
+    // mr_count is at least 1, so the row loop runs at least once and writes
+    // every accumulator the kernel reads.
+    __m512 acc[12][4];
     const int nv = (nr_count + 15) / 16;
-    for (int m = 0; m < mr_count; ++m)
-        for (int v = 0; v < nv; ++v)
-            acc[m][v] = _mm512_setzero_ps();
+    {
+        int m = 0;
+        do {
+            for (int v = 0; v < 4; ++v)
+                acc[m][v] = _mm512_setzero_ps();
+        } while (++m < mr_count);
+    }
 
     for (int kk = 0; kk < k; ++kk) {
         __m512 bv[4];
@@ -614,10 +620,16 @@ void scalar_microkernel(const float *pa, int a_stride, const float *pb,
         int b_stride, float *C, int ldc, int k, int mr_count, int nr_count,
         float beta, const float *bias, fused_postop_t fused_op) {
 
+    // C = beta * C + A * B, the products accumulated onto beta * C; C is not
+    // read when beta is 0.
     if (beta == 0.0f) {
         for (int m = 0; m < mr_count; ++m)
             for (int n = 0; n < nr_count; ++n)
                 C[m * ldc + n] = 0.0f;
+    } else if (beta != 1.0f) {
+        for (int m = 0; m < mr_count; ++m)
+            for (int n = 0; n < nr_count; ++n)
+                C[m * ldc + n] *= beta;
     }
     for (int kk = 0; kk < k; ++kk)
         for (int m = 0; m < mr_count; ++m) {

@@ -569,7 +569,7 @@ LOWOHA reorder tests validate quantization, dequantization, and type conversion 
 
 > **Note:** `F16_QUANT_DEQUANT`, `F16_QUANT_DEQUANT_F16_SCALE`, `F16_DYN_QUANT`, and `F16_DYN_QUANT_F16_SCALE` exercise FP16 source. At dispatch time the kernel picks between two backends:
 > - **F32-FMA** (AVX-512F + F16C): F16C convert on load/store, all math in `__m512`. Bit-exact with the scalar reference.
-> - **FP16-FMA** (`__m512h`-native, AVX512-FP16 ISA): full quant chain in FP16, ~2× throughput on Granite Rapids / Turin / Sapphire Rapids; ±1 LSB drift vs the scalar reference (absorbed by the shared BF16/FP16 tolerance epsilon — see below).
+> - **FP16-FMA** (`__m512h`-native, AVX512-FP16 ISA): full quant chain in FP16, ~2× the F32-FMA throughput on a host with AVX512-FP16; ±1 LSB drift vs the scalar reference (absorbed by the shared BF16/FP16 tolerance epsilon — see below).
 >
 > Backend is auto-selected by `can_use_f16_fma_kernel()` (defined in `lowoha_reorder_common.hpp`) — FP16-FMA when the host has AVX512-FP16 + the library was built with GCC 12+ and without `-DZENDNNL_NATIVE_F32_ACCUM=ON`; else F32-FMA. No runtime env var. Rebuild with `-DZENDNNL_NATIVE_F32_ACCUM=ON` to pin reorder to F32-FMA. Orthogonal to `ZENDNNL_DYNAMIC_QUANT_ALGO` which selects fused/unfused/scalar layout.
 

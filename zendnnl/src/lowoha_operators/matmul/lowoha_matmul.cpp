@@ -14,6 +14,7 @@
 # * limitations under the License.
 # *******************************************************************************/
 
+#include "common/zendnnl_compat.hpp"
 #include "ggml_weight_unpack.hpp"
 #include "lowoha_matmul_utils.hpp"
 #include "lowoha_operators/common/omp_thread_control.hpp"
@@ -71,8 +72,7 @@ void matmul_kernel_wrapper(char layout, char transA, char transB, int M, int N,
         return;
     }
 #endif
-    if (kernel == matmul_algo_t::native_gemm
-            || kernel == matmul_algo_t::native_brgemm) {
+    if (kernel == matmul_algo_t::native_gemm) {
         // Native kernels support FP32 and BF16 (src=BF16,wei=BF16,dst=BF16|FP32), no transA
         const bool is_fp32 = (lowoha_param.dtypes.src == data_type_t::f32
                 && lowoha_param.dtypes.wei == data_type_t::f32
@@ -95,10 +95,9 @@ void matmul_kernel_wrapper(char layout, char transA, char transB, int M, int N,
             apilog_info("Executing matmul LOWOHA kernel with ",
                     kernel_to_string(kernel),
                     ", algo: ", static_cast<int>(kernel));
-            bool executed = native::native_matmul_execute(kernel, layout,
-                    transA == 't', transB == 't', M, N, K, alpha, A, lda, B,
-                    ldb, bias, beta, C, ldc, is_weights_const, num_threads,
-                    lowoha_param);
+            bool executed = native::native_gemm_execute(layout, transA == 't',
+                    transB == 't', M, N, K, alpha, A, lda, B, ldb, bias, beta,
+                    C, ldc, is_weights_const, num_threads, lowoha_param);
             if (executed) { return; }
             log_info(
                     "Native kernel execution failed, falling back to aocl_dlp");
@@ -192,8 +191,7 @@ void matmul_execute(const char layout, const bool transA, const bool transB,
 
 #endif
 
-    if (kernel == matmul_algo_t::native_gemm
-            || kernel == matmul_algo_t::native_brgemm) {
+    if (kernel == matmul_algo_t::native_gemm) {
         // Native kernels support FP32, BF16, and INT8 (u8/s8 × s8 → f32/bf16/s8/u8)
         const bool is_fp32 = (params.dtypes.src == data_type_t::f32
                 && params.dtypes.wei == data_type_t::f32
@@ -236,11 +234,11 @@ void matmul_execute(const char layout, const bool transA, const bool transB,
             apilog_info("Executing matmul LOWOHA kernel with ",
                     kernel_to_string(kernel),
                     ", algo: ", static_cast<int>(kernel));
-            bool handled = native::native_matmul_execute(kernel, layout, transA,
-                    transB, M, N, K, alpha, src, lda, weight, ldb, bias, beta,
-                    dst, ldc, is_weights_const, num_threads, params);
+            bool handled = native::native_gemm_execute(layout, transA, transB,
+                    M, N, K, alpha, src, lda, weight, ldb, bias, beta, dst, ldc,
+                    is_weights_const, num_threads, params);
             if (handled) { return; }
-            // Native kernel declined (e.g. INT8 shape not supported by GEMV).
+            // The native GEMM has no kernel for the call (e.g. INT8).
             // Fall through to DLP.
             kernel = matmul_algo_t::aocl_dlp;
         }
@@ -275,23 +273,31 @@ static bool to_group_gated_act(
     return false;
 }
 
-status_t matmul_direct(const char layout, const bool transA, const bool transB,
-        const int M, const int N, const int K, const float alpha,
-        const void *src, const int lda, const void *weight, const int ldb,
-        const void *bias, const float beta, void *dst, const int ldc,
-        const bool is_weights_const, const matmul_batch_params_t &batch_params,
-        const matmul_params &params, const matmul_gated_act_params *gated_act) {
-    // Profiler overhead in production (ZENDNNL_ENABLE_PROFILER unset):
-    //  - profiler_t constructor: eliminated by dead store elimination at -O3
-    //    when profiler is never used.
-    //  - is_profile_enabled(): negligible (cached static const bool, shared
-    //    across all translation units via inline linkage).
-    //  - if (is_profile) branch: negligible (always false, branch predictor
-    //    learns not-taken quickly).
-    profiler_t profiler;
-    bool is_profile = is_profile_enabled();
-    if (is_profile) { profiler.tbp_start(); }
+namespace {
 
+/// The working state of a matmul_direct call after its input checks.
+struct direct_call_t {
+    explicit direct_call_t(const matmul_params &p) : params(p) {}
+    /// The call's copy of params: reorder, kernel_select, and post-op
+    /// normalization mutate effective execution state only; caller params
+    /// are left unchanged so the same struct can be reused across
+    /// iterations.
+    matmul_params params;
+    grp_matmul_gated_act_params group_gated_act;
+    bool has_gated_act = false; ///< a gated_act argument was given
+    bool run_gated_act = false; ///< and it is an activation
+    int batch_count = 1;
+};
+
+/// matmul_direct's checks of a call and its normalization of call.params,
+/// the call's copy of params: the status it returns before any route runs,
+/// success when the call goes on.  Inlined into its callers: matmul_direct
+/// runs it on every call, whatever route the call takes.
+ZENDNNL_ALWAYS_INLINE inline status_t prepare_direct_call(const int M,
+        const int N, const int K, const void *src, const void *weight,
+        void *dst, const bool is_weights_const,
+        const matmul_batch_params_t &batch_params, const matmul_params &params,
+        const matmul_gated_act_params *gated_act, direct_call_t &call) {
     // F16 ISA check must always run — not gated behind diagnostics.
     // Prevents undefined behavior on platforms without AVX512-FP16 support.
     // Covers every F16-bearing operand: src / wei / dst, bias, and any binary
@@ -313,7 +319,7 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
     // explicitly disabled, this resolves to a single predicted-taken branch,
     // skipping the full validation path (null-pointer checks, dimension
     // checks, and quantization-parameter validation).
-    // Must run BEFORE creating exec_params: diagnostics report the
+    // Must judge params, not the call's copy: diagnostics report the
     // caller-supplied configuration, not the library's internal state.
     status_t status = zendnnl::common::op_instrumentation::validate([&]() {
         return validate_matmul_direct_inputs(src, weight, dst, M, N, K,
@@ -322,15 +328,10 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
     });
     if (status != status_t::success) { return status; }
 
-    // Working copies for this call — reorder, kernel_select, and post-op
-    // normalization mutate effective execution state only; caller params are
-    // left unchanged so the same struct can be reused across iterations.
-    matmul_params exec_params = params;
-    matmul_batch_params_t exec_batch_params = batch_params;
-
-    // Defaults N for binary post-ops when leading_dim is -1. Mutates exec_params
-    // only. Must always execute regardless of ZENDNNL_DIAGNOSTICS_ENABLE.
-    for (auto &po : exec_params.postop_) {
+    // Defaults N for binary post-ops when leading_dim is -1. Mutates the
+    // call's copy only. Must always execute regardless of
+    // ZENDNNL_DIAGNOSTICS_ENABLE.
+    for (auto &po : call.params.postop_) {
         // Materialize operation-specific defaults on the per-call copy.
         // In particular, an omitted Swish/ELU alpha becomes 1 while an
         // explicitly supplied zero remains zero.
@@ -356,39 +357,113 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
         }
     }
 
-    size_t src_type_size = size_of(exec_params.dtypes.src);
-    const size_t weight_type_size = size_of(exec_params.dtypes.wei);
-    const size_t out_type_size = size_of(exec_params.dtypes.dst);
-
-    const int batch_count
-            = std::max(exec_batch_params.Batch_A, exec_batch_params.Batch_B);
-    grp_matmul_gated_act_params group_gated_act;
-    const grp_matmul_gated_act_params *group_gated_act_ptr = nullptr;
+    call.batch_count = std::max(batch_params.Batch_A, batch_params.Batch_B);
     if (gated_act != nullptr) {
-        if (!to_group_gated_act(gated_act->act, group_gated_act.act)) {
+        if (!to_group_gated_act(gated_act->act, call.group_gated_act.act)) {
             log_error("matmul_direct: unsupported gated activation value ",
                     static_cast<int>(gated_act->act));
             return status_t::failure;
         }
-        group_gated_act_ptr = &group_gated_act;
+        call.has_gated_act = true;
     }
-    const bool run_gated_act = group_gated_act_ptr != nullptr
-            && group_gated_act.act != grp_matmul_gated_act_t::none;
-    if (run_gated_act && batch_count != 1) {
+    call.run_gated_act = call.has_gated_act
+            && call.group_gated_act.act != grp_matmul_gated_act_t::none;
+    if (call.run_gated_act && call.batch_count != 1) {
         log_error(
                 "matmul_direct: gated activation is supported only for a "
                 "single batch");
         return status_t::failure;
     }
+    return status_t::success;
+}
+
+/// Points q at held, a copy of the elements its dims name; a null buffer,
+/// or dims that name no element, stay as they are.
+void point_at_copy(matmul_quantization_params_t::matmul_quant_t &q,
+        std::vector<uint8_t> &held) {
+    const int64_t n = checked_quant_param_num_elements(q.dims);
+    const size_t bytes = n > 0 ? static_cast<size_t>(n) * size_of(q.dt) : 0;
+    if (q.buff == nullptr || bytes == 0) return;
+    const uint8_t *from = static_cast<const uint8_t *>(q.buff);
+    held.assign(from, from + bytes);
+    q.buff = held.data();
+}
+
+} // namespace
+
+status_t native_brgemm_refusal(const char layout, const bool transA,
+        const bool transB, const int M, const int N, const int K,
+        const float alpha, const void *src, const int lda, const void *weight,
+        const int ldb, const void *bias, const float beta, void *dst,
+        const int ldc, const bool is_weights_const,
+        const matmul_batch_params_t &batch_params, const matmul_params &params,
+        const matmul_gated_act_params *gated_act, const char **reason) {
+    direct_call_t call(params);
+    if (prepare_direct_call(M, N, K, src, weight, dst, is_weights_const,
+                batch_params, params, gated_act, call)
+                    != status_t::success
+            || !native::native_brgemm_selected(call.params))
+        return status_t::success;
+    // A dynamic quantization writes the scales and zero points it makes
+    // into the buffers of the call's params: the check writes into copies.
+    std::vector<uint8_t> scale_copy, zp_copy;
+    if (call.params.dynamic_quant) {
+        point_at_copy(call.params.quant_params.src_scale, scale_copy);
+        point_at_copy(call.params.quant_params.src_zp, zp_copy);
+    }
+    const int32_t num_threads = resolve_num_threads(
+            call.params.num_threads, thread_guard::max_threads());
+    status_t status = status_t::success;
+    const char *why = nullptr;
+    if (!native::native_layout_check(layout, transA, transB, M, N, K, alpha,
+                src, lda, weight, ldb, bias, beta, dst, ldc, is_weights_const,
+                call.batch_count, num_threads,
+                call.run_gated_act ? gated_act->act : matmul_gated_act_t::none,
+                call.params, status, why))
+        return status_t::success;
+    if (reason != nullptr) *reason = why;
+    return status;
+}
+
+status_t matmul_direct(const char layout, const bool transA, const bool transB,
+        const int M, const int N, const int K, const float alpha,
+        const void *src, const int lda, const void *weight, const int ldb,
+        const void *bias, const float beta, void *dst, const int ldc,
+        const bool is_weights_const, const matmul_batch_params_t &batch_params,
+        const matmul_params &params, const matmul_gated_act_params *gated_act) {
+    // Profiler overhead in production (ZENDNNL_ENABLE_PROFILER unset):
+    //  - profiler_t constructor: eliminated by dead store elimination at -O3
+    //    when profiler is never used.
+    //  - is_profile_enabled(): negligible (cached static const bool, shared
+    //    across all translation units via inline linkage).
+    //  - if (is_profile) branch: negligible (always false, branch predictor
+    //    learns not-taken quickly).
+    profiler_t profiler;
+    bool is_profile = is_profile_enabled();
+    if (is_profile) { profiler.tbp_start(); }
+
+    direct_call_t call(params);
+    const status_t checked = prepare_direct_call(M, N, K, src, weight, dst,
+            is_weights_const, batch_params, params, gated_act, call);
+    if (checked != status_t::success) { return checked; }
+    matmul_params &exec_params = call.params;
+    matmul_batch_params_t exec_batch_params = batch_params;
+
+    size_t src_type_size = size_of(exec_params.dtypes.src);
+    const size_t weight_type_size = size_of(exec_params.dtypes.wei);
+    const size_t out_type_size = size_of(exec_params.dtypes.dst);
+
+    const int batch_count = call.batch_count;
+    const grp_matmul_gated_act_params &group_gated_act = call.group_gated_act;
+    const grp_matmul_gated_act_params *group_gated_act_ptr
+            = call.has_gated_act ? &call.group_gated_act : nullptr;
+    const bool run_gated_act = call.run_gated_act;
     const int32_t omp_mt = thread_guard::max_threads();
     const int32_t num_threads
             = resolve_num_threads(exec_params.num_threads, omp_mt);
-    // ALGO 11: the native BRGEMM serves the calls it qualifies for; the others
-    // continue below as without it, up to the kernel choice.
-    const bool native_selected = native::native_brgemm_selected(exec_params);
-    const bool native_requested
-            = native_selected && native::native_brgemm_requested(exec_params);
-    if (native_selected) {
+    // The native BRGEMM takes every call that asks for it: it serves it or
+    // returns the call's error; the others continue below as without it.
+    if (native::native_brgemm_selected(exec_params)) {
         status_t native_status = status_t::success;
         if (native::native_layout_matmul(layout, transA, transB, M, N, K, alpha,
                     src, lda, weight, ldb, bias, beta, dst, ldc,
@@ -576,26 +651,9 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
             && exec_params.dtypes.src == data_type_t::s8;
     if (w4a8_source_reordered) { exec_params.dynamic_quant = false; }
 
-    // A single call that asked for the native BRGEMM and was declined runs on
-    // AOCL-DLP blocked, never on the other native kernels, and keeps its
-    // weight raw (weight cache mode at most 1): a later call may take the
-    // weight to the native BRGEMM.
-    const bool native_declined = native_requested && batch_count == 1;
-    if (native_declined) {
-        exec_params.weight_cache_type
-                = std::min<int32_t>(exec_params.weight_cache_type, 1);
-    }
     matmul_algo_t kernel = kernel_select(exec_params, exec_batch_params.Batch_A,
             exec_batch_params.Batch_B, batch_count, M, N, K, num_threads, bias,
-            is_weights_const, transB);
-    if (native_declined && kernel == matmul_algo_t::native_brgemm) {
-#if ZENDNNL_DEPENDS_AOCLDLP
-        kernel = matmul_algo_t::aocl_dlp_blocked;
-#else
-        kernel = matmul_algo_t::reference;
-#endif
-        exec_params.lowoha_algo = kernel;
-    }
+            is_weights_const);
     matmul_algo_t api_log_kernel = kernel;
     static unsigned int auto_version = get_auto_tuner_ver();
 

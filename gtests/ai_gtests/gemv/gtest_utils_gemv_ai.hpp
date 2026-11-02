@@ -38,7 +38,7 @@ public:
 
 private:
     static void add_kc_path_params(std::vector<MatmulParamsAI> &params);
-    static void add_looper_path_params(std::vector<MatmulParamsAI> &params);
+    static void add_wide_n_params(std::vector<MatmulParamsAI> &params);
     static void add_random_stress_params(std::vector<MatmulParamsAI> &params);
     static void add_boundary_params(std::vector<MatmulParamsAI> &params);
     static void add_edge_case_params(std::vector<MatmulParamsAI> &params);

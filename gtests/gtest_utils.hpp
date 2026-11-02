@@ -44,6 +44,7 @@ static inline int unsetenv(const char *name) {
     return _putenv_s(name, "");
 }
 #endif
+#include "gtest_native_refusal.hpp"
 #include "lowoha_operators/embedding_bag/lowoha_embedding_bag.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 #include "lowoha_operators/normalization/lowoha_normalization.hpp"

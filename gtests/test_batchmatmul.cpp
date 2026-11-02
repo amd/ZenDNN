@@ -103,6 +103,7 @@ TEST_P(TestBatchMatmul, 4D_INVALID) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, alpha, beta);
+    if (native_refusal_verified()) return;
     bool is_test_failed = (status != status_t::success);
     EXPECT_TRUE(is_test_failed);
 }
@@ -129,6 +130,7 @@ TEST_P(TestBatchMatmul, OUTPUT_LESS_THAN_3D_INVALID) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, alpha, beta);
+    if (native_refusal_verified()) return;
     bool is_test_failed = (status != status_t::success);
     EXPECT_TRUE(is_test_failed);
 }
@@ -157,6 +159,7 @@ TEST_P(TestBatchMatmul, OUTPUT_ONLY_3D_INVALID) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, alpha, beta);
+    if (native_refusal_verified()) return;
     bool is_test_failed = (status != status_t::success);
     EXPECT_TRUE(is_test_failed);
 }
@@ -184,6 +187,7 @@ TEST_P(TestBatchMatmul, INPUT_LESS_THAN_2D_INVALID) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, alpha, beta);
+    if (native_refusal_verified()) return;
     bool is_test_failed = (status != status_t::success);
     EXPECT_TRUE(is_test_failed);
 }
@@ -211,6 +215,7 @@ TEST_P(TestBatchMatmul, WEIGHT_LESS_THAN_2D_INVALID) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, alpha, beta);
+    if (native_refusal_verified()) return;
     bool is_test_failed = (status != status_t::success);
     EXPECT_TRUE(is_test_failed);
 }
@@ -241,6 +246,7 @@ TEST_P(TestBatchMatmul, DIFFERENT_BATCH_INVALID) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, alpha, beta);
+    if (native_refusal_verified()) return;
     bool is_test_failed = (status != status_t::success);
     EXPECT_TRUE(is_test_failed);
 }
@@ -270,6 +276,7 @@ TEST_P(TestBatchMatmul, DIFFERENT_ROW_INVALID) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, alpha, beta);
+    if (native_refusal_verified()) return;
     bool is_test_failed = (status != status_t::success);
     EXPECT_TRUE(is_test_failed);
 }
@@ -299,6 +306,7 @@ TEST_P(TestBatchMatmul, DIFFERENT_COL_INVALID) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, alpha, beta);
+    if (native_refusal_verified()) return;
     bool is_test_failed = (status != status_t::success);
     EXPECT_TRUE(is_test_failed);
 }
@@ -333,6 +341,7 @@ TEST_P(TestBatchMatmul, F32_3D) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, alpha, beta);
+    if (native_refusal_verified()) return;
     status_t ref_status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor_ref, po_types, binary_tensors,
             use_LOWOHA, algo, alpha, beta, true);
@@ -380,6 +389,7 @@ TEST_P(TestBatchMatmul, F32_2D_WEI) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, alpha, beta);
+    if (native_refusal_verified()) return;
 
     bool is_test_failed = (status != status_t::success);
     if (is_test_failed
@@ -435,6 +445,7 @@ TEST_P(TestBatchMatmul, F32_2D_INP) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, alpha, beta);
+    if (native_refusal_verified()) return;
 
     bool is_test_failed = (status != status_t::success);
     if (is_test_failed
@@ -491,6 +502,7 @@ TEST_P(TestBatchMatmul, BF16_F32_3D) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, alpha, beta);
+    if (native_refusal_verified()) return;
     status_t ref_status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor_ref, po_types, binary_tensors,
             use_LOWOHA, algo, alpha, beta, true);
@@ -538,6 +550,7 @@ TEST_P(TestBatchMatmul, BF16_F32_2D_WEI) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, alpha, beta);
+    if (native_refusal_verified()) return;
 
     bool is_test_failed = (status != status_t::success);
     if (is_test_failed
@@ -594,6 +607,7 @@ TEST_P(TestBatchMatmul, BF16_F32_2D_INP) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, alpha, beta);
+    if (native_refusal_verified()) return;
 
     bool is_test_failed = (status != status_t::success);
     if (is_test_failed
@@ -650,6 +664,7 @@ TEST_P(TestBatchMatmul, BF16_BF16_3D) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, alpha, beta);
+    if (native_refusal_verified()) return;
     status_t ref_status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor_ref, po_types, binary_tensors,
             use_LOWOHA, algo, alpha, beta, true);
@@ -694,6 +709,7 @@ TEST_P(TestBatchMatmul, BF16_BF16_2D_WEI) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, alpha, beta);
+    if (native_refusal_verified()) return;
 
     bool is_test_failed = (status != status_t::success);
     if (is_test_failed
@@ -747,6 +763,7 @@ TEST_P(TestBatchMatmul, BF16_BF16_2D_INP) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, alpha, beta);
+    if (native_refusal_verified()) return;
 
     bool is_test_failed = (status != status_t::success);
     if (is_test_failed
@@ -809,6 +826,7 @@ TEST_P(TestBatchMatmul, F16_3D) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, alpha, beta);
+    if (native_refusal_verified()) return;
     if (status == status_t::isa_unsupported) {
         GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
     }
@@ -866,6 +884,7 @@ TEST_P(TestBatchMatmul, F16_F32_3D) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, alpha, beta);
+    if (native_refusal_verified()) return;
     if (status == status_t::isa_unsupported) {
         GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
     }

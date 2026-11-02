@@ -40,7 +40,8 @@ static std::string trim_whitespace(const std::string &s) {
  * Parses ZENDNNL_MATMUL_AUTO_ALGO_CANDIDATES env var.
  * Format: comma-separated integers matching matmul_algo_t enum values
  * (e.g. "1,2,6" for aocl_dlp_blocked, onednn_blocked, libxsmm).
- * Valid range: 0 to algo_count-1. dynamic_dispatch (0) and auto_tuner (8) are skipped.
+ * Valid range: 0 to algo_count-1. dynamic_dispatch (0), auto_tuner (8) and
+ * native_brgemm (11, which runs only the calls that ask for it) are skipped.
  * Returns empty vector if unset or if no valid algos were parsed.
  */
 static std::vector<matmul_algo_t> parse_algo_candidates_from_env() {
@@ -78,7 +79,8 @@ static std::vector<matmul_algo_t> parse_algo_candidates_from_env() {
             }
             matmul_algo_t algo = static_cast<matmul_algo_t>(ival);
             if (algo == matmul_algo_t::auto_tuner
-                    || algo == matmul_algo_t::dynamic_dispatch) {
+                    || algo == matmul_algo_t::dynamic_dispatch
+                    || algo == matmul_algo_t::native_brgemm) {
                 log_info("AutoTuner: algo id ", ival,
                         " invalid as candidate, skipping");
                 continue;

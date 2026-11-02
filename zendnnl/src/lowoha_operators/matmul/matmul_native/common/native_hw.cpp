@@ -268,6 +268,7 @@ const native_hw_t &native_hw() {
 
 UarchParams native_plan_uarch(const native_hw_t &hw) {
     UarchParams u = hw.uarch;
+    if (!u.l3_detected) u.l3_domain_bytes = 0;
     u.l3_domain_cores = 0;
     if (hw.l3_domain_threads > 0) {
         const int cores = hw.l3_domain_threads / (hw.smt > 0 ? hw.smt : 1);

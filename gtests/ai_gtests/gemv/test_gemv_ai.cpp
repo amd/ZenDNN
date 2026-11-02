@@ -14,6 +14,7 @@
  * limitations under the License.
  *******************************************************************************/
 
+#include "gtest_native_refusal.hpp"
 #include "gtest_utils_gemv_ai.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
@@ -217,7 +218,7 @@ protected:
                 matmul_params mp;
                 mp.dtypes = dtypes;
                 // Default 1 for stable CI. Set GEMV_NUM_THREADS>1 to stress the
-                // multi-thread BKC-GEMV path in bf16_gemv_direct; use GEMV_NUM_THREADS=0
+                // multi-thread BKC-GEMV path; use GEMV_NUM_THREADS=0
                 // to follow omp_get_max_threads() (respect OMP_NUM_THREADS).
                 {
                     int gemv_nt = 1;
@@ -301,8 +302,8 @@ protected:
                 const float test_alpha = params.alpha;
                 const float test_beta = params.beta;
                 auto call_kernel = [&](bool wt_const, void *dst_buf) {
-                    return matmul_direct('r', false, params.trans_b, M, N, K,
-                            test_alpha, input.get_raw_handle_unsafe(), lda,
+                    return run_matmul_direct('r', false, params.trans_b, M, N,
+                            K, test_alpha, input.get_raw_handle_unsafe(), lda,
                             weights.get_raw_handle_unsafe(), ldb,
                             bias.get_raw_handle_unsafe(), test_beta, dst_buf,
                             ldc, wt_const, bp, mp);
@@ -427,6 +428,7 @@ protected:
                 in_dt, wt_dt, out_dt, params.post_op_config.post_ops);
         status_t st = run_gemv(tensors.input, tensors.weights, tensors.bias,
                 tensors.output, params, tensors.binary_post_op_tensors);
+        if (native_refusal_verified()) return;
         if (supported) {
             EXPECT_EQ(st, status_t::success)
                     << "GEMV kernel failed for " << params.test_name;
@@ -474,6 +476,7 @@ protected:
         auto tensors = create_test_tensors(params, in_dt, wt_dt, out_dt, false);
         status_t st = run_gemv(tensors.input, tensors.weights, tensors.bias,
                 tensors.output, params, tensors.binary_post_op_tensors);
+        if (native_refusal_verified()) return;
         EXPECT_EQ(st, status_t::success)
                 << "Boundary GEMV failed: " << params.test_name;
     }
@@ -485,6 +488,7 @@ protected:
         auto tensors = create_test_tensors(params, in_dt, wt_dt, out_dt, true);
         status_t st = run_gemv(tensors.input, tensors.weights, tensors.bias,
                 tensors.output, params, tensors.binary_post_op_tensors);
+        if (native_refusal_verified()) return;
         if (params.expect_success) {
             EXPECT_EQ(st, status_t::success)
                     << "Edge GEMV failed: " << params.test_name;

@@ -25,6 +25,7 @@
 #include <utility>
 #include "lowoha_operators/matmul/lowoha_common.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
+#include "lowoha_operators/matmul/lowoha_quant_layout.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -173,48 +174,6 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
         const void *dst, const int M, const int N, const int K,
         const int Batch_A, const int Batch_B, const matmul_params &params,
         const bool is_weights_const);
-
-/**
- * @brief Checked quant-parameter element count with scalar empty-dims semantics.
- *
- * Quant metadata uses `{}`, `{1}`, and `{1,1}` for per-tensor storage in
- * different frontends. Returns one for empty dims, or -1 for non-positive /
- * overflowing dimensions.
- */
-inline int64_t checked_quant_param_num_elements(
-        const std::vector<int64_t> &dims) noexcept {
-    int64_t count = 1;
-    for (const int64_t dim : dims) {
-        if (dim <= 0 || count > std::numeric_limits<int64_t>::max() / dim)
-            return -1;
-        count *= dim;
-    }
-    return count;
-}
-
-inline bool quant_param_dims_are_per_tensor(
-        const std::vector<int64_t> &dims) noexcept {
-    return checked_quant_param_num_elements(dims) == 1;
-}
-
-inline bool quant_param_is_per_tensor(
-        const matmul_quantization_params_t::matmul_quant_t &q) noexcept {
-    return q.buff != nullptr && quant_param_dims_are_per_tensor(q.dims);
-}
-
-inline bool quant_param_is_per_channel(
-        const matmul_quantization_params_t::matmul_quant_t &q, int N) noexcept {
-    if (q.buff == nullptr || N <= 0) return false;
-    return (q.dims.size() == 1 && q.dims[0] == static_cast<int64_t>(N))
-            || (q.dims.size() == 2 && q.dims[0] == 1
-                    && q.dims[1] == static_cast<int64_t>(N));
-}
-
-inline bool quant_param_is_per_token(
-        const matmul_quantization_params_t::matmul_quant_t &q, int M) noexcept {
-    return M > 0 && q.dims.size() == 2 && q.dims[0] == static_cast<int64_t>(M)
-            && q.dims[1] == 1;
-}
 
 inline bool quant_scale_dtype_supported(data_type_t dt) noexcept {
     return dt == data_type_t::f32 || dt == data_type_t::bf16;
@@ -413,14 +372,6 @@ inline bool int8_ck_postops_supported(
     return int8_ck_binary_postops_supported(params, M, N);
 }
 
-/** @brief AOCL sym_quant requires K/G divisible and group_size % 4 == 0. */
-inline bool is_w4a8_sym_quant_group_valid(int K, int64_t num_groups) {
-    if (num_groups <= 0) { return false; }
-    if (static_cast<int64_t>(K) % num_groups != 0) { return false; }
-    const int64_t group_size = static_cast<int64_t>(K) / num_groups;
-    return group_size % 4 == 0;
-}
-
 /**
  * @brief Convert post-op names to a comma-separated string.
  *
@@ -483,7 +434,7 @@ inline matmul_algo_t select_algo_by_heuristics_bf16_mm(int M, int N, int K);
 */
 matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
         int batch_count, int M, int N, int K, int num_threads, const void *bias,
-        const bool is_weights_const, bool transB = false);
+        const bool is_weights_const);
 
 /**
  * @brief Get the auto-tuner version number

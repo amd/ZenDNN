@@ -20,9 +20,6 @@
 #include <sstream>
 #include <string>
 #include "common/zendnnl_global.hpp"
-#include "matmul_native/common/cost_model.hpp"
-#include "matmul_native/common/kernel_cache.hpp"
-#include "matmul_native/native_matmul.hpp"
 #if ZENDNNL_DEPENDS_AOCLDLP
 #include "aocl_dlp.h"
 #endif
@@ -156,12 +153,12 @@ status_t validate_w4a8_inputs(
         return status_t::failure;
     }
 
-    if (static_cast<int64_t>(K) % G != 0) {
+    if (!quant_groups_divide(K, G)) {
         log_error("W4A8 requires K divisible by weight group count (K=", K,
                 ", G=", G, ")");
         return status_t::failure;
     }
-    if (!is_w4a8_sym_quant_group_valid(K, G)) {
+    if (!quant_groups_are_whole_quads(K, G)) {
         const int64_t group_size = static_cast<int64_t>(K) / G;
         log_error("W4A8 requires K/G to be a multiple of 4 (got group_size=",
                 group_size, ")");
@@ -185,10 +182,8 @@ status_t validate_w4a8_inputs(
     // Reject per-tensor {1,1} src scale except M==1; sym-quant needs per-row scales.
     const int64_t src_rows = src_scale.dims[0];
     const int64_t src_cols = src_scale.dims[1];
-    const bool is_per_token_src
-            = (src_rows == static_cast<int64_t>(M) && src_cols == 1);
-    const bool is_per_group_src
-            = (src_rows == static_cast<int64_t>(M) && src_cols == G);
+    const bool is_per_token_src = quant_param_is_per_token(src_scale, M);
+    const bool is_per_group_src = quant_param_is_per_group_src(src_scale, M, G);
     if (!is_per_token_src && !is_per_group_src) {
         log_error(
                 "W4A8 requires per-token {M,1} or per-group {M,G} source "
@@ -269,9 +264,7 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
                       const char *param_name) -> bool {
         if (!buff) { return true; }
 
-        const int64_t nelems = checked_quant_param_num_elements(dims);
-
-        if (nelems != 1) {
+        if (!quant_param_dims_are_per_tensor(dims)) {
             log_error(param_name, " supports only per-tensor");
             return false;
         }
@@ -292,12 +285,9 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
             bool is_symmetric = (!params.quant_params.src_zp.buff);
             bool is_supported_dst = (params.dtypes.dst == data_type_t::f32
                     || params.dtypes.dst == data_type_t::bf16);
-            bool is_per_token = (nelems == static_cast<int64_t>(M));
-            bool is_per_group = (nelems > static_cast<int64_t>(M))
-                    && (nelems % static_cast<int64_t>(M) == 0)
-                    && (static_cast<int64_t>(K)
-                                    % (nelems / static_cast<int64_t>(M))
-                            == 0);
+            const int64_t src_groups = quant_count_src_groups(nelems, M, K);
+            bool is_per_token = (src_groups == 1);
+            bool is_per_group = (src_groups > 1);
             if (!(is_supported_src && is_symmetric && is_supported_dst
                         && (is_per_token || is_per_group))) {
                 log_error(
@@ -328,8 +318,8 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
                 //   per-token src + per-group wei {G,N}  -> accepted
                 //     (src scale is N-independent; B-side group size is
                 //     taken from wei {G,N} by sym_quant_group_size)
-                const bool has_per_channel_wei
-                        = wei_scale_nelems == static_cast<int64_t>(N);
+                const bool has_per_channel_wei = quant_count_is_per_axis(
+                        static_cast<size_t>(wei_scale_nelems), N);
                 const bool has_per_group_wei
                         = has_per_group_wei_scale(params.quant_params, N);
                 if (!has_per_channel_wei && !has_per_group_wei) {
@@ -342,9 +332,8 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
                 }
             }
             if (wei_scale_supplied_externally && is_per_group) {
-                int64_t src_num_groups = nelems / static_cast<int64_t>(M);
                 int64_t expected_wei_nelems
-                        = src_num_groups * static_cast<int64_t>(N);
+                        = src_groups * static_cast<int64_t>(N);
                 if (wei_scale_nelems != expected_wei_nelems) {
                     log_error(
                             "Per-group source scale requires per-group weight "
@@ -613,26 +602,26 @@ inline matmul_algo_t select_algo_by_heuristics_woq_int4_mm(
         return matmul_algo_t::aocl_dlp_blocked;
     } else {
         // If M <= 16 AOCL S4 Kernel gives Optimal Performance.
-        // If M >= 128, N and K >=1024 AOCL BLIS kernels with Zen weights conversion
+        // If M >= 128, N and K >=1024 AOCL BLIS kernels with ZenDNN weight conversion
         // gives optimal performance.
         // This is based on heuristic with different models and difference BS
         if (M <= 16) {
             // AOCL S4 Kernel
             return matmul_algo_t::aocl_dlp_blocked;
         } else if (M >= 128 && N >= 1024 && K >= 1024) {
-            // AOCL BF16 Kernel with Zen Weights Conversion
+            // AOCL BF16 Kernel with ZenDNN Weight Conversion
             return matmul_algo_t::aocl_dlp;
         } else if (M == 32) {
             if (N <= K) {
-                // TODO: Implement Blocked BRGEMM BF16 with Zen Weights Conversion
+                // TODO: Implement Blocked BRGEMM BF16 with ZenDNN Weight Conversion
                 return matmul_algo_t::aocl_dlp;
             } else {
                 // AOCL S4 Kernel
                 return matmul_algo_t::aocl_dlp_blocked;
             }
         } else {
-            // AOCL BF16 Kernel with Zen Weights Conversion
-            // TODO: Implement Blocked BRGEMM BF16 with Zen Weights Conversion for N > K case
+            // AOCL BF16 Kernel with ZenDNN Weight Conversion
+            // TODO: Implement Blocked BRGEMM BF16 with ZenDNN Weight Conversion for N > K case
             return matmul_algo_t::aocl_dlp;
         }
     }
@@ -768,7 +757,7 @@ unsigned int get_auto_tuner_ver() {
 
 matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
         int batch_count, int M, int N, int K, int num_threads, const void *bias,
-        const bool is_weights_const, bool transB) {
+        const bool is_weights_const) {
 
     matmul_config_t &matmul_config = matmul_config_t::instance();
     int32_t algo;
@@ -880,38 +869,10 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
                     && N == 1024) {
                 kernel = matmul_algo_t::libxsmm_blocked;
             } else {
-                if (params.dtypes.wei == data_type_t::bf16) {
-                    if (M <= 8) {
-                        // M=1: BKC GEMV with flat kernel + CCX scheduling.
-                        // M=2-8: BRGEMM with MR=M (decode) or MR=8, with
-                        // b_exceeds_l2 exemption. Both are the preferred default
-                        // over DLP at high thread counts on MoE shapes.
-                        // transB threaded through so the M=1 narrow-N gate can
-                        // route transB=true shapes back to the DLP rules (the
-                        // narrow xmm kernel inside bf16_gemv_direct only engages
-                        // when !transB).
-                        kernel = native::bf16_gemv_best_algo(
-                                M, N, K, num_threads, transB);
-                    } else {
-                        kernel = select_algo_by_heuristics_bf16_mm(M, N, K);
-                    }
-                } else if (params.dtypes.wei == data_type_t::s8 && M == 1
-                        && num_threads == 1) {
-                    // INT8 GEMV: BKC kernel for shapes where packed B fits in L2.
-                    // For large B near L2 capacity (>500KB) with N>256, DLP wins
-                    // due to two-block dispatch overhead. Route those to DLP.
-                    const int kp = (K + 3) & ~3;
-                    const int np = ((N + native::BKC_NR_PAD - 1)
-                                           / native::BKC_NR_PAD)
-                            * native::BKC_NR_PAD;
-                    const size_t b_packed = static_cast<size_t>(kp) * np;
-                    static const size_t l2 = static_cast<size_t>(
-                            native::detect_uarch().l2_bytes);
-                    if (b_packed <= l2 && !(b_packed > 500 * 1024 && N > 256)) {
-                        kernel = matmul_algo_t::native_brgemm;
-                    } else {
-                        kernel = matmul_algo_t::aocl_dlp_blocked;
-                    }
+                // The native BRGEMM runs only the calls that ask for it, so
+                // the decode shapes (M <= 8) take AOCL-DLP blocked.
+                if (params.dtypes.wei == data_type_t::bf16 && M > 8) {
+                    kernel = select_algo_by_heuristics_bf16_mm(M, N, K);
                 } else {
                     kernel = matmul_algo_t::aocl_dlp_blocked;
                 }

@@ -28,9 +28,11 @@
 #include "common/bfloat16.hpp"
 #include "common/float16.hpp"
 #include "common/zendnnl_compat.hpp"
+#include "lowoha_operators/matmul/lowoha_quant_layout.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/native_int8_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_epilogue.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_operator_bridge.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_utils.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -51,22 +53,6 @@ constexpr float kUnitScale = 1.0f;
 constexpr int kShiftClaimBytes = 65536;
 /// Pauses a wait of ready_group_shifts spins before it yields.
 constexpr int kShiftSpinPauses = 4096;
-
-/// 1 for a per-tensor buffer, rows for a per-row one ({rows} or {rows, 1}),
-/// 0 for any other shape.
-int64_t per_tensor_or_row(const std::vector<int64_t> &dims, int rows) {
-    const int64_t n = quant_elements(dims);
-    if (n == 1) return 1;
-    const bool row_shape
-            = dims.size() == 1 || (dims.size() == 2 && dims[1] == 1);
-    return n == rows && row_shape ? n : 0;
-}
-
-/// An {M, groups} source scale: one per row and K group.
-bool per_group_scale(const quant_t &q, int M, int groups) {
-    return groups > 1 && q.dims.size() == 2 && q.dims[0] == M
-            && q.dims[1] == groups;
-}
 
 /// The int32 zero-point term of the kernels is exact when every |sum over K
 /// of (a - zp) * w| fits int32: K times the largest |a - zp| over the source
@@ -192,21 +178,31 @@ void row_group_shifts(
 status_t quantize_source(const GemmDescriptor &desc,
         const matmul_params &params, const void *src, int nt, int copy_block,
         int64_t copy_par_min, int groups, native_int8_call_t &call,
-        const void *&a, int &lda, const matmul_params *&q) {
+        const void *&a, int &lda, const matmul_params *&q, const char **why) {
     const int M = desc.M;
     const int K = desc.K;
     const auto &qp = params.quant_params;
     const data_type_t compute = params.dtypes.compute;
     if (!params.dynamic_quant
             || (compute != data_type_t::s8 && compute != data_type_t::u8))
-        return status_t::unimplemented;
-    const int64_t n_scale = per_tensor_or_row(qp.src_scale.dims, M);
-    if (n_scale == 0 && !per_group_scale(qp.src_scale, M, groups))
-        return status_t::unimplemented;
+        return turned_away(status_t::unimplemented,
+                "a bf16 / f32 source with an s8 weight and no dynamic "
+                "quantization to u8 / s8",
+                why);
+    const int64_t n_scale
+            = quant_param_tensor_or_row_values(qp.src_scale.dims, M);
+    if (n_scale == 0 && !quant_param_is_per_group_src(qp.src_scale, M, groups))
+        return turned_away(status_t::unimplemented,
+                "a dynamic quantization with a source scale other than per "
+                "tensor, per token or per group",
+                why);
     // The quantizer writes one zero point per scale.
     if (compute == data_type_t::u8
-            && per_tensor_or_row(qp.src_zp.dims, M) != n_scale)
-        return status_t::unimplemented;
+            && quant_param_tensor_or_row_values(qp.src_zp.dims, M) != n_scale)
+        return turned_away(status_t::unimplemented,
+                "a dynamic quantization to u8 with a zero point of another "
+                "shape than its scale",
+                why);
 
     // A transposed source is made row-major first, so it quantizes exactly
     // as the same rows given row-major.
@@ -233,36 +229,121 @@ status_t quantize_source(const GemmDescriptor &desc,
     if (st != status_t::success) return st;
     a = quantized;
     lda = quantized_lda;
-    // The wrapper leaves the source as it was when it does not quantize;
-    // another route can still serve the call.
+    // The wrapper leaves the source as it was when it does not quantize.
     if (q->dtypes.src != data_type_t::s8 && q->dtypes.src != data_type_t::u8)
-        return status_t::unimplemented;
+        return turned_away(status_t::unimplemented,
+                "a dynamic quantization the quantizer does not make", why);
     return status_t::success;
 }
 
+/// The types of a zero point of a u8 / s8 source.
+bool zero_point_dt(data_type_t dt) {
+    return dt == data_type_t::s32 || dt == data_type_t::s8
+            || dt == data_type_t::u8;
+}
+
+/// The destinations of a per-group call: f32 or bf16, or u8 / s8 / s32,
+/// which the epilogue requantizes and rounds as the per-channel call's.
+bool group_dst(data_type_t dt) {
+    return dt == data_type_t::f32 || dt == data_type_t::bf16
+            || dt == data_type_t::u8 || dt == data_type_t::s8
+            || dt == data_type_t::s32;
+}
+
 /// check_int8_call of a call with groups per-group weight scales.
-status_t check_group_call(
-        const GemmDescriptor &desc, const matmul_params &params, int groups) {
+status_t check_group_call(const GemmDescriptor &desc,
+        const matmul_params &params, int groups, const char **why) {
     const auto &qp = params.quant_params;
     const quant_t &sc = qp.src_scale;
-    if (desc.K % groups != 0 || (desc.K / groups) % 4 != 0
-            || !native_float_dt(qp.wei_scale.dt)
-            || (desc.dst_dt != data_type_t::f32
-                    && desc.dst_dt != data_type_t::bf16)
+    if (!quant_groups_are_whole_quads(desc.K, groups))
+        return turned_away(status_t::unimplemented,
+                "per-group weight scales over groups of other than whole K "
+                "quads",
+                why);
+    if (!native_float_dt(qp.wei_scale.dt)
             || (sc.buff != nullptr && !native_float_dt(sc.dt)))
-        return status_t::unimplemented;
-    const int64_t n_scale = per_tensor_or_row(sc.dims, desc.M);
-    const bool per_group = per_group_scale(sc, desc.M, groups);
-    if (dynamic_source(params))
+        return turned_away(status_t::unimplemented,
+                "a per-group call with scales other than f32, bf16 or f16",
+                why);
+    if (!group_dst(desc.dst_dt))
+        return turned_away(status_t::unimplemented,
+                "a per-group call into a dst other than f32, bf16, u8, s8 or "
+                "s32",
+                why);
+    const int64_t n_scale = quant_param_tensor_or_row_values(sc.dims, desc.M);
+    const bool per_group = quant_param_is_per_group_src(sc, desc.M, groups);
+    // A u8 source, given or quantized in the call, has one scale and one
+    // zero point for the whole tensor.
+    const bool tensor_zp
+            = quant_param_tensor_or_row_values(qp.src_zp.dims, desc.M) == 1;
+    if (dynamic_source(params)) {
+        if (params.dtypes.compute == data_type_t::u8)
+            return n_scale == 1 && tensor_zp
+                            && (qp.src_zp.buff == nullptr
+                                    || qp.src_zp.dt == data_type_t::s32)
+                    ? status_t::success
+                    : turned_away(status_t::unimplemented,
+                              "a per-group call quantizing its source to u8 "
+                              "with other than one scale and one s32 zero "
+                              "point",
+                              why);
         return params.dtypes.compute == data_type_t::s8
-                        && (n_scale == 1 || quant_per_token(sc, desc.M)
+                        && (n_scale == 1 || quant_param_is_per_token(sc, desc.M)
                                 || per_group)
                 ? status_t::success
-                : status_t::unimplemented;
-    if (params.dtypes.src != data_type_t::s8 || qp.src_zp.buff != nullptr
-            || (sc.buff != nullptr && n_scale == 0 && !per_group))
-        return status_t::unimplemented;
+                : turned_away(status_t::unimplemented,
+                          "a per-group call quantizing its source with a scale "
+                          "other than per tensor, per token or per group",
+                          why);
+    }
+    if (params.dtypes.src == data_type_t::u8)
+        return (sc.buff == nullptr || n_scale == 1)
+                        && (qp.src_zp.buff == nullptr
+                                || (tensor_zp && zero_point_dt(qp.src_zp.dt)))
+                ? status_t::success
+                : turned_away(status_t::unimplemented,
+                          "a per-group call with a u8 source whose scale or "
+                          "zero "
+                          "point is not per tensor",
+                          why);
+    if (params.dtypes.src != data_type_t::s8)
+        return turned_away(status_t::unimplemented,
+                "a per-group call with a source other than u8 or s8", why);
+    if (qp.src_zp.buff != nullptr)
+        return turned_away(status_t::unimplemented,
+                "an s8 source with a zero point on per-group weights", why);
+    if (sc.buff != nullptr && n_scale == 0 && !per_group)
+        return turned_away(status_t::unimplemented,
+                "a per-group call with a source scale other than per tensor, "
+                "per token or per group",
+                why);
     return status_t::success;
+}
+
+/// check_int8_call of a call with an {M, groups} source scale and
+/// per-tensor or per-channel weight scales (or none): an s8 source without a
+/// zero point, given or quantized in the call.
+status_t check_source_group_call(const GemmDescriptor &desc,
+        const matmul_params &params, int groups, const char **why) {
+    const auto &qp = params.quant_params;
+    const quant_t &ws = qp.wei_scale;
+    if (!quant_groups_are_whole_quads(desc.K, groups) || !group_dst(desc.dst_dt)
+            || !native_float_dt(qp.src_scale.dt) || qp.src_zp.buff != nullptr
+            || (ws.buff != nullptr
+                    && ((!quant_param_dims_are_per_tensor(ws.dims)
+                                && !quant_param_is_per_channel(ws, desc.N))
+                            || !native_float_dt(ws.dt))))
+        return turned_away(status_t::unimplemented,
+                "an {M, G} source scale with a zero point, a dst, groups or "
+                "weight scales the per-group tile does not take",
+                why);
+    const bool s8 = dynamic_source(params)
+            ? params.dtypes.compute == data_type_t::s8
+            : params.dtypes.src == data_type_t::s8;
+    return s8 ? status_t::success
+              : turned_away(status_t::unimplemented,
+                        "an {M, G} source scale with a source other than s8",
+                        why);
 }
 
 } // namespace
@@ -279,6 +360,14 @@ native_int8_decision_t decide_int8_call(const GemmDescriptor &desc,
                 && (dst == data_type_t::f32 || dst == data_type_t::bf16);
         return d;
     }
+    const int source_groups = int8_source_groups(params, desc.M, desc.N);
+    if (source_groups > 0) {
+        d.scheme = native_int8_scheme_t::per_group;
+        d.groups = source_groups;
+        d.scales_after_groups = true;
+        d.order = native_int8_order_t::reference;
+        return d;
+    }
     if (desc.alpha != 1.0f || desc.beta != 0.0f || dst == data_type_t::s8
             || dst == data_type_t::u8 || dst == data_type_t::s32) {
         d.order = native_int8_order_t::reference;
@@ -293,59 +382,92 @@ native_int8_decision_t decide_int8_call(const GemmDescriptor &desc,
 }
 
 status_t check_int8_call(const GemmDescriptor &desc,
-        const matmul_params &params, const native_int8_decision_t &decision) {
+        const matmul_params &params, const native_int8_decision_t &decision,
+        const char **why) {
     const int M = desc.M;
     if (params.dtypes.wei != data_type_t::s8 || desc.K > kMaxSafeInt8AccumK)
-        return status_t::unimplemented;
+        return turned_away(status_t::unimplemented,
+                "K exceeds the int32 accumulation bound", why);
     const auto &qp = params.quant_params;
-    if (qp.wei_zp.buff != nullptr) return status_t::unimplemented;
-    if (desc.gated_act != matmul_gated_act_t::none && desc.beta != 0.0f)
-        return status_t::unimplemented;
+    if (qp.wei_zp.buff != nullptr)
+        return turned_away(status_t::unimplemented, "weight zero points", why);
+    // The tile applies beta of a gated call over the dst's N pre-activation
+    // columns.
+    if (desc.gated_act != matmul_gated_act_t::none && desc.beta != 0.0f
+            && desc.ldc < desc.N)
+        return turned_away(status_t::unimplemented,
+                "beta with a gated activation over a dst of fewer than N "
+                "columns",
+                why);
     if (decision.scheme == native_int8_scheme_t::per_group)
-        return check_group_call(desc, params, decision.groups);
+        return decision.scales_after_groups
+                ? check_source_group_call(desc, params, decision.groups, why)
+                : check_group_call(desc, params, decision.groups, why);
 
     const data_type_t src_dt = params.dtypes.src;
     if (src_dt == data_type_t::bf16 || src_dt == data_type_t::f32) {
         const data_type_t compute = params.dtypes.compute;
         if (!params.dynamic_quant
                 || (compute != data_type_t::s8 && compute != data_type_t::u8))
-            return status_t::unimplemented;
+            return turned_away(status_t::unimplemented,
+                    "a bf16 / f32 source with an s8 weight and no dynamic "
+                    "quantization to u8 / s8",
+                    why);
         // What the shared quantizer takes: a per-tensor or an {M, 1}
         // per-token scale of f32 / bf16 / f16, and for u8 an s32 zero point
         // of the scale's shape.
         const auto &sc = qp.src_scale;
-        const int64_t n_scale = per_tensor_or_row(sc.dims, M);
-        if (n_scale == 0 || (n_scale != 1 && !quant_per_token(sc, M))
+        const int64_t n_scale = quant_param_tensor_or_row_values(sc.dims, M);
+        if (n_scale == 0 || (n_scale != 1 && !quant_param_is_per_token(sc, M))
                 || (sc.buff != nullptr && !native_float_dt(sc.dt)))
-            return status_t::unimplemented;
+            return turned_away(status_t::unimplemented,
+                    "a dynamic quantization with a source scale other than "
+                    "per tensor or per token of f32, bf16 or f16",
+                    why);
         if (compute == data_type_t::u8
-                && (per_tensor_or_row(qp.src_zp.dims, M) != n_scale
+                && (quant_param_tensor_or_row_values(qp.src_zp.dims, M)
+                                != n_scale
                         || (qp.src_zp.buff != nullptr
                                 && qp.src_zp.dt != data_type_t::s32)))
-            return status_t::unimplemented;
+            return turned_away(status_t::unimplemented,
+                    "a dynamic quantization to u8 with a zero point other "
+                    "than s32 of its scale's shape",
+                    why);
     } else if (src_dt == data_type_t::u8 || src_dt == data_type_t::s8) {
         if (qp.src_scale.buff != nullptr
-                && (per_tensor_or_row(qp.src_scale.dims, M) == 0
+                && (quant_param_tensor_or_row_values(qp.src_scale.dims, M) == 0
                         || !native_float_dt(qp.src_scale.dt)))
-            return status_t::unimplemented;
+            return turned_away(status_t::unimplemented,
+                    "a source scale other than per tensor or per row of f32, "
+                    "bf16 or f16",
+                    why);
         // A u8 / s8 source keeps its zero point whatever dynamic_quant says.
         if (qp.src_zp.buff != nullptr) {
-            const int64_t n_zp = per_tensor_or_row(qp.src_zp.dims, M);
+            const int64_t n_zp
+                    = quant_param_tensor_or_row_values(qp.src_zp.dims, M);
             if (n_zp == 0
                     || (qp.src_zp.dt != data_type_t::s32
                             && qp.src_zp.dt != data_type_t::s8
                             && qp.src_zp.dt != data_type_t::u8))
-                return status_t::unimplemented;
+                return turned_away(status_t::unimplemented,
+                        "a source zero point other than per tensor or per "
+                        "row of s32, s8 or u8",
+                        why);
         }
     } else {
-        return status_t::unimplemented;
+        return turned_away(status_t::unimplemented,
+                "a source other than u8, s8, bf16 or f32 with an s8 weight",
+                why);
     }
 
     if (qp.wei_scale.buff != nullptr
-            && ((!quant_dims_per_tensor(qp.wei_scale.dims)
-                        && !quant_per_channel(qp.wei_scale, desc.N))
+            && ((!quant_param_dims_are_per_tensor(qp.wei_scale.dims)
+                        && !quant_param_is_per_channel(qp.wei_scale, desc.N))
                     || !native_float_dt(qp.wei_scale.dt)))
-        return status_t::unimplemented;
+        return turned_away(status_t::unimplemented,
+                "weight scales other than per tensor, per column or per group "
+                "of f32, bf16 or f16",
+                why);
     return status_t::success;
 }
 
@@ -356,10 +478,23 @@ int int8_scale_groups(const matmul_params &params, int N) {
                     std::numeric_limits<int>::max()));
 }
 
+int int8_source_groups(const matmul_params &params, int M, int N) {
+    const auto &qp = params.quant_params;
+    const auto &dims = qp.src_scale.dims;
+    // Dims on a null buffer scale nothing, except those of a source the
+    // call quantizes, whose quantizer makes the scales.
+    if (has_per_group_wei_scale(qp, N) || dims.size() != 2 || dims[0] != M
+            || dims[1] <= 1
+            || (qp.src_scale.buff == nullptr && !dynamic_source(params)))
+        return 0;
+    return static_cast<int>(
+            std::min<int64_t>(dims[1], std::numeric_limits<int>::max()));
+}
+
 status_t prepare_int8_call(const GemmDescriptor &desc,
         const matmul_params &params, const native_int8_decision_t &decision,
         const void *src, int copy_block, int64_t copy_par_min,
-        native_int8_call_t &call) {
+        native_int8_call_t &call, const char **why) {
     const int M = desc.M;
     const int K = desc.K;
     if (M <= 0 || K <= 0 || src == nullptr || desc.lda < (desc.transA ? M : K))
@@ -401,14 +536,16 @@ status_t prepare_int8_call(const GemmDescriptor &desc,
     const matmul_params *quantized = nullptr;
     if (src_dt == data_type_t::bf16 || src_dt == data_type_t::f32) {
         const status_t st = quantize_source(desc, params, src, nt, copy_block,
-                copy_par_min, groups, call, a, lda, quantized);
+                copy_par_min, groups, call, a, lda, quantized, why);
         if (st != status_t::success) return st;
         trans = false;
         a_dt = quantized->dtypes.src;
         src_scale = &quantized->quant_params.src_scale;
         if (src_zp != nullptr) src_zp = &quantized->quant_params.src_zp;
     } else if (src_dt != data_type_t::u8 && src_dt != data_type_t::s8) {
-        return status_t::unimplemented;
+        return turned_away(status_t::unimplemented,
+                "a source other than u8, s8, bf16 or f32 with an s8 weight",
+                why);
     }
 
     call.src_signed = a_dt == data_type_t::s8;
@@ -427,24 +564,32 @@ status_t prepare_int8_call(const GemmDescriptor &desc,
     if (src_scale->buff == nullptr) {
         call.src_scale = &kUnitScale;
         call.src_scale_stride = 0;
-    } else if (per_group_scale(*src_scale, M, groups)) {
-        if (!native_float_dt(src_scale->dt)) return status_t::unimplemented;
+    } else if (quant_param_is_per_group_src(*src_scale, M, groups)) {
+        if (!native_float_dt(src_scale->dt))
+            return turned_away(status_t::unimplemented,
+                    "a source scale other than f32, bf16 or f16", why);
         call.src_scale = f32_values(src_scale->buff, src_scale->dt,
                 static_cast<int64_t>(M) * groups, call.scale_buf);
         call.src_scale_stride = groups;
         call.src_scale_group_stride = 1;
     } else {
-        const int64_t n = per_tensor_or_row(src_scale->dims, M);
+        const int64_t n = quant_param_tensor_or_row_values(src_scale->dims, M);
         if (n == 0 || !native_float_dt(src_scale->dt))
-            return status_t::unimplemented;
+            return turned_away(status_t::unimplemented,
+                    "a source scale other than per tensor or per row of f32, "
+                    "bf16 or f16",
+                    why);
         call.src_scale
                 = f32_values(src_scale->buff, src_scale->dt, n, call.scale_buf);
         call.src_scale_stride = n == 1 ? 0 : 1;
     }
 
     if (src_zp != nullptr && src_zp->buff != nullptr) {
-        const int64_t n = per_tensor_or_row(src_zp->dims, M);
-        if (n == 0) return status_t::unimplemented;
+        const int64_t n = quant_param_tensor_or_row_values(src_zp->dims, M);
+        if (n == 0)
+            return turned_away(status_t::unimplemented,
+                    "a source zero point other than per tensor or per row",
+                    why);
         if (src_zp->dt == data_type_t::s32) {
             call.src_zp = static_cast<const int32_t *>(src_zp->buff);
         } else if (src_zp->dt == data_type_t::s8
@@ -457,12 +602,23 @@ status_t prepare_int8_call(const GemmDescriptor &desc,
             }
             call.src_zp = call.zp_buf.data();
         } else {
-            return status_t::unimplemented;
+            return turned_away(status_t::unimplemented,
+                    "a source zero point other than s32, s8 or u8", why);
         }
         call.src_zp_stride = n == 1 ? 0 : 1;
         // An asymmetric quantization puts the zero point of a row whose
-        // values exclude 0 outside the byte range, and so can a caller.
-        call.wide_zp = !zero_points_fit(call.src_zp, n, call.src_signed, K);
+        // values exclude 0 outside the byte range, and so can a caller.  The
+        // group kernel takes one zero point.  The int32 sums over K, or over
+        // a group, are exact only within the int32 range: past it the
+        // kernels take the zero-point term in int64.
+        const bool per_group
+                = decision.scheme == native_int8_scheme_t::per_group;
+        if (per_group && n != 1)
+            return turned_away(status_t::unimplemented,
+                    "a per-group call whose source zero point is not one value",
+                    why);
+        call.wide_zp = !zero_points_fit(
+                call.src_zp, n, call.src_signed, per_group ? K / groups : K);
     }
 
     const auto &wei_scale = qp.wei_scale;
@@ -470,25 +626,32 @@ status_t prepare_int8_call(const GemmDescriptor &desc,
         call.wei_scale = &kUnitScale;
         call.wei_scale_dt = data_type_t::f32;
         call.wei_scale_stride = 0;
-    } else if (decision.scheme == native_int8_scheme_t::per_group) {
+    } else if (decision.scheme == native_int8_scheme_t::per_group
+            && !decision.scales_after_groups) {
         call.wei_scale = wei_scale.buff;
         call.wei_scale_dt = wei_scale.dt;
         call.wei_scale_stride = 1;
-        call.groups = groups;
-        call.group_quads = K / groups / 4;
     } else {
         int64_t n = 0;
-        if (quant_dims_per_tensor(wei_scale.dims))
+        if (quant_param_dims_are_per_tensor(wei_scale.dims))
             n = 1;
-        else if (quant_per_channel(wei_scale, desc.N))
+        else if (quant_param_is_per_channel(wei_scale, desc.N))
             n = desc.N;
         if (n == 0 || !native_float_dt(wei_scale.dt))
-            return status_t::unimplemented;
+            return turned_away(status_t::unimplemented,
+                    "weight scales other than per tensor or per column of "
+                    "f32, bf16 or f16",
+                    why);
         call.wei_scale = wei_scale.buff;
         call.wei_scale_dt = wei_scale.dt;
         call.wei_scale_stride = n == 1 ? 0 : 1;
     }
+    call.scales_after_groups = decision.scales_after_groups;
     if (call.scheme == native_int8_scheme_t::per_group) {
+        call.groups = groups;
+        call.group_quads = K / groups / 4;
+    }
+    if (call.scheme == native_int8_scheme_t::per_group && call.src_signed) {
         // Every shift is written before its chunk is marked ready, and read
         // only after: the buffer needs no fill.
         call.shift_buf.reset(new int32_t[static_cast<size_t>(M) * groups]);

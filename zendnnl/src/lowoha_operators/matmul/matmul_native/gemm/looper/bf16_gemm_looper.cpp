@@ -176,39 +176,9 @@ static void bf16_thread_loop(const GemmDescriptor &desc, const BlockPlan &plan,
         }
     }
 
-    // Fused post-op detection
-    fused_postop_t fused_op = fused_postop_t::none;
+    // Fused post-op detection: an activation at the head of the chain.
     int fused_idx = -1;
-    for (int i = 0; i < static_cast<int>(params.postop_.size()); ++i) {
-        auto pt = params.postop_[i].po_type;
-        if (pt == post_op_type_t::relu) {
-            if (params.postop_[i].alpha == 0.0f) {
-                fused_op = fused_postop_t::relu;
-                fused_idx = i;
-                break;
-            }
-        } else if (pt == post_op_type_t::gelu_tanh) {
-            fused_op = fused_postop_t::gelu_tanh;
-            fused_idx = i;
-            break;
-        } else if (pt == post_op_type_t::gelu_erf) {
-            fused_op = fused_postop_t::gelu_erf;
-            fused_idx = i;
-            break;
-        } else if (pt == post_op_type_t::sigmoid) {
-            fused_op = fused_postop_t::sigmoid;
-            fused_idx = i;
-            break;
-        } else if (pt == post_op_type_t::tanh) {
-            fused_op = fused_postop_t::tanh_op;
-            fused_idx = i;
-            break;
-        } else if (pt == post_op_type_t::swish) {
-            fused_op = fused_postop_t::swish;
-            fused_idx = i;
-            break;
-        }
-    }
+    const fused_postop_t fused_op = head_fused_postop(params, &fused_idx);
 
     std::vector<matmul_post_op> remaining_postops;
     remaining_postops.reserve(params.postop_.size());

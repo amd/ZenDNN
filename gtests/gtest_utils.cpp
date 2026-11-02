@@ -18,6 +18,7 @@
 #include <atomic>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -25,6 +26,7 @@
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
 #include "lowoha_operators/matmul/group_matmul/executors/n_tile/group_matmul_n_tile.hpp"
 #include "lowoha_operators/matmul/group_matmul/prepack/prepack.hpp"
+#include <gtest/gtest.h>
 
 namespace {
 
@@ -2859,12 +2861,151 @@ void fill_tensor_with_nan(tensor_t &tensor) {
             tensor.get_buffer_sz_bytes(), tensor.get_data_type());
 }
 
+namespace {
+
+thread_local bool native_refusal_seen = false;
+/// The reason of the last checked refusal, and whether the call carries
+/// what it names (refusal_explained).
+thread_local std::string native_refusal_reason;
+thread_local bool native_refusal_explained = false;
+
+/// Whether the call carries what reason, the native BRGEMM's refusal of it,
+/// names, for the refusals that the suites drawing calls it serves meet on
+/// purpose: weight types it has no kernel for, sources of another type than
+/// the weight's, GGML packs, batched calls that name it, column-major calls,
+/// reordered sources, weight zero points, an f32 call into another dst, and
+/// a softmax after a gated activation.  Judged from the call's arguments
+/// alone, so a wrong refusal in the library is not explained by itself.
+bool refusal_explained(const std::string &reason, char layout,
+        const matmul_batch_params_t &batch, const matmul_params &params,
+        const matmul_gated_act_params *gated_act) {
+    using dt = data_type_t;
+    const dt src = params.dtypes.src, wei = params.dtypes.wei,
+             dst = params.dtypes.dst, compute = params.dtypes.compute;
+    // The source type the kernel multiplies with: a bf16 / f32 source the
+    // call quantizes to u8 / s8 counts as that type.
+    const dt mul_src = params.dynamic_quant
+                    && (src == dt::bf16 || src == dt::f32)
+                    && (compute == dt::u8 || compute == dt::s8)
+            ? compute
+            : src;
+    if (reason == "weight type other than bf16 / s8 / f32")
+        return wei != dt::bf16 && wei != dt::s8 && wei != dt::f32;
+    if (reason == "bf16 weight with a non-bf16 source")
+        return wei == dt::bf16 && src != dt::bf16;
+    if (reason == "s8 weight with a source other than u8 / s8")
+        return wei == dt::s8 && mul_src != dt::u8 && mul_src != dt::s8;
+    if (reason == "f32 weight with a non-f32 source")
+        return wei == dt::f32 && src != dt::f32;
+    if (reason == "an f32 call into a dst other than f32 or bf16")
+        return src == dt::f32 && wei == dt::f32 && dst != dt::f32
+                && dst != dt::bf16;
+    if (reason == "a GGML pack format")
+        return params.packing.pack_format_b != 0;
+    if (reason == "a batched call")
+        return std::max(batch.Batch_A, batch.Batch_B) > 1
+                && params.lowoha_algo == matmul_algo_t::native_brgemm;
+    if (reason == "a column-major call") return layout != 'r' && layout != 'R';
+    if (reason == "a reordered source") return params.mem_format_a != 'n';
+    if (reason == "weight zero points")
+        return params.quant_params.wei_zp.buff != nullptr;
+    if (reason == "a softmax with a gated activation")
+        return gated_act != nullptr
+                && gated_act->act != matmul_gated_act_t::none
+                && std::any_of(params.postop_.begin(), params.postop_.end(),
+                        [](const matmul_post_op &po) {
+            return po.po_type == post_op_type_t::softmax;
+        });
+    return false;
+}
+
+/// The bytes matmul_direct may write at dst: every batch of M rows (N
+/// columns of a column-major call) ldc elements apart.
+size_t dst_bytes(char layout, int M, int N, int ldc,
+        const matmul_batch_params_t &batch, const matmul_params &params) {
+    const bool row_major = layout == 'r' || layout == 'R';
+    const size_t rows = static_cast<size_t>(row_major ? M : N) * ldc;
+    const int batches = std::max(1, std::max(batch.Batch_A, batch.Batch_B));
+    const size_t stride = batch.batch_stride_dst != static_cast<size_t>(-1)
+            ? batch.batch_stride_dst
+            : rows;
+    return ((batches - 1) * stride + rows) * size_of(params.dtypes.dst);
+}
+
+} // namespace
+
+status_t run_matmul_direct(const char layout, const bool transA,
+        const bool transB, const int M, const int N, const int K,
+        const float alpha, const void *src, const int lda, const void *weight,
+        const int ldb, const void *bias, const float beta, void *dst,
+        const int ldc, const bool is_weights_const,
+        const matmul_batch_params_t &batch_params, const matmul_params &params,
+        const matmul_gated_act_params *gated_act) {
+    native_refusal_seen = false;
+    const char *reason = nullptr;
+    const status_t refused = native_brgemm_refusal(layout, transA, transB, M, N,
+            K, alpha, src, lda, weight, ldb, bias, beta, dst, ldc,
+            is_weights_const, batch_params, params, gated_act, &reason);
+    if (refused == status_t::success)
+        return matmul_direct(layout, transA, transB, M, N, K, alpha, src, lda,
+                weight, ldb, bias, beta, dst, ldc, is_weights_const,
+                batch_params, params, gated_act);
+    const size_t bytes = dst != nullptr && M > 0 && N > 0 && ldc > 0
+            ? dst_bytes(layout, M, N, ldc, batch_params, params)
+            : 0;
+    const std::vector<uint8_t> before(static_cast<const uint8_t *>(dst),
+            static_cast<const uint8_t *>(dst) + bytes);
+    ::testing::internal::CaptureStdout();
+    const status_t status = matmul_direct(layout, transA, transB, M, N, K,
+            alpha, src, lda, weight, ldb, bias, beta, dst, ldc,
+            is_weights_const, batch_params, params, gated_act);
+    const std::string log = ::testing::internal::GetCapturedStdout();
+    EXPECT_EQ(status, refused)
+            << "the native BRGEMM does not serve the call: " << reason;
+    EXPECT_TRUE(bytes == 0 || std::memcmp(before.data(), dst, bytes) == 0)
+            << "dst written by a call the native BRGEMM does not serve: "
+            << reason;
+    if (apilog_error_enabled()) {
+        EXPECT_NE(log.find(reason), std::string::npos)
+                << "no error line names \"" << reason << "\"";
+    }
+    // One line per checked refusal, for the run's count of them.
+    const ::testing::TestInfo *test
+            = ::testing::UnitTest::GetInstance()->current_test_info();
+    std::fprintf(stderr, "NATIVE_REFUSAL test=%s.%s status=%d reason=%s\n",
+            test != nullptr ? test->test_suite_name() : "-",
+            test != nullptr ? test->name() : "-", static_cast<int>(status),
+            reason);
+    native_refusal_seen = true;
+    native_refusal_reason = reason != nullptr ? reason : "";
+    native_refusal_explained = refusal_explained(
+            native_refusal_reason, layout, batch_params, params, gated_act);
+    return status;
+}
+
+bool native_refusal_verified() {
+    const bool seen = native_refusal_seen;
+    native_refusal_seen = false;
+    EXPECT_TRUE(!seen || native_refusal_explained)
+            << "the native BRGEMM refused a call these tests expect it to "
+               "serve: "
+            << native_refusal_reason;
+    return seen;
+}
+
+bool native_refusal_checked() {
+    const bool seen = native_refusal_seen;
+    native_refusal_seen = false;
+    return seen;
+}
+
 status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         tensor_t &bias_tensor, tensor_t &output_tensor,
         const std::vector<post_op_type_t> &po_types,
         const std::vector<tensor_t> &binary_tensors, bool use_LOWOHA,
         matmul_algo_t algo, float alpha, float beta, bool use_reference,
         int pack_format_b, bool is_superblock) {
+    if (!use_reference) native_refusal_seen = false;
     try {
         // beta == 0 must overwrite every element. A finite prefill can hide
         // a skipped store; the reference path keeps the caller's buffer.
@@ -3356,11 +3497,18 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
                         return status;
                     }
                 }
-                status_t status = matmul_direct('r', // layout: row-major
-                        transA, transB, static_cast<int>(M),
-                        static_cast<int>(N), static_cast<int>(K), alpha, A_data,
-                        lda, B_data, ldb, bias_data, beta, C_data, ldc,
-                        is_weights_const, batch_params, params);
+                status_t status = use_reference
+                        ? matmul_direct('r', // layout: row-major
+                                  transA, transB, static_cast<int>(M),
+                                  static_cast<int>(N), static_cast<int>(K),
+                                  alpha, A_data, lda, B_data, ldb, bias_data,
+                                  beta, C_data, ldc, is_weights_const,
+                                  batch_params, params)
+                        : run_matmul_direct('r', transA, transB,
+                                  static_cast<int>(M), static_cast<int>(N),
+                                  static_cast<int>(K), alpha, A_data, lda,
+                                  B_data, ldb, bias_data, beta, C_data, ldc,
+                                  is_weights_const, batch_params, params);
                 if (status != status_t::success) {
                     if (status != status_t::isa_unsupported) {
                         log_error("LOWOHA matmul_direct execution failed.");

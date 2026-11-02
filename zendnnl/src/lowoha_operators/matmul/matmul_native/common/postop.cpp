@@ -33,6 +33,31 @@ using zendnnl::common::post_op_type_t;
 // AVX-512 math helpers (avx512_exp, avx512_tanh, avx512_sigmoid, avx512_erf)
 // are provided by avx512_math.hpp — shared with the microkernel epilogue.
 
+fused_postop_t head_fused_postop(const matmul_params &params, int *index) {
+    *index = -1;
+    for (size_t i = 0; i < params.postop_.size(); ++i) {
+        const matmul_post_op &po = params.postop_[i];
+        fused_postop_t op = fused_postop_t::none;
+        switch (po.po_type) {
+            case post_op_type_t::none: continue;
+            case post_op_type_t::relu:
+                if (po.alpha == 0.0f) op = fused_postop_t::relu;
+                break;
+            case post_op_type_t::gelu_tanh:
+                op = fused_postop_t::gelu_tanh;
+                break;
+            case post_op_type_t::gelu_erf: op = fused_postop_t::gelu_erf; break;
+            case post_op_type_t::sigmoid: op = fused_postop_t::sigmoid; break;
+            case post_op_type_t::tanh: op = fused_postop_t::tanh_op; break;
+            case post_op_type_t::swish: op = fused_postop_t::swish; break;
+            default: break;
+        }
+        if (op != fused_postop_t::none) *index = static_cast<int>(i);
+        return op;
+    }
+    return fused_postop_t::none;
+}
+
 // ============================================================================
 // Main vectorized post-op application
 // ============================================================================
@@ -413,6 +438,100 @@ void apply_postops_tile(float *C, int ldc, int m_count, int n_count,
             }
 
             default: break;
+        }
+    }
+}
+
+namespace {
+
+/// An eltwise post-op on one element, by the formulas of the remainder loops
+/// of apply_postops_tile (not bit for bit: see apply_postops_tile_scalar).
+float eltwise_scalar(const matmul_post_op &po, float v) {
+    switch (po.po_type) {
+        case post_op_type_t::relu:
+            if (v < 0.0f) v = po.alpha == 0.0f ? 0.0f : po.alpha * v;
+            return v;
+        case post_op_type_t::leaky_relu:
+            if (v < 0.0f) v *= po.alpha;
+            return v;
+        case post_op_type_t::elu:
+            if (v < 0.0f) v = po.alpha * (std::exp(v) - 1.0f);
+            return v;
+        case post_op_type_t::gelu_tanh: {
+            const float x3 = v * v * v;
+            return 0.5f * v
+                    * (1.0f
+                            + std::tanh(0.7978845608028654f
+                                    * (v + 0.044715f * x3)));
+        }
+        case post_op_type_t::gelu_erf:
+            return 0.5f * v * (1.0f + std::erf(v * 0.7071067811865476f));
+        case post_op_type_t::sigmoid: return 1.0f / (1.0f + std::exp(-v));
+        case post_op_type_t::swish: return v / (1.0f + std::exp(-po.alpha * v));
+        case post_op_type_t::tanh: return std::tanh(v);
+        case post_op_type_t::square: return v * v;
+        case post_op_type_t::abs: return std::abs(v);
+        case post_op_type_t::sqrt: return std::sqrt(v);
+        case post_op_type_t::exp: return std::exp(v);
+        case post_op_type_t::log: return std::log(v);
+        case post_op_type_t::clip:
+            return std::min(std::max(v, po.alpha), po.beta);
+        default: return v;
+    }
+}
+
+} // namespace
+
+void apply_postops_tile_scalar(float *C, int ldc, int m_count, int n_count,
+        int n_offset, int m_offset, const float *bias,
+        const std::vector<matmul_post_op> &postops) {
+    if (bias != nullptr) {
+        const float *bias_row = bias + n_offset;
+        for (int mr = 0; mr < m_count; ++mr) {
+            float *row = C + mr * ldc;
+            for (int nr = 0; nr < n_count; ++nr)
+                row[nr] += bias_row[nr];
+        }
+    }
+
+    for (const auto &po : postops) {
+        if (po.po_type != post_op_type_t::binary_add
+                && po.po_type != post_op_type_t::binary_mul) {
+            for (int mr = 0; mr < m_count; ++mr) {
+                float *row = C + mr * ldc;
+                for (int nr = 0; nr < n_count; ++nr)
+                    row[nr] = eltwise_scalar(po, row[nr]);
+            }
+            continue;
+        }
+        if (po.buff == nullptr) continue;
+        const int ld = (po.leading_dim > 0) ? po.leading_dim : n_count;
+        const bool is_1d = (po.dims.size() <= 1)
+                || (po.dims.size() == 2 && po.dims[0] == 1);
+        const bool is_add = (po.po_type == post_op_type_t::binary_add);
+        const bool bin_is_bf16 = (po.dtype == data_type_t::bf16);
+        for (int mr = 0; mr < m_count; ++mr) {
+            float *row = C + mr * ldc;
+            for (int nr = 0; nr < n_count; ++nr) {
+                const size_t at = is_1d
+                        ? static_cast<size_t>(n_offset + nr)
+                        : static_cast<size_t>(m_offset + mr) * ld
+                                + (n_offset + nr);
+                float bval;
+                if (bin_is_bf16) {
+                    const uint32_t bits = static_cast<uint32_t>(
+                                                  static_cast<const uint16_t *>(
+                                                          po.buff)[at])
+                            << 16;
+                    std::memcpy(&bval, &bits, sizeof(bval));
+                } else {
+                    bval = static_cast<const float *>(po.buff)[at];
+                }
+                if (is_add)
+                    row[nr] += bval;
+                else
+                    row[nr] *= bval;
+            }
         }
     }
 }

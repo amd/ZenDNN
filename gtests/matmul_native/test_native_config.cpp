@@ -81,7 +81,7 @@ native_hw_t test_hw() {
     native_hw_t hw;
     hw.uarch.l1d_bytes = 48 << 10;
     hw.uarch.l2_bytes = 1 << 20;
-    hw.uarch.l3_bytes_per_ccd = 32 << 20;
+    hw.uarch.l3_domain_bytes = 32 << 20;
     hw.uarch.avx512f = true;
     hw.uarch.avx512bf16 = true;
     hw.uarch.avx512vnni = true;
@@ -1071,7 +1071,7 @@ TEST(NativeConfigTuningFile, HardwareOneFileForAFamily) {
     a.l3_domain_threads = 8;
     native_hw_t b = a;
     b.model = 81;
-    b.uarch.l3_bytes_per_ccd = 128 << 20;
+    b.uarch.l3_domain_bytes = 128 << 20;
     b.logical_cpus = b.physical_cores = 512;
     b.l3_domain_threads = 32;
     const std::string common = R"("vendor": "TestVendorId", "family": 26,
@@ -1130,7 +1130,7 @@ TEST(NativeConfigTuningFile, HardwareFieldsTheCpuDoesNotReport) {
             {R"({"l3_cores": {"min": 0}})",
                     [](native_hw_t &h) {
         h.l3_domain_threads = 0;
-        h.uarch.ccx_cores = 0;
+        h.uarch.family_l3_cores = 0;
     }},
     };
     for (const auto &c : cases) {
@@ -1142,10 +1142,11 @@ TEST(NativeConfigTuningFile, HardwareFieldsTheCpuDoesNotReport) {
         EXPECT_TRUE(hardware_applies(R"({"isa": "avx512f"})", forgot))
                 << c.block;
     }
-    // Without the L3 topology the plan's domain, and l3_cores, is ccx_cores.
+    // Without the L3 topology the plan's domain, and l3_cores, is
+    // family_l3_cores.
     native_hw_t no_topology = hw;
     no_topology.l3_domain_threads = 0;
-    no_topology.uarch.ccx_cores = 4;
+    no_topology.uarch.family_l3_cores = 4;
     EXPECT_TRUE(hardware_applies(R"({"l3_cores": 4})", no_topology));
     EXPECT_FALSE(hardware_applies(R"({"l3_cores": 8})", no_topology));
 }
@@ -1210,7 +1211,8 @@ TEST(NativeConfigTuningFile, HardwareBlockOfThisCpu) {
     EXPECT_EQ(m.at("l2_kib"), hw.uarch.l2_bytes / 1024);
     const UarchParams &plan = native_plan_uarch();
     EXPECT_EQ(m.at("l3_cores"),
-            plan.l3_domain_cores > 0 ? plan.l3_domain_cores : plan.ccx_cores);
+            plan.l3_domain_cores > 0 ? plan.l3_domain_cores
+                                     : plan.family_l3_cores);
     // Every key the block gives is a hardware key of the loader, in its
     // order.
     const nlohmann::ordered_json ordered = nlohmann::ordered_json::parse(
@@ -1887,12 +1889,16 @@ namespace {
 uint32_t kernel_rows(native_kernel_kind_t kind, int nr) {
     uint32_t mask = 0;
     for (int mr = 1; mr <= 12; ++mr) {
-        const bool served = kind == native_kernel_kind_t::bf16
-                ? select_bf16_brgemm_tall_kernel(mr, native_bf16_slab_cols(nr))
-                        != nullptr
-                : select_native_int8_ukernel(mr, nr / 16, false) != nullptr
-                        && select_native_int8_ukernel(mr, nr / 16, true)
-                                != nullptr;
+        bool served = false;
+        if (kind == native_kernel_kind_t::bf16)
+            served = select_bf16_brgemm_tall_kernel(
+                             mr, native_bf16_slab_cols(nr))
+                    != nullptr;
+        else if (kind == native_kernel_kind_t::f32)
+            served = select_native_fp32_ukernel(mr, nr / 16) != nullptr;
+        else
+            served = select_native_int8_ukernel(mr, nr / 16, false) != nullptr
+                    && select_native_int8_ukernel(mr, nr / 16, true) != nullptr;
         if (served) mask |= 1u << (mr - 1);
     }
     return mask;
@@ -1962,13 +1968,40 @@ TEST(NativeConfigRegistry, MatchesTheSelectors) {
             EXPECT_FALSE(r.covers_int8(0, nr, s)) << nr;
         }
     }
+    // FP32 tiles are 16 or 32 columns wide, every row count 1 .. 12.
+    for (const int nr : {16, 32}) {
+        const native_kernel_caps_t *c = r.caps(native_kernel_kind_t::f32, nr);
+        if (!u.avx512f) {
+            EXPECT_EQ(c, nullptr);
+            EXPECT_EQ(r.f32_table(nr), nullptr);
+            continue;
+        }
+        ASSERT_NE(c, nullptr) << nr;
+        for (int mr = 1; mr <= 12; ++mr)
+            EXPECT_EQ(r.f32_table(nr)[mr],
+                    select_native_fp32_ukernel(mr, nr / 16))
+                    << nr << " " << mr;
+        EXPECT_EQ(c->max_mr,
+                full_rows(kernel_rows(native_kernel_kind_t::f32, nr)));
+        EXPECT_EQ(c->max_mr, native_fp32_ukernel_max_mr(nr / 16));
+        EXPECT_EQ(c->max_mr, 12);
+        EXPECT_TRUE(r.covers(native_kernel_kind_t::f32, 12, nr));
+        EXPECT_FALSE(r.covers(native_kernel_kind_t::f32, 13, nr));
+        EXPECT_FALSE(r.covers(native_kernel_kind_t::f32, 0, nr));
+        EXPECT_EQ(c->int8_schemes, 0u);
+    }
     for (const int nr : {48, 96, 256}) {
         EXPECT_EQ(r.caps(native_kernel_kind_t::bf16, nr), nullptr) << nr;
         EXPECT_EQ(r.caps(native_kernel_kind_t::int8, nr), nullptr) << nr;
+        EXPECT_EQ(r.caps(native_kernel_kind_t::f32, nr), nullptr) << nr;
         EXPECT_EQ(r.bf16_table(nr), nullptr) << nr;
+        EXPECT_EQ(r.f32_table(nr), nullptr) << nr;
     }
-    for (const int nr : {64, 128})
+    for (const int nr : {64, 128}) {
         EXPECT_EQ(r.caps(native_kernel_kind_t::int8, nr), nullptr) << nr;
+        EXPECT_EQ(r.caps(native_kernel_kind_t::f32, nr), nullptr) << nr;
+        EXPECT_EQ(r.f32_table(nr), nullptr) << nr;
+    }
     EXPECT_FALSE(r.covers(native_kernel_kind_t::int8, 0, 16));
     if (u.avx512bf16 && u.avx512vnni) {
         EXPECT_EQ(kernel_rows(native_kernel_kind_t::bf16, 16), 0x3fu);
@@ -1984,8 +2017,8 @@ TEST(NativeConfigHw, Probe) {
     const UarchParams &u = detect_uarch();
     const native_hw_t &hw = native_hw();
     const UarchParams &plan = native_plan_uarch();
-    const int domain
-            = plan.l3_domain_cores > 0 ? plan.l3_domain_cores : plan.ccx_cores;
+    const int domain = plan.l3_domain_cores > 0 ? plan.l3_domain_cores
+                                                : plan.family_l3_cores;
     EXPECT_EQ(hw.uarch.l2_bytes, u.l2_bytes);
     EXPECT_GT(hw.logical_cpus, 0);
 #if !defined(_WIN32)
@@ -1997,10 +2030,10 @@ TEST(NativeConfigHw, Probe) {
     EXPECT_EQ(plan.l3_domain_cores,
             hw.l3_domain_threads > 0 ? (cores > 0 ? cores : 1) : 0);
     EXPECT_GE(domain, 1);
-    EXPECT_EQ(plan.ccx_cores, u.ccx_cores);
+    EXPECT_EQ(plan.family_l3_cores, u.family_l3_cores);
     EXPECT_EQ(plan.l1d_bytes, u.l1d_bytes);
     EXPECT_EQ(plan.l2_bytes, u.l2_bytes);
-    EXPECT_EQ(plan.l3_bytes_per_ccd, u.l3_bytes_per_ccd);
+    EXPECT_EQ(plan.l3_domain_bytes, u.l3_detected ? u.l3_domain_bytes : 0);
     EXPECT_EQ(native_plan_uarch(test_hw()).l3_domain_cores, 8);
 }
 
@@ -2106,13 +2139,13 @@ nlohmann::ordered_json schema_json() {
             {"model", hw.model}, {"stepping", hw.stepping}, {"isa", isa},
             {"l1d_kib", hw.uarch.l1d_bytes / 1024},
             {"l2_kib", hw.uarch.l2_bytes / 1024},
-            {"l3_kib", hw.uarch.l3_bytes_per_ccd / 1024},
+            {"l3_kib", hw.uarch.l3_domain_bytes / 1024},
             {"logical_cpus", hw.logical_cpus}, {"smt", hw.smt},
             {"physical_cores", hw.physical_cores},
             {"l3_domain_threads", hw.l3_domain_threads}};
     doc["uarch"] = {{"l1d_bytes", u.l1d_bytes}, {"l2_bytes", u.l2_bytes},
-            {"l3_bytes", u.l3_bytes_per_ccd}, {"num_cores", u.num_cores},
-            {"family_l3_cores", u.ccx_cores},
+            {"l3_bytes", u.l3_domain_bytes}, {"num_cores", u.num_cores},
+            {"family_l3_cores", u.family_l3_cores},
             {"l3_domain_cores", u.l3_domain_cores}, {"avx512f", u.avx512f},
             {"avx512bf16", u.avx512bf16}, {"avx512vnni", u.avx512vnni}};
     doc["hw_match"] = nlohmann::ordered_json::parse(
@@ -2164,10 +2197,20 @@ nlohmann::ordered_json schema_json() {
         if (c == nullptr) continue;
         uint32_t mask = 0;
         for (int mr = 1; mr <= 12; ++mr)
-            if (select_native_int8_group_ukernel(mr, nr / 16) != nullptr)
+            if (select_native_int8_group_ukernel(mr, nr / 16, false) != nullptr
+                    && select_native_int8_group_ukernel(mr, nr / 16, true)
+                            != nullptr)
                 mask |= 1u << (mr - 1);
         kernels.push_back({{"kind", "int8"}, {"nr", nr}, {"mr_mask", mask},
                 {"max_mr", c->max_mr}, {"k_unit", 4},
+                {"int8_schemes", scheme_names(c->int8_schemes)}});
+    }
+    for (const int nr : {16, 32}) {
+        const native_kernel_caps_t *c = r.caps(native_kernel_kind_t::f32, nr);
+        if (c == nullptr) continue;
+        kernels.push_back({{"kind", "f32"}, {"nr", nr},
+                {"mr_mask", kernel_rows(native_kernel_kind_t::f32, nr)},
+                {"max_mr", c->max_mr}, {"k_unit", 1},
                 {"int8_schemes", scheme_names(c->int8_schemes)}});
     }
     doc["kernels"] = kernels;
@@ -2198,7 +2241,8 @@ TEST(NativeConfigSchema, SchemaDump) {
     EXPECT_EQ(doc.at("hw").at("vendor"), hw.vendor);
     EXPECT_EQ(doc.at("hw").at("smt"), hw.smt);
     EXPECT_EQ(doc.at("uarch").at("l2_bytes"), detect_uarch().l2_bytes);
-    EXPECT_EQ(doc.at("uarch").at("family_l3_cores"), detect_uarch().ccx_cores);
+    EXPECT_EQ(doc.at("uarch").at("family_l3_cores"),
+            detect_uarch().family_l3_cores);
     EXPECT_EQ(doc.at("uarch").at("l3_domain_cores"),
             native_plan_uarch().l3_domain_cores);
     size_t count = 0;
@@ -2278,8 +2322,25 @@ TEST(NativeConfigSchema, SchemaDump) {
                 group || c.at("int8_schemes") == json::array({"per_channel"}));
     }
     EXPECT_EQ(group_kernels, detect_uarch().avx512vnni ? 2u : 0u);
+    // The FP32 kernels: every row count 1 .. 12 at 16 and 32 columns, K in
+    // steps of one.
+    std::vector<json> f32_kernels;
+    for (const json &c : doc.at("kernels"))
+        if (c.at("kind") == "f32") f32_kernels.push_back(c);
+    if (detect_uarch().avx512f) {
+        ASSERT_EQ(f32_kernels.size(), 2u);
+        for (size_t i = 0; i < 2; ++i) {
+            EXPECT_EQ(f32_kernels[i].at("nr"), 16 << i);
+            EXPECT_EQ(f32_kernels[i].at("mr_mask"), 0xfff);
+            EXPECT_EQ(f32_kernels[i].at("max_mr"), 12);
+            EXPECT_EQ(f32_kernels[i].at("k_unit"), 1);
+        }
+    } else {
+        EXPECT_TRUE(f32_kernels.empty());
+    }
     EXPECT_EQ(doc.at("match_keys").size(), 12u);
-    EXPECT_EQ(doc.at("match_keys").at("dtype"), json::array({"bf16", "s8"}));
+    EXPECT_EQ(doc.at("match_keys").at("dtype"),
+            json::array({"bf16", "s8", "f32"}));
     EXPECT_EQ(doc.at("features").size(), 26u);
     EXPECT_EQ(
             doc.at("tuning_file").at("format"), "zendnnl-native-brgemm-tuning");

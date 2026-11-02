@@ -18,6 +18,7 @@
 #define MATMUL_NATIVE_BRGEMM_LOOPER_INT8_GEMV_DIRECT_HPP
 
 #include "lowoha_operators/matmul/lowoha_common.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_gemv.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/gemm_descriptor.hpp"
 
@@ -26,15 +27,27 @@ namespace lowoha {
 namespace matmul {
 namespace native {
 
-/// Direct INT8 GEMV (M=1) fast path for u8/s8 source × s8 weights.
-/// Supports output as BF16 or FP32 with fused activation post-ops.
-/// Uses K-contiguous VNNI packing with vpdpbusd and precomputed
-/// dequantization (combined_scale + effective_bias).
-///
-/// Returns true if the fast path handled the operation, false to fall back.
-bool int8_gemv_direct(const GemmDescriptor &desc, const UarchParams &uarch,
-        const void *src, const void *weight, void *dst, const void *bias,
-        matmul_params &params);
+/// The INT8 GEMV kernel of an M = 1 call (none for any other call): a u8 /
+/// s8 source and an s8 weight to a bf16 / f32 dst on a CPU with
+/// AVX512-VNNI, one thread, no transposed source, ldc == N, the BKC pack of
+/// the weight (K in quads, N in BKC_NR_PAD columns) within the L2, at most
+/// one post-op that the kernel fuses (scan_gemv_postops), a per-tensor f32
+/// source scale and s32 / s8 / u8 zero point, f32 weight scales per tensor
+/// or per column, no weight zero point, dst scale or dst zero point, and
+/// alpha 1 and beta 0.
+/// int8_bkc then: K-contiguous VNNI packing with vpdpbusd, the pack and its
+/// column sums cached globally at a weight cache mode other than 0 (else
+/// made for the call), and the dequantization per column (combined scale
+/// and effective bias) computed for each call.
+native_gemv_plan_t int8_gemv_choice(const GemmDescriptor &desc,
+        const UarchParams &uarch, const matmul_params &params);
+
+/// Runs plan, int8_gemv_choice's for desc and params, under the call's
+/// weight cache mode: see run_native_gemv.
+status_t int8_gemv_run(const native_gemv_plan_t &plan,
+        const GemmDescriptor &desc, const void *src, const void *weight,
+        void *dst, const void *bias, const matmul_params &params,
+        int32_t weight_cache_mode);
 
 } // namespace native
 } // namespace matmul

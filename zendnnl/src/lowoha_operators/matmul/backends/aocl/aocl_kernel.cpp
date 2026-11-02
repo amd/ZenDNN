@@ -1360,8 +1360,8 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
     size_t run_src_scale_nelems
             = get_num_elements(lowoha_param.quant_params.src_scale.dims);
 
-    const bool src_scale_collapsed_per_token
-            = src_scale_is_collapsed_per_token(lowoha_param.quant_params, M, N);
+    const bool src_scale_sym_quant = src_scale_selects_sym_quant(
+            lowoha_param.quant_params, run_src_scale_nelems, M, N);
 
     // s8×s8 sym_quant uses a distinct blocked weight layout.  Fired by a
     // non-scalar src scale (per-token {M}/{M,1} or per-group {M,G}); B-side
@@ -1369,8 +1369,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
     // per-token src + per-group wei is valid.  bf16/f32 src still runs
     // bf16s8/f32s8 GEMMs with standard s8 blocked weights + a_pre/a_post.
     const bool is_s8_sym_quant_scales = dtypes.wei == data_type_t::s8
-            && !lowoha_param.quant_params.src_zp.buff
-            && (run_src_scale_nelems > 1 || src_scale_collapsed_per_token)
+            && !lowoha_param.quant_params.src_zp.buff && src_scale_sym_quant
             && (dtypes.dst == data_type_t::f32
                     || dtypes.dst == data_type_t::bf16)
             && dtypes.src == data_type_t::s8;
@@ -1379,8 +1378,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
     // Distinct from W4A8: that path requires a bf16 destination.  GGML Q4_0
     // keeps nibbles and lands here for an f32 (or non-W4A8 bf16) destination.
     const bool is_s4_sym_quant_scales = dtypes.wei == data_type_t::s4
-            && !lowoha_param.quant_params.src_zp.buff
-            && (run_src_scale_nelems > 1 || src_scale_collapsed_per_token)
+            && !lowoha_param.quant_params.src_zp.buff && src_scale_sym_quant
             && (dtypes.dst == data_type_t::f32
                     || dtypes.dst == data_type_t::bf16)
             && dtypes.src == data_type_t::s8;

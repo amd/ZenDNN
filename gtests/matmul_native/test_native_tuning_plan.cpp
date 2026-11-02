@@ -21,7 +21,7 @@
 // plan with every rule switched off pass validate_native_plan on the detected
 // and on synthetic L2 / L3 / L3-domain sizes.  The INT8 tile's call widths,
 // rows per call and K passes follow their definitions.  The L3 domain of the
-// plan is the topology's physical cores per L3, else ccx_cores; it must
+// plan is the topology's physical cores per L3, else family_l3_cores; it must
 // decide the row-group schedule and keep the plan legal for every domain and
 // team size.
 
@@ -237,8 +237,8 @@ TEST(NativeTuningPlan, RulesOffWorkedExamples) {
     nat::UarchParams u = nat::detect_uarch();
     u.l1d_bytes = 48 << 10;
     u.l2_bytes = 1 << 20;
-    u.l3_bytes_per_ccd = 32 << 20;
-    u.ccx_cores = 1;
+    u.l3_domain_bytes = 32 << 20;
+    u.family_l3_cores = 1;
     u.l3_domain_cores = 8;
     const nat::heuristic_params_t none = rules_off();
     const auto plan = [&](int M, int N, int K, bool bf16) {
@@ -480,7 +480,7 @@ struct uarch_case_t {
     std::string name;
     int l2_kib = 0; ///< 0: the micro-architecture the process plans with
     int l3_mib = 0;
-    int ccx_cores = 0;
+    int family_l3_cores = 0;
     int l3_domain_cores = 0;
 };
 
@@ -491,19 +491,19 @@ void PrintTo(const uarch_case_t &c, std::ostream *os) {
 std::vector<uarch_case_t> uarch_cases() {
     std::vector<uarch_case_t> v(1);
     v[0].name = "detected";
-    // L3 domain unknown: ccx_cores is the domain.
+    // L3 domain unknown: family_l3_cores is the domain.
     for (int l2 : {512, 1024, 2048})
         for (int l3 : {16, 32, 96})
-            for (int ccx : {1, 8, 16}) {
+            for (int cores : {1, 8, 16}) {
                 uarch_case_t c;
                 c.name = "l2_" + std::to_string(l2) + "k_l3_"
-                        + std::to_string(l3) + "m_ccx" + std::to_string(ccx);
+                        + std::to_string(l3) + "m_fam" + std::to_string(cores);
                 c.l2_kib = l2;
                 c.l3_mib = l3;
-                c.ccx_cores = ccx;
+                c.family_l3_cores = cores;
                 v.push_back(c);
             }
-    // L3 domain from the topology, over a ccx_cores of 1.
+    // L3 domain from the topology, over a family_l3_cores of 1.
     for (int l2 : {1024, 2048})
         for (int l3 : {32, 128, 256})
             for (int domain : {8, 32, 64}) {
@@ -512,7 +512,7 @@ std::vector<uarch_case_t> uarch_cases() {
                         + std::to_string(l3) + "m_dom" + std::to_string(domain);
                 c.l2_kib = l2;
                 c.l3_mib = l3;
-                c.ccx_cores = 1;
+                c.family_l3_cores = 1;
                 c.l3_domain_cores = domain;
                 v.push_back(c);
             }
@@ -523,8 +523,8 @@ nat::UarchParams uarch_of(const uarch_case_t &c) {
     nat::UarchParams u = nat::native_plan_uarch();
     if (c.l2_kib == 0) return u;
     u.l2_bytes = c.l2_kib * 1024;
-    u.l3_bytes_per_ccd = c.l3_mib * 1024 * 1024;
-    u.ccx_cores = c.ccx_cores;
+    u.l3_domain_bytes = c.l3_mib * 1024 * 1024;
+    u.family_l3_cores = c.family_l3_cores;
     u.l3_domain_cores = c.l3_domain_cores;
     return u;
 }
@@ -587,13 +587,14 @@ INSTANTIATE_TEST_SUITE_P(NativeTuning, NativeTuningPlanHierarchy,
         });
 
 /// A machine with l3_threads logical CPUs on each L3 of l3_mib MiB, smt per
-/// core (0: unknown), whose CPU family gives ccx_cores.
-nat::native_hw_t topology(int l3_threads, int smt, int l3_mib, int ccx_cores) {
+/// core (0: unknown), whose CPU family gives family_l3_cores.
+nat::native_hw_t topology(
+        int l3_threads, int smt, int l3_mib, int family_l3_cores) {
     nat::native_hw_t hw;
     hw.uarch = nat::detect_uarch();
     hw.uarch.l2_bytes = 1 << 20;
-    hw.uarch.l3_bytes_per_ccd = l3_mib << 20;
-    hw.uarch.ccx_cores = ccx_cores;
+    hw.uarch.l3_domain_bytes = l3_mib << 20;
+    hw.uarch.family_l3_cores = family_l3_cores;
     hw.logical_cpus = 512;
     hw.smt = smt;
     hw.physical_cores = smt > 0 ? hw.logical_cpus / smt : 0;
@@ -603,22 +604,22 @@ nat::native_hw_t topology(int l3_threads, int smt, int l3_mib, int ccx_cores) {
 
 TEST(NativeTuningPlanDomain, CoresPerL3FromTheTopology) {
     const struct {
-        int l3_threads, smt, ccx_cores, cores;
+        int l3_threads, smt, family_l3_cores, cores;
     } cases[] = {{64, 2, 8, 32}, {64, 2, 1, 32}, {32, 1, 8, 32}, {16, 2, 8, 8},
             {16, 2, 1, 8}, {16, 0, 8, 16}, {1, 2, 8, 1}, {0, 2, 8, 0},
             {0, 0, 1, 0}};
     for (const auto &c : cases) {
         SCOPED_TRACE("l3_threads " + std::to_string(c.l3_threads) + " smt "
-                + std::to_string(c.smt) + " ccx_cores "
-                + std::to_string(c.ccx_cores));
+                + std::to_string(c.smt) + " family_l3_cores "
+                + std::to_string(c.family_l3_cores));
         const nat::native_hw_t hw
-                = topology(c.l3_threads, c.smt, 128, c.ccx_cores);
+                = topology(c.l3_threads, c.smt, 128, c.family_l3_cores);
         const nat::UarchParams u = nat::native_plan_uarch(hw);
         EXPECT_EQ(u.l3_domain_cores, c.cores);
-        EXPECT_EQ(u.ccx_cores, c.ccx_cores);
+        EXPECT_EQ(u.family_l3_cores, c.family_l3_cores);
         EXPECT_EQ(u.l1d_bytes, hw.uarch.l1d_bytes);
         EXPECT_EQ(u.l2_bytes, hw.uarch.l2_bytes);
-        EXPECT_EQ(u.l3_bytes_per_ccd, hw.uarch.l3_bytes_per_ccd);
+        EXPECT_EQ(u.l3_domain_bytes, hw.uarch.l3_domain_bytes);
         EXPECT_EQ(u.num_cores, hw.uarch.num_cores);
         EXPECT_EQ(u.fma_ports, hw.uarch.fma_ports);
         EXPECT_EQ(u.vec_width_bits, hw.uarch.vec_width_bits);
@@ -632,22 +633,22 @@ TEST(NativeTuningPlanDomain, CoresPerL3FromTheTopology) {
     EXPECT_EQ(host.l3_domain_cores, 0);
     EXPECT_EQ(plan.l3_domain_cores,
             nat::native_plan_uarch(nat::native_hw()).l3_domain_cores);
-    EXPECT_EQ(plan.ccx_cores, host.ccx_cores);
+    EXPECT_EQ(plan.family_l3_cores, host.family_l3_cores);
     EXPECT_EQ(plan.l2_bytes, host.l2_bytes);
-    EXPECT_EQ(plan.l3_bytes_per_ccd, host.l3_bytes_per_ccd);
+    EXPECT_EQ(plan.l3_domain_bytes, host.l3_domain_bytes);
 }
 
 TEST(NativeTuningPlanDomain, RowGroupsFollowTheDomain) {
     const nat::UarchParams wide
             = nat::native_plan_uarch(topology(64, 2, 128, 8));
-    const nat::UarchParams wide_no_ccx
+    const nat::UarchParams wide_no_family
             = nat::native_plan_uarch(topology(64, 2, 128, 1));
     const nat::UarchParams narrow
             = nat::native_plan_uarch(topology(16, 2, 128, 8));
     const nat::UarchParams unknown
             = nat::native_plan_uarch(topology(0, 2, 128, 8));
     ASSERT_EQ(wide.l3_domain_cores, 32);
-    ASSERT_EQ(wide_no_ccx.l3_domain_cores, 32);
+    ASSERT_EQ(wide_no_family.l3_domain_cores, 32);
     ASSERT_EQ(narrow.l3_domain_cores, 8);
     ASSERT_EQ(unknown.l3_domain_cores, 0);
     const nat::UarchParams &host = nat::detect_uarch();
@@ -685,12 +686,12 @@ TEST(NativeTuningPlanDomain, RowGroupsFollowTheDomain) {
             EXPECT_EQ(nat::validate_native_plan(w, p), nullptr) << describe(p);
             EXPECT_EQ(nat::validate_native_plan(n, p), nullptr) << describe(p);
         }
-        // The family's ccx_cores counts only when the domain is unknown.
+        // family_l3_cores counts only when the domain is unknown.
         const char *field
-                = plan_diff(nat::heuristic_plan(p, wide_no_ccx, none), w);
-        EXPECT_EQ(field, nullptr) << "ccx_cores 1 under a known domain";
+                = plan_diff(nat::heuristic_plan(p, wide_no_family, none), w);
+        EXPECT_EQ(field, nullptr) << "family_l3_cores 1 under a known domain";
         field = plan_diff(nat::heuristic_plan(p, unknown, none), n);
-        EXPECT_EQ(field, nullptr) << "unknown domain, ccx_cores 8";
+        EXPECT_EQ(field, nullptr) << "unknown domain, family_l3_cores 8";
         // domain_threads replaces the detected domain.
         field = plan_diff(nat::heuristic_plan(p, wide, pin8), n);
         EXPECT_EQ(field, nullptr) << "domain_threads=8 on the wide domain";

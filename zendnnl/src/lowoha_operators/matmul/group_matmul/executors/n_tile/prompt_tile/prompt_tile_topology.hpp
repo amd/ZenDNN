@@ -27,7 +27,7 @@
 /// so it assumes the OMP threads are pinned (vLLM / ZenTorch bind one
 /// thread per core).  Unpinned, the map records where that one probe found
 /// the threads; a nested or non-Linux call, or one whose CPUs sysfs does
-/// not describe, gets contiguous domains of `ccx_cores` threads.  Either
+/// not describe, gets contiguous domains of `family_l3_cores` threads.  Either
 /// map is valid; only locality suffers.
 
 #ifndef ZENDNNL_GROUP_MATMUL_PROMPT_TILE_TOPOLOGY_HPP
@@ -68,7 +68,7 @@ struct TeamMap {
 /// argument triple and per whether the caller is inside a parallel
 /// region; safe to call concurrently.  Inside a parallel region a probe
 /// region would run with a single thread, so the map there is built from
-/// contiguous domains of `ccx_cores` threads.
+/// contiguous domains of `family_l3_cores` threads.
 const TeamMap &get_team_map(int num_threads, int team_override, int subteam);
 
 /// Contiguous teams of `team_size` threads, one domain each; the last

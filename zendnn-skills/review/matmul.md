@@ -141,7 +141,9 @@ contract.
   it. Reset and test-only clear hooks drop every entry the change adds.
 - Under `ZENDNNL_MATMUL_ALGO=11`, mode 2 may rewrite a buffer in place for
   the native BRGEMM. `lowoha_algo == native_brgemm` alone still caches out
-  of place. Do not extend in-place rewrite to any other algorithm.
+  of place, and so does a weight whose N is not a multiple of 32 (its layout
+  holds zero columns up to whole blocks). Do not extend in-place rewrite to
+  any other algorithm.
 
 ## oneDNN, libxsmm, BMM, and the other scalar paths
 
@@ -169,21 +171,25 @@ or native change. Highlight any edit that moves them.
 
 `matmul/matmul_native/` stays off the default run until an algorithm selects
 it. `native_brgemm_selected` is `lowoha_algo == native_brgemm` or
-`ZENDNNL_MATMUL_ALGO=11`. `matmul_execute` also enters
-`native_matmul_execute` when `kernel_select` returns `native_gemm` or
-`native_brgemm`.
+`ZENDNNL_MATMUL_ALGO=11`. `matmul_execute` also enters `native_gemm_execute`
+when `kernel_select` returns `native_gemm`.
 
 - A change in this folder does not change the algorithm or the result of a
   default call (`lowoha_algo == none`, algo unset), which stays on
   `aocl_dlp_blocked`. Flag it if it does.
-- Dynamic dispatch and the auto-tuner may already return `native_brgemm` for
-  documented small-M BF16 and single-thread INT8 shapes. A native-folder
-  change may affect those shapes only while that algorithm is selected.
-  Highlight a PR that adds new default or AUTO shapes to that set.
-- A native dtype, `transA`, post-op, or shape the kernel does not implement
-  falls back to AOCL-DLP. The fallback writes a correct result and does not
-  leave a partial destination. `native_layout_matmul` returns without stores
-  when the call does not qualify.
+- Dynamic dispatch and the auto-tuner never return `native_brgemm`: the
+  native BRGEMM runs only the calls that ask for it. Flag a PR that makes
+  them pick it.
+- The native BRGEMM serves any N: its layout pads a weight to whole
+  32-column blocks with zero columns, and the last column tile reads and
+  writes only the columns below N. Flag a change that reads or writes an
+  operand or dst past N.
+- A call that asks for the native BRGEMM and uses a dtype, layout, post-op,
+  or shape it does not implement returns an error status (unimplemented,
+  isa_unsupported, or failure for a weight it cannot read), with dst
+  untouched and one error line naming the reason; it never falls back to
+  AOCL-DLP. Tests decide the expected status with `native_brgemm_refusal`,
+  not with a copy of the rules.
 - Do not call native code from the `aocl_dlp_blocked`, oneDNN, libxsmm, BMM,
   or reference paths.
 

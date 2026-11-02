@@ -67,9 +67,9 @@ namespace matmul {
  *
  * When ZENDNNL_MATMUL_AUTO_ALGO_CANDIDATES is set to a comma-separated list
  * of algo integer ids (e.g. "1,2,6" for aocl_dlp_blocked, onednn_blocked,
- * libxsmm), that list is used. matmul_algo_t::dynamic_dispatch and
- * matmul_algo_t::auto_tuner are ignored. Otherwise the default
- * {aocl_dlp_blocked, onednn_blocked} is used.
+ * libxsmm), that list is used. matmul_algo_t::dynamic_dispatch,
+ * matmul_algo_t::auto_tuner and matmul_algo_t::native_brgemm are ignored.
+ * Otherwise the default {aocl_dlp_blocked, onednn_blocked} is used.
  *
  * @note The env var is parsed and validated exactly once on the first call;
  *       every subsequent call returns a reference to the same cached vector.

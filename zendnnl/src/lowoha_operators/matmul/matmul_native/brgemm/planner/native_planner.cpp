@@ -33,6 +33,7 @@
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_int8_tile.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_tuning_file.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_hw.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_pack.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_utils.hpp"
 
 namespace zendnnl {
@@ -96,11 +97,28 @@ bool bf16_wide_width(int nr, int pack_nr) {
             && (nr % pack_nr == 0 || pack_nr % nr == 0);
 }
 
-/// BF16 rows per call by tile width: tall_rows from 32 columns, else
-/// tile_rows; INT8 tile_rows.
-int call_rows(const heuristic_params_t &hp, bool bf16, int nr) {
+/// BF16 and FP32 rows per call by tile width: tall_rows from 32 columns,
+/// else tile_rows; INT8 tile_rows.
+int call_rows(const heuristic_params_t &hp, bool int8, int nr) {
     if (hp.mr > 0) return hp.mr;
-    return bf16 && nr >= 32 ? hp.tall_rows : hp.tile_rows;
+    return !int8 && nr >= 32 ? hp.tall_rows : hp.tile_rows;
+}
+
+/// The kernels of p's tile: BF16 and FP32 run one kernel per row call and
+/// K pass, INT8 its own tile.
+native_kernel_kind_t kernel_kind(const native_problem_t &p) {
+    if (p.int8()) return native_kernel_kind_t::int8;
+    return p.f32() ? native_kernel_kind_t::f32 : native_kernel_kind_t::bf16;
+}
+
+/// Bytes of a source or weight element the kernels read: the L1, L2 and L3
+/// rules weigh rows and slabs by it.
+int elem_bytes(const native_problem_t &p) {
+    return p.f32() ? 4 : (p.bf16() ? 2 : 1);
+}
+
+const char *dtype_name(const native_problem_t &p) {
+    return p.f32() ? "f32" : (p.bf16() ? "bf16" : "s8");
 }
 
 const char *source_name(native_plan_source_t s) {
@@ -231,7 +249,7 @@ int64_t slice_makespan(const grid_t &g, int M, int workers, bool bytes,
 grid_t makespan_grid(const native_problem_t &p, const heuristic_params_t &hp,
         int threads, const grid_t &base) {
     const int M = p.M, N = p.N;
-    const bool bf16 = p.bf16();
+    const bool int8 = p.int8();
     const bool bytes = M <= hp.decode_m;
     const int workers = std::max(1, threads);
     if (base.n_tiles <= 0 || base.m_blocks <= 0) return base;
@@ -251,11 +269,11 @@ grid_t makespan_grid(const native_problem_t &p, const heuristic_params_t &hp,
         grid_t g;
         g.nr = nr;
         g.n_tiles = nr > 0 ? N / nr : 0;
-        g.mr = call_rows(hp, bf16, nr);
-        // A BF16 width counts only with kernels for its rows per call.
-        const bool rows_served = !bf16
-                || native_kernel_registry().covers(
-                        native_kernel_kind_t::bf16, g.mr, nr);
+        g.mr = call_rows(hp, int8, nr);
+        // A BF16 or FP32 width counts only with kernels for its rows per
+        // call.
+        const bool rows_served = int8
+                || native_kernel_registry().covers(kernel_kind(p), g.mr, nr);
         const auto consider = [&](int mb) {
             g.mb = mb;
             g.m_blocks = ceil_div(M, mb);
@@ -369,14 +387,14 @@ int64_t busiest_work(const native_plan_t &q, int M, bool bytes) {
 /// per distinct row block their slices start at, and their share of the
 /// weight.  With g column groups a domain reads only its rows of the source
 /// (once, or once per column tile of a thread when they do not fit either)
-/// and the whole weight once per row group.
-int traffic_col_groups(const native_plan_t &q, int M, int N, int K, bool bf16,
+/// and the whole weight once per row group.  Elements are elem bytes.
+int traffic_col_groups(const native_plan_t &q, int M, int N, int K, int elem,
         int dt, int64_t l3_share) {
     const int workers = q.threads;
     const int g = std::gcd(std::gcd(q.n_tiles, workers), dt);
     if (q.m_blocks <= 1 || workers <= 1 || g < 1) return 0;
     const int de = std::min(dt, workers);
-    const double esz = bf16 ? 2.0 : 1.0;
+    const double esz = elem;
     const double a = static_cast<double>(M) * K * esz;
     const double b = static_cast<double>(N) * K * esz;
     const double slabs = static_cast<double>(de) * q.nr * K * esz;
@@ -435,7 +453,10 @@ native_problem_t make_native_problem(const GemmDescriptor &desc,
         const native_int8_decision_t &decision) {
     native_problem_t p;
     p.M = desc.M;
-    p.N = desc.N;
+    // The tiles of a weight of N not a multiple of its blocks run on its
+    // padded width.
+    p.N = desc.N % kNativeLayoutPackNr == 0 ? desc.N
+                                            : native_padded_n(desc.N, pack_nr);
     p.K = desc.K;
     p.pack_nr = pack_nr;
     p.threads = omp_in_parallel() ? 1 : std::max(1, desc.num_threads);
@@ -471,7 +492,11 @@ native_problem_t make_native_problem(const GemmDescriptor &desc,
 native_plan_t heuristic_plan(const native_problem_t &p,
         const UarchParams &uarch, const heuristic_params_t &hp) {
     const int M = p.M, N = p.N, K = p.K;
+    // FP32 takes the rules of BF16 with its own element size, but not the
+    // BF16 tiles of several slabs.
     const bool bf16 = p.bf16();
+    const bool int8 = p.int8();
+    const int esz = elem_bytes(p);
     const int threads = hp.threads_cap > 0 ? std::min(p.threads, hp.threads_cap)
                                            : p.threads;
     const rule_switches_t on = rule_switches(hp);
@@ -488,11 +513,11 @@ native_plan_t heuristic_plan(const native_problem_t &p,
     };
     // Every thread needs a tile: narrow the tiles first (one row block streams
     // each B slab once), then split the rows.
-    // A pinned BF16 mr stops at the narrowest width with its kernels.
+    // A pinned BF16 or FP32 mr stops at the narrowest width with its kernels.
     const auto narrower_has_mr = [&]() {
-        return hp.mr == 0 || !bf16
+        return hp.mr == 0 || int8
                 || native_kernel_registry().covers(
-                        native_kernel_kind_t::bf16, hp.mr, q.nr / 2);
+                        kernel_kind(p), hp.mr, q.nr / 2);
     };
     if (hp.nr > 0)
         count();
@@ -500,7 +525,7 @@ native_plan_t heuristic_plan(const native_problem_t &p,
         while (count() < threads && q.m_blocks == 1 && q.nr > hp.min_tile_cols
                 && narrower_has_mr())
             q.nr /= 2;
-    q.mr = call_rows(hp, bf16, q.nr);
+    q.mr = call_rows(hp, int8, q.nr);
     if (hp.mb == 0 && hp.row_split && count() < threads && q.n_tiles > 0
             && q.mr > 0 && q.mb > q.mr) {
         const int blocks = ceil_div(threads, q.n_tiles);
@@ -519,8 +544,8 @@ native_plan_t heuristic_plan(const native_problem_t &p,
     // takes at most bf16_alias_mr rows per call (a block of 9 to 12 rows
     // then takes two calls).  A row-major source counts as rows K apart (the
     // problem carries no row stride).
-    constexpr int kAliasK = 4096 / static_cast<int>(sizeof(uint16_t));
-    if (bf16 && on.bf16_alias && hp.mr == 0 && K % kAliasK == 0
+    constexpr int kAliasBytes = 4096;
+    if (!int8 && on.bf16_alias && hp.mr == 0 && K % (kAliasBytes / esz) == 0
             && M > hp.decode_m && q.nr >= 32 && q.mb > hp.bf16_alias_mr)
         q.mr = std::min(q.mr, hp.bf16_alias_mr);
     q.threads = std::max(1,
@@ -532,10 +557,9 @@ native_plan_t heuristic_plan(const native_problem_t &p,
     q.kc = K;
     if (hp.kc > 0) {
         q.kc = std::min(hp.kc, K);
-    } else if (bf16 && q.nr > 0 && q.mb > q.mr) {
+    } else if (!int8 && q.nr > 0 && q.mb > q.mr) {
         const int kc = static_cast<int>(static_cast<int64_t>(uarch.l2_bytes)
-                * hp.bf16_l2_pct / 100
-                / (q.nr * static_cast<int>(sizeof(uint16_t))));
+                * hp.bf16_l2_pct / 100 / (q.nr * esz));
         if (kc < K) q.kc = std::max(std::max(2, hp.min_pass_k), kc & ~1);
         if (hp.kc_split == native_kc_split_t::equal && q.kc < K)
             q.kc = (ceil_div(K, ceil_div(K, q.kc)) + 1) & ~1;
@@ -545,8 +569,7 @@ native_plan_t heuristic_plan(const native_problem_t &p,
         if (on.l1_pass && q.mr > 0 && 2 * q.mr <= q.mb
                 && q.mb <= hp.l1_pass_max_mb) {
             const int64_t l1 = static_cast<int64_t>(uarch.l1d_bytes) * hp.l1_pct
-                    / 100
-                    / ((q.nr + q.mr) * static_cast<int64_t>(sizeof(uint16_t)));
+                    / 100 / ((q.nr + q.mr) * static_cast<int64_t>(esz));
             const int64_t pass = std::max<int64_t>(std::max(2, hp.min_pass_k),
                                          std::min<int64_t>(kc, l1))
                     & ~int64_t {1};
@@ -567,17 +590,18 @@ native_plan_t heuristic_plan(const native_problem_t &p,
     // ranges.
     const int dt = hp.domain_threads > 0 ? hp.domain_threads
             : uarch.l3_domain_cores > 0  ? uarch.l3_domain_cores
-                                         : uarch.ccx_cores;
+                                         : uarch.family_l3_cores;
     q.row_unit = hp.row_unit;
     const auto take_blocks = [&]() {
         q.col_groups = 0;
         q.unit_tiles = std::min(std::max(1, q.n_tiles),
                 hp.unit_tiles > 0 ? hp.unit_tiles : kBlocksTiles);
-        // BF16 K passes keep the accumulators of every tile of a unit, in the
-        // worker's scratch, which is kept for the thread's lifetime: the
-        // unit takes at most the tiles whose accumulators fit the
-        // bf16_l2_pct share of L2 that sizes the K pass, and at least one.
-        if (bf16 && q.kc < K && q.unit_tiles > 1) {
+        // BF16 and FP32 K passes keep the accumulators of every tile of a
+        // unit, in the worker's scratch, which is kept for the thread's
+        // lifetime: the unit takes at most the tiles whose accumulators fit
+        // the bf16_l2_pct share of L2 that sizes the K pass, and at least
+        // one.
+        if (!int8 && q.kc < K && q.unit_tiles > 1) {
             const int64_t tile_bytes = static_cast<int64_t>(q.mb) * q.nr
                     * static_cast<int64_t>(sizeof(float));
             const int64_t share = static_cast<int64_t>(uarch.l2_bytes)
@@ -588,6 +612,7 @@ native_plan_t heuristic_plan(const native_problem_t &p,
         }
         q.domain_threads = std::max(1, dt);
     };
+    bool narrow_blocks = false;
     if (hp.col_groups >= 0) {
         q.col_groups = hp.col_groups;
     } else if (hp.schedule == native_schedule_t::row_groups) {
@@ -595,8 +620,8 @@ native_plan_t heuristic_plan(const native_problem_t &p,
     } else if (hp.schedule == native_schedule_t::blocks) {
         take_blocks();
     } else if (hp.schedule == native_schedule_t::automatic) {
-        const int64_t l3_share = static_cast<int64_t>(uarch.l3_bytes_per_ccd)
-                * hp.l3_pct / 100;
+        const int64_t l3_share
+                = static_cast<int64_t>(uarch.l3_domain_bytes) * hp.l3_pct / 100;
         if (on.makespan && q.n_tiles > 0) {
             const int64_t slice
                     = slice_makespan(grid_of(q), M, q.threads, bytes);
@@ -607,47 +632,57 @@ native_plan_t heuristic_plan(const native_problem_t &p,
                 q.col_groups = idle_col_groups(q, M, std::max(1, dt), bytes,
                         gain_bound(slice, hp.min_gain_pct));
         }
+        // The L3 rules below need an L3 (l3_share above 0).
         if (q.col_groups == 0 && on.traffic) {
-            if (dt > 1)
+            if (dt > 1 && l3_share > 0)
                 q.col_groups
-                        = traffic_col_groups(q, M, N, K, bf16, dt, l3_share);
+                        = traffic_col_groups(q, M, N, K, esz, dt, l3_share);
         } else if (q.col_groups == 0) {
             const int64_t domain_bytes
                     = (static_cast<int64_t>(M)
                               + static_cast<int64_t>(dt) * q.nr)
-                    * K * (bf16 ? 2 : 1);
+                    * K * esz;
             if (q.m_blocks > 1 && q.n_tiles % q.threads != 0 && dt > 1
-                    && domain_bytes > l3_share)
+                    && l3_share > 0 && domain_bytes > l3_share)
                 q.col_groups = std::gcd(std::gcd(q.n_tiles, q.threads), dt);
         }
         // Under the blocks schedule the workers of each L3 domain take the
         // units of the domain's share of the row blocks from one counter, so
         // the domain reads only those source rows.  When they fit the l3_pct
-        // share of its L3, it replaces the schedule of a BF16 plan whose B
-        // slab over all of K exceeds the bf16_l2_pct share of L2, and the
-        // slice of an INT8 plan.  The deal gives each domain row blocks in
-        // proportion to its workers, so a full domain's share is
+        // share of its L3, it replaces the schedule of a BF16 or FP32 plan
+        // whose B slab over all of K exceeds the bf16_l2_pct share of L2, and
+        // the slice of an INT8 plan.  The deal gives each domain row blocks
+        // in proportion to its workers, so a full domain's share is
         // M * de / threads rows.
         const int domains = ceil_div(q.threads, std::max(1, dt));
         const int de = std::min(std::max(1, dt), q.threads);
         const int64_t share_bytes
                 = (static_cast<int64_t>(M) * de + q.threads - 1) / q.threads * K
-                * (bf16 ? 2 : 1);
-        const int64_t slab_bytes = static_cast<int64_t>(q.nr) * K * 2;
+                * esz;
+        const int64_t slab_bytes = static_cast<int64_t>(q.nr) * K * esz;
         if (on.blocks && domains > 1
-                && M >= (bf16 ? hp.bf16_blocks_min_m : hp.int8_blocks_min_m)
-                && (bf16 ? slab_bytes * 100
+                && M >= (!int8 ? hp.bf16_blocks_min_m : hp.int8_blocks_min_m)
+                && (!int8 ? slab_bytes * 100
                                         > static_cast<int64_t>(uarch.l2_bytes)
                                                 * hp.bf16_l2_pct
-                         : q.col_groups == 0)
+                          : q.col_groups == 0)
                 && share_bytes <= l3_share)
             take_blocks();
+        // A BF16 or FP32 slice of 32-column tiles with at most two column
+        // tiles per domain: the threads of every domain share column tiles
+        // over all the rows, so every domain reads the whole source.  Under
+        // the same bounds it takes the blocks schedule, unless bf16_narrow_n
+        // widens the tiles of a BF16 plan (below).
+        narrow_blocks = on.blocks && !int8 && domains > 1
+                && M >= hp.bf16_blocks_min_m && q.unit_tiles == 0
+                && q.col_groups == 0 && q.nr == kMaxTileCols
+                && q.n_tiles <= 2 * domains && share_bytes <= l3_share;
     }
     q.traversal = hp.traversal;
     q.scratch_floats = native_plan_scratch_floats(q, p);
     // A per-group call runs the group kernel, with its own rows per call.
     const bool group_kernel
-            = !bf16 && p.int8_scheme == native_int8_scheme_t::per_group;
+            = int8 && p.int8_scheme == native_int8_scheme_t::per_group;
     const auto int8_max_mr = [group_kernel](int nv) {
         return group_kernel ? native_int8_group_ukernel_max_mr(nv)
                             : native_int8_ukernel_max_mr(nv);
@@ -661,7 +696,7 @@ native_plan_t heuristic_plan(const native_problem_t &p,
             = hp.int8_kc > 0 ? std::min(hp.int8_kc / 4, ceil_div(K, 4)) : 0;
     // The INT8 form of the L1 pass, at the tile's call width and rows per
     // call; equal passes in whole quads.  Only the per-channel tile reads it.
-    if (!bf16 && !group_kernel && hp.int8_kc == 0 && on.l1_pass && q.nr > 0) {
+    if (int8 && !group_kernel && hp.int8_kc == 0 && on.l1_pass && q.nr > 0) {
         const int cw = native_int8_col_width(q, q.nr);
         const int rows = native_int8_call_rows(q, cw / 16);
         if (rows > 0 && 2 * rows <= q.mb && q.mb <= hp.l1_pass_max_mb) {
@@ -684,7 +719,7 @@ native_plan_t heuristic_plan(const native_problem_t &p,
     q.int8_bias_in_dequant = hp.bias_in_dequant;
     q.int8_scheme = p.int8_scheme;
     q.copy_block = hp.copy_block;
-    q.copy_par_min = bf16 ? hp.bf16_copy_par_min : hp.int8_copy_par_min;
+    q.copy_par_min = !int8 ? hp.bf16_copy_par_min : hp.int8_copy_par_min;
     // Few column tiles against the team: with fewer than two 32-column tiles
     // per L3 domain in the slice, each domain reads from memory the source
     // rows of its column tiles, and each row is read once per column tile,
@@ -714,6 +749,10 @@ native_plan_t heuristic_plan(const native_problem_t &p,
                 return w;
         }
     }
+    if (narrow_blocks) {
+        take_blocks();
+        q.scratch_floats = native_plan_scratch_floats(q, p);
+    }
     return q;
 }
 
@@ -734,6 +773,9 @@ const char *validate_native_plan(
         return "no BF16 kernel for every row count 1 .. mr at nr";
     if (bf16 && q.kc < p.K && (q.kc < 2 || q.kc % 2 != 0))
         return "kc is below K and not an even number of at least 2";
+    if (p.f32() && !kernels.covers(native_kernel_kind_t::f32, q.mr, q.nr))
+        return "no FP32 kernel for every row count 1 .. mr at nr";
+    if (p.f32() && q.kc < 1) return "kc is below 1";
     if (q.threads < 1 || q.threads > p.threads)
         return "threads is outside 1 .. the requested team";
     if (q.col_groups < 0
@@ -747,7 +789,7 @@ const char *validate_native_plan(
                "1, or the blocks schedule has col_groups";
     if (q.row_unit < 1 || q.copy_block < 1 || q.copy_par_min < 0)
         return "row_unit, copy_block or copy_par_min is out of range";
-    if (!bf16) {
+    if (p.int8()) {
         if ((q.int8_cw_mask & kNativeInt8Cw16) == 0)
             return "int8_cw does not allow 16";
         for (const int nv : {1, 2}) {
@@ -770,10 +812,10 @@ const char *validate_native_plan(
 
 size_t native_plan_scratch_floats(
         const native_plan_t &plan, const native_problem_t &p) {
-    const bool bf16 = p.bf16();
-    if (bf16 && plan.kc >= p.K) return static_cast<size_t>(plan.mr) * plan.nr;
-    // BF16 K passes keep the accumulators of every tile of a unit.
-    const int tiles = bf16 ? std::max(1, plan.unit_tiles) : 1;
+    const bool passes = !p.int8();
+    if (passes && plan.kc >= p.K) return static_cast<size_t>(plan.mr) * plan.nr;
+    // BF16 and FP32 K passes keep the accumulators of every tile of a unit.
+    const int tiles = passes ? std::max(1, plan.unit_tiles) : 1;
     return static_cast<size_t>(plan.mb) * plan.nr * tiles;
 }
 
@@ -884,7 +926,7 @@ native_plan_t native_planner_t::resolve_layers(
     const native_config_entry_t *entries[kLayerCount] = {};
     native_config_t configs[kLayerCount];
     const bool scoped
-            = !p.bf16() && p.int8_scheme != native_int8_scheme_t::per_channel;
+            = p.int8() && p.int8_scheme != native_int8_scheme_t::per_channel;
     for (int i = 0; i < kLayerCount; ++i) {
         const native_config_entry_t *e = found[i];
         if (e == nullptr) continue;
@@ -954,9 +996,8 @@ native_plan_t native_planner_t::resolve_layers(
                             conflict ? " conflicts with a higher layer"
                                      : " gives an illegal plan",
                             " for M=", p.M, " N=", p.N, " K=", p.K,
-                            " threads=", p.threads, " ",
-                            p.bf16() ? "bf16" : "s8", ": ", reason,
-                            "; dropped");
+                            " threads=", p.threads, " ", dtype_name(p), ": ",
+                            reason, "; dropped");
                 } else if (n == kMaxDropWarnings) {
                     apilog_warning(
                             "native BRGEMM: more entries are dropped "

@@ -78,7 +78,7 @@ struct heuristic_params_t {
     native_kc_split_t kc_split = native_kc_split_t::budget;
     int l3_pct = 100; ///< L3 share of the row-group test
     /// Threads of one L3 domain; 0: UarchParams::l3_domain_cores, or
-    /// ccx_cores when that is 0.
+    /// family_l3_cores when that is 0.
     int domain_threads = 0;
     // INT8 tile.
     int int8_mr = 12; ///< rows per call, at most
@@ -141,7 +141,9 @@ struct heuristic_params_t {
     /// the rows of a full L3 domain's share of the source (M * domain_threads
     /// / threads) fit the l3_pct share of its L3: in place of the
     /// schedule of a BF16 plan whose B slab over all of K exceeds the
-    /// bf16_l2_pct share of L2, or of the slice of an INT8 plan.
+    /// bf16_l2_pct share of L2, of a BF16 slice of 32-column tiles with at
+    /// most two column tiles per L3 domain that bf16_narrow_n leaves, or of
+    /// the slice of an INT8 plan.
     int blocks = 1;
     int bf16_blocks_min_m = 1024;
     int int8_blocks_min_m = 3072;

@@ -21,7 +21,10 @@
 // same call on the default route, with that result (INT8 bit-identical or
 // within one u8 step; BF16 within the BF16 band, bit identity reported).
 // Gated activations are also compared with the one-op group_matmul_direct
-// fused activation.  One instantiation per feature row.
+// fused activation.  FP32 calls (an f32 dst, the only one matmul_direct
+// takes for an f32 source), which neither of those routes takes, are
+// compared with the reference algorithm within the FP32 band.  One
+// instantiation per feature row.
 
 #include <cmath>
 #include <cstring>
@@ -39,6 +42,7 @@ namespace {
 
 namespace nt = native_brgemm_test;
 namespace mm = zendnnl::lowoha::matmul;
+namespace nat = zendnnl::lowoha::matmul::native;
 using nt::buffer_t;
 using zendnnl::common::matmul_algo_t;
 using zendnnl::common::post_op_type_t;
@@ -55,7 +59,7 @@ constexpr data_type_t kS32 = data_type_t::s32;
 constexpr data_type_t kNone = data_type_t::none;
 
 /// Weight / source configuration of a call.
-enum class q_t { bf16, dyn_s8, dyn_u8, st_u8, st_s8 };
+enum class q_t { bf16, dyn_s8, dyn_u8, st_u8, st_s8, f32 };
 /// How the weight reaches the call.
 struct po_t {
     post_op_type_t type;
@@ -90,7 +94,7 @@ void PrintTo(const pcase_t &c, std::ostream *os) {
 }
 
 bool is_int8(q_t q) {
-    return q != q_t::bf16;
+    return q != q_t::bf16 && q != q_t::f32;
 }
 bool is_dyn(q_t q) {
     return q == q_t::dyn_s8 || q == q_t::dyn_u8;
@@ -113,6 +117,7 @@ const char *q_name(q_t q) {
         case q_t::dyn_s8: return "dyns8";
         case q_t::dyn_u8: return "dynu8";
         case q_t::st_u8: return "stu8";
+        case q_t::f32: return "f32";
         default: return "sts8";
     }
 }
@@ -219,8 +224,9 @@ operands_t make_operands(const pcase_t &c) {
     operands_t o;
     const uint32_t seed = seed_of(c.name);
     const bool int8 = is_int8(c.q);
-    o.src_dt = c.q == q_t::st_u8 ? kU8 : (c.q == q_t::st_s8 ? kS8 : kBf16);
-    o.wei_dt = int8 ? kS8 : kBf16;
+    const data_type_t float_dt = c.q == q_t::f32 ? kF32 : kBf16;
+    o.src_dt = c.q == q_t::st_u8 ? kU8 : (c.q == q_t::st_s8 ? kS8 : float_dt);
+    o.wei_dt = int8 ? kS8 : float_dt;
     const int a_rows = c.transA ? c.K : c.M, a_cols = c.transA ? c.M : c.K;
     const int b_rows = c.transB ? c.N : c.K, b_cols = c.transB ? c.K : c.N;
     o.lda = a_cols + c.pad;
@@ -232,10 +238,10 @@ operands_t make_operands(const pcase_t &c) {
     else if (o.src_dt == kS8)
         o.src = nt::random_buffer(kS8, a_n, seed, -64, 64);
     else
-        o.src = nt::random_buffer(kBf16, a_n, seed, -1.0f, 1.0f);
+        o.src = nt::random_buffer(float_dt, a_n, seed, -1.0f, 1.0f);
     const size_t b_n = static_cast<size_t>(b_rows) * o.ldb;
     o.wei = int8 ? nt::random_buffer(kS8, b_n, seed + 1, -127, 127)
-                 : nt::random_buffer(kBf16, b_n, seed + 1, -1.0f, 1.0f);
+                 : nt::random_buffer(float_dt, b_n, seed + 1, -1.0f, 1.0f);
     if (c.bias != kNone)
         o.bias = nt::random_buffer(c.bias, c.N, seed + 2, -1.0f, 1.0f);
 
@@ -341,6 +347,7 @@ bool direct_accepts(const pcase_t &c) {
 /// True when the single-expert custom-kernel route admits the call and
 /// matmul_direct accepts it on the default route.
 bool ck_admits(const pcase_t &c) {
+    if (c.q == q_t::f32) return false;
     if (c.alpha != 1.0f || c.beta != 0.0f || c.transA) return false;
     if (c.gated != gated_t::none || c.q == q_t::st_s8) return false;
     if (is_int8(c.q) && c.K % 4 != 0) return false;
@@ -407,18 +414,25 @@ TEST_P(NativeBrgemmParity, Matches) {
                         act[static_cast<size_t>(m) * cols + i]);
     }
     const bool int_dst = c.dst == kU8 || c.dst == kS8;
-    const float abs_bound = nt::comparison_abs_bound(
-            c.K, epsilon_bf16, c.alpha, c.beta, true, int8, false);
+    const bool low = c.q != q_t::f32;
+    const float rtol = low ? rtol_bf16 : rtol_f32;
+    const float abs_bound
+            = nt::comparison_abs_bound(c.K, low ? epsilon_bf16 : epsilon_f32,
+                    c.alpha, c.beta, low, int8, false);
 
     {
         std::unique_ptr<nt::algo_pin_t> pin;
         if (!c.per_call)
             pin.reset(new nt::algo_pin_t(matmul_algo_t::native_brgemm));
+        const bool on_gemv = nt::gemv_kernel(call) != nat::native_gemv_t::none;
         for (int i = 0; i < c.calls; ++i) {
             std::memcpy(dst.get(), init.get(), init.bytes);
             ASSERT_EQ(nt::run_matmul(call), status_t::success)
                     << "ALGO 11 call " << i;
-            if (c.wc != 0) {
+            if (c.wc != 0 && on_gemv) {
+                EXPECT_EQ(nt::native_layouts(o.wei.get()), 0u)
+                        << "ALGO 11 call " << i << " on a GEMV kernel";
+            } else if (c.wc != 0) {
                 ASSERT_GE(nt::native_layouts(o.wei.get()), 1u)
                         << "ALGO 11 call " << i
                         << " was not served by the native BRGEMM over the "
@@ -430,7 +444,7 @@ TEST_P(NativeBrgemmParity, Matches) {
                         << "ALGO 11 call " << i << " vs reference";
             } else {
                 EXPECT_TRUE(nt::within_band(dst.get(), o.ldc, ref.get(), o.ldc,
-                        c.dst, c.M, cols, rtol_bf16, abs_bound))
+                        c.dst, c.M, cols, rtol, abs_bound))
                         << "ALGO 11 call " << i << " vs reference";
             }
         }
@@ -479,7 +493,7 @@ TEST_P(NativeBrgemmParity, Matches) {
     }
 
     // gated: the one-op group call with the fused activation
-    if (c.gated != gated_t::none) {
+    if (c.gated != gated_t::none && c.q != q_t::f32) {
         buffer_t g_dst = nt::make_buffer(
                 static_cast<size_t>(c.M) * c.N * nt::dt_bytes(c.dst));
         buffer_t g_wei = nt::kept_until_exit(copy_of(raw));
@@ -771,6 +785,122 @@ std::vector<pcase_t> per_call_cases() {
     return named(v);
 }
 
+/// FP32 calls over every feature row of the BF16 and INT8 cases.
+std::vector<pcase_t> fp32_cases() {
+    std::vector<pcase_t> v;
+    for (int M : {1, 2, 7, 8, 16, 65, 512, 1500})
+        v.push_back(mk(q_t::f32, M, 4096, 1000, kF32));
+    for (int K : {1, 3, 31, 63, 64, 100, 1000, 4096})
+        for (int M : {4, 65})
+            v.push_back(mk(q_t::f32, M, 96, K, kF32));
+    for (int N : {32, 64, 96, 4096})
+        for (int M : {8, 128})
+            v.push_back(mk(q_t::f32, M, N, 64, kF32));
+    v.push_back(mk(q_t::f32, 32, 11008, 4096, kF32));
+    v.push_back(mk(q_t::f32, 128, 4096, 11008, kF32));
+    for (int t : {1, 4}) {
+        pcase_t a = mk(q_t::f32, 16, 4096, 1000, kF32);
+        a.threads = t;
+        v.push_back(a);
+        pcase_t b = mk(q_t::f32, 512, 96, 63, kF32);
+        b.threads = t;
+        v.push_back(b);
+    }
+    const float ab[][2] = {{0.0f, 0.0f}, {0.5f, 0.0f}, {2.0f, 0.0f},
+            {1.0f, 1.0f}, {1.0f, 0.5f}, {0.5f, 2.0f}, {0.0f, 1.0f}};
+    for (const auto &x : ab) {
+        pcase_t c = mk(q_t::f32, 16, 96, 100, kF32);
+        c.alpha = x[0];
+        c.beta = x[1];
+        v.push_back(c);
+    }
+    for (int M : {7, 65})
+        for (int pad : {0, 8}) {
+            pcase_t c = mk(q_t::f32, M, 96, 100, kF32);
+            c.transA = true;
+            c.pad = pad;
+            v.push_back(c);
+        }
+    for (int M : {8, 65})
+        for (int pad : {1, 16}) {
+            pcase_t c = mk(q_t::f32, M, 96, 100, kF32);
+            c.pad = pad;
+            v.push_back(c);
+        }
+    for (int pad : {0, 5}) {
+        pcase_t c = mk(q_t::f32, 8, 4096, 1024, kF32);
+        c.transB = true;
+        c.pad = pad;
+        v.push_back(c);
+    }
+    for (data_type_t b : {kBf16, kF32, kF16})
+        for (int M : {4, 128}) {
+            pcase_t c = mk(q_t::f32, M, 4096, 1024, kF32);
+            c.bias = b;
+            v.push_back(c);
+        }
+    const std::vector<std::vector<po_t>> eltwise = {{{post_op_type_t::relu}},
+            {{post_op_type_t::leaky_relu, 0.1f}}, {{post_op_type_t::elu}},
+            {{post_op_type_t::gelu_tanh}}, {{post_op_type_t::gelu_erf}},
+            {{post_op_type_t::sigmoid}}, {{post_op_type_t::swish}},
+            {{post_op_type_t::swish, 1.702f}}, {{post_op_type_t::tanh}},
+            {{post_op_type_t::square}},
+            {{post_op_type_t::abs}, {post_op_type_t::sqrt}},
+            {{post_op_type_t::exp}, {post_op_type_t::log}},
+            {{post_op_type_t::clip, -0.5f, 0.5f}}, {{post_op_type_t::mish}},
+            {{post_op_type_t::softmax}}};
+    for (const auto &chain : eltwise) {
+        pcase_t c = mk(q_t::f32, 16, 128, 64, kF32);
+        c.po = chain;
+        v.push_back(c);
+    }
+    for (post_op_type_t t :
+            {post_op_type_t::binary_add, post_op_type_t::binary_mul})
+        for (data_type_t bd : {kF32, kBf16})
+            for (bool full : {true, false}) {
+                pcase_t c = mk(q_t::f32, 16, 128, 64, kF32);
+                po_t p {t};
+                p.buf_dt = bd;
+                p.full = full;
+                c.po = {p};
+                v.push_back(c);
+            }
+    po_t mul_full {post_op_type_t::binary_mul};
+    po_t add_full {post_op_type_t::binary_add};
+    for (const auto &chain :
+            std::vector<std::vector<po_t>> {{{post_op_type_t::relu}, add_full},
+                    {{post_op_type_t::gelu_erf}, mul_full,
+                            {post_op_type_t::clip, -0.5f, 0.5f}}}) {
+        pcase_t c = mk(q_t::f32, 8, 4096, 1024, kF32);
+        c.po = chain;
+        v.push_back(c);
+    }
+    const int shapes[][3] = {{1, 4096, 1000}, {8, 64, 64}, {65, 4096, 64}};
+    int i = 0;
+    for (gated_t g : {gated_t::silu_and_mul, gated_t::gelu_and_mul,
+                 gated_t::swiglu_oai_mul})
+        for (data_type_t b : {kNone, kF32, kBf16}) {
+            const int *s = shapes[i++ % 3];
+            pcase_t c = mk(q_t::f32, s[0], s[1], s[2], kF32);
+            c.gated = g;
+            c.bias = b;
+            v.push_back(c);
+        }
+    for (int wc : {0, 1, 2})
+        for (int K : {1024, 1023}) {
+            pcase_t c = mk(q_t::f32, 4, 4096, K, kF32);
+            c.wc = wc;
+            c.calls = 2;
+            v.push_back(c);
+        }
+    for (int M : {1, 128}) {
+        pcase_t c = mk(q_t::f32, M, 4096, 1024, kF32);
+        c.per_call = true;
+        v.push_back(c);
+    }
+    return named(v);
+}
+
 std::string case_name(const ::testing::TestParamInfo<pcase_t> &info) {
     return info.param.name;
 }
@@ -797,5 +927,7 @@ INSTANTIATE_TEST_SUITE_P(WeightCache, NativeBrgemmParity,
         ::testing::ValuesIn(weight_cache_cases()), case_name);
 INSTANTIATE_TEST_SUITE_P(PerCallAlgo, NativeBrgemmParity,
         ::testing::ValuesIn(per_call_cases()), case_name);
+INSTANTIATE_TEST_SUITE_P(
+        Fp32, NativeBrgemmParity, ::testing::ValuesIn(fp32_cases()), case_name);
 
 } // namespace

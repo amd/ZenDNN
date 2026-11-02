@@ -552,7 +552,7 @@ status_t validate_group_matmul_direct_inputs(const std::vector<char> &layout,
             const bool sym_quant_reorder_path
                     = params[i].dtypes.wei == data_type_t::s8;
             if ((per_group_wei || per_channel_wei) && sym_quant_reorder_path
-                    && !is_w4a8_sym_quant_group_valid(K[i], ws.dims[0])) {
+                    && !quant_groups_are_whole_quads(K[i], ws.dims[0])) {
                 log_error(
                         "group_matmul parallel: per-group symmetric quant at "
                         "operation ",
@@ -1477,7 +1477,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
             exec_params[i].lowoha_algo = grp_matmul_lowoha_algo(exec_params[i]);
             matmul_algo_t kernel = kernel_select(exec_params[i], bp.Batch_A,
                     bp.Batch_B, 1, M[i], N[i], K[i], num_threads, bias[i],
-                    is_weights_const[i], transB[i]);
+                    is_weights_const[i]);
 
             matmul_execute(layout[i], transA[i], transB[i], M[i], N[i], K[i],
                     alpha[i], cur_src, cur_lda, weight[i], ldb[i], bias[i],

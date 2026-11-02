@@ -23,8 +23,10 @@
 #include <new>
 
 #include "common/zendnnl_compat.hpp"
+#include "lowoha_operators/matmul/lowoha_quant_layout.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/avx512_math.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_operator_bridge.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_utils.hpp"
 #include "memory/memory_utils.hpp"
 
 namespace zendnnl {
@@ -33,7 +35,6 @@ namespace matmul {
 namespace native {
 
 using zendnnl::common::post_op_type_t;
-using zendnnl::error_handling::commonlog_info_enabled;
 using zendnnl::error_handling::log_error;
 using zendnnl::memory::read_and_cast;
 
@@ -288,18 +289,19 @@ inline __m512 eltwise(const native_postop_t &op, __m512 x, int lanes) {
     }
 }
 
-/// Post-ops [from, to) at output columns oc .. oc + lanes of row m.
+/// Post-ops [from, to) at columns oc .. oc + lanes of row m of the output
+/// the binary operands index, cols columns wide.
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,avx512dq,fma")
 inline __m512 run_ops(const native_epilogue_t &ep, size_t from, size_t to,
-        __m512 v, int m, int oc, __mmask16 k, int lanes) {
+        __m512 v, int m, int oc, int cols, __mmask16 k, int lanes) {
     for (size_t i = from; i < to; ++i) {
         const native_postop_t &op = ep.ops[i];
         if (op.type == post_op_type_t::binary_add)
             v = _mm512_add_ps(
-                    v, load_operand(op.operand, m, oc, ep.n_out, k, lanes));
+                    v, load_operand(op.operand, m, oc, cols, k, lanes));
         else if (op.type == post_op_type_t::binary_mul)
             v = _mm512_mul_ps(
-                    v, load_operand(op.operand, m, oc, ep.n_out, k, lanes));
+                    v, load_operand(op.operand, m, oc, cols, k, lanes));
         else
             v = eltwise(op, v, lanes);
     }
@@ -328,8 +330,8 @@ inline void emit(
         const native_epilogue_t &ep, __m512 v, int m, int oc, int lanes) {
     const bool staged = ep.softmax_at < ep.ops.size();
     const __mmask16 k = lane_mask(lanes);
-    v = run_ops(
-            ep, 0, staged ? ep.softmax_at : ep.ops.size(), v, m, oc, k, lanes);
+    v = run_ops(ep, 0, staged ? ep.softmax_at : ep.ops.size(), v, m, oc,
+            ep.n_out, k, lanes);
     if (staged)
         _mm512_mask_storeu_ps(
                 ep.rows.get() + static_cast<size_t>(m) * ep.n_out + oc, k, v);
@@ -360,8 +362,9 @@ void finish_row(const native_epilogue_t &ep, int m) {
         for (int j = 0; j < ep.n_out; j += 16) {
             const int lanes = std::min(16, ep.n_out - j);
             const __mmask16 k = lane_mask(lanes);
-            const __m512 v = run_ops(ep, i, i + 1,
-                    _mm512_maskz_loadu_ps(k, row + j), m, j, k, lanes);
+            const __m512 v
+                    = run_ops(ep, i, i + 1, _mm512_maskz_loadu_ps(k, row + j),
+                            m, j, ep.n_out, k, lanes);
             _mm512_mask_storeu_ps(row + j, k, v);
         }
     }
@@ -391,19 +394,48 @@ inline __m512 load_bias(
             k, gate, _mm512_load_si512(kPairLanes), up);
 }
 
+/// The pre-activation columns of pack columns p .. p + lanes (p even for an
+/// interleaved pack) of row m of beta_src, as f32; the conversions are
+/// exact.
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+inline __m512 load_pre_activation(
+        const native_epilogue_t &ep, int m, int p, int lanes, __mmask16 k) {
+    const char *row = static_cast<const char *>(ep.beta_src)
+            + static_cast<size_t>(m) * ep.beta_ld * ep.dst_esz;
+    if (!ep.interleaved)
+        return load_f32(
+                row + static_cast<size_t>(p) * ep.dst_esz, ep.dst_dt, k);
+    const __mmask16 half = lane_mask((lanes + 1) / 2);
+    const __m512 gate = load_f32(
+            row + static_cast<size_t>(p / 2) * ep.dst_esz, ep.dst_dt, half);
+    const __m512 up
+            = load_f32(row + static_cast<size_t>(ep.N / 2 + p / 2) * ep.dst_esz,
+                    ep.dst_dt, half);
+    return _mm512_maskz_permutex2var_ps(
+            k, gate, _mm512_load_si512(kPairLanes), up);
+}
+
 /// v = alpha * acc + beta * dst + bias at pack columns p .. p + lanes, in the
 /// reference order, one rounding per operation (neither product is fused
-/// with the add that follows it).
+/// with the add that follows it); a gated call reads beta's dst at the
+/// pre-activation columns.
+template <bool Gated>
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
 inline __m512 pre(const native_epilogue_t &ep, const float *acc, int m, int p,
         int lanes) {
     const __mmask16 k = lane_mask(lanes);
     __m512 v = _mm512_maskz_loadu_ps(k, acc);
     if (ep.alpha != 1.0f) v = avx512_mul_unfused(v, _mm512_set1_ps(ep.alpha));
-    if (ep.beta != 0.0f)
-        v = _mm512_add_ps(v,
-                avx512_mul_unfused(load_f32(dst_at(ep, m, p), ep.dst_dt, k),
-                        _mm512_set1_ps(ep.beta)));
+    if (ep.beta != 0.0f) {
+        if constexpr (Gated)
+            v = _mm512_add_ps(v,
+                    avx512_mul_unfused(load_pre_activation(ep, m, p, lanes, k),
+                            _mm512_set1_ps(ep.beta)));
+        else
+            v = _mm512_add_ps(v,
+                    avx512_mul_unfused(load_f32(dst_at(ep, m, p), ep.dst_dt, k),
+                            _mm512_set1_ps(ep.beta)));
+    }
     if (ep.bias != nullptr)
         v = _mm512_add_ps(v, _mm512_maskz_loadu_ps(k, ep.bias + p));
     else if (ep.bias_raw != nullptr)
@@ -453,34 +485,32 @@ inline __m512 gated_value(matmul_gated_act_t gated, __m512 g, __m512 u) {
 
 status_t prepare_epilogue(const GemmDescriptor &desc,
         const matmul_params &params, const void *bias, void *dst,
-        bool interleaved, native_epilogue_t &ep) {
+        bool interleaved, native_epilogue_t &ep, const char **why) {
     const matmul_gated_act_t gated = desc.gated_act;
     const bool is_gated = gated != matmul_gated_act_t::none;
     if (is_gated) {
         if (gated != matmul_gated_act_t::silu_and_mul
                 && gated != matmul_gated_act_t::gelu_and_mul
-                && gated != matmul_gated_act_t::swiglu_oai_mul) {
-            log_error("native epilogue: unknown gated act ",
-                    static_cast<int>(gated));
-            return status_t::unimplemented;
-        }
+                && gated != matmul_gated_act_t::swiglu_oai_mul)
+            return turned_away(status_t::unimplemented,
+                    "an unknown gated activation", why);
         // silu / gelu weights are [gate | up] halves, which pair up only in
         // an interleaved pack; swiglu weights arrive interleaved.
         if (desc.N % 2 != 0
-                || interleaved
-                        != (gated != matmul_gated_act_t::swiglu_oai_mul)) {
-            log_error("native epilogue: gated act ", static_cast<int>(gated),
-                    " over a pack with interleave=", interleaved,
-                    " N=", desc.N);
-            return status_t::failure;
-        }
-        if (desc.beta != 0.0f) {
-            log_info("native epilogue: beta with a gated act is not served");
-            return status_t::unimplemented;
-        }
+                || interleaved != (gated != matmul_gated_act_t::swiglu_oai_mul))
+            return turned_away(status_t::failure,
+                    "a gated activation over a pack that does not pair its "
+                    "columns",
+                    why);
+        // beta reads the dst's N pre-activation columns.
+        if (desc.beta != 0.0f && desc.ldc < desc.N)
+            return turned_away(status_t::unimplemented,
+                    "beta with a gated activation over a dst of fewer than N "
+                    "columns",
+                    why);
     } else if (interleaved) {
-        log_error("native epilogue: interleaved pack without a gated act");
-        return status_t::unimplemented;
+        return turned_away(status_t::unimplemented,
+                "an interleaved pack without a gated activation", why);
     }
     switch (desc.dst_dt) {
         case data_type_t::f32:
@@ -490,18 +520,15 @@ status_t prepare_epilogue(const GemmDescriptor &desc,
         case data_type_t::s8:
         case data_type_t::s32: break;
         default:
-            if (commonlog_info_enabled())
-                log_info("native epilogue: dst ", dtype_info(desc.dst_dt),
-                        " is not served");
-            return status_t::unimplemented;
+            return turned_away(status_t::unimplemented,
+                    "a dst other than f32, bf16, f16, u8, s8 or s32", why);
     }
 
     ep.N = desc.N;
     ep.n_out = is_gated ? desc.N / 2 : desc.N;
-    if (desc.ldc < ep.n_out || desc.M < 0) {
-        log_error("native epilogue: ldc=", desc.ldc, " < ", ep.n_out);
-        return status_t::failure;
-    }
+    if (desc.ldc < ep.n_out || desc.M < 0)
+        return turned_away(
+                status_t::failure, "ldc below the output columns", why);
     ep.alpha = desc.alpha;
     ep.beta = desc.beta;
     ep.gated = gated;
@@ -510,24 +537,21 @@ status_t prepare_epilogue(const GemmDescriptor &desc,
     ep.dst_dt = desc.dst_dt;
     ep.dst_esz = static_cast<int>(size_of(desc.dst_dt));
     ep.ldc = desc.ldc;
+    ep.beta_src = dst;
+    ep.beta_ld = desc.ldc;
     const bool is_int8 = desc.wei_dt == data_type_t::s8;
     if (is_int8 && !has_per_group_wei_scale(params.quant_params, desc.N)
-            && (desc.alpha != 1.0f || desc.beta != 0.0f)) {
-        log_error("native epilogue: INT8 alpha=", desc.alpha,
-                " beta=", desc.beta, " belong to the INT8 tile");
-        return status_t::unimplemented;
-    }
+            && (desc.alpha != 1.0f || desc.beta != 0.0f))
+        return turned_away(status_t::unimplemented,
+                "INT8 alpha / beta outside the INT8 tile", why);
 
     ep.bias = nullptr;
     ep.bias_raw = nullptr;
     if (bias != nullptr) {
         const data_type_t bdt = params.dtypes.bias;
-        if (!is_operand_dt(bdt)) {
-            if (commonlog_info_enabled())
-                log_info("native epilogue: bias ", dtype_info(bdt),
-                        " is not served");
-            return status_t::unimplemented;
-        }
+        if (!is_operand_dt(bdt))
+            return turned_away(status_t::unimplemented,
+                    "a bias other than f32, bf16, f16, s8, u8 or s32", why);
         if (bdt == data_type_t::f32 && !interleaved) {
             ep.bias = static_cast<const float *>(bias);
         } else {
@@ -541,6 +565,9 @@ status_t prepare_epilogue(const GemmDescriptor &desc,
     ep.ops.reserve(params.postop_.size());
     ep.softmax_at = 0;
     bool softmax = false;
+    // The binary operands of a gated call's post-ops index its
+    // pre-activation.
+    const int op_cols = is_gated ? desc.N : ep.n_out;
     for (const matmul_post_op &po : params.postop_) {
         native_postop_t op;
         op.type = po.po_type;
@@ -548,20 +575,20 @@ status_t prepare_epilogue(const GemmDescriptor &desc,
             case post_op_type_t::none: continue;
             case post_op_type_t::binary_add:
             case post_op_type_t::binary_mul: {
-                const int64_t count = quant_elements(po.dims);
+                const int64_t count = checked_quant_param_num_elements(po.dims);
                 const status_t st = make_operand(po.buff, po.dtype, count,
-                        po.leading_dim, desc.M, ep.n_out, false, op.operand);
-                if (st != status_t::success) {
-                    if (commonlog_info_enabled())
-                        log_info("native epilogue: binary post-op ",
-                                dtype_info(po.dtype), " of ", count,
-                                " elements, ld ", po.leading_dim,
-                                " is not served");
-                    return st;
-                }
+                        po.leading_dim, desc.M, op_cols, false, op.operand);
+                if (st != status_t::success)
+                    return turned_away(st,
+                            "a binary post-op operand of a type or shape the "
+                            "epilogue does not read",
+                            why);
                 break;
             }
             case post_op_type_t::softmax:
+                if (is_gated)
+                    return turned_away(status_t::unimplemented,
+                            "a softmax with a gated activation", why);
                 if (!softmax) ep.softmax_at = ep.ops.size();
                 softmax = true;
                 break;
@@ -584,9 +611,8 @@ status_t prepare_epilogue(const GemmDescriptor &desc,
                 op.beta = po.beta;
                 break;
             default:
-                log_info("native epilogue: post-op ",
-                        static_cast<int>(po.po_type), " is not served");
-                return status_t::unimplemented;
+                return turned_away(status_t::unimplemented,
+                        "a post-op the epilogue does not apply", why);
         }
         ep.ops.push_back(op);
     }
@@ -612,21 +638,21 @@ status_t prepare_epilogue(const GemmDescriptor &desc,
     ep.has_dst_zp = false;
     if (ep.requant) {
         status_t st = make_operand(qp.dst_scale.buff, qp.dst_scale.dt,
-                quant_elements(qp.dst_scale.dims), 0, desc.M, ep.n_out, false,
-                ep.dst_scale);
-        const int64_t zp_count = quant_elements(qp.dst_zp.dims);
+                checked_quant_param_num_elements(qp.dst_scale.dims), 0, desc.M,
+                ep.n_out, false, ep.dst_scale);
+        const int64_t zp_count
+                = checked_quant_param_num_elements(qp.dst_zp.dims);
         ep.has_dst_zp = qp.dst_zp.buff != nullptr && zp_count != 0;
         if (st == status_t::success && ep.has_dst_zp)
             st = make_operand(qp.dst_zp.buff, qp.dst_zp.dt, zp_count, 0, desc.M,
                     ep.n_out, true, ep.dst_zp);
-        if (st == status_t::unimplemented) {
-            log_info("native epilogue: dst scale / zero point is not served");
-            return st;
-        }
-        if (st != status_t::success) {
-            log_error("native epilogue: bad dst scale / zero point");
-            return st;
-        }
+        if (st == status_t::unimplemented)
+            return turned_away(st,
+                    "a dst scale or zero point of a type the epilogue does not "
+                    "read",
+                    why);
+        if (st != status_t::success)
+            return turned_away(st, "a bad dst scale or zero point", why);
     }
     ep.store_only = !is_gated && ep.alpha == 1.0f && ep.beta == 0.0f
             && ep.bias == nullptr && ep.bias_raw == nullptr && ep.ops.empty()
@@ -654,20 +680,42 @@ void apply_epilogue_tile(const native_epilogue_t &ep, float *C, int ldc_acc,
         if (!gated) {
             for (int j = 0; j < nr; j += 16) {
                 const int lanes = std::min(16, nr - j);
-                emit(ep, pre(ep, acc + j, m, n0 + j, lanes), m, n0 + j, lanes);
+                emit(ep, pre<false>(ep, acc + j, m, n0 + j, lanes), m, n0 + j,
+                        lanes);
             }
         } else {
+            // The post-ops act on the pre-activation: at weight columns 2i
+            // and 2i + 1 before the halves of a swiglu weight separate, at
+            // the gate and up columns i and N / 2 + i after the pairs of an
+            // interleaved pack do.
+            const bool ops = !ep.ops.empty();
             for (int j = 0; j < nr; j += 32) {
                 const int lanes = std::min(32, nr - j);
-                const __m512 lo
-                        = pre(ep, acc + j, m, n0 + j, std::min(16, lanes));
-                const __m512 hi = lanes > 16
-                        ? pre(ep, acc + j + 16, m, n0 + j + 16, lanes - 16)
+                const int hi_lanes = lanes - 16;
+                const int i0 = (n0 + j) / 2;
+                const int pairs = lanes / 2;
+                __m512 lo = pre<true>(
+                        ep, acc + j, m, n0 + j, std::min(16, lanes));
+                __m512 hi = hi_lanes > 0
+                        ? pre<true>(ep, acc + j + 16, m, n0 + j + 16, hi_lanes)
                         : _mm512_setzero_ps();
-                const __m512 g = _mm512_permutex2var_ps(lo, gate_lanes, hi);
-                const __m512 u = _mm512_permutex2var_ps(lo, up_lanes, hi);
-                emit(ep, gated_value(ep.gated, g, u), m, (n0 + j) / 2,
-                        lanes / 2);
+                if (ops && !ep.interleaved) {
+                    lo = run_ops(ep, 0, ep.ops.size(), lo, m, n0 + j, ep.N,
+                            lane_mask(std::min(16, lanes)),
+                            std::min(16, lanes));
+                    if (hi_lanes > 0)
+                        hi = run_ops(ep, 0, ep.ops.size(), hi, m, n0 + j + 16,
+                                ep.N, lane_mask(hi_lanes), hi_lanes);
+                }
+                __m512 g = _mm512_permutex2var_ps(lo, gate_lanes, hi);
+                __m512 u = _mm512_permutex2var_ps(lo, up_lanes, hi);
+                if (ops && ep.interleaved) {
+                    const __mmask16 k = lane_mask(pairs);
+                    g = run_ops(ep, 0, ep.ops.size(), g, m, i0, ep.N, k, pairs);
+                    u = run_ops(ep, 0, ep.ops.size(), u, m, ep.N / 2 + i0, ep.N,
+                            k, pairs);
+                }
+                store_out(ep, gated_value(ep.gated, g, u), m, i0, pairs);
             }
         }
         if (ep.softmax_at < ep.ops.size()

@@ -125,8 +125,8 @@ nat::UarchParams caches(int l3_mib, int domain) {
     nat::UarchParams u = nat::detect_uarch();
     u.l1d_bytes = 48 << 10;
     u.l2_bytes = 1 << 20;
-    u.l3_bytes_per_ccd = l3_mib << 20;
-    u.ccx_cores = 1;
+    u.l3_domain_bytes = l3_mib << 20;
+    u.family_l3_cores = 1;
     u.l3_domain_cores = domain;
     return u;
 }
@@ -461,6 +461,62 @@ TEST(NativeTuningRules, BlocksRuleExamples) {
             0);
     EXPECT_EQ(plan(domain8, "col_groups=8", 4096, 4096, 14336, true).col_groups,
             8);
+}
+
+// The blocks rule on 8 cores per 32 MiB of L3, 32 threads, for a BF16 slice
+// of 32-column tiles with at most two column tiles per domain (N up to 256):
+// it takes the blocks schedule of one tile per unit from bf16_blocks_min_m
+// rows, keeping the slice's grid; not where bf16_narrow_n widens the tiles
+// (N 64), past two tiles per domain, under row groups, below the rule's rows,
+// on one domain, with the switch off, or for INT8.  16 threads are two
+// domains: four column tiles at most.
+TEST(NativeTuningRules, BlocksRuleNarrowN) {
+    const nat::UarchParams domain8 = caches(32, 8), domain32 = caches(128, 32);
+    const nat::UarchParams &host = nat::detect_uarch();
+    const auto plan
+            = [](const nat::UarchParams &u, const char *settings, int M, int N,
+                      int K, int threads = 32, bool bf16 = true) {
+        return nat::heuristic_plan(
+                problem(M, N, K, nat::kNativeLayoutPackNr, threads, bf16), u,
+                params(settings));
+    };
+    const auto blocks = [](const nat::native_plan_t &q) {
+        return q.unit_tiles == 1 && q.col_groups == 0 && q.domain_threads == 8
+                && q.nr == 32;
+    };
+    for (const int M : {1024, 4096})
+        for (const int N : {96, 256}) {
+            SCOPED_TRACE("M " + std::to_string(M) + " N " + std::to_string(N));
+            const nat::native_plan_t slice
+                    = plan(domain8, "blocks=0", M, N, 1536);
+            const nat::native_plan_t q = plan(domain8, "", M, N, 1536);
+            ASSERT_EQ(slice.col_groups, 0);
+            EXPECT_TRUE(blocks(q));
+            EXPECT_EQ(q.mb, slice.mb);
+            EXPECT_EQ(q.mr, slice.mr);
+            EXPECT_EQ(q.kc, slice.kc);
+            EXPECT_EQ(q.threads, slice.threads);
+            EXPECT_EQ(q.scratch_floats, slice.scratch_floats);
+            if (host.avx512bf16) {
+                EXPECT_EQ(nat::validate_native_plan(q,
+                                  problem(M, N, 1536, nat::kNativeLayoutPackNr,
+                                          32, true)),
+                        nullptr);
+            }
+        }
+    const nat::native_plan_t n64 = plan(domain8, "", 4096, 64, 2560);
+    EXPECT_EQ(n64.unit_tiles, 0);
+    EXPECT_EQ(n64.nr, 64);
+    EXPECT_EQ(plan(domain8, "", 4096, 288, 1536).unit_tiles, 0);
+    EXPECT_EQ(plan(domain8, "col_groups=1", 4096, 256, 1536).unit_tiles, 0);
+    EXPECT_EQ(plan(domain8, "", 512, 256, 1536).unit_tiles, 0);
+    EXPECT_FALSE(
+            blocks(plan(domain8, "bf16_blocks_min_m=2048", 1024, 256, 1536)));
+    EXPECT_EQ(plan(domain32, "", 4096, 256, 1536).unit_tiles, 0);
+    EXPECT_EQ(plan(domain8, "", 1024, 256, 1536, 32, false).unit_tiles, 0);
+    EXPECT_TRUE(blocks(plan(domain8, "", 4096, 96, 1536, 16)));
+    EXPECT_EQ(plan(domain8, "", 4096, 256, 1536, 16).unit_tiles, 0);
+    EXPECT_EQ(plan(domain8, "", 4096, 256, 1536, 8).unit_tiles, 0);
 }
 
 TEST(NativeTuningRules, WorkedExamples) {

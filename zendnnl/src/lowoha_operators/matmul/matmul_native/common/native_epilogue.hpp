@@ -59,9 +59,12 @@ struct native_postop_t {
 };
 
 /// Everything after the accumulation of one call over a native-layout
-/// weight: alpha, beta, bias, the gated activation, post-ops and the store to
-/// dst (f32, bf16, f16, or u8 / s8 / s32 requantized).  Prepared once per call,
-/// then applied by every thread to its own tiles.
+/// weight: alpha, beta, bias, post-ops, the gated activation and the store
+/// to dst (f32, bf16, f16, or u8 / s8 / s32 requantized).  A gated call
+/// applies alpha, beta, the bias and the post-ops to its N pre-activation
+/// columns, as matmul_direct defines it (the gated activation follows the
+/// matmul), then the activation and the store of N / 2 columns.  Prepared
+/// once per call, then applied by every thread to its own tiles.
 struct native_epilogue_t {
     int N = 0; ///< weight columns; a gated activation writes N / 2
     int n_out = 0; ///< dst columns
@@ -95,6 +98,13 @@ struct native_epilogue_t {
     size_t softmax_at = 0;
     std::unique_ptr<float[]> rows;
     std::unique_ptr<std::atomic<int>[]> row_cols;
+
+    /// What beta reads in a gated call, rows beta_ld elements apart of the
+    /// dst type: dst, or a copy of its N pre-activation columns when the
+    /// call's tiles store over columns other tiles read (see
+    /// native_brgemm_execute).
+    const void *beta_src = nullptr;
+    int beta_ld = 0;
 };
 
 /// f32, bf16 or f16: the float types the native BRGEMM reads in their own
@@ -105,19 +115,25 @@ inline bool native_float_dt(data_type_t dt) {
 }
 
 /// Fills ep for the call; unimplemented when the call needs something the
-/// epilogue cannot finish.  The alpha and beta of an INT8 call with
-/// per-tensor or per-channel weight scales act on the integer sum, so its
-/// tile applies them and desc carries alpha 1 and beta 0; those of a call
-/// with per-group weight scales apply here, to the sum of the scaled groups.
-/// The CPU has AVX512-BF16 or AVX512-VNNI.
+/// epilogue cannot finish (a gated call with a softmax, or with beta over a
+/// dst of fewer than N columns), with *why (when why is not null) naming
+/// it.  The alpha and beta of an INT8 call with per-tensor or per-channel
+/// weight scales act on the integer sum, so its tile applies them and desc
+/// carries alpha 1 and beta 0; those of a call with per-group weight scales
+/// apply here, to the sum of the scaled groups.  A gated call's post-op
+/// operands index its [M, N] pre-activation.  The CPU has AVX-512 F, BW, VL
+/// and DQ and FMA (native_base_isa).
 status_t prepare_epilogue(const GemmDescriptor &desc,
         const matmul_params &params, const void *bias, void *dst,
-        bool interleaved, native_epilogue_t &ep);
+        bool interleaved, native_epilogue_t &ep, const char **why = nullptr);
 
 /// Finishes C[mr][nr] (f32 accumulators of rows m0 .. m0 + mr and pack
 /// columns n0 .. n0 + nr of one block) and stores them to dst.  A gated
 /// activation needs n0 and nr even.  C may be overwritten.  Tiles of a call
-/// are disjoint and cover the output once.
+/// are disjoint and cover the output once; with beta they read beta_src
+/// while other tiles store.  No column past n0 + nr of any operand or of
+/// dst is read or written: the last tile of a weight of padded columns
+/// passes only its columns below N.
 void apply_epilogue_tile(const native_epilogue_t &ep, float *C, int ldc_acc,
         int m0, int mr, int n0, int nr);
 

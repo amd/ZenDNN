@@ -44,12 +44,24 @@ struct native_int8_out_t {
 /// beta 0 only), the result is stored there instead and C holds only what
 /// the tile carries between K passes or batches of groups.  The column
 /// widths, rows per kernel call and K passes are plan's; with per-group
-/// weight scales one call of the group kernel reduces every group of its
-/// rows (no K passes).  Safe to call concurrently on disjoint tiles.
+/// weight scales the group kernel takes the groups in order, in batches of
+/// whole groups instead of K passes.  Safe to call concurrently on disjoint
+/// tiles.
 void compute_int8_tile(const native_plan_t &plan,
         const native_int8_call_t &call, const native_weight_view_t &w, int m0,
         int mr, int n0, int nr, float *C, int ldc,
         const native_int8_out_t *out = nullptr);
+
+/// compute_int8_tile of the last column tile of a weight of padded columns,
+/// whose pack columns n0 .. n0 + cols lie below w.N (0 < cols, and n0 +
+/// cols == w.N): C holds them, and the columns after them up to a multiple
+/// of 16 hold values no store reads.  No operand of the call is read past
+/// its N columns (weight scales, a bias of the dequantization, the
+/// destination beta reads), and the result is never stored to the
+/// destination: the caller's epilogue stores the cols columns.
+void compute_int8_tail_tile(const native_plan_t &plan,
+        const native_int8_call_t &call, const native_weight_view_t &w, int m0,
+        int mr, int n0, int cols, float *C, int ldc);
 
 } // namespace native
 } // namespace matmul

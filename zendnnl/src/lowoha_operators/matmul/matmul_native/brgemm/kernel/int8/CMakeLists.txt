@@ -2,12 +2,10 @@
 set(sources
     int8_gemv_bkc.cpp
     int8_gemv_bkc_wide.cpp
-    int8_brgemm_ukernel.cpp
     native_int8_ukernel.cpp)
 
 set(headers
     int8_gemv_bkc.hpp
-    int8_brgemm_ukernel.hpp
     native_int8_ukernel.hpp)
 
 if(ZENDNNL_LIB_BUILD_ARCHIVE)

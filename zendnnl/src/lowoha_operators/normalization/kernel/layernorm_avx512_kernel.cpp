@@ -113,7 +113,7 @@ static inline void row_mean_inv_std(const void *__restrict in_row,
 //     zmm8  - zmm11 : 4 data loads (s0–s3, 16 FP32 lanes each)
 //
 //   FP32 path: 4 vmovups(src) + 4 vaddps(sum) + 4 vfmadd231ps(sq) = 12 instr.
-//   FMA-bound (Zen4, 2 FMA ports): 4 fmadd / 2 = 2 cycles/iter (best case).
+//   FMA-bound (2 FMA ports): 4 fmadd / 2 = 2 cycles/iter (best case).
 //   Cleanup: 1×16 loop + masked tail.
 //
 // Pass 2 — normalize + optional gamma/beta (4×16 = 64 elements/iter):

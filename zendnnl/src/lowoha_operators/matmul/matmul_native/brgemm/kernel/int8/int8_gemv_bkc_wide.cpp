@@ -34,11 +34,10 @@ namespace native {
 template <int NP>
 ZENDNNL_TARGET_NOINLINE("avx512f,avx512bf16,avx512bw,avx512vl,avx512vnni,fma")
 static void int8_gemv_bkc_wide_core(const uint8_t *__restrict A,
-        const int8_t *__restrict B_bkc, const float *__restrict combined_scale,
-        const float *__restrict effective_bias, uint16_t *__restrict C_bf16,
-        float *__restrict C_fp32, fused_postop_t fused_op, float alpha,
-        float beta, bool dst_is_bf16, int k_quads, int n_stride, int K, int N,
-        int jc) {
+        const int8_t *__restrict B_bkc, const int8_gemv_dequant_t &dq,
+        uint16_t *__restrict C_bf16, float *__restrict C_fp32,
+        fused_postop_t fused_op, float alpha, float beta, bool dst_is_bf16,
+        int k_quads, int n_stride, int K, int N, int jc) {
 
     constexpr int NV = 4;
     constexpr int NR = 64;
@@ -77,6 +76,11 @@ static void int8_gemv_bkc_wide_core(const uint8_t *__restrict A,
         }
     }
 
+    // A copy that the stores to the destination cannot alias, and its
+    // broadcasts, made after the K loop, whose accumulators take the
+    // registers.
+    const int8_gemv_dequant_t d = dq;
+    const int8_gemv_dequant_bcast_t db = int8_gemv_dequant_bcast(d);
     for (int i = 0; i < NP * NV; ++i) {
         const int n_off = jc + i * 16;
         if (n_off >= N) break;
@@ -86,12 +90,8 @@ static void int8_gemv_bkc_wide_core(const uint8_t *__restrict A,
                 : static_cast<__mmask16>((1u << elems) - 1);
 
         __m512 val = _mm512_cvtepi32_ps(acc[i]);
-        __m512 cs = (elems == 16)
-                ? _mm512_loadu_ps(combined_scale + n_off)
-                : _mm512_maskz_loadu_ps(mask, combined_scale + n_off);
-        __m512 eb = (elems == 16)
-                ? _mm512_loadu_ps(effective_bias + n_off)
-                : _mm512_maskz_loadu_ps(mask, effective_bias + n_off);
+        __m512 cs, eb;
+        int8_gemv_dequant_cols(d, db, n_off, mask, cs, eb);
         val = _mm512_fmadd_ps(val, cs, eb);
 
         if (alpha != 1.0f) val = _mm512_mul_ps(val, _mm512_set1_ps(alpha));
@@ -135,25 +135,22 @@ static void int8_gemv_bkc_wide_core(const uint8_t *__restrict A,
 }
 
 void int8_gemv_bkc_wide_dispatch(const uint8_t *__restrict A,
-        const int8_t *__restrict B_bkc, const float *__restrict combined_scale,
-        const float *__restrict effective_bias, uint16_t *__restrict C_bf16,
-        float *__restrict C_fp32, fused_postop_t fused_op, float alpha,
-        float beta, bool dst_is_bf16, int k_quads, int n_stride, int K, int N,
-        int jc, int nb) {
+        const int8_t *__restrict B_bkc, const int8_gemv_dequant_t &dq,
+        uint16_t *__restrict C_bf16, float *__restrict C_fp32,
+        fused_postop_t fused_op, float alpha, float beta, bool dst_is_bf16,
+        int k_quads, int n_stride, int K, int N, int jc, int nb) {
 
     constexpr int NR = 64;
     const int np = nb / NR;
 
     switch (np) {
         case 6:
-            int8_gemv_bkc_wide_core<6>(A, B_bkc, combined_scale, effective_bias,
-                    C_bf16, C_fp32, fused_op, alpha, beta, dst_is_bf16, k_quads,
-                    n_stride, K, N, jc);
+            int8_gemv_bkc_wide_core<6>(A, B_bkc, dq, C_bf16, C_fp32, fused_op,
+                    alpha, beta, dst_is_bf16, k_quads, n_stride, K, N, jc);
             break;
         case 5:
-            int8_gemv_bkc_wide_core<5>(A, B_bkc, combined_scale, effective_bias,
-                    C_bf16, C_fp32, fused_op, alpha, beta, dst_is_bf16, k_quads,
-                    n_stride, K, N, jc);
+            int8_gemv_bkc_wide_core<5>(A, B_bkc, dq, C_bf16, C_fp32, fused_op,
+                    alpha, beta, dst_is_bf16, k_quads, n_stride, K, N, jc);
             break;
         default: break;
     }

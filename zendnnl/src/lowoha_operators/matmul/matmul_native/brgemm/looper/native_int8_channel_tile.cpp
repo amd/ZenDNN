@@ -32,88 +32,23 @@ namespace lowoha {
 namespace matmul {
 namespace native {
 
-using zendnnl::memory::read_and_cast;
-
 namespace {
-
-/// The f32 values at pack columns p0 .. p0 + cw (cw a multiple of 16) of a
-/// per-column (stride 1, weight column order) or per-tensor (stride 0)
-/// vector of f32, bf16 or f16: in place for f32 per column over a plain
-/// pack, else converted, exactly, into buf.
-ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
-inline const float *column_values(const void *v, data_type_t dt, int stride,
-        const native_weight_view_t &w, int p0, int cw, float *buf) {
-    if (stride == 0) {
-        std::fill(buf, buf + cw, read_and_cast<float>(v, dt, 0));
-        return buf;
-    }
-    if (w.interleaved) {
-        for (int j = 0; j < cw; ++j)
-            buf[j] = read_and_cast<float>(v, dt, w.logical_col(p0 + j));
-        return buf;
-    }
-    if (dt == data_type_t::f32) return static_cast<const float *>(v) + p0;
-    const uint16_t *h = static_cast<const uint16_t *>(v) + p0;
-    for (int j = 0; j < cw; j += 16) {
-        const __m256i x
-                = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(h + j));
-        _mm512_storeu_ps(buf + j,
-                dt == data_type_t::bf16 ? avx512_bf16_to_f32(x)
-                                        : _mm512_cvtph_ps(x));
-    }
-    return buf;
-}
-
-/// The destination at row and columns p .. p + 16, read as float the way
-/// the reference reads it: exactly, an s32 value rounded to nearest.  Pack
-/// columns are destination columns: a call with beta has a plain pack.
-ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
-inline __m512 dst_values(const native_int8_call_t &call, int row, int p) {
-    const size_t at = static_cast<size_t>(row) * call.ldc + p;
-    switch (call.dst_dt) {
-        case data_type_t::f32:
-            return _mm512_loadu_ps(static_cast<const float *>(call.dst) + at);
-        case data_type_t::bf16:
-        case data_type_t::f16: {
-            const __m256i h
-                    = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(
-                            static_cast<const uint16_t *>(call.dst) + at));
-            return call.dst_dt == data_type_t::bf16 ? avx512_bf16_to_f32(h)
-                                                    : _mm512_cvtph_ps(h);
-        }
-        case data_type_t::s8:
-            return _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(
-                    _mm_loadu_si128(reinterpret_cast<const __m128i *>(
-                            static_cast<const int8_t *>(call.dst) + at))));
-        case data_type_t::u8:
-            return _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(
-                    _mm_loadu_si128(reinterpret_cast<const __m128i *>(
-                            static_cast<const uint8_t *>(call.dst) + at))));
-        case data_type_t::s32:
-            return _mm512_cvtepi32_ps(_mm512_loadu_si512(
-                    static_cast<const int32_t *>(call.dst) + at));
-        default: break;
-    }
-    alignas(64) float v[16];
-    for (int l = 0; l < 16; ++l)
-        v[l] = read_and_cast<float>(call.dst, call.dst_dt, at + l);
-    return _mm512_load_ps(v);
-}
 
 /// C holds f32(S) for rows m0 .. m0 + mr and pack columns p0 .. p0 + nr (a
 /// multiple of 16), wei_scale the f32 weight scales of those columns.
 /// Applies alpha, beta, the zero-point term and the scales one rounding at a
 /// time, in the reference algorithm's order: ((alpha * S + beta * C + Z) *
-/// src_scale) * wei_scale[j].
+/// src_scale) * wei_scale[j].  Pairs: w is an interleaved pack, and beta
+/// reads C at the columns its pack columns hold.  Tail: only the first cols
+/// pack columns lie below the weight's N; beta reads no column past it.
+template <bool Pairs, bool Tail>
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,avx512dq")
 void finish_in_reference_order(const native_int8_call_t &call,
-        const native_weight_view_t &w, int m0, int mr, int p0, int nr,
+        const native_weight_view_t &w, int m0, int mr, int p0, int nr, int cols,
         const int32_t *col_sum, const float *wei_scale, float *C, int ldc) {
     const bool scale_alpha = call.alpha != 1.0f;
     const bool add_beta = call.beta != 0.0f;
-    // An interleaved pack comes only with a gated activation, which no call
-    // with beta takes (check_int8_call, prepare_epilogue).
-    assert(!add_beta || !w.interleaved);
+    assert(Pairs == w.interleaved);
     const __m512 alpha = _mm512_set1_ps(call.alpha);
     const __m512 beta = _mm512_set1_ps(call.beta);
     for (int r = 0; r < mr; ++r) {
@@ -129,10 +64,27 @@ void finish_in_reference_order(const native_int8_call_t &call,
             __m512 v = _mm512_loadu_ps(c + j);
             // No product may fuse with the add that follows it.
             if (scale_alpha) v = avx512_mul_unfused(v, alpha);
-            if (add_beta)
-                v = _mm512_add_ps(v,
-                        avx512_mul_unfused(
-                                dst_values(call, row, p0 + j), beta));
+            if (add_beta) {
+                if constexpr (Tail && Pairs)
+                    v = _mm512_add_ps(v,
+                            avx512_mul_unfused(dst_pair_values_below(call, w,
+                                                       row, p0 + j, cols - j),
+                                    beta));
+                else if constexpr (Tail)
+                    v = _mm512_add_ps(v,
+                            avx512_mul_unfused(dst_values_below(call, row,
+                                                       p0 + j, cols - j),
+                                    beta));
+                else if constexpr (Pairs)
+                    v = _mm512_add_ps(v,
+                            avx512_mul_unfused(
+                                    dst_pair_values(call, w, row, p0 + j),
+                                    beta));
+                else
+                    v = _mm512_add_ps(v,
+                            avx512_mul_unfused(
+                                    dst_values(call, row, p0 + j), beta));
+            }
             if (zp != 0) {
                 // In int64, each product rounded once: exact for any zero
                 // point, and equal to the wrapping int32 product wherever
@@ -156,6 +108,7 @@ void finish_in_reference_order(const native_int8_call_t &call,
 
 } // namespace
 
+template <bool Tail>
 void compute_channel_tile(const native_plan_t &plan,
         const native_int8_call_t &call, const native_weight_view_t &w, int m0,
         int mr, int n0, int nr, float *C, int ldc,
@@ -198,14 +151,23 @@ void compute_channel_tile(const native_plan_t &plan,
         const int cw = native_int8_col_width(plan, nr - c);
         assert(cw <= kMaxTileNr);
         const int nv = cw / 16;
-        const float *col_scale
-                = column_values(call.wei_scale, call.wei_scale_dt,
-                        call.wei_scale_stride, w, n0 + c, cw, scale_buf);
+        // Tail: the columns of this call below the weight's N.
+        const int cols = Tail ? std::min(cw, w.N - (n0 + c)) : cw;
+        const bool part = Tail && cols < cw;
+        const float *col_scale = part
+                ? column_values_below(call.wei_scale, call.wei_scale_dt,
+                          call.wei_scale_stride, w, n0 + c, cw, cols, scale_buf)
+                : column_values(call.wei_scale, call.wei_scale_dt,
+                          call.wei_scale_stride, w, n0 + c, cw, scale_buf);
         if (!reference_order) args.wei_scale = col_scale;
-        args.bias = call.bias != nullptr
-                ? column_values(
-                          call.bias, call.bias_dt, 1, w, n0 + c, cw, bias_buf)
-                : nullptr;
+        if (call.bias == nullptr)
+            args.bias = nullptr;
+        else if (part)
+            args.bias = column_values_below(
+                    call.bias, call.bias_dt, 1, w, n0 + c, cw, cols, bias_buf);
+        else
+            args.bias = column_values(
+                    call.bias, call.bias_dt, 1, w, n0 + c, cw, bias_buf);
         args.col_sum = col_sums + j0 + c;
         const int max_mr = native_int8_call_rows(plan, nv);
         assert(max_mr >= 1 && max_mr <= kMaxTileMr);
@@ -243,15 +205,29 @@ void compute_channel_tile(const native_plan_t &plan,
                             + (static_cast<size_t>(m0 + i) * out->ldc + n0 + c)
                                     * out_esz;
                 select_native_int8_ukernel(rows, nv, call.src_signed)(args);
-                if (reference_order && args.last_pass)
-                    finish_in_reference_order(call, w, m0 + i, rows, n0 + c, cw,
-                            args.col_sum, col_scale, args.C, ldc);
+                if (reference_order && args.last_pass) {
+                    if (w.interleaved)
+                        finish_in_reference_order<true, Tail>(call, w, m0 + i,
+                                rows, n0 + c, cw, cols, args.col_sum, col_scale,
+                                args.C, ldc);
+                    else
+                        finish_in_reference_order<false, Tail>(call, w, m0 + i,
+                                rows, n0 + c, cw, cols, args.col_sum, col_scale,
+                                args.C, ldc);
+                }
                 i += rows;
             }
         }
         c += cw;
     }
 }
+
+template void compute_channel_tile<false>(const native_plan_t &,
+        const native_int8_call_t &, const native_weight_view_t &, int, int, int,
+        int, float *, int, const native_int8_out_t *);
+template void compute_channel_tile<true>(const native_plan_t &,
+        const native_int8_call_t &, const native_weight_view_t &, int, int, int,
+        int, float *, int, const native_int8_out_t *);
 
 } // namespace native
 } // namespace matmul

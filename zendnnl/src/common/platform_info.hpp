@@ -79,9 +79,9 @@ public:
    *  native reorder / dynamic-quant kernels are compiled for
    *  avx512f + avx512bw + avx512vl (they emit VPMOVDB narrowing plus
    *  byte/word and 128/256-bit masked AVX-512 instructions). On a CPU
-   *  that has AVX-512F but lacks BW/VL (e.g. some Intel Xeon Phi SKUs)
-   *  calling those kernels would raise an illegal-instruction fault, so
-   *  callers must gate native selection on this status.
+   *  that has AVX-512F but lacks BW/VL, calling those kernels would
+   *  raise an illegal-instruction fault, so callers must gate native
+   *  selection on this status.
    *
    *  @return true if platform supports both AVX-512BW and AVX-512VL.
    */

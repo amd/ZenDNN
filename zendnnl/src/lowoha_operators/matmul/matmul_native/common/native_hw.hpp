@@ -33,8 +33,8 @@ namespace native {
 /// matching.  A count that could not be detected is 0; an identity field,
 /// empty or -1.  A cache size CPUID does not report holds detect_uarch()'s
 /// default, which tuning-file matching treats as not reported.  base_isa
-/// feeds only the ISA checks of the layout rule and of
-/// native_brgemm_execute.
+/// feeds only the ISA checks of the layout rule, of native_brgemm_execute
+/// and of the FP32 GEMM looper's AVX-512 path.
 struct native_hw_t {
     UarchParams uarch; ///< detect_uarch()
     /// AVX-512 F, BW, VL and DQ and FMA (native_base_isa).
@@ -50,12 +50,14 @@ struct native_hw_t {
 };
 
 /// Detected once per process, on first use: by the layout rule, a native
-/// BRGEMM plan or a tuning file.
+/// BRGEMM plan, a tuning file or an FP32 call of the native GEMM.
 const native_hw_t &native_hw();
 
 /// What the native BRGEMM plan reads on hw: hw.uarch with l3_domain_cores =
 /// l3_domain_threads / smt (smt 1 when unknown; at least 1), or 0 when
-/// l3_domain_threads is unknown, where the plan uses ccx_cores instead.
+/// l3_domain_threads is unknown, where the plan uses family_l3_cores
+/// instead; and l3_domain_bytes 0 when CPUID reports no L3, where the plan
+/// has no L3.
 UarchParams native_plan_uarch(const native_hw_t &hw);
 
 /// native_plan_uarch(native_hw()), made once.

@@ -116,11 +116,10 @@ status_t warm_pack_all_custom_kernel_experts(
     // Per-family ISA gate — mirrors the split gate in
     // `custom_kernel/dispatch.cpp::prepare_for_call`.  bf16 pack warming
     // needs AVX-512 BF16 (VDPBF16PS); the DQ-INT8 family needs AVX-512
-    // VNNI (VPDPBUSD).  On AVX-512-VNNI capable CPUs, VNNI is a superset
-    // of BF16, but on
-    // broader x86 (Cascade Lake / Ice Lake) VNNI exists WITHOUT BF16, so
-    // gating the int8 warm on `bf16_isa_supported()` (BF16) would make
-    // the int8 fast path unreachable on a host that can actually run it.
+    // VNNI (VPDPBUSD).  A CPU with AVX-512 BF16 also has AVX-512 VNNI,
+    // but some x86 CPUs have VNNI WITHOUT BF16, so gating the int8 warm
+    // on `bf16_isa_supported()` (BF16) would make the int8 fast path
+    // unreachable on a host that can actually run it.
     // Refuse the whole warm only when the family's own ISA is absent —
     // warming an arena the runtime cannot consume is pure waste, and the
     // runtime would refuse the matching call identically.

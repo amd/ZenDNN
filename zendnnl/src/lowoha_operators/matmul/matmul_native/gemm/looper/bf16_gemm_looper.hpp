@@ -33,6 +33,9 @@ namespace native {
 /// Calls: microkernels from kernel/bf16/bf16_gemm_ukernel.
 ///
 /// This is a drop-in replacement for the original bf16_gemm_execute().
+/// With alpha other than 1 and beta other than 0, beta / alpha must be
+/// finite: the kernels add it times C, and the sum is scaled by alpha after
+/// the K loop.
 void bf16_gemm_execute(const GemmDescriptor &desc, const UarchParams &uarch,
         const void *src, const void *weight, void *dst, const void *bias,
         matmul_params &params);

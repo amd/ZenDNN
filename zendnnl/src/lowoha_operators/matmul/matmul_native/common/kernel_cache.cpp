@@ -195,13 +195,27 @@ BF16BKCWeightCache &BF16BKCWeightCache::instance() {
     return inst;
 }
 
+const BF16BKCWeight *BF16BKCWeightCache::find(
+        const PrepackedWeightKey &key, size_t bytes) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const BF16BKCWeight *cached = cache_.find_and_touch(key);
+    return cached != nullptr
+                    && weight_end_words_hold(
+                            cached->source_ends, key.weight_ptr, bytes)
+            ? cached
+            : nullptr;
+}
+
 const BF16BKCWeight *BF16BKCWeightCache::get_or_pack(
-        const PrepackedWeightKey &key, const uint16_t *weight) {
+        const PrepackedWeightKey &key, const uint16_t *weight, size_t bytes) {
 
     // Fast path: check cache under lock.
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (auto *cached = cache_.find_and_touch(key)) return cached;
+        auto *cached = cache_.find_and_touch(key);
+        if (cached != nullptr
+                && weight_end_words_hold(cached->source_ends, weight, bytes))
+            return cached;
     }
 
     // Cache miss: pack outside the lock to avoid serializing threads.
@@ -216,6 +230,7 @@ const BF16BKCWeight *BF16BKCWeightCache::get_or_pack(
             64, ((total * sizeof(uint16_t) + 63) & ~size_t(63))));
     if (!buf) return nullptr;
 
+    const weight_end_words_t source_ends = weight_end_words_of(weight, bytes);
     pack_b_bkc_ext(weight, ldb, K, N, transB, buf);
 
     auto pw = std::make_unique<BF16BKCWeight>();
@@ -226,10 +241,14 @@ const BF16BKCWeight *BF16BKCWeightCache::get_or_pack(
     pw->N = N;
     pw->N_padded = N_padded;
     pw->total = total;
+    pw->source_ends = source_ends;
 
-    // Re-acquire lock and insert (another thread may have raced).
+    // Re-acquire lock and insert (another thread may have raced); a pack of
+    // other bytes under the key is replaced.
     std::lock_guard<std::mutex> lock(mutex_);
-    if (auto *cached = cache_.find_and_touch(key))
+    auto *cached = cache_.find_and_touch(key);
+    if (cached != nullptr
+            && weight_end_words_hold(cached->source_ends, weight, bytes))
         return cached; // race loser — discard our pack, use winner's
 
     return cache_.insert(key, std::move(pw));
@@ -245,21 +264,15 @@ INT8KContiguousWeightCache &INT8KContiguousWeightCache::instance() {
 }
 
 const INT8KContiguousWeight *INT8KContiguousWeightCache::get_or_pack(
-        const PrepackedWeightKey &key, const int8_t *weight, float src_scale,
-        int32_t src_zp, const float *bias, const float *wei_scale,
-        int wei_scale_count) {
+        const PrepackedWeightKey &key, const int8_t *weight, size_t bytes) {
 
     // Fast path: check cache under lock.
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (auto *entry = cache_.find_and_touch(key)) {
-            if (entry->cached_src_scale == src_scale
-                    && entry->cached_src_zp == src_zp)
-                return entry;
-            // Quant params changed — return nullptr to force thread-local path.
-            // Avoids in-place mutation that races with concurrent readers.
-            return nullptr;
-        }
+        auto *entry = cache_.find_and_touch(key);
+        if (entry != nullptr
+                && weight_end_words_hold(entry->source_ends, weight, bytes))
+            return entry;
     }
 
     // Cache miss: pack outside the lock.
@@ -287,131 +300,29 @@ const INT8KContiguousWeight *INT8KContiguousWeightCache::get_or_pack(
         return nullptr;
     }
 
-    float *cscale_buf = static_cast<float *>(zendnnl_aligned_alloc(
-            64, ((N_padded * sizeof(float) + 63) & ~size_t(63))));
-    if (!cscale_buf) {
-        zendnnl_aligned_free(pbuf);
-        zendnnl_aligned_free(cs_buf);
-        return nullptr;
-    }
-
-    float *ebias_buf = static_cast<float *>(zendnnl_aligned_alloc(
-            64, ((N_padded * sizeof(float) + 63) & ~size_t(63))));
-    if (!ebias_buf) {
-        zendnnl_aligned_free(pbuf);
-        zendnnl_aligned_free(cs_buf);
-        zendnnl_aligned_free(cscale_buf);
-        return nullptr;
-    }
-
+    const weight_end_words_t source_ends = weight_end_words_of(weight, bytes);
     pack_b_int8_bkc(weight, ldb, K, N, transB, pbuf, cs_buf);
     std::memset(pbuf + packed_total, 0, bkc_guard);
-    precompute_int8_dequant(cs_buf, bias, src_scale, src_zp, wei_scale,
-            wei_scale_count, N, N_padded, cscale_buf, ebias_buf);
 
     auto pw = std::make_unique<INT8KContiguousWeight>();
     pw->packed_buf.reset(pbuf);
     pw->col_sum_buf.reset(cs_buf);
-    pw->combined_scale_buf.reset(cscale_buf);
-    pw->effective_bias_buf.reset(ebias_buf);
     pw->data = pbuf;
     pw->col_sum = cs_buf;
-    pw->combined_scale = cscale_buf;
-    pw->effective_bias = ebias_buf;
     pw->K = K;
     pw->K_padded = K_padded;
     pw->N = N;
     pw->N_padded = N_padded;
     pw->total = packed_total;
-    pw->cached_src_scale = src_scale;
-    pw->cached_src_zp = src_zp;
+    pw->source_ends = source_ends;
 
-    // Re-acquire lock and insert.
+    // Re-acquire lock and insert; a pack of other bytes under the key is
+    // replaced.
     std::lock_guard<std::mutex> lock(mutex_);
-    if (auto *cached = cache_.find_and_touch(key)) return cached;
-
-    return cache_.insert(key, std::move(pw));
-}
-
-// ============================================================================
-// INT8 VNNI panel-format prepacked weight cache (for BRGEMM looper)
-// ============================================================================
-
-INT8PrepackedWeightCache &INT8PrepackedWeightCache::instance() {
-    static INT8PrepackedWeightCache inst;
-    return inst;
-}
-
-const INT8PrepackedWeight *INT8PrepackedWeightCache::get_or_prepack(
-        const PrepackedWeightKey &key, const int8_t *weight) {
-
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (auto *cached = cache_.find_and_touch(key)) return cached;
-    }
-
-    const int K = key.K, N = key.N, ldb = key.ldb;
-    const bool transB = key.transB;
-    if (K <= 0 || N <= 0) return nullptr;
-    const int K_padded = (K + 3) & ~3;
-    const int k_quads = K_padded / 4;
-    const int np = (N + NR_PACK - 1) / NR_PACK;
-    const int vnni_stride = NR_PACK * INT8_VNNI_GRP;
-    const size_t pack_total = static_cast<size_t>(np) * k_quads * vnni_stride;
-
-    int8_t *pbuf = static_cast<int8_t *>(
-            zendnnl_aligned_alloc(64, ((pack_total + 63) & ~size_t(63))));
-    if (!pbuf) return nullptr;
-
-    int32_t *cs_buf = static_cast<int32_t *>(zendnnl_aligned_alloc(
-            64, ((N * sizeof(int32_t) + 63) & ~size_t(63))));
-    if (!cs_buf) {
-        zendnnl_aligned_free(pbuf);
-        return nullptr;
-    }
-
-    std::memset(cs_buf, 0, N * sizeof(int32_t));
-    for (int jp = 0; jp < np; ++jp) {
-        const int j0 = jp * NR_PACK;
-        const int nr_act = std::min(NR_PACK, N - j0);
-        int8_t *dst = pbuf + static_cast<size_t>(jp) * k_quads * vnni_stride;
-        for (int kq = 0; kq < k_quads; ++kq) {
-            int8_t *d = dst + kq * vnni_stride;
-            const int k_base = kq * 4;
-            for (int n = 0; n < nr_act; ++n) {
-                int32_t sum = 0;
-                for (int i = 0; i < 4; ++i) {
-                    const int k = k_base + i;
-                    int8_t val = 0;
-                    if (k < K)
-                        val = transB ? weight[(j0 + n) * ldb + k]
-                                     : weight[k * ldb + (j0 + n)];
-                    d[n * 4 + i] = val;
-                    sum += val;
-                }
-                cs_buf[j0 + n] += sum;
-            }
-            for (int n = nr_act; n < NR_PACK; ++n) {
-                d[n * 4 + 0] = 0;
-                d[n * 4 + 1] = 0;
-                d[n * 4 + 2] = 0;
-                d[n * 4 + 3] = 0;
-            }
-        }
-    }
-
-    auto pw = std::make_unique<INT8PrepackedWeight>();
-    pw->packed_buf.reset(pbuf);
-    pw->col_sum_buf.reset(cs_buf);
-    pw->data = pbuf;
-    pw->col_sum = cs_buf;
-    pw->K = K;
-    pw->K_padded = K_padded;
-    pw->N = N;
-    pw->n_panels = np;
-
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (auto *cached = cache_.find_and_touch(key)) return cached;
+    auto *cached = cache_.find_and_touch(key);
+    if (cached != nullptr
+            && weight_end_words_hold(cached->source_ends, weight, bytes))
+        return cached;
 
     return cache_.insert(key, std::move(pw));
 }
@@ -426,7 +337,6 @@ void clear_all_weight_caches() {
     BF16PrepackedWeightCache::instance().clear();
     BF16BKCWeightCache::instance().clear();
     INT8KContiguousWeightCache::instance().clear();
-    INT8PrepackedWeightCache::instance().clear();
     clear_native_weight_caches();
     weight_cache_generation().fetch_add(1, std::memory_order_relaxed);
 }

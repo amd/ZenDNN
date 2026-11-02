@@ -344,21 +344,14 @@ std::size_t compute_postop_signature(const matmul_params &lowoha_param,
     // same applies to per-channel {1,N} vs per-group {G,N} weight scales.
     // Hash the category rather than the exact element count so dynamic M and
     // group-size changes can still hit and use the mutable-field refresh path.
-    const auto scale_layout = [](size_t nelems, int outer_dim) {
-        if (nelems <= 1) return 0u; // per-tensor
-        if (nelems == static_cast<size_t>(outer_dim)) {
-            return 1u; // per-token (A) / per-channel (B)
-        }
-        return 2u; // per-group
-    };
     sig = sig * 31u
-            + scale_layout(
+            + static_cast<std::size_t>(quant_count_granularity(
                     get_num_elements(lowoha_param.quant_params.src_scale.dims),
-                    M);
+                    M));
     sig = sig * 31u
-            + scale_layout(
+            + static_cast<std::size_t>(quant_count_granularity(
                     get_num_elements(lowoha_param.quant_params.wei_scale.dims),
-                    N);
+                    N));
     // Include W4A8 algo in post-op cache key (S4 vs S8 wiring differs).
     sig = sig * 31u
             + static_cast<std::size_t>(static_cast<uint32_t>(w4a8_algo));
@@ -556,12 +549,13 @@ static woq_b_qparam_t classify_woq_b_qparam(
     q.len = get_num_elements(dims);
     // {} / {1} / {1,1} are one scalar. {1,1} must not fall through to
     // PER_CHANNEL: DLP requires a per-channel buffer to have length N.
-    if (q.len <= 1) {
+    if (quant_count_granularity(q.len, N)
+            == quant_count_granularity_t::per_tensor) {
         q.dim = DLP_PARAM_DIM_PER_TENSOR;
         q.len = 1;
         return q;
     }
-    if (dims.size() == 2 && dims[1] == N && dims[0] > 1) {
+    if (quant_param_dims_are_per_group_wei(dims, N)) {
         q.dim = DLP_PARAM_DIM_PER_GROUP;
         return q;
     }
@@ -576,7 +570,7 @@ static woq_b_qparam_t classify_woq_b_qparam(
 static int64_t woq_group_size(
         const woq_b_qparam_t &scale, int64_t num_groups, int64_t K) {
     if (scale.dim != DLP_PARAM_DIM_PER_GROUP) { return K; }
-    if (num_groups <= 0 || K % num_groups != 0) {
+    if (!quant_groups_divide(K, num_groups)) {
         log_error("WOQ: group count (", num_groups, ") must divide K (", K,
                 ") evenly");
         return K;
@@ -742,9 +736,8 @@ static void patch_mutable_fields(dlp_metadata_t *md,
     if (!is_int8 && dtypes.wei == data_type_t::s4
             && dtypes.src == data_type_t::s8
             && !lowoha_param.quant_params.src_zp.buff
-            && (src_scale_nelems > 1
-                    || src_scale_is_collapsed_per_token(
-                            lowoha_param.quant_params, M, N))
+            && src_scale_selects_sym_quant(
+                    lowoha_param.quant_params, src_scale_nelems, M, N)
             && (dtypes.dst == data_type_t::f32
                     || dtypes.dst == data_type_t::bf16)) {
         is_int8 = true;
@@ -752,8 +745,9 @@ static void patch_mutable_fields(dlp_metadata_t *md,
     const bool is_bf16_f32_per_token_sym = is_int8
             && (dtypes.src == data_type_t::bf16
                     || dtypes.src == data_type_t::f32)
-            && !lowoha_param.quant_params.src_zp.buff && src_scale_nelems > 1
-            && src_scale_nelems == static_cast<size_t>(M)
+            && !lowoha_param.quant_params.src_zp.buff
+            && quant_count_granularity(src_scale_nelems, M)
+                    == quant_count_granularity_t::per_axis
             && (dtypes.dst == data_type_t::f32
                     || dtypes.dst == data_type_t::bf16);
     bool is_non_quant_src_int8 = (dtypes.src == data_type_t::bf16
@@ -761,9 +755,9 @@ static void patch_mutable_fields(dlp_metadata_t *md,
             && is_int8 && !is_bf16_f32_per_token_sym;
     bool is_sym_quant = is_int8 && dtypes.src == data_type_t::s8
             && !lowoha_param.quant_params.src_zp.buff
-            && (src_scale_nelems > 1 || is_w4a8
-                    || src_scale_is_collapsed_per_token(
-                            lowoha_param.quant_params, M, N))
+            && (is_w4a8
+                    || src_scale_selects_sym_quant(
+                            lowoha_param.quant_params, src_scale_nelems, M, N))
             && (dtypes.dst == data_type_t::f32
                     || dtypes.dst == data_type_t::bf16);
 
@@ -1146,9 +1140,8 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
     if (!is_int8 && dtypes.wei == data_type_t::s4
             && dtypes.src == data_type_t::s8
             && !lowoha_param.quant_params.src_zp.buff
-            && (src_scale_nelems > 1
-                    || src_scale_is_collapsed_per_token(
-                            lowoha_param.quant_params, M, N))
+            && src_scale_selects_sym_quant(
+                    lowoha_param.quant_params, src_scale_nelems, M, N)
             && (dtypes.dst == data_type_t::f32
                     || dtypes.dst == data_type_t::bf16)) {
         is_int8 = true;
@@ -1158,8 +1151,9 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
     const bool is_bf16_f32_per_token_sym = is_int8
             && (dtypes.src == data_type_t::bf16
                     || dtypes.src == data_type_t::f32)
-            && !lowoha_param.quant_params.src_zp.buff && src_scale_nelems > 1
-            && src_scale_nelems == static_cast<size_t>(M)
+            && !lowoha_param.quant_params.src_zp.buff
+            && quant_count_granularity(src_scale_nelems, M)
+                    == quant_count_granularity_t::per_axis
             && (dtypes.dst == data_type_t::f32
                     || dtypes.dst == data_type_t::bf16);
 
@@ -1170,9 +1164,9 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
     // W4A8 and collapsed per-token src need sym-quant wiring (see run_dlp).
     const bool is_sym_quant = is_int8 && dtypes.src == data_type_t::s8
             && !lowoha_param.quant_params.src_zp.buff
-            && (src_scale_nelems > 1 || has_w4a8_algo
-                    || src_scale_is_collapsed_per_token(
-                            lowoha_param.quant_params, M, N))
+            && (has_w4a8_algo
+                    || src_scale_selects_sym_quant(
+                            lowoha_param.quant_params, src_scale_nelems, M, N))
             && (dtypes.dst == data_type_t::f32
                     || dtypes.dst == data_type_t::bf16);
 
@@ -1444,7 +1438,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
         // scale into b_quant_op.dequant_scale_factors. Both are dequant-only
         // (A and B are already s8, no forward-quant or zero-point). Replaces
         // the old post_op_grp.
-        const bool a_per_token = (src_scale_nelems == static_cast<size_t>(M));
+        const bool a_per_token = quant_count_is_per_axis(src_scale_nelems, M);
 
         dlp_metadata->a_quant_op = &new_holder->a_quant_op;
         // QUANTIZE: operands are already s8; the scales only dequantize/correct
@@ -1469,7 +1463,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
 
         size_t wei_scale_nelems
                 = get_num_elements(lowoha_param.quant_params.wei_scale.dims);
-        const bool b_per_channel = (wei_scale_nelems == static_cast<size_t>(N));
+        const bool b_per_channel = quant_count_is_per_axis(wei_scale_nelems, N);
 
         dlp_metadata->b_quant_op = &new_holder->b_quant_op;
         dlp_metadata->b_quant_op->quant_op_kind = DLP_QUANT_OP_QUANTIZE;

@@ -72,9 +72,9 @@ using zendnnl::lowoha::matmul::grp_matmul_gated_act_t;
 
 // DQ-INT8 ISA gate — needed for tests that exercise the int8 variant
 // resolution through `prepare_for_call`.  The int8 microkernel uses
-// VPDPBUSD (AVX-512 VNNI), which on Zen 4+ is a strict superset of
-// AVX-512-BF16 but on broader x86 silicon is an independent feature
-// flag.  Tests that probe the int8 path call this macro instead of
+// VPDPBUSD (AVX-512 VNNI), which every CPU with AVX-512-BF16 also has
+// but some x86 CPUs have without AVX-512-BF16 (an independent feature
+// flag).  Tests that probe the int8 path call this macro instead of
 // (or in addition to) `CK_SKIP_IF_NO_BF16_ISA`.
 #define CK_SKIP_IF_NO_INT8_ISA() \
     do { \

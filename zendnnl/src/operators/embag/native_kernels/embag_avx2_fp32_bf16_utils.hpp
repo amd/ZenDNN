@@ -109,7 +109,7 @@ inline void avx2_maybe_prefetch_weight(
 */
 
 // The BF16 helpers below are AVX2 only: this kernel runs on CPUs without
-// AVX-512 (e.g. AMD Zen 3), where any AVX-512 encoding faults.
+// AVX-512, where any AVX-512 encoding faults.
 
 // Helper function for BF16 to FP32 conversion
 ZENDNNL_TARGET("avx2")

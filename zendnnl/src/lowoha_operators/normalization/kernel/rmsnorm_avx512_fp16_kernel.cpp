@@ -51,7 +51,7 @@ using zendnnl::common::f16x32_store_mask_typed;
 //
 // Pass 1 — sum-of-squares (4×32 = 128 elements/iter):
 //   4 vmovdqu64(src) + 4 vfmadd231ph(acc) = 8 instructions.
-//   FMA-bound (Zen5 / SPR 2 FP16 FMA ports): 4 fmadd / 2 = 2 cycles/iter.
+//   FMA-bound (2 FP16 FMA ports): 4 fmadd / 2 = 2 cycles/iter.
 //   Reduction is widened to FP32 once (precision; long rows).
 //
 // Pass 2 — normalize + optional gamma (4×32 = 128 elements/iter):

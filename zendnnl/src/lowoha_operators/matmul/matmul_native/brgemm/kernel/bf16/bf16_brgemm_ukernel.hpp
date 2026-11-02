@@ -31,32 +31,15 @@ using bf16_brgemm_fn_t = void (*)(const uint16_t *__restrict A, int lda,
         int ldc, int K, int BK, float beta, const float *__restrict bias,
         fused_postop_t fused_op, uint16_t *__restrict C_bf16, int ldc_bf16);
 
+/// The BF16 BRGEMM kernel of MR rows by NR columns: MR 1 .. 6 at NR 16 or
+/// 32; nullptr for any other.
 ZENDNNL_TARGET("avx512f,avx512bf16,fma")
 bf16_brgemm_fn_t select_bf16_brgemm_kernel(int MR, int NR);
 
-// select_bf16_brgemm_kernel plus MR ∈ {7..12} at NR=32.  The loopers that
-// fall back to the generic kernel on a nullptr from select_bf16_brgemm_kernel
-// rely on its kernel set staying as it is.
+/// select_bf16_brgemm_kernel plus MR 7 .. 12 at NR 32: the BF16 kernels of
+/// the native kernel registry.
 ZENDNNL_TARGET("avx512f,avx512bf16,fma")
 bf16_brgemm_fn_t select_bf16_brgemm_tall_kernel(int MR, int NR);
-
-ZENDNNL_TARGET("avx512f,avx512bf16,avx512bw,avx512vl,fma")
-void bf16_brgemm_tail_kernel(const uint16_t *__restrict A, int lda,
-        const uint16_t *__restrict B_vnni, int b_stride, float *__restrict C,
-        int ldc, int K, int BK, int mr_act, int nr_act, float beta,
-        const float *__restrict bias, fused_postop_t fused_op,
-        uint16_t *__restrict C_bf16, int ldc_bf16);
-
-// Templated MR + runtime nr_partial ∈ [1..15] masked NV=1 kernel.
-// Selector returns nullptr for unsupported MR (currently anything
-// outside {1..6, 8}).
-using bf16_brgemm_n_masked_fn_t = void (*)(const uint16_t *__restrict A,
-        int lda, const uint16_t *__restrict B_vnni, int b_stride,
-        float *__restrict C, int ldc, int K, int BK, int nr_partial, float beta,
-        const float *__restrict bias, fused_postop_t fused_op,
-        uint16_t *__restrict C_bf16, int ldc_bf16);
-
-bf16_brgemm_n_masked_fn_t select_bf16_brgemm_n_masked_kernel(int MR);
 
 } // namespace native
 } // namespace matmul

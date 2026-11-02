@@ -53,14 +53,12 @@ constexpr int kMaxMr = 12;
 #define ZENDNNL_NATIVE_INT8_UNROLL(n) ZENDNNL_NATIVE_INT8_PRAGMA(GCC unroll n)
 #endif
 
-/// f32(acc - zp * col_sum) for 16 lanes with the zero-point term in int64:
-/// exact before the one rounding to f32, so equal to the int32 form wherever
-/// that one does not wrap.
+/// f32(acc - zp * cs) for 16 lanes with the zero-point term in int64: exact
+/// before the one rounding to f32, so equal to the int32 form wherever that
+/// one does not wrap.
 ZENDNNL_TARGET("avx512f,avx512dq")
-inline __m512 sum_minus_zp_wide(
-        __m512i acc, int64_t zp, const int32_t *col_sum) {
+inline __m512 sum_minus_zp_wide(__m512i acc, int64_t zp, __m512i cs) {
     const __m512i z = _mm512_set1_epi64(zp);
-    const __m512i cs = _mm512_loadu_si512(col_sum);
     const __m512i lo = _mm512_sub_epi64(
             _mm512_cvtepi32_epi64(_mm512_castsi512_si256(acc)),
             _mm512_mullo_epi64(
@@ -184,7 +182,7 @@ void native_int8_ukernel(const native_int8_ukernel_args_t &p) {
             if (p.wide_zp) {
                 f = sum_minus_zp_wide(acc[0][m][v],
                         static_cast<int64_t>(p.zp[m]) + (Signed ? 128 : 0),
-                        p.col_sum + v * 16);
+                        _mm512_loadu_si512(p.col_sum + v * 16));
             } else {
                 const __m512i corr = _mm512_mullo_epi32(
                         zp, _mm512_loadu_si512(p.col_sum + v * 16));
@@ -229,8 +227,9 @@ constexpr auto kNv2Signed
 /// Rows of the group kernel per width.  At two vectors the 4 * MR int32 and
 /// f32 accumulators, two B or weight-scale vectors, the broadcast and the
 /// flip constant take 4 * MR + 4 of the 32 registers; 6 rows leave four for
-/// the conversion and the scale widening.  At one vector the rows are
-/// kMaxMr's.
+/// the conversion and the scale widening (two for a u8 source, whose ones
+/// and two column sums replace the flip constant).  At one vector the rows
+/// are kMaxMr's.
 constexpr int kMaxGroupMrNv1 = kMaxMr;
 constexpr int kMaxGroupMrNv2 = 6;
 
@@ -250,10 +249,12 @@ inline __m512 scales_as_f32(const char *p) {
     }
 }
 
-/// The group kernel for weight scales of type S.
-template <int MR, int NV, data_type_t S>
+/// The group kernel for weight scales of type S, over an s8 source, or a u8
+/// source with U8, whose zero-point term is in int64 with Wide.
+template <int MR, int NV, data_type_t S, bool U8, bool Wide>
 ZENDNNL_TARGET_NOINLINE("avx512f,avx512bw,avx512vl,avx512dq,avx512vnni")
 void native_int8_group_ukernel(const native_int8_group_ukernel_args_t &p) {
+    static_assert(U8 || !Wide, "only a u8 source has a zero point");
     // Small tiles split each element's K over independent accumulator sets;
     // the int32 sum is exact in any order.
     constexpr int kSets = MR * NV <= 2 ? 4 : (MR * NV <= 4 ? 2 : 1);
@@ -267,7 +268,14 @@ void native_int8_group_ukernel(const native_int8_group_ukernel_args_t &p) {
                                    : _mm512_setzero_ps();
     }
 
+    // An s8 source reads the weight as w + 128; a u8 source reads it as it
+    // is and sums its columns against a u8 one in every byte.
     const __m512i flip = _mm512_set1_epi32(static_cast<int32_t>(0x80808080u));
+    const __m512i ones = _mm512_set1_epi8(1);
+    if constexpr (U8)
+        (void)flip;
+    else
+        (void)ones;
     const size_t lda = static_cast<size_t>(p.lda);
     const size_t b_stride = static_cast<size_t>(p.b_stride);
     const int k_quads = p.k_quads;
@@ -281,11 +289,14 @@ void native_int8_group_ukernel(const native_int8_group_ukernel_args_t &p) {
     const size_t wei_scale_step
             = static_cast<size_t>(p.wei_scale_step) * wei_scale_esz;
     for (int g = 0; g < p.batch; ++g) {
-        // The sum of each row starts at its shift; the other sets at zero.
+        // The sum of each row starts at its shift (zero for a u8 source);
+        // the other sets at zero.
         __m512i acc[kSets][MR][NV];
+        __m512i col[kSets][NV];
         ZENDNNL_NATIVE_INT8_UNROLL(12)
         for (int m = 0; m < MR; ++m) {
-            const __m512i start = _mm512_set1_epi32(shift[m * p.shift_ld]);
+            const __m512i start = U8 ? _mm512_setzero_si512()
+                                     : _mm512_set1_epi32(shift[m * p.shift_ld]);
             ZENDNNL_NATIVE_INT8_UNROLL(4)
             for (int v = 0; v < NV; ++v)
                 acc[0][m][v] = start;
@@ -299,6 +310,14 @@ void native_int8_group_ukernel(const native_int8_group_ukernel_args_t &p) {
                     acc[s][m][v] = _mm512_setzero_si512();
             }
         }
+        if constexpr (U8) {
+            ZENDNNL_NATIVE_INT8_UNROLL(4)
+            for (int s = 0; s < kSets; ++s) {
+                ZENDNNL_NATIVE_INT8_UNROLL(4)
+                for (int v = 0; v < NV; ++v)
+                    col[s][v] = _mm512_setzero_si512();
+            }
+        }
         int kq = 0;
         for (; kq < k_main; kq += kSets) {
             ZENDNNL_NATIVE_INT8_UNROLL(4)
@@ -307,9 +326,16 @@ void native_int8_group_ukernel(const native_int8_group_ukernel_args_t &p) {
                 const uint8_t *aq = a + static_cast<size_t>(kq + s) * 4;
                 __m512i bv[NV];
                 ZENDNNL_NATIVE_INT8_UNROLL(4)
-                for (int v = 0; v < NV; ++v)
-                    bv[v] = _mm512_xor_si512(
-                            _mm512_loadu_si512(bq + v * 64), flip);
+                for (int v = 0; v < NV; ++v) {
+                    if constexpr (U8) {
+                        bv[v] = _mm512_loadu_si512(bq + v * 64);
+                        col[s][v] = _mm512_dpbusd_epi32(col[s][v], ones, bv[v]);
+                        ZENDNNL_NATIVE_INT8_ACC_BARRIER(col[s][v]);
+                    } else {
+                        bv[v] = _mm512_xor_si512(
+                                _mm512_loadu_si512(bq + v * 64), flip);
+                    }
+                }
                 ZENDNNL_NATIVE_INT8_UNROLL(12)
                 for (int m = 0; m < MR; ++m) {
                     uint32_t quad;
@@ -318,8 +344,9 @@ void native_int8_group_ukernel(const native_int8_group_ukernel_args_t &p) {
                             = _mm512_set1_epi32(static_cast<int32_t>(quad));
                     ZENDNNL_NATIVE_INT8_UNROLL(4)
                     for (int v = 0; v < NV; ++v) {
-                        acc[s][m][v]
-                                = _mm512_dpbusd_epi32(acc[s][m][v], bv[v], av);
+                        acc[s][m][v] = U8
+                                ? _mm512_dpbusd_epi32(acc[s][m][v], av, bv[v])
+                                : _mm512_dpbusd_epi32(acc[s][m][v], bv[v], av);
                         ZENDNNL_NATIVE_INT8_ACC_BARRIER(acc[s][m][v]);
                     }
                 }
@@ -330,8 +357,16 @@ void native_int8_group_ukernel(const native_int8_group_ukernel_args_t &p) {
             const uint8_t *aq = a + static_cast<size_t>(kq) * 4;
             __m512i bv[NV];
             ZENDNNL_NATIVE_INT8_UNROLL(4)
-            for (int v = 0; v < NV; ++v)
-                bv[v] = _mm512_xor_si512(_mm512_loadu_si512(bq + v * 64), flip);
+            for (int v = 0; v < NV; ++v) {
+                if constexpr (U8) {
+                    bv[v] = _mm512_loadu_si512(bq + v * 64);
+                    col[0][v] = _mm512_dpbusd_epi32(col[0][v], ones, bv[v]);
+                    ZENDNNL_NATIVE_INT8_ACC_BARRIER(col[0][v]);
+                } else {
+                    bv[v] = _mm512_xor_si512(
+                            _mm512_loadu_si512(bq + v * 64), flip);
+                }
+            }
             ZENDNNL_NATIVE_INT8_UNROLL(12)
             for (int m = 0; m < MR; ++m) {
                 uint32_t quad;
@@ -340,7 +375,9 @@ void native_int8_group_ukernel(const native_int8_group_ukernel_args_t &p) {
                         = _mm512_set1_epi32(static_cast<int32_t>(quad));
                 ZENDNNL_NATIVE_INT8_UNROLL(4)
                 for (int v = 0; v < NV; ++v) {
-                    acc[0][m][v] = _mm512_dpbusd_epi32(acc[0][m][v], bv[v], av);
+                    acc[0][m][v] = U8
+                            ? _mm512_dpbusd_epi32(acc[0][m][v], av, bv[v])
+                            : _mm512_dpbusd_epi32(acc[0][m][v], bv[v], av);
                     ZENDNNL_NATIVE_INT8_ACC_BARRIER(acc[0][m][v]);
                 }
             }
@@ -354,9 +391,38 @@ void native_int8_group_ukernel(const native_int8_group_ukernel_args_t &p) {
                     acc[0][m][v] = _mm512_add_epi32(acc[0][m][v], acc[s][m][v]);
             }
         }
+        if constexpr (U8 && !Wide) {
+            // The int32 arithmetic wraps: the difference is exact whenever
+            // the element's sum fits int32.
+            const __m512i zp = _mm512_set1_epi32(p.src_zp);
+            ZENDNNL_NATIVE_INT8_UNROLL(4)
+            for (int v = 0; v < NV; ++v) {
+                __m512i sum = col[0][v];
+                ZENDNNL_NATIVE_INT8_UNROLL(4)
+                for (int s = 1; s < kSets; ++s)
+                    sum = _mm512_add_epi32(sum, col[s][v]);
+                const __m512i term = _mm512_mullo_epi32(sum, zp);
+                ZENDNNL_NATIVE_INT8_UNROLL(12)
+                for (int m = 0; m < MR; ++m)
+                    acc[0][m][v] = _mm512_sub_epi32(acc[0][m][v], term);
+            }
+        }
+        // Wide: the column sums, for the zero-point term in int64 at the
+        // conversion.
+        [[maybe_unused]] __m512i cols[NV];
+        if constexpr (Wide) {
+            ZENDNNL_NATIVE_INT8_UNROLL(4)
+            for (int v = 0; v < NV; ++v) {
+                cols[v] = col[0][v];
+                ZENDNNL_NATIVE_INT8_UNROLL(4)
+                for (int s = 1; s < kSets; ++s)
+                    cols[v] = _mm512_add_epi32(cols[v], col[s][v]);
+            }
+        }
 
-        // The result bits depend on this operation order: the exact int32
-        // sum, conversion, source scale, weight scale, one add.
+        // The result bits depend on this operation order: the exact sum
+        // (int32, or int64 with Wide), conversion, source scale, weight
+        // scale, one add.
         __m512 ws[NV];
         ZENDNNL_NATIVE_INT8_UNROLL(4)
         for (int v = 0; v < NV; ++v)
@@ -366,14 +432,19 @@ void native_int8_group_ukernel(const native_int8_group_ukernel_args_t &p) {
             const __m512 sa = _mm512_set1_ps(src_scale[m * p.src_scale_ld]);
             ZENDNNL_NATIVE_INT8_UNROLL(4)
             for (int v = 0; v < NV; ++v) {
-                const __m512 d = _mm512_cvtepi32_ps(acc[0][m][v]);
+                __m512 d;
+                if constexpr (Wide)
+                    d = sum_minus_zp_wide(acc[0][m][v], p.src_zp, cols[v]);
+                else
+                    d = _mm512_cvtepi32_ps(acc[0][m][v]);
                 c[m][v] = _mm512_add_ps(c[m][v],
                         avx512_mul_unfused(_mm512_mul_ps(d, sa), ws[v]));
             }
         }
         a += p.a_step;
         b += p.b_step;
-        shift += p.shift_step;
+        // A u8 source has no shifts: its shift pointer may be null.
+        if constexpr (!U8) shift += p.shift_step;
         src_scale += p.src_scale_step;
         wei_scale += wei_scale_step;
     }
@@ -410,28 +481,36 @@ void native_int8_group_ukernel(const native_int8_group_ukernel_args_t &p) {
 
 /// The instance of the call's weight scale type, picked once per call: the
 /// batch loop tests no type.
-template <int MR, int NV>
+template <int MR, int NV, bool U8, bool Wide>
 void native_int8_group_ukernel_of_dt(
         const native_int8_group_ukernel_args_t &p) {
     if (p.wei_scale_dt == data_type_t::f32)
-        native_int8_group_ukernel<MR, NV, data_type_t::f32>(p);
+        native_int8_group_ukernel<MR, NV, data_type_t::f32, U8, Wide>(p);
     else if (p.wei_scale_dt == data_type_t::bf16)
-        native_int8_group_ukernel<MR, NV, data_type_t::bf16>(p);
+        native_int8_group_ukernel<MR, NV, data_type_t::bf16, U8, Wide>(p);
     else {
         assert(p.wei_scale_dt == data_type_t::f16);
-        native_int8_group_ukernel<MR, NV, data_type_t::f16>(p);
+        native_int8_group_ukernel<MR, NV, data_type_t::f16, U8, Wide>(p);
     }
 }
 
-template <int NV, int... I>
+template <int NV, bool U8, bool Wide, int... I>
 constexpr std::array<native_int8_group_ukernel_fn_t, sizeof...(I)>
 make_group_table(std::integer_sequence<int, I...>) {
-    return {{&native_int8_group_ukernel_of_dt<I + 1, NV>...}};
+    return {{&native_int8_group_ukernel_of_dt<I + 1, NV, U8, Wide>...}};
 }
 
-constexpr auto kGroupNv1 = make_group_table<1>(
+constexpr auto kGroupNv1 = make_group_table<1, false, false>(
         std::make_integer_sequence<int, kMaxGroupMrNv1> {});
-constexpr auto kGroupNv2 = make_group_table<2>(
+constexpr auto kGroupNv2 = make_group_table<2, false, false>(
+        std::make_integer_sequence<int, kMaxGroupMrNv2> {});
+constexpr auto kGroupNv1U8 = make_group_table<1, true, false>(
+        std::make_integer_sequence<int, kMaxGroupMrNv1> {});
+constexpr auto kGroupNv2U8 = make_group_table<2, true, false>(
+        std::make_integer_sequence<int, kMaxGroupMrNv2> {});
+constexpr auto kGroupNv1U8Wide = make_group_table<1, true, true>(
+        std::make_integer_sequence<int, kMaxGroupMrNv1> {});
+constexpr auto kGroupNv2U8Wide = make_group_table<2, true, true>(
         std::make_integer_sequence<int, kMaxGroupMrNv2> {});
 
 } // namespace
@@ -452,9 +531,13 @@ int native_int8_group_ukernel_max_mr(int nv) {
 }
 
 native_int8_group_ukernel_fn_t select_native_int8_group_ukernel(
-        int mr, int nv) {
+        int mr, int nv, bool src_u8, bool wide_zp) {
     if (mr < 1 || mr > native_int8_group_ukernel_max_mr(nv)) return nullptr;
-    return nv == 1 ? kGroupNv1[mr - 1] : kGroupNv2[mr - 1];
+    if (nv == 1)
+        return (src_u8 ? (wide_zp ? kGroupNv1U8Wide : kGroupNv1U8)
+                       : kGroupNv1)[mr - 1];
+    return (src_u8 ? (wide_zp ? kGroupNv2U8Wide : kGroupNv2U8)
+                   : kGroupNv2)[mr - 1];
 }
 
 } // namespace native

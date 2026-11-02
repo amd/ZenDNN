@@ -29,9 +29,9 @@
 
 /// What the native BRGEMM uses of the rest of the matmul operator: the AOCL
 /// reorder and prepack API, the reorder quantization of a source, the custom
-/// kernel's record of the buffers it packed in place, and the quantization
-/// parameter checks and log text of lowoha_matmul_utils.hpp.  The .cpp is the
-/// only native file that includes their headers.
+/// kernel's record of the buffers it packed in place, and the log text of
+/// lowoha_matmul_utils.hpp.  The .cpp is the only native file that includes
+/// their headers.
 
 namespace zendnnl {
 namespace lowoha {
@@ -64,23 +64,6 @@ size_t aocl_prepack_bytes(int K, int N, int ldb, bool transB, bool int8_u8s8);
 /// A custom-kernel pack rewrote the buffer at weight in place: its reader is
 /// that route.
 bool custom_kernel_packed_in_place(const void *weight);
-
-// ── Quantization parameters ─────────────────────────────────────────────
-
-using quant_param_t = matmul_quantization_params_t::matmul_quant_t;
-
-/// Elements of a quantization buffer of the given dims: 1 for empty dims, -1
-/// for a non-positive or overflowing dimension.
-int64_t quant_elements(const std::vector<int64_t> &dims);
-
-/// dims of one element ({}, {1}, {1, 1}, ...).
-bool quant_dims_per_tensor(const std::vector<int64_t> &dims);
-
-/// A buffer of one value per column: dims {N} or {1, N}.
-bool quant_per_channel(const quant_param_t &q, int N);
-
-/// Dims {M, 1}: one value per row.
-bool quant_per_token(const quant_param_t &q, int M);
 
 // ── Source quantization ─────────────────────────────────────────────────
 

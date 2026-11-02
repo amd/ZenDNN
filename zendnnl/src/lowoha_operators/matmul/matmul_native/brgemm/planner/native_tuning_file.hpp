@@ -38,14 +38,17 @@ inline constexpr const char *kNativeTuningFormat
 inline constexpr int64_t kNativeTuningVersion = 2;
 
 /// Match keys of override clauses and table entries: the numeric ones
-/// (ranges), the named ones (sets of names), then the flags.
+/// (ranges), the named ones (sets of names), then the flags.  The n of a
+/// call whose N is not a multiple of the native blocks is its padded width
+/// (make_native_problem), as are the rule features computed from it; the
+/// [MATMUL.NATIVE_BRGEMM] line shows it as padded_n.
 inline constexpr const char *kNativeMatchKeys[]
         = {"m", "n", "k", "threads", "pack_nr", "dtype", "src", "dst",
                 "epilogue", "trans_a", "dynamic", "has_bias"};
 inline constexpr int kNativeNumericMatchKeys = 5;
 inline constexpr int kNativeNamedMatchKeys = 4;
 /// The names the named match keys dtype, src, dst and epilogue take.
-inline constexpr const char *kNativeDtypeNames[] = {"bf16", "s8"};
+inline constexpr const char *kNativeDtypeNames[] = {"bf16", "s8", "f32"};
 inline constexpr const char *kNativeSrcNames[] = {"bf16", "f32", "u8", "s8"};
 inline constexpr const char *kNativeDstNames[]
         = {"f32", "bf16", "f16", "u8", "s8", "s32"};

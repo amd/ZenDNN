@@ -123,22 +123,6 @@ bool custom_kernel_packed_in_place(const void *weight) {
     return custom_kernel::weight_packed_in_place(weight);
 }
 
-int64_t quant_elements(const std::vector<int64_t> &dims) {
-    return checked_quant_param_num_elements(dims);
-}
-
-bool quant_dims_per_tensor(const std::vector<int64_t> &dims) {
-    return quant_param_dims_are_per_tensor(dims);
-}
-
-bool quant_per_channel(const quant_param_t &q, int N) {
-    return quant_param_is_per_channel(q, N);
-}
-
-bool quant_per_token(const quant_param_t &q, int M) {
-    return quant_param_is_per_token(q, M);
-}
-
 namespace {
 
 /// Hands the buffers back to the quantizer's own type, whose destructor frees

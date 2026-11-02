@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/bf16/bf16_brgemm_ukernel.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/fp32/native_fp32_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_int8_scheme.hpp"
 
 namespace zendnnl {
@@ -28,7 +29,7 @@ namespace lowoha {
 namespace matmul {
 namespace native {
 
-enum class native_kernel_kind_t : uint8_t { bf16, int8 };
+enum class native_kernel_kind_t : uint8_t { bf16, int8, f32 };
 
 /// Columns of a slab: one 2-vector BF16 kernel call of a wider tile.
 inline constexpr int kNativeBf16SlabCols = 32;
@@ -78,23 +79,28 @@ public:
     /// tile nr wide, native_bf16_slab_cols(nr) columns each; nullptr when
     /// caps(bf16, nr) is nullptr.
     const bf16_brgemm_fn_t *bf16_table(int nr) const noexcept;
+    /// FP32 kernels by row count (index 0 unused, size 13) of a tile nr wide
+    /// (16 or 32); nullptr when caps(f32, nr) is nullptr.
+    const native_fp32_ukernel_fn_t *f32_table(int nr) const noexcept;
 
 private:
     friend const native_kernel_registry_t &native_kernel_registry();
-    native_kernel_registry_t(bool bf16_isa, bool int8_isa);
+    native_kernel_registry_t(bool bf16_isa, bool int8_isa, bool f32_isa);
 
     static constexpr int kMaxRows = 12;
     static constexpr int kWidths = 2; ///< nr 16, 32
 
     std::vector<native_kernel_caps_t> all_;
     bf16_brgemm_fn_t bf16_[kWidths][kMaxRows + 1] = {};
+    native_fp32_ukernel_fn_t f32_[kWidths][kMaxRows + 1] = {};
 };
 
 /// Built once by probing select_bf16_brgemm_tall_kernel (mr 1 .. 12 at nr
-/// 16 / 32), select_native_int8_ukernel and select_native_int8_group_ukernel
-/// (mr 1 .. 12 at nv 1 / 2).  BF16 tiles of 64 and 128 columns take the row
-/// counts of nr 32.  A dtype is probed only when the CPU has its ISA;
-/// otherwise it has no entries.
+/// 16 / 32), select_native_int8_ukernel, select_native_int8_group_ukernel
+/// and select_native_fp32_ukernel (mr 1 .. 12 at nv 1 / 2).  BF16 tiles of
+/// 64 and 128 columns take the row counts of nr 32.  A dtype is probed only
+/// when the CPU has its ISA (AVX512-BF16, AVX512-VNNI, AVX-512 F); otherwise
+/// it has no entries.
 const native_kernel_registry_t &native_kernel_registry();
 
 } // namespace native

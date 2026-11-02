@@ -321,9 +321,9 @@ reorder_algo_t select_reorder_algo(
     // Native reorder / dynamic-quant kernels are compiled for
     // avx512f + avx512bw + avx512vl (they emit VPMOVDB narrowing plus
     // byte/word and 128/256-bit masked AVX-512 instructions). Selecting
-    // them on a CPU that has AVX-512F but lacks BW/VL (e.g. some Intel
-    // Xeon Phi SKUs) would raise an illegal-instruction fault, so the
-    // full feature set is required before choosing the native path.
+    // them on a CPU that has AVX-512F but lacks BW/VL would raise an
+    // illegal-instruction fault, so the full feature set is required
+    // before choosing the native path.
     static const bool has_native_isa
             = zendnnl::common::zendnnl_platform_info().get_avx512f_status()
             && zendnnl::common::zendnnl_platform_info()

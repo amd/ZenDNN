@@ -30,6 +30,7 @@
 #include "common/op_config.hpp"
 #include "lowoha_operators/matmul/group_matmul/group_matmul_direct.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_gemv.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_planner.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_tuning_keys.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_hw.hpp"
@@ -94,6 +95,20 @@ struct call_t {
 };
 
 status_t run_matmul(const call_t &c);
+
+/// The GEMV kernel native_layout_matmul runs c on: decide_native_gemv's
+/// choice over the descriptor it builds for c (none for the native tiles,
+/// and for a call that does not ask for the native BRGEMM).
+zendnnl::lowoha::matmul::native::native_gemv_t gemv_kernel(const call_t &c);
+
+/// The status native_brgemm_refusal gives c (success when the native BRGEMM
+/// serves it or does not take it), with reason its reason.
+status_t refusal_of(const call_t &c, std::string *reason = nullptr);
+
+/// c is a call the native BRGEMM takes and does not serve, refused with
+/// status st; then c runs through run_matmul_direct, which checks
+/// matmul_direct's status, dst and error line for it.
+::testing::AssertionResult refused_with(const call_t &c, status_t st);
 
 /// The call on lowoha_algo = reference (all threads) with raw weight
 /// `raw_wei` into `dst`.  A gated activation is applied in the test

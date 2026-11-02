@@ -19,7 +19,7 @@
 // ZENDNNL_MATMUL_NATIVE_TUNING_FILE once, so the calls under a setting run
 // in a child process; the outputs under the built-in plan come from the
 // parent.  Every key whose schema bits are "same" must give the output bits
-// of the built-in plan, on BF16 and INT8 calls that reach the paths the keys
+// of the built-in plan, on BF16, INT8 and FP32 calls that reach the paths the keys
 // steer (narrowing, row split, K passes, row groups, the rule switches, INT8
 // call widths, rows and K passes, direct store, bias in the dequantization,
 // source copies, gated and softmax epilogues, alpha / beta);
@@ -84,7 +84,7 @@ constexpr data_type_t kNone = data_type_t::none;
 constexpr const char *kConfig = "ZENDNNL_MATMUL_NATIVE_CONFIG";
 constexpr const char *kTuningFile = "ZENDNNL_MATMUL_NATIVE_TUNING_FILE";
 
-enum class src_t { bf16, dyn_s8, st_u8, st_s8 };
+enum class src_t { bf16, dyn_s8, st_u8, st_s8, f32 };
 
 /// One dense call; threads is its params.num_threads.
 struct case_t {
@@ -100,7 +100,7 @@ struct case_t {
     float alpha = 1.0f;
     float beta = 0.0f;
 
-    bool int8() const { return src != src_t::bf16; }
+    bool int8() const { return src != src_t::bf16 && src != src_t::f32; }
     int cols() const { return gated == gated_t::none ? N : N / 2; }
 };
 
@@ -137,6 +137,18 @@ std::vector<case_t> all_cases() {
                     kNone, none, gated_t::none, 0.5f, 2.0f},
             {"int8_dyn_bf16_bias_softmax", src_t::dyn_s8, 16, 128, 64, kF32, 4,
                     false, kBf16, post_op_type_t::softmax},
+            {"f32_decode", src_t::f32, 1, 1536, 1000, kF32, 8},
+            {"f32_decode_narrowed", src_t::f32, 2, 320, 512, kF32, 8},
+            {"f32_row_split", src_t::f32, 100, 96, 128, kF32, 8},
+            {"f32_k_passes", src_t::f32, 200, 64, 9000, kF32, 8},
+            {"f32_trans_bias_gelu", src_t::f32, 300, 256, 320, kF32, 8, true,
+                    kF32, post_op_type_t::gelu_erf},
+            {"f32_gated_bias", src_t::f32, 24, 1024, 320, kF32, 8, false, kF32,
+                    none, gated_t::silu_and_mul},
+            {"f32_softmax", src_t::f32, 16, 128, 64, kF32, 4, false, kNone,
+                    post_op_type_t::softmax},
+            {"f32_alpha_beta", src_t::f32, 16, 96, 100, kF32, 8, false, kNone,
+                    none, gated_t::none, 0.5f, 2.0f},
     };
 }
 
@@ -246,14 +258,15 @@ operands_t make_operands(const case_t &c, int k_max = 0, int32_t wc = 1) {
     const uint32_t seed = seed_of(c.name);
     const size_t a_n = static_cast<size_t>(c.M) * o.k_max;
     const size_t b_n = static_cast<size_t>(o.k_max) * c.N;
+    const data_type_t float_dt = c.src == src_t::f32 ? kF32 : kBf16;
     if (c.src == src_t::st_u8)
         o.src = nt::random_buffer(kU8, a_n, seed, 96, 160);
     else if (c.src == src_t::st_s8)
         o.src = nt::random_buffer(kS8, a_n, seed, -64, 64);
     else
-        o.src = nt::random_buffer(kBf16, a_n, seed, -1.0f, 1.0f);
+        o.src = nt::random_buffer(float_dt, a_n, seed, -1.0f, 1.0f);
     o.wei = c.int8() ? nt::random_buffer(kS8, b_n, seed + 1, -127, 127)
-                     : nt::random_buffer(kBf16, b_n, seed + 1, -1.0f, 1.0f);
+                     : nt::random_buffer(float_dt, b_n, seed + 1, -1.0f, 1.0f);
     if (c.bias != kNone)
         o.bias = nt::random_buffer(c.bias, c.N, seed + 2, -1.0f, 1.0f);
     o.init = nt::random_buffer(
@@ -262,8 +275,8 @@ operands_t make_operands(const case_t &c, int k_max = 0, int32_t wc = 1) {
     mm::matmul_params &p = o.params;
     p.dtypes.src = c.src == src_t::st_u8
             ? kU8
-            : (c.src == src_t::st_s8 ? kS8 : kBf16);
-    p.dtypes.wei = c.int8() ? kS8 : kBf16;
+            : (c.src == src_t::st_s8 ? kS8 : float_dt);
+    p.dtypes.wei = c.int8() ? kS8 : float_dt;
     p.dtypes.dst = c.dst;
     p.dtypes.bias = c.bias;
     p.num_threads = c.threads;
@@ -426,8 +439,12 @@ struct fixture_t {
 std::vector<case_t> served(const std::vector<case_t> &cases) {
     const nat::UarchParams &uarch = nat::detect_uarch();
     std::vector<case_t> v;
-    for (const case_t &c : cases)
-        if (c.int8() ? uarch.avx512vnni : uarch.avx512bf16) v.push_back(c);
+    for (const case_t &c : cases) {
+        const bool isa = c.src == src_t::f32
+                ? nat::native_base_isa()
+                : (c.int8() ? uarch.avx512vnni : uarch.avx512bf16);
+        if (isa) v.push_back(c);
+    }
     return v;
 }
 
@@ -551,9 +568,10 @@ nlohmann::json match_of(const nat::native_problem_t &p) {
         }
     };
     const char *const epilogues[] = {"store", "bias", "postops", "gated"};
+    const char *dtype = p.f32() ? "f32" : (p.bf16() ? "bf16" : "s8");
     return {{"m", p.M}, {"n", p.N}, {"k", p.K}, {"threads", p.threads},
-            {"pack_nr", p.pack_nr}, {"dtype", p.bf16() ? "bf16" : "s8"},
-            {"src", dt(p.src_dt)}, {"dst", dt(p.dst_dt)},
+            {"pack_nr", p.pack_nr}, {"dtype", dtype}, {"src", dt(p.src_dt)},
+            {"dst", dt(p.dst_dt)},
             {"epilogue", epilogues[static_cast<int>(p.epilogue)]},
             {"trans_a", p.trans_a}, {"dynamic", p.dynamic_quant},
             {"has_bias", p.has_bias}};
@@ -723,7 +741,7 @@ TEST_F(NativeTuningExec, SameBitsBf16TileWidthsKeepTheBits) {
     constexpr int kSettings = static_cast<int>(std::size(settings));
     std::vector<case_t> cases;
     for (const case_t &c : served(all_cases()))
-        if (!c.int8()) cases.push_back(c);
+        if (c.src == src_t::bf16) cases.push_back(c);
     if (cases.empty()) GTEST_SKIP() << "needs AVX512-BF16";
     const auto k_of = [](const case_t &c, int j) { return c.K + 4 * j; };
     std::vector<operands_t> ops;
@@ -833,8 +851,8 @@ std::unique_ptr<nat::native_planner_t> fixed_planner(const char *setting) {
     nat::UarchParams u = nat::detect_uarch();
     u.l1d_bytes = 48 << 10;
     u.l2_bytes = 1 << 20;
-    u.l3_bytes_per_ccd = 32 << 20;
-    u.ccx_cores = 8;
+    u.l3_domain_bytes = 32 << 20;
+    u.family_l3_cores = 8;
     u.l3_domain_cores = 8;
     return std::make_unique<nat::native_planner_t>(
             u, nat::make_native_override_source(setting), nullptr, nullptr);
@@ -1015,7 +1033,8 @@ const std::map<std::string, std::string> &table_entry_ids() {
             {"int8_u8_alpha_beta", "int8-static-u8"},
             {"bf16_softmax", "few-threads"}, {"int8_s8", "few-threads"},
             {"int8_dyn_gated", "few-threads"},
-            {"int8_dyn_bf16_bias_softmax", "few-threads"}};
+            {"int8_dyn_bf16_bias_softmax", "few-threads"},
+            {"f32_softmax", "few-threads"}};
     return ids;
 }
 
@@ -1028,9 +1047,10 @@ const char *const kTreeRules = R"({"kind": "tree",
                     "else": {"id": "bf16-large-m",
                              "config": {"block_rows": 24, "bf16_l2_pct": 10}}}}})";
 
+/// An FP32 problem's bf16 feature is 0.
 const char *tree_leaf_id(const case_t &c) {
     if (c.M <= 16) return "small-m";
-    return c.int8() ? "int8-large-m" : "bf16-large-m";
+    return c.src == src_t::bf16 ? "bf16-large-m" : "int8-large-m";
 }
 
 constexpr unsigned bit(source_t s) {
@@ -1100,9 +1120,10 @@ TEST_F(NativeTuningExec, TuningFileOrderedRulesKeepTheBits) {
             SCOPED_TRACE(c.name);
             const nat::native_plan_t plan
                     = planner->plan(problem_of(c, f.operands[i]));
+            // An FP32 problem's bf16 feature is 0.
             const char *want = c.M <= 16 && c.N / c.threads <= 256
                     ? "decode"
-                    : (c.int8() ? "int8" : "rest");
+                    : (c.src != src_t::bf16 ? "int8" : "rest");
             EXPECT_EQ(nt::top_source(plan), source_t::rules);
             EXPECT_TRUE(contains(label_of(plan.rules_entry), want))
                     << label_of(plan.rules_entry) << ", expected rule " << want;
@@ -1512,7 +1533,7 @@ TEST_F(NativeTuningExec, ConcurrentCallsKeepPlansAndOutputs) {
     nt::child_buffers_t shared;
     const fixture_t f = make_fixture(
             {
-                    {"c_bf16_m1", src_t::bf16, 1, 512, 256, kBf16, 1},
+                    {"c_bf16_m1", src_t::bf16, 1, 512, 256, kBf16, 2},
                     {"c_bf16_m8", src_t::bf16, 8, 256, 320, kF32, 2},
                     {"c_bf16_m24_bias", src_t::bf16, 24, 128, 200, kBf16, 2,
                             false, kF32},

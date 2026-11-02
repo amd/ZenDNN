@@ -65,6 +65,16 @@ static int read_intel_cache_size(int level) {
     return 0;
 }
 
+void set_cache_sizes(UarchParams &p, int l1d, int l2, int l3) {
+    const UarchParams d;
+    p.l1d_bytes = l1d > 0 ? l1d : d.l1d_bytes;
+    p.l2_bytes = l2 > 0 ? l2 : d.l2_bytes;
+    p.l3_domain_bytes = l3 > 0 ? l3 : p.l2_bytes;
+    p.l1d_detected = l1d > 0;
+    p.l2_detected = l2 > 0;
+    p.l3_detected = l3 > 0;
+}
+
 static UarchParams do_detect() {
     UarchParams p;
     auto &pinfo = zendnnl::common::zendnnl_platform_info();
@@ -83,27 +93,12 @@ static UarchParams do_detect() {
     zendnnl_cpuid(0, eax, ebx, ecx, edx);
     bool is_amd = (ebx == 0x68747541);
 
-    if (is_amd) {
-        int l1 = read_amd_cache_size(1);
-        int l2 = read_amd_cache_size(2);
-        int l3 = read_amd_cache_size(3);
-        p.l1d_bytes = l1 > 0 ? l1 : 32768;
-        p.l2_bytes = l2 > 0 ? l2 : 1048576;
-        p.l3_bytes_per_ccd = l3 > 0 ? l3 : 33554432;
-        p.l1d_detected = l1 > 0;
-        p.l2_detected = l2 > 0;
-        p.l3_detected = l3 > 0;
-    } else {
-        int l1 = read_intel_cache_size(1);
-        int l2 = read_intel_cache_size(2);
-        int l3 = read_intel_cache_size(3);
-        p.l1d_bytes = l1 > 0 ? l1 : 32768;
-        p.l2_bytes = l2 > 0 ? l2 : 1048576;
-        p.l3_bytes_per_ccd = l3 > 0 ? l3 : 33554432;
-        p.l1d_detected = l1 > 0;
-        p.l2_detected = l2 > 0;
-        p.l3_detected = l3 > 0;
-    }
+    if (is_amd)
+        set_cache_sizes(p, read_amd_cache_size(1), read_amd_cache_size(2),
+                read_amd_cache_size(3));
+    else
+        set_cache_sizes(p, read_intel_cache_size(1), read_intel_cache_size(2),
+                read_intel_cache_size(3));
 
     p.fma_ports = 2;
     if (is_amd && cpu_family == 0x1A) {
@@ -123,9 +118,9 @@ static UarchParams do_detect() {
     // L3 domain width for parallel GEMV column scheduling (spread slice indices
     // across L3 domains when OpenMP tid order matches consecutive CPU ids).
     if (is_amd && (cpu_family == 0x19 || cpu_family == 0x1A))
-        p.ccx_cores = 8;
+        p.family_l3_cores = 8;
     else
-        p.ccx_cores = 1;
+        p.family_l3_cores = 1;
 
     return p;
 }

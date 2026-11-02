@@ -167,7 +167,7 @@ static inline __m512i quantize_to_s16_ph(__m512h v, __m512h vinv_scale) {
 //
 // FMA cadence: VMULPH on PH operands is the FP16-FMA building block; it
 // pairs with the round-narrow chain for ~2x throughput over the F32-FMA
-// path on AVX512-FP16 capable CPUs (Granite Rapids, Turin).
+// path on AVX512-FP16 capable CPUs.
 //==============================================================================
 
 ZENDNNL_TARGET("avx512f,avx512vl,avx512bw,avx512fp16")

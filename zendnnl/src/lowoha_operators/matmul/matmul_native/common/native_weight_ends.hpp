@@ -70,6 +70,60 @@ inline weight_ends_t weight_ends_of(const void *p, size_t bytes) noexcept {
             weight_end_digest(p, bytes, true)};
 }
 
+/// 64-bit words in kWeightEndBytes.
+inline constexpr size_t kWeightEndWords = kWeightEndBytes / sizeof(uint64_t);
+
+/// The words of the two ends of a range of bytes that weight_ends_of
+/// digests, kept whole: a check of the range against them compares words
+/// and makes no digest.  A range below sizeof(uint64_t) bytes has none.
+struct weight_end_words_t {
+    size_t bytes = 0;
+    uint64_t head[kWeightEndWords] = {};
+    uint64_t tail[kWeightEndWords] = {};
+};
+
+/// Calls f(i, word) for the words of one end of [p, p + bytes) in the order
+/// weight_end_digest reads them.
+template <typename F>
+inline void for_each_end_word(
+        const void *p, size_t bytes, bool tail, F &&f) noexcept {
+    if (p == nullptr || bytes < sizeof(uint64_t)) return;
+    const unsigned char *b = static_cast<const unsigned char *>(p);
+    const size_t span = bytes < kWeightEndBytes ? bytes : kWeightEndBytes;
+    const size_t from = tail ? bytes - span : 0;
+    size_t i = 0;
+    for (size_t at = 0; at < span; at += sizeof(uint64_t), ++i) {
+        const size_t word
+                = at + sizeof(uint64_t) <= span ? at : span - sizeof(uint64_t);
+        uint64_t w = 0;
+        std::memcpy(&w, b + from + word, sizeof(w));
+        f(i, w);
+    }
+}
+
+inline weight_end_words_t weight_end_words_of(
+        const void *p, size_t bytes) noexcept {
+    weight_end_words_t e;
+    e.bytes = bytes;
+    for_each_end_word(
+            p, bytes, false, [&](size_t i, uint64_t w) { e.head[i] = w; });
+    for_each_end_word(
+            p, bytes, true, [&](size_t i, uint64_t w) { e.tail[i] = w; });
+    return e;
+}
+
+/// Whether [p, p + bytes) holds the words of its two ends that e kept.
+inline bool weight_end_words_hold(
+        const weight_end_words_t &e, const void *p, size_t bytes) noexcept {
+    if (e.bytes != bytes) return false;
+    uint64_t diff = 0;
+    for_each_end_word(p, bytes, false,
+            [&](size_t i, uint64_t w) { diff |= w ^ e.head[i]; });
+    for_each_end_word(p, bytes, true,
+            [&](size_t i, uint64_t w) { diff |= w ^ e.tail[i]; });
+    return diff == 0;
+}
+
 } // namespace native
 } // namespace matmul
 } // namespace lowoha

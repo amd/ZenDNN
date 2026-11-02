@@ -26,7 +26,9 @@ namespace lowoha {
 namespace matmul {
 namespace native {
 
-/// FP32 GEMM entry point (restructured).
+/// FP32 GEMM entry point (restructured).  With alpha other than 1 and beta
+/// other than 0, beta / alpha must be finite: the kernels add it times C,
+/// and the sum is scaled by alpha after the K loop.
 void gemm_execute(const GemmDescriptor &desc, const UarchParams &uarch,
         const void *src, const void *weight, void *dst, const void *bias,
         matmul_params &params);

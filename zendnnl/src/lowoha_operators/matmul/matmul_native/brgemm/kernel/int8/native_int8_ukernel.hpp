@@ -93,28 +93,33 @@ native_int8_ukernel_fn_t select_native_int8_ukernel(
 /// batch; C enters before the first element and leaves after the last.  The
 /// per-group tile runs it with one element per K group.
 struct native_int8_group_ukernel_args_t {
-    // The batch.  Element g multiplies MR rows of s8 source, at A + g *
-    // a_step and lda apart, by B + g * b_step, k_quads K quads each.
+    // The batch.  Element g multiplies MR rows of s8 (or u8) source, at A + g
+    // * a_step and lda apart, by B + g * b_step, k_quads K quads each.
     const uint8_t *A = nullptr;
     int lda = 0;
     size_t a_step = 0;
     /// Quad 0 of the tile's first pack column; b_stride bytes between quads.
-    /// The weight is read as w + 128.
+    /// Against an s8 source the weight is read as w + 128.
     const int8_t *B = nullptr;
     int b_stride = 0;
     size_t b_step = 0;
     int k_quads = 0;
     int batch = 0;
-    // The step of element g, for row m: the row's int32 sum starts at
-    // shift[m * shift_ld + g * shift_step], which cancels what reading the
-    // weight as w + 128 adds (-128 times the sum of the row's source values
-    // over the element), and the scales are src_scale[m * src_scale_ld + g *
-    // src_scale_step] and the NR weight scales from element g *
-    // wei_scale_step of wei_scale on, of type wei_scale_dt (f32, bf16 or
-    // f16), each read exactly as f32.
+    // The step of element g, for row m: against an s8 source the row's int32
+    // sum starts at shift[m * shift_ld + g * shift_step], which cancels what
+    // reading the weight as w + 128 adds (-128 times the sum of the row's
+    // source values over the element); against a u8 source it is the exact
+    // sum of (a - src_zp) * w, src_zp times the element's column sums of the
+    // weight taken from the sum of a * w.  The scales are src_scale[m *
+    // src_scale_ld + g * src_scale_step] and the NR weight scales from
+    // element g * wei_scale_step of wei_scale on, of type wei_scale_dt (f32,
+    // bf16 or f16), each read exactly as f32.
     const int32_t *shift = nullptr;
     int shift_ld = 0;
     int shift_step = 0;
+    /// The zero point of a u8 source; the sum of an element is exact when
+    /// it fits int32, and for any zero point in the wide form.
+    int32_t src_zp = 0;
     const float *src_scale = nullptr;
     int src_scale_ld = 0;
     int src_scale_step = 0;
@@ -133,22 +138,30 @@ struct native_int8_group_ukernel_args_t {
     bool dst_bf16 = false;
 };
 
-/// C[m][n] (+)= the sum over the batch, in order, of (f32(shift_g + acc_g)
-/// * src_scale_g) * wei_scale_g[n], where acc_g is the int32 dot product of
-/// row m of element g's A and column n of its B read as w + 128: one
-/// rounding per operation and no fused multiply-add, the first element
-/// added to the entry value of C (+0.0 without accumulate).  shift_g + acc_g
-/// is the exact sum of element g, so equal inputs give equal bits.
+/// C[m][n] (+)= the sum over the batch, in order, of (f32(S_g) *
+/// src_scale_g) * wei_scale_g[n], where S_g is the exact int32 sum of row m
+/// of element g's A times column n of its B (shift_g plus the dot product of
+/// the s8 source and the weight read as w + 128, or the dot product of the u8
+/// source and the weight less src_zp times the weight's column sum, that
+/// term in int64 in the wide form, whose S_g is exact for any zero point and
+/// equal to the int32 form's wherever that one does not wrap): one rounding
+/// per operation and no fused multiply-add, the first element added to the
+/// entry value of C (+0.0 without accumulate).  Equal inputs give equal
+/// bits.
 using native_int8_group_ukernel_fn_t
         = void (*)(const native_int8_group_ukernel_args_t &);
 
-/// Largest MR served for NR = 16 * nv: 12 at nv 1, 6 at nv 2, 0 otherwise.
-/// The int32 and f32 accumulators, the B vectors, the broadcast source, the
-/// flip constant and the step's scales fit the 32 vector registers.
+/// Largest MR served for NR = 16 * nv: 12 at nv 1, 6 at nv 2, 0 otherwise,
+/// for either source.  The int32 and f32 accumulators, the B vectors, the
+/// broadcast source, the flip constant (the column sums and the ones of a u8
+/// source) and the step's scales fit the 32 vector registers.
 int native_int8_group_ukernel_max_mr(int nv);
 
-/// nullptr outside MR 1 .. native_int8_group_ukernel_max_mr(nv).
-native_int8_group_ukernel_fn_t select_native_int8_group_ukernel(int mr, int nv);
+/// nullptr outside MR 1 .. native_int8_group_ukernel_max_mr(nv); the kernel
+/// of a u8 source with src_u8 (its wide form with wide_zp), of an s8 source
+/// otherwise.
+native_int8_group_ukernel_fn_t select_native_int8_group_ukernel(
+        int mr, int nv, bool src_u8, bool wide_zp = false);
 
 } // namespace native
 } // namespace matmul

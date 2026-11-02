@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include "common/error_status.hpp"
 #include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/lowoha_common.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/avx512_math.hpp"
@@ -35,27 +36,18 @@ struct native_aligned_free_t {
     void operator()(void *p) const { zendnnl_aligned_free(p); }
 };
 
+/// st for a call turned away, with *why (when why is not null) naming the
+/// reason.
+inline zendnnl::error_handling::status_t turned_away(
+        zendnnl::error_handling::status_t st, const char *reason,
+        const char **why) {
+    if (why != nullptr) *why = reason;
+    return st;
+}
+
 /// a / b rounded up, for a >= 0 and b > 0; no intermediate overflows.
 inline int ceil_div(int a, int b) {
     return a / b + (a % b != 0);
-}
-
-/// Detect the first fuseable activation post-op from the post-op chain.
-/// Returns fused_postop_t::none if no fuseable activation is found.
-inline fused_postop_t detect_fused_postop(const matmul_params &params) {
-    for (const auto &po : params.postop_) {
-        if (po.po_type == post_op_type_t::relu && po.alpha == 0.0f)
-            return fused_postop_t::relu;
-        if (po.po_type == post_op_type_t::gelu_tanh)
-            return fused_postop_t::gelu_tanh;
-        if (po.po_type == post_op_type_t::gelu_erf)
-            return fused_postop_t::gelu_erf;
-        if (po.po_type == post_op_type_t::sigmoid)
-            return fused_postop_t::sigmoid;
-        if (po.po_type == post_op_type_t::tanh) return fused_postop_t::tanh_op;
-        if (po.po_type == post_op_type_t::swish) return fused_postop_t::swish;
-    }
-    return fused_postop_t::none;
 }
 
 /// Extracted INT8 quantization parameters (per-tensor src, per-tensor/channel wei).

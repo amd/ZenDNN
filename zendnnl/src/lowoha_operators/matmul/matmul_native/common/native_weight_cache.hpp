@@ -19,6 +19,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 
 #include "common/error_status.hpp"
 #include "lowoha_operators/matmul/lowoha_common.hpp"
@@ -87,9 +88,10 @@ struct native_image_check_t {
 ///      (contiguous ldb, wei_inplace_fits with capacity_bytes) is rewritten
 ///      in place and recorded, and so is an aocl_blocked weight with a
 ///      contiguous ldb whose layout fits capacity_bytes (0: the size of its
-///      AOCL prepack).  Other s8 weights are never rewritten.  The cached
-///      layouts packed from bytes a rewrite overwrites stay cached: the
-///      image holds the same weight.
+///      AOCL prepack).  Other s8 weights, f32 weights and weights of N not a
+///      multiple of pack_nr (whose layout holds zero columns past N) are
+///      never rewritten.  The cached layouts packed from bytes a rewrite
+///      overwrites stay cached: the image holds the same weight.
 /// checked is the call's own check of the buffer for an image
 /// (native_weight_find_image), when it made one: an image ready there in w's
 /// layout is served without a second check when that check read at least
@@ -150,6 +152,23 @@ bool native_weight_packed_in_place(const void *weight, size_t owned_bytes);
 /// native_weight_packed_in_place, which also tells found what it found.
 bool native_weight_find_image(
         const void *weight, size_t owned_bytes, native_image_check_t &found);
+
+/// What native_weight_read_raw did.
+enum class native_raw_read_t : uint8_t {
+    done, ///< read ran on the raw weight
+    image, ///< the buffer holds an in-place image: read did not run
+    failed, ///< no memory to hold the buffer: read did not run
+};
+
+/// Runs read, a pack outside this cache that reads the extent bytes of the
+/// raw weight at weight, with the buffer held as the packs of weight cache
+/// modes 1 and 2 hold it (get_native_layout): no in-place rewrite of the
+/// buffer starts or runs while read runs.  A buffer that holds an image by
+/// then (at weight, or starting inside the extent bytes) has no raw weight
+/// left, and read does not run.  owned_bytes is the caller's buffer at
+/// weight, as for native_weight_find_image.
+native_raw_read_t native_weight_read_raw(const void *weight, size_t extent,
+        size_t owned_bytes, const std::function<void()> &read);
 
 /// Drops every cached layout and every in-place record.  Same quiescence
 /// contract as clear_all_weight_caches, which calls it; a buffer that still

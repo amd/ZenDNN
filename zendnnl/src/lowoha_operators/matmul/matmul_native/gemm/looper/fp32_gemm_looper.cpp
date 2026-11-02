@@ -27,6 +27,7 @@
 #include "lowoha_operators/matmul/matmul_native/common/avx512_math.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/fp32_packing.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_hw.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/postop.hpp"
 #include "lowoha_operators/matmul/matmul_native/gemm/kernel/fp32/fp32_gemm_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/gemm/planner/gemm_planner.hpp"
@@ -61,6 +62,15 @@ static void scale_tile(
     }
 }
 
+static void scale_tile_scalar(
+        float *C, int ldc, int m_count, int n_count, float alpha) {
+    for (int m = 0; m < m_count; ++m) {
+        float *row = C + m * ldc;
+        for (int n = 0; n < n_count; ++n)
+            row[n] *= alpha;
+    }
+}
+
 static void native_thread_loop(const GemmDescriptor &desc,
         const BlockPlan &plan, const UarchParams &uarch, const void *src,
         const void *weight, void *dst, const void *bias, matmul_params &params,
@@ -83,42 +93,21 @@ static void native_thread_loop(const GemmDescriptor &desc,
     const int MB = plan.MB, NB = plan.NB, KB = plan.KB;
     const int MR = plan.MR, NR = plan.NR;
     const int num_threads = plan.num_threads;
-    const bool use_avx512 = uarch.avx512f;
+    // The AVX-512 kernels and tile helpers are built for AVX-512 F, BW and
+    // VL and FMA: without all of them the scalar kernel runs.
+    const bool use_avx512 = uarch.avx512f && native_hw().base_isa;
     const bool has_bias = (bias_f != nullptr);
+    // The tile epilogue helpers follow the kernels: AVX-512 with the
+    // AVX-512 kernels, portable with the scalar kernel.
+    void (*const scale)(float *, int, int, int, float)
+            = use_avx512 ? scale_tile : scale_tile_scalar;
+    void (*const postops)(float *, int, int, int, int, int, const float *,
+            const std::vector<matmul_post_op> &)
+            = use_avx512 ? apply_postops_tile : apply_postops_tile_scalar;
 
-    // Detect fusable post-op (first eltwise op in the chain).
-    fused_postop_t fused_op = fused_postop_t::none;
+    // Fusable post-op: an activation at the head of the chain.
     int fused_idx = -1;
-    for (int i = 0; i < static_cast<int>(params.postop_.size()); ++i) {
-        auto pt = params.postop_[i].po_type;
-        if (pt == post_op_type_t::relu) {
-            if (params.postop_[i].alpha == 0.0f) {
-                fused_op = fused_postop_t::relu;
-                fused_idx = i;
-                break;
-            }
-        } else if (pt == post_op_type_t::gelu_tanh) {
-            fused_op = fused_postop_t::gelu_tanh;
-            fused_idx = i;
-            break;
-        } else if (pt == post_op_type_t::gelu_erf) {
-            fused_op = fused_postop_t::gelu_erf;
-            fused_idx = i;
-            break;
-        } else if (pt == post_op_type_t::sigmoid) {
-            fused_op = fused_postop_t::sigmoid;
-            fused_idx = i;
-            break;
-        } else if (pt == post_op_type_t::tanh) {
-            fused_op = fused_postop_t::tanh_op;
-            fused_idx = i;
-            break;
-        } else if (pt == post_op_type_t::swish) {
-            fused_op = fused_postop_t::swish;
-            fused_idx = i;
-            break;
-        }
-    }
+    const fused_postop_t fused_op = head_fused_postop(params, &fused_idx);
 
     std::vector<matmul_post_op> remaining_postops;
     remaining_postops.reserve(params.postop_.size());
@@ -254,16 +243,28 @@ static void native_thread_loop(const GemmDescriptor &desc,
                                         = prepacked_b->get_panel(pc, pidx + 1);
 
                                 const float *bias1 = tile_bias;
-                                avx512_tail_kernel(pa, pa_stride, pb1, NR_PACK,
-                                        Ct, ldc, kb_act, mr_act, nr_part1,
-                                        tile_beta, bias1, tile_fop);
-
                                 const float *bias2 = tile_bias
                                         ? (tile_bias + nr_part1)
                                         : nullptr;
-                                avx512_tail_kernel(pa, pa_stride, pb2, NR_PACK,
-                                        Ct + nr_part1, ldc, kb_act, mr_act,
-                                        nr_part2, tile_beta, bias2, tile_fop);
+                                if (use_avx512) {
+                                    avx512_tail_kernel(pa, pa_stride, pb1,
+                                            NR_PACK, Ct, ldc, kb_act, mr_act,
+                                            nr_part1, tile_beta, bias1,
+                                            tile_fop);
+                                    avx512_tail_kernel(pa, pa_stride, pb2,
+                                            NR_PACK, Ct + nr_part1, ldc, kb_act,
+                                            mr_act, nr_part2, tile_beta, bias2,
+                                            tile_fop);
+                                } else {
+                                    scalar_microkernel(pa, pa_stride, pb1,
+                                            NR_PACK, Ct, ldc, kb_act, mr_act,
+                                            nr_part1, tile_beta, bias1,
+                                            tile_fop);
+                                    scalar_microkernel(pa, pa_stride, pb2,
+                                            NR_PACK, Ct + nr_part1, ldc, kb_act,
+                                            mr_act, nr_part2, tile_beta, bias2,
+                                            tile_fop);
+                                }
                             }
                         }
                     }
@@ -272,19 +273,18 @@ static void native_thread_loop(const GemmDescriptor &desc,
                     if (is_last_k) {
                         float *Ctile = C + ic * ldc + jc;
                         if (alpha != 1.0f) {
-                            scale_tile(Ctile, ldc, mb_act, nb_act, alpha);
+                            scale(Ctile, ldc, mb_act, nb_act, alpha);
                             if (has_bias)
-                                apply_postops_tile(Ctile, ldc, mb_act, nb_act,
-                                        jc, ic, bias_f, {});
+                                postops(Ctile, ldc, mb_act, nb_act, jc, ic,
+                                        bias_f, {});
                             if (fused_op != fused_postop_t::none
                                     && fused_idx >= 0)
-                                apply_postops_tile(Ctile, ldc, mb_act, nb_act,
-                                        jc, ic, nullptr,
-                                        {params.postop_[fused_idx]});
+                                postops(Ctile, ldc, mb_act, nb_act, jc, ic,
+                                        nullptr, {params.postop_[fused_idx]});
                         }
                         if (has_remaining_postops) {
-                            apply_postops_tile(Ctile, ldc, mb_act, nb_act, jc,
-                                    ic, nullptr, remaining_postops);
+                            postops(Ctile, ldc, mb_act, nb_act, jc, ic, nullptr,
+                                    remaining_postops);
                         }
                     }
                 } // ic
@@ -443,16 +443,28 @@ static void native_thread_loop(const GemmDescriptor &desc,
                                 const float *pb2
                                         = prepacked_b->get_panel(pc, pidx + 1);
 
-                                avx512_tail_kernel(pa, pa_stride, pb1, NR_PACK,
-                                        Ct, ldc, kb_act, mr_act, nr_part1,
-                                        tile_beta, tile_bias, tile_fop);
-
                                 const float *bias2 = tile_bias
                                         ? (tile_bias + nr_part1)
                                         : nullptr;
-                                avx512_tail_kernel(pa, pa_stride, pb2, NR_PACK,
-                                        Ct + nr_part1, ldc, kb_act, mr_act,
-                                        nr_part2, tile_beta, bias2, tile_fop);
+                                if (use_avx512) {
+                                    avx512_tail_kernel(pa, pa_stride, pb1,
+                                            NR_PACK, Ct, ldc, kb_act, mr_act,
+                                            nr_part1, tile_beta, tile_bias,
+                                            tile_fop);
+                                    avx512_tail_kernel(pa, pa_stride, pb2,
+                                            NR_PACK, Ct + nr_part1, ldc, kb_act,
+                                            mr_act, nr_part2, tile_beta, bias2,
+                                            tile_fop);
+                                } else {
+                                    scalar_microkernel(pa, pa_stride, pb1,
+                                            NR_PACK, Ct, ldc, kb_act, mr_act,
+                                            nr_part1, tile_beta, tile_bias,
+                                            tile_fop);
+                                    scalar_microkernel(pa, pa_stride, pb2,
+                                            NR_PACK, Ct + nr_part1, ldc, kb_act,
+                                            mr_act, nr_part2, tile_beta, bias2,
+                                            tile_fop);
+                                }
                             }
                         }
                     }
@@ -460,19 +472,18 @@ static void native_thread_loop(const GemmDescriptor &desc,
                     if (is_last_k) {
                         float *Ctile = C + ic * ldc + jc;
                         if (alpha != 1.0f) {
-                            scale_tile(Ctile, ldc, mb_act, nb_act, alpha);
+                            scale(Ctile, ldc, mb_act, nb_act, alpha);
                             if (has_bias)
-                                apply_postops_tile(Ctile, ldc, mb_act, nb_act,
-                                        jc, ic, bias_f, {});
+                                postops(Ctile, ldc, mb_act, nb_act, jc, ic,
+                                        bias_f, {});
                             if (fused_op != fused_postop_t::none
                                     && fused_idx >= 0)
-                                apply_postops_tile(Ctile, ldc, mb_act, nb_act,
-                                        jc, ic, nullptr,
-                                        {params.postop_[fused_idx]});
+                                postops(Ctile, ldc, mb_act, nb_act, jc, ic,
+                                        nullptr, {params.postop_[fused_idx]});
                         }
                         if (has_remaining_postops) {
-                            apply_postops_tile(Ctile, ldc, mb_act, nb_act, jc,
-                                    ic, nullptr, remaining_postops);
+                            postops(Ctile, ldc, mb_act, nb_act, jc, ic, nullptr,
+                                    remaining_postops);
                         }
                     }
                 } // K-loop (BRGEMM)

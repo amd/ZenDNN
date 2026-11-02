@@ -47,8 +47,8 @@ inline int source_col(int p, int half) {
     }
 }
 
-/// A K group row of a block: 32 columns of 4 bytes (a bf16 pair or an s8
-/// quad), two vectors of 16 columns.
+/// A K group row of a block: 32 columns of 4 bytes (a bf16 pair, an s8 quad
+/// or an f32), two vectors of 16 columns.
 constexpr int kBlockCols = 32;
 constexpr size_t kGroupRowBytes = kBlockCols * 4;
 static_assert(kNativeLayoutPackNr == kBlockCols,
@@ -97,38 +97,48 @@ inline __m256i quad_sums(__m256i v) {
 
 /// The groups of 4 bytes from byte at on of the 16 rows rows[i], 16 or as
 /// many as the left bytes of a row hold (the rest read as zero), transposed:
-/// lane i of out[q] is group q of row i.
+/// lane i of out[q] is group q of row i.  Tail: only the first nrows rows
+/// are read, the others read as zero.
+template <bool Tail>
 ZENDNNL_TARGET("avx512f,avx512bw")
 inline void load_group_columns(const uint8_t *const (&rows)[16], size_t at,
-        size_t left, __m512i (&out)[16]) {
+        size_t left, __m512i (&out)[16], int nrows) {
     __m512i in[16];
+    const int n = Tail ? nrows : 16;
     if (left >= 64) {
-        for (int i = 0; i < 16; ++i)
+        for (int i = 0; i < n; ++i)
             in[i] = _mm512_loadu_si512(rows[i] + at);
     } else {
         const __mmask64 m = (__mmask64 {1} << left) - 1;
-        for (int i = 0; i < 16; ++i)
+        for (int i = 0; i < n; ++i)
             in[i] = _mm512_maskz_loadu_epi8(m, rows[i] + at);
     }
+    for (int i = n; i < 16; ++i)
+        in[i] = _mm512_setzero_si512();
     transpose_groups(in, out);
 }
 
 /// The block of pack columns p0 .. p0 + 31 of a weight stored [N, K]
 /// (transB): each pack column is a row of the buffer, row_bytes apart, of
 /// which k_bytes are the weight's; groups K groups of 4 bytes.  Sums: the s8
-/// column sums follow the groups.
-template <bool Interleave, bool Sums>
+/// column sums follow the groups.  Tail: only the first cols pack columns
+/// hold weight columns (cols even when interleaved); the others are zero and
+/// their rows are not read.
+template <bool Interleave, bool Sums, bool Tail>
 ZENDNNL_TARGET("avx512f,avx512bw")
 void pack_block_rows_of_n(const uint8_t *w, size_t row_bytes, size_t k_bytes,
-        int groups, int half, int p0, uint8_t *blk) {
+        int groups, int half, int p0, uint8_t *blk, int cols) {
     // Pack columns 0 .. 15 and 16 .. 31, or, interleaved, the gate and the up
     // columns of the block.
     const uint8_t *first[16], *second[16];
+    const int n_first = Tail ? std::min(16, Interleave ? cols / 2 : cols) : 16;
+    const int n_second
+            = Tail ? (Interleave ? n_first : std::max(0, cols - 16)) : 16;
     for (int i = 0; i < 16; ++i) {
         const int c0 = Interleave ? p0 / 2 + i : p0 + i;
         const int c1 = Interleave ? half + p0 / 2 + i : p0 + 16 + i;
-        first[i] = w + static_cast<size_t>(c0) * row_bytes;
-        second[i] = w + static_cast<size_t>(c1) * row_bytes;
+        first[i] = i < n_first ? w + static_cast<size_t>(c0) * row_bytes : w;
+        second[i] = i < n_second ? w + static_cast<size_t>(c1) * row_bytes : w;
     }
     // Interleaved, pack column 2i is gate i and 2i + 1 up i.
     const __m512i lo_idx = _mm512_setr_epi32(
@@ -141,8 +151,8 @@ void pack_block_rows_of_n(const uint8_t *w, size_t row_bytes, size_t k_bytes,
         const int count = std::min(16, groups - g0);
         const size_t at = static_cast<size_t>(g0) * 4;
         __m512i a[16], b[16];
-        load_group_columns(first, at, k_bytes - at, a);
-        load_group_columns(second, at, k_bytes - at, b);
+        load_group_columns<Tail>(first, at, k_bytes - at, a, n_first);
+        load_group_columns<Tail>(second, at, k_bytes - at, b, n_second);
         for (int q = 0; q < count; ++q) {
             __m512i lo = a[q], hi = b[q];
             if constexpr (Interleave) {
@@ -166,11 +176,28 @@ void pack_block_rows_of_n(const uint8_t *w, size_t row_bytes, size_t k_bytes,
 }
 
 /// Pack columns p0 .. p0 + 31 of a row of a bf16 weight stored [K, N];
-/// interleaved, the 16 gate columns, then the 16 up columns.
-template <bool Interleave>
+/// interleaved, the 16 gate columns, then the 16 up columns.  Tail: only the
+/// first cols pack columns (cols below 32, even when interleaved) hold
+/// weight columns; the others read as zero.
+template <bool Interleave, bool Tail>
 ZENDNNL_TARGET("avx512f,avx512bw")
-inline __m512i load_bf16_columns(const uint16_t *row, int half, int p0) {
-    if constexpr (Interleave) {
+inline __m512i
+        load_bf16_columns(const uint16_t *row, int half, int p0, int cols) {
+    if constexpr (Tail) {
+        if constexpr (Interleave) {
+            const __mmask32 m = (__mmask32 {1} << (cols / 2)) - 1;
+            const __m256i gate = _mm512_castsi512_si256(
+                    _mm512_maskz_loadu_epi16(m, row + p0 / 2));
+            const __m256i up = _mm512_castsi512_si256(
+                    _mm512_maskz_loadu_epi16(m, row + half + p0 / 2));
+            return _mm512_inserti64x4(_mm512_castsi256_si512(gate), up, 1);
+        } else {
+            (void)half;
+            return _mm512_maskz_loadu_epi16(
+                    (__mmask32 {1} << cols) - 1, row + p0);
+        }
+    } else if constexpr (Interleave) {
+        (void)cols;
         const __m256i gate = _mm256_loadu_si256(
                 reinterpret_cast<const __m256i *>(row + p0 / 2));
         const __m256i up = _mm256_loadu_si256(
@@ -178,6 +205,7 @@ inline __m512i load_bf16_columns(const uint16_t *row, int half, int p0) {
         return _mm512_inserti64x4(_mm512_castsi256_si512(gate), up, 1);
     } else {
         (void)half;
+        (void)cols;
         return _mm512_loadu_si512(row + p0);
     }
 }
@@ -216,59 +244,63 @@ inline void bf16_pair_index(__m512i &lo, __m512i &hi) {
 }
 
 /// K pair row kp of pack columns p0 .. p0 + 31 of a bf16 weight stored
-/// [K, N], at d.
-template <bool Interleave>
+/// [K, N], at d; Tail as load_bf16_columns.
+template <bool Interleave, bool Tail>
 ZENDNNL_TARGET("avx512f,avx512bw")
 inline void pack_bf16_pair_row(const uint16_t *w, int K, size_t ldb, int half,
-        int p0, int kp, __m512i lo_idx, __m512i hi_idx, uint16_t *d) {
+        int p0, int kp, __m512i lo_idx, __m512i hi_idx, uint16_t *d, int cols) {
     const int k = kp * VNNI_PAIR;
     const uint16_t *row = w + static_cast<size_t>(k) * ldb;
-    const __m512i a = load_bf16_columns<Interleave>(row, half, p0);
+    const __m512i a = load_bf16_columns<Interleave, Tail>(row, half, p0, cols);
     const __m512i b = k + 1 < K
-            ? load_bf16_columns<Interleave>(row + ldb, half, p0)
+            ? load_bf16_columns<Interleave, Tail>(row + ldb, half, p0, cols)
             : _mm512_setzero_si512();
     _mm512_storeu_si512(d, _mm512_permutex2var_epi16(a, lo_idx, b));
     _mm512_storeu_si512(d + 32, _mm512_permutex2var_epi16(a, hi_idx, b));
 }
 
-/// The block of pack columns p0 .. p0 + 31 of a bf16 weight stored [K, N].
-template <bool Interleave>
+/// The block of pack columns p0 .. p0 + 31 of a bf16 weight stored [K, N];
+/// Tail as load_bf16_columns.
+template <bool Interleave, bool Tail>
 ZENDNNL_TARGET("avx512f,avx512bw")
-void pack_bf16_block_rows_of_k(
-        const uint16_t *w, int K, size_t ldb, int half, int p0, uint16_t *blk) {
+void pack_bf16_block_rows_of_k(const uint16_t *w, int K, size_t ldb, int half,
+        int p0, uint16_t *blk, int cols) {
     __m512i lo_idx, hi_idx;
     bf16_pair_index<Interleave>(lo_idx, hi_idx);
     const int k_pairs = native_k_groups(data_type_t::bf16, K);
     for (int kp = 0; kp < k_pairs; ++kp)
-        pack_bf16_pair_row<Interleave>(w, K, ldb, half, p0, kp, lo_idx, hi_idx,
-                blk + static_cast<size_t>(kp) * kBlockCols * VNNI_PAIR);
+        pack_bf16_pair_row<Interleave, Tail>(w, K, ldb, half, p0, kp, lo_idx,
+                hi_idx, blk + static_cast<size_t>(kp) * kBlockCols * VNNI_PAIR,
+                cols);
 }
 
-/// A bf16 weight stored [K, N] of at least kTileMinK rows packs by tiles of
-/// kTilePairs K pairs by kTileBlocks blocks.  A block reads one line of each
-/// of its rows, a row stride apart: a walk down that many rows loses the lines
-/// it fetches ahead (all in one cache set when the stride is a multiple of the
-/// page size).  A tile reads the segments of its rows in order and writes the
-/// part of each block whole.
-constexpr int kTilePairs = 8;
+/// A bf16 or f32 weight stored [K, N] of at least kTileMinK rows packs by
+/// tiles of kTileGroups K groups by kTileBlocks blocks.  A block reads one
+/// or two lines of each of its rows, a row stride apart: a walk down that
+/// many rows loses the lines it fetches ahead (all in one cache set when the
+/// stride is a multiple of the page size).  A tile reads the segments of its
+/// rows in order and writes the part of each block whole.
+constexpr int kTileGroups = 8;
 constexpr int kTileBlocks = 16;
 constexpr int kTileMinK = 1024;
 
-/// K pairs kp0 .. kp1 (at most kTilePairs) of blocks nb0 .. nb1 (at most
+/// K pairs kp0 .. kp1 (at most kTileGroups) of blocks nb0 .. nb1 (at most
 /// kTileBlocks) of a bf16 weight stored [K, N] into the layout at out, whose
 /// blocks are block_bytes long.
 template <bool Interleave>
 ZENDNNL_TARGET("avx512f,avx512bw")
 void pack_bf16_tile_rows_of_k(const uint16_t *w, int K, size_t ldb, int half,
         int kp0, int kp1, int nb0, int nb1, size_t block_bytes, uint8_t *out) {
-    alignas(64) uint16_t tile[kTileBlocks][kTilePairs * kBlockCols * VNNI_PAIR];
+    alignas(64)
+            uint16_t tile[kTileBlocks][kTileGroups * kBlockCols * VNNI_PAIR];
     __m512i lo_idx, hi_idx;
     bf16_pair_index<Interleave>(lo_idx, hi_idx);
     for (int kp = kp0; kp < kp1; ++kp)
         for (int nb = nb0; nb < nb1; ++nb)
-            pack_bf16_pair_row<Interleave>(w, K, ldb, half, nb * kBlockCols, kp,
-                    lo_idx, hi_idx,
-                    tile[nb - nb0] + (kp - kp0) * kBlockCols * VNNI_PAIR);
+            pack_bf16_pair_row<Interleave, false>(w, K, ldb, half,
+                    nb * kBlockCols, kp, lo_idx, hi_idx,
+                    tile[nb - nb0] + (kp - kp0) * kBlockCols * VNNI_PAIR,
+                    kBlockCols);
     const size_t part = static_cast<size_t>(kp1 - kp0) * kGroupRowBytes;
     for (int nb = nb0; nb < nb1; ++nb) {
         const uint8_t *s = reinterpret_cast<const uint8_t *>(tile[nb - nb0]);
@@ -279,30 +311,124 @@ void pack_bf16_tile_rows_of_k(const uint16_t *w, int K, size_t ldb, int half,
     }
 }
 
-/// Pack columns p0 .. p0 + 31 of a row of an s8 weight stored [K, N];
-/// interleaved, gate and up columns alternate.
-template <bool Interleave>
-ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
-inline __m256i load_s8_columns(const int8_t *row, int half, int p0) {
+/// The lanes below lanes (0 .. 16) of a 16-lane mask.
+inline __mmask16 lanes_below(int lanes) {
+    return lanes >= 16
+            ? static_cast<__mmask16>(0xFFFF)
+            : static_cast<__mmask16>((1u << std::max(0, lanes)) - 1u);
+}
+
+/// Pack columns p0 .. p0 + 31 of a row of an f32 weight stored [K, N], at
+/// d; interleaved, gate column i at pack column 2i and up column i at
+/// 2i + 1.  Tail: only the first cols pack columns (even when interleaved)
+/// hold weight columns; the others are zero.
+template <bool Interleave, bool Tail>
+ZENDNNL_TARGET("avx512f")
+inline void pack_f32_row(
+        const float *row, int half, int p0, float *d, int cols) {
     if constexpr (Interleave) {
-        const __m128i gate = _mm_loadu_si128(
-                reinterpret_cast<const __m128i *>(row + p0 / 2));
-        const __m128i up = _mm_loadu_si128(
-                reinterpret_cast<const __m128i *>(row + half + p0 / 2));
-        return _mm256_set_m128i(
-                _mm_unpackhi_epi8(gate, up), _mm_unpacklo_epi8(gate, up));
+        const __m512i lo_idx = _mm512_setr_epi32(
+                0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23);
+        const __m512i hi_idx = _mm512_setr_epi32(
+                8, 24, 9, 25, 10, 26, 11, 27, 12, 28, 13, 29, 14, 30, 15, 31);
+        __m512 gate, up;
+        if constexpr (Tail) {
+            const __mmask16 m = lanes_below(cols / 2);
+            gate = _mm512_maskz_loadu_ps(m, row + p0 / 2);
+            up = _mm512_maskz_loadu_ps(m, row + half + p0 / 2);
+        } else {
+            (void)cols;
+            gate = _mm512_loadu_ps(row + p0 / 2);
+            up = _mm512_loadu_ps(row + half + p0 / 2);
+        }
+        _mm512_storeu_ps(d, _mm512_permutex2var_ps(gate, lo_idx, up));
+        _mm512_storeu_ps(d + 16, _mm512_permutex2var_ps(gate, hi_idx, up));
+    } else if constexpr (Tail) {
+        (void)half;
+        _mm512_storeu_ps(d, _mm512_maskz_loadu_ps(lanes_below(cols), row + p0));
+        _mm512_storeu_ps(d + 16,
+                _mm512_maskz_loadu_ps(lanes_below(cols - 16), row + p0 + 16));
     } else {
         (void)half;
+        (void)cols;
+        _mm512_storeu_ps(d, _mm512_loadu_ps(row + p0));
+        _mm512_storeu_ps(d + 16, _mm512_loadu_ps(row + p0 + 16));
+    }
+}
+
+/// The block of pack columns p0 .. p0 + 31 of an f32 weight stored [K, N];
+/// Tail as pack_f32_row.
+template <bool Interleave, bool Tail>
+ZENDNNL_TARGET("avx512f")
+void pack_f32_block_rows_of_k(const float *w, int K, size_t ldb, int half,
+        int p0, float *blk, int cols) {
+    for (int k = 0; k < K; ++k)
+        pack_f32_row<Interleave, Tail>(w + static_cast<size_t>(k) * ldb, half,
+                p0, blk + static_cast<size_t>(k) * kBlockCols, cols);
+}
+
+/// Rows k0 .. k1 (at most kTileGroups) of blocks nb0 .. nb1 (at most
+/// kTileBlocks) of an f32 weight stored [K, N] into the layout at out, whose
+/// blocks are block_bytes long.
+template <bool Interleave>
+ZENDNNL_TARGET("avx512f")
+void pack_f32_tile_rows_of_k(const float *w, size_t ldb, int half, int k0,
+        int k1, int nb0, int nb1, size_t block_bytes, uint8_t *out) {
+    alignas(64) float tile[kTileBlocks][kTileGroups * kBlockCols];
+    for (int k = k0; k < k1; ++k)
+        for (int nb = nb0; nb < nb1; ++nb)
+            pack_f32_row<Interleave, false>(w + static_cast<size_t>(k) * ldb,
+                    half, nb * kBlockCols,
+                    tile[nb - nb0] + (k - k0) * kBlockCols, kBlockCols);
+    const size_t part = static_cast<size_t>(k1 - k0) * kGroupRowBytes;
+    for (int nb = nb0; nb < nb1; ++nb) {
+        const uint8_t *s = reinterpret_cast<const uint8_t *>(tile[nb - nb0]);
+        uint8_t *d = out + static_cast<size_t>(nb) * block_bytes
+                + static_cast<size_t>(k0) * kGroupRowBytes;
+        for (size_t i = 0; i < part; i += 64)
+            _mm512_storeu_si512(d + i, _mm512_load_si512(s + i));
+    }
+}
+
+/// Pack columns p0 .. p0 + 31 of a row of an s8 weight stored [K, N];
+/// interleaved, gate and up columns alternate.  Tail: only the first cols
+/// pack columns (cols below 32, even when interleaved) hold weight columns;
+/// the others read as zero.
+template <bool Interleave, bool Tail>
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
+inline __m256i load_s8_columns(const int8_t *row, int half, int p0, int cols) {
+    if constexpr (Interleave) {
+        __m128i gate, up;
+        if constexpr (Tail) {
+            const __mmask16 m = static_cast<__mmask16>((1u << (cols / 2)) - 1u);
+            gate = _mm_maskz_loadu_epi8(m, row + p0 / 2);
+            up = _mm_maskz_loadu_epi8(m, row + half + p0 / 2);
+        } else {
+            (void)cols;
+            gate = _mm_loadu_si128(
+                    reinterpret_cast<const __m128i *>(row + p0 / 2));
+            up = _mm_loadu_si128(
+                    reinterpret_cast<const __m128i *>(row + half + p0 / 2));
+        }
+        return _mm256_set_m128i(
+                _mm_unpackhi_epi8(gate, up), _mm_unpacklo_epi8(gate, up));
+    } else if constexpr (Tail) {
+        (void)half;
+        return _mm256_maskz_loadu_epi8((__mmask32 {1} << cols) - 1, row + p0);
+    } else {
+        (void)half;
+        (void)cols;
         return _mm256_loadu_si256(reinterpret_cast<const __m256i *>(row + p0));
     }
 }
 
 /// The block of pack columns p0 .. p0 + 31 of an s8 weight stored [K, N],
-/// its column sums after the quads.
-template <bool Interleave>
+/// its column sums after the quads; Tail as load_s8_columns (the zero
+/// columns sum to zero).
+template <bool Interleave, bool Tail>
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
-void pack_s8_block_rows_of_k(
-        const int8_t *w, int K, size_t ldb, int half, int p0, int8_t *blk) {
+void pack_s8_block_rows_of_k(const int8_t *w, int K, size_t ldb, int half,
+        int p0, int8_t *blk, int cols) {
     const int k_quads = native_k_groups(data_type_t::s8, K);
     __m256i sums[4];
     for (__m256i &s : sums)
@@ -311,10 +437,10 @@ void pack_s8_block_rows_of_k(
         const int k = kq * INT8_VNNI_GRP;
         __m256i r[4];
         for (int i = 0; i < 4; ++i)
-            r[i] = k + i < K
-                    ? load_s8_columns<Interleave>(
-                              w + static_cast<size_t>(k + i) * ldb, half, p0)
-                    : _mm256_setzero_si256();
+            r[i] = k + i < K ? load_s8_columns<Interleave, Tail>(
+                                       w + static_cast<size_t>(k + i) * ldb,
+                                       half, p0, cols)
+                             : _mm256_setzero_si256();
         // Byte pairs of rows 0 | 1 and 2 | 3, then the quads of columns
         // 0 .. 3 | 16 .. 19 (e), 4 .. 7 | 20 .. 23 (f), 8 .. 11 | 24 .. 27 (g)
         // and 12 .. 15 | 28 .. 31 (h) per 128-bit lane.
@@ -342,31 +468,54 @@ void pack_s8_block_rows_of_k(
         _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst + 32 * i), sums[i]);
 }
 
-template <bool TransB, bool Interleave>
+/// The block nb of a bf16 weight; Tail: the last block, of fewer than
+/// pack_nr columns of the weight (pack columns from N on are zero).
+template <bool TransB, bool Interleave, bool Tail>
 void pack_bf16_block(const uint16_t *w, int K, int N, size_t ldb, int pack_nr,
         int nb, uint16_t *blk) {
     const int p0 = nb * pack_nr;
+    const int cols = N - p0;
     if constexpr (TransB)
-        pack_block_rows_of_n<Interleave, false>(
+        pack_block_rows_of_n<Interleave, false, Tail>(
                 reinterpret_cast<const uint8_t *>(w), ldb * sizeof(uint16_t),
                 static_cast<size_t>(K) * sizeof(uint16_t),
                 native_k_groups(data_type_t::bf16, K), N / 2, p0,
-                reinterpret_cast<uint8_t *>(blk));
+                reinterpret_cast<uint8_t *>(blk), cols);
     else
-        pack_bf16_block_rows_of_k<Interleave>(w, K, ldb, N / 2, p0, blk);
+        pack_bf16_block_rows_of_k<Interleave, Tail>(
+                w, K, ldb, N / 2, p0, blk, cols);
 }
 
-template <bool TransB, bool Interleave>
+/// The block nb of an s8 weight; Tail as pack_bf16_block.
+template <bool TransB, bool Interleave, bool Tail>
 void pack_s8_block(const int8_t *w, int K, int N, size_t ldb, int pack_nr,
         int nb, int8_t *blk) {
     const int p0 = nb * pack_nr;
+    const int cols = N - p0;
     if constexpr (TransB)
-        pack_block_rows_of_n<Interleave, true>(
+        pack_block_rows_of_n<Interleave, true, Tail>(
                 reinterpret_cast<const uint8_t *>(w), ldb,
                 static_cast<size_t>(K), native_k_groups(data_type_t::s8, K),
-                N / 2, p0, reinterpret_cast<uint8_t *>(blk));
+                N / 2, p0, reinterpret_cast<uint8_t *>(blk), cols);
     else
-        pack_s8_block_rows_of_k<Interleave>(w, K, ldb, N / 2, p0, blk);
+        pack_s8_block_rows_of_k<Interleave, Tail>(
+                w, K, ldb, N / 2, p0, blk, cols);
+}
+
+/// The block nb of an f32 weight; Tail as pack_bf16_block.
+template <bool TransB, bool Interleave, bool Tail>
+void pack_f32_block(const float *w, int K, int N, size_t ldb, int pack_nr,
+        int nb, float *blk) {
+    const int p0 = nb * pack_nr;
+    const int cols = N - p0;
+    if constexpr (TransB)
+        pack_block_rows_of_n<Interleave, false, Tail>(
+                reinterpret_cast<const uint8_t *>(w), ldb * sizeof(float),
+                static_cast<size_t>(K) * sizeof(float), K, N / 2, p0,
+                reinterpret_cast<uint8_t *>(blk), cols);
+    else
+        pack_f32_block_rows_of_k<Interleave, Tail>(
+                w, K, ldb, N / 2, p0, blk, cols);
 }
 
 template <bool TransB, bool Interleave>
@@ -413,35 +562,71 @@ void pack_typed(data_type_t wei_dt, const void *weight, int K, int N,
         size_t ldb, int pack_nr, void *dst, int num_threads) {
     const size_t block_bytes = native_block_bytes(wei_dt, K, pack_nr);
     uint8_t *out = static_cast<uint8_t *>(dst);
+    // The whole blocks; then, on the calling thread, the block of the last
+    // N % pack_nr columns, padded with zero columns.
     const int n_blocks = N / pack_nr;
+    const bool tail = n_blocks * pack_nr < N;
+    uint8_t *tail_blk = out + static_cast<size_t>(n_blocks) * block_bytes;
     if (wei_dt == data_type_t::s8) {
         const int8_t *w = static_cast<const int8_t *>(weight);
         for_each_part(n_blocks, num_threads, [=](int nb) {
-            pack_s8_block<TransB, Interleave>(w, K, N, ldb, pack_nr, nb,
+            pack_s8_block<TransB, Interleave, false>(w, K, N, ldb, pack_nr, nb,
                     reinterpret_cast<int8_t *>(out + nb * block_bytes));
         });
+        if (tail)
+            pack_s8_block<TransB, Interleave, true>(w, K, N, ldb, pack_nr,
+                    n_blocks, reinterpret_cast<int8_t *>(tail_blk));
+        return;
+    }
+    if (wei_dt == data_type_t::f32) {
+        const float *w = static_cast<const float *>(weight);
+        if (!TransB && K >= kTileMinK) {
+            const int groups = ceil_div(n_blocks, kTileBlocks);
+            const int chunks = ceil_div(K, kTileGroups);
+            // Row chunks outer: the tiles of a thread take its rows in order.
+            for_each_part(groups * chunks, num_threads, [=](int t) {
+                const int g = t % groups;
+                const int c = t / groups;
+                pack_f32_tile_rows_of_k<Interleave>(w, ldb, N / 2,
+                        c * kTileGroups, std::min(K, (c + 1) * kTileGroups),
+                        g * kTileBlocks,
+                        std::min(n_blocks, (g + 1) * kTileBlocks), block_bytes,
+                        out);
+            });
+        } else {
+            for_each_part(n_blocks, num_threads, [=](int nb) {
+                pack_f32_block<TransB, Interleave, false>(w, K, N, ldb, pack_nr,
+                        nb, reinterpret_cast<float *>(out + nb * block_bytes));
+            });
+        }
+        if (tail)
+            pack_f32_block<TransB, Interleave, true>(w, K, N, ldb, pack_nr,
+                    n_blocks, reinterpret_cast<float *>(tail_blk));
         return;
     }
     const uint16_t *w = static_cast<const uint16_t *>(weight);
     if (!TransB && K >= kTileMinK) {
         const int k_pairs = native_k_groups(data_type_t::bf16, K);
         const int groups = ceil_div(n_blocks, kTileBlocks);
-        const int chunks = ceil_div(k_pairs, kTilePairs);
+        const int chunks = ceil_div(k_pairs, kTileGroups);
         // K pair chunks outer: the tiles of a thread take its rows in order.
         for_each_part(groups * chunks, num_threads, [=](int t) {
             const int g = t % groups;
             const int c = t / groups;
             pack_bf16_tile_rows_of_k<Interleave>(w, K, ldb, N / 2,
-                    c * kTilePairs, std::min(k_pairs, (c + 1) * kTilePairs),
+                    c * kTileGroups, std::min(k_pairs, (c + 1) * kTileGroups),
                     g * kTileBlocks, std::min(n_blocks, (g + 1) * kTileBlocks),
                     block_bytes, out);
         });
-        return;
+    } else {
+        for_each_part(n_blocks, num_threads, [=](int nb) {
+            pack_bf16_block<TransB, Interleave, false>(w, K, N, ldb, pack_nr,
+                    nb, reinterpret_cast<uint16_t *>(out + nb * block_bytes));
+        });
     }
-    for_each_part(n_blocks, num_threads, [=](int nb) {
-        pack_bf16_block<TransB, Interleave>(w, K, N, ldb, pack_nr, nb,
-                reinterpret_cast<uint16_t *>(out + nb * block_bytes));
-    });
+    if (tail)
+        pack_bf16_block<TransB, Interleave, true>(w, K, N, ldb, pack_nr,
+                n_blocks, reinterpret_cast<uint16_t *>(tail_blk));
 }
 
 template <bool TransB, bool Interleave>
@@ -463,7 +648,7 @@ void unpack_typed(const void *packed, int K, int N, size_t ldb, int pack_nr,
 size_t native_packed_bytes(data_type_t wei_dt, int K, int N, int pack_nr) {
     assert(native_layout_fits(wei_dt, K, N, pack_nr));
     const size_t bytes = native_block_bytes(wei_dt, K, pack_nr)
-            * static_cast<size_t>(N / pack_nr);
+            * static_cast<size_t>(native_padded_n(N, pack_nr) / pack_nr);
     return (bytes + 63) & ~size_t {63};
 }
 

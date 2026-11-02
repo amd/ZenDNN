@@ -18,6 +18,7 @@
 #define ZENDNNL_AOCL_POSTOP_HPP_
 
 #include "lowoha_operators/matmul/lowoha_common.hpp"
+#include "lowoha_operators/matmul/lowoha_quant_layout.hpp"
 
 #if ZENDNNL_DEPENDS_AOCLDLP
 #include "aocl_dlp.h"
@@ -42,9 +43,14 @@ inline void *get_void_ptr(const float &v) {
     return const_cast<void *>(static_cast<const void *>(&v));
 }
 
-// Helper function to compute number of elements from dimension vector.
-// Returns 1 for empty dims (per-tensor case) specific for DLP use case,
-// or product of all dims.
+// ── Counts and source scales of the AOCL-DLP sym-quant kernel ───────────
+
+/**
+ * @brief Element count of quant dims as the AOCL-DLP metadata states it.
+ *
+ * One for empty dims (per-tensor), else the product of the dims, unchecked:
+ * a non-positive or overflowing dimension wraps.
+ */
 inline size_t get_num_elements(const std::vector<int64_t> &dims) {
     if (dims.empty()) { return 1; }
     size_t count = 1;
@@ -54,31 +60,37 @@ inline size_t get_num_elements(const std::vector<int64_t> &dims) {
     return count;
 }
 
-// Collapsed per-token src at M==1: a per-token src scale over a single
-// token has one element, so `src_scale_nelems > 1` cannot distinguish it
-// from a per-tensor scale.  The weight-scale shape disambiguates — either
-// 2-D form ({G>1, N} per-group or {1, N} per-channel) is a scale layout
-// the sym-quant reorder can consume, since `sym_quant_group_size` maps
-// both to `K / dims[0]`.
-//
-// Per-channel was previously excluded, which silently dropped every
-// single-token DA8W8 expert out of sym-quant: at M==1 the first disjunct
-// of the sym-quant predicate is false and the {1, N} weight scale failed
-// `has_per_group_wei_scale`'s `dims[0] > 1`.  Those calls reordered into
-// the plain s8 blocked LRU instead, holding a second copy of every weight
-// that no warm targets — the majority of experts at decode.
-//
-// Callers must stay in lockstep: this drives `is_s8_sym_quant_scales` in
-// aocl_kernel.cpp (which reorder/GEMM runs) AND `is_sym_quant` in
-// aocl_postop.cpp (whether the scales are consumed natively by the
-// sym-quant GEMM or wired as post-op scale slots).  Disagreement applies
-// the scales twice or not at all.
+/**
+ * @brief A per-token source scale over a single token.
+ *
+ * At M == 1 a per-token scale has one element, so its count cannot tell it
+ * from a per-tensor scale.  The weight scale's layout does: either 2-D form
+ * ({G > 1, N} per-group or {1, N} per-channel) is one the sym-quant reorder
+ * consumes, since `sym_quant_group_size` maps both to `K / dims[0]`.
+ */
 inline bool src_scale_is_collapsed_per_token(
         const matmul_quantization_params_t &quant_params, int M, int N) {
     return quant_params.src_scale.buff != nullptr
             && get_num_elements(quant_params.src_scale.dims) == 1 && M == 1
             && (has_per_group_wei_scale(quant_params, N)
                     || has_per_channel_wei_scale(quant_params, N));
+}
+
+/**
+ * @brief The source scale of an s8 source selects the AOCL-DLP sym-quant
+ *        kernel: more than one element (per token or per group), or a
+ *        per-token scale collapsed to one token.
+ *
+ * src_count is `get_num_elements(quant_params.src_scale.dims)`.  The kernel
+ * choice (aocl_kernel.cpp) and the scale wiring (aocl_postop.cpp) both decide
+ * by this: a disagreement applies the scales twice or not at all.
+ */
+inline bool src_scale_selects_sym_quant(
+        const matmul_quantization_params_t &quant_params, size_t src_count,
+        int M, int N) {
+    return quant_count_granularity(src_count, M)
+            != quant_count_granularity_t::per_tensor
+            || src_scale_is_collapsed_per_token(quant_params, M, N);
 }
 
 #if ZENDNNL_DEPENDS_AOCLDLP

@@ -131,7 +131,7 @@ MatmulParamsAI GemvParameterGenerator::create_gemv_param(uint64_t n, uint64_t k,
     return param;
 }
 
-// KC path: N<=256, packed B fits in L2. These shapes hit bf16_gemv_direct.
+// KC path: N<=256, packed B fits in L2.
 void GemvParameterGenerator::add_kc_path_params(
         std::vector<MatmulParamsAI> &params) {
     static const uint64_t kc_n_vals[] = {1, 2, 4, 8, 16, 32, 64, 128, 192, 256};
@@ -262,8 +262,8 @@ void GemvParameterGenerator::add_kc_path_params(
     }
 }
 
-// Looper BRGEMM M=1 path: N>256. These go through bf16_brgemm_execute.
-void GemvParameterGenerator::add_looper_path_params(
+// M = 1 calls of N above 256.
+void GemvParameterGenerator::add_wide_n_params(
         std::vector<MatmulParamsAI> &params) {
     static const uint64_t lp_n_vals[] = {257, 384, 512, 768, 1024};
     static const uint64_t lp_k_vals[] = {32, 64, 128, 256, 512, 1024};
@@ -275,19 +275,19 @@ void GemvParameterGenerator::add_looper_path_params(
                 for (auto k : lp_k_vals) {
                     params.push_back(create_gemv_param(n, k, combo,
                             TestCategory::ACCURACY, po, false, true,
-                            "gemv_looper"));
+                            "gemv_wide_n"));
                 }
             }
         }
     }
-    // INT8 looper path: exercises int8_brgemm_execute for large N
+    // INT8 calls of N above 256
     for (auto combo : gemv_int8_combos) {
         for (const auto &po : postop_cfgs) {
             for (auto n : lp_n_vals) {
                 for (auto k : lp_k_vals) {
                     params.push_back(create_gemv_param(n, k, combo,
                             TestCategory::ACCURACY, po, false, true,
-                            "gemv_int8_looper"));
+                            "gemv_int8_wide_n"));
                 }
             }
         }
@@ -458,7 +458,7 @@ std::vector<MatmulParamsAI>
 GemvParameterGenerator::generate_comprehensive_test_suite() {
     std::vector<MatmulParamsAI> all;
     add_kc_path_params(all);
-    add_looper_path_params(all);
+    add_wide_n_params(all);
     add_random_stress_params(all);
     add_boundary_params(all);
     add_edge_case_params(all);
@@ -481,7 +481,7 @@ GemvParameterGenerator::generate_minimal_test_suite() {
                 TestCategory::ACCURACY, relu_po, false, true, "gemv_min"));
         minimal.push_back(create_gemv_param(256, 512, combo,
                 TestCategory::ACCURACY, no_postop, false, true, "gemv_min"));
-        // Looper path
+        // N above 256
         minimal.push_back(create_gemv_param(512, 256, combo,
                 TestCategory::ACCURACY, no_postop, false, true, "gemv_min"));
         minimal.push_back(create_gemv_param(1024, 64, combo,
@@ -507,7 +507,7 @@ GemvParameterGenerator::generate_category_specific_params(
     switch (category) {
         case TestCategory::ACCURACY:
             add_kc_path_params(params);
-            add_looper_path_params(params);
+            add_wide_n_params(params);
             add_random_stress_params(params);
             break;
         case TestCategory::BOUNDARY: add_boundary_params(params); break;
@@ -524,7 +524,7 @@ GemvParameterGenerator::generate_category_specific_params(
 // // maximize code coverage while minimizing test count. This includes:
 // //   - One test per data type combination (BF16 and INT8)
 // //   - One test per post-op type
-// //   - KC path and Looper path coverage
+// //   - KC path and N above 256 coverage
 // //   - Key boundary tests
 // //
 // // Returns:

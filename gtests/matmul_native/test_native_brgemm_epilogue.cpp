@@ -44,12 +44,14 @@
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_epilogue.hpp"
 #include "lowoha_operators/matmul/matmul_native/native_matmul.hpp"
+#include "matmul_native/native_brgemm_test_utils.hpp"
 #include "memory/memory_utils.hpp"
 
 namespace {
 
 namespace mm = zendnnl::lowoha::matmul;
 namespace nat = zendnnl::lowoha::matmul::native;
+namespace nt = native_brgemm_test;
 using zendnnl::common::bfloat16_t;
 using zendnnl::common::data_type_t;
 using zendnnl::common::float16_t;
@@ -348,11 +350,15 @@ inputs_t make_inputs(const problem_t &pb) {
     }
     in.dst0.init(pb.dst_dt, static_cast<int64_t>(pb.M) * pb.ldc());
     in.dst0.fill(rng, -2.0f, 2.0f);
+    // Past the columns the call reads: beta of a gated call reads N.
+    const int read
+            = pb.gated != gated_t::none && pb.beta != 0.0f ? pb.N : pb.n_out();
     for (int m = 0; m < pb.M; ++m)
-        for (int j = pb.n_out(); j < pb.ldc(); ++j)
+        for (int j = read; j < pb.ldc(); ++j)
             in.dst0.set(static_cast<int64_t>(m) * pb.ldc() + j, 99.0f);
 
-    make_postops(pb.po, pb.M, pb.n_out(), rng, in.bin, in.postops);
+    make_postops(pb.po, pb.M, pb.gated == gated_t::none ? pb.n_out() : pb.N,
+            rng, in.bin, in.postops);
     if (pb.dst_scale_dt != data_type_t::none) {
         in.dst_scale.init(pb.dst_scale_dt, pb.dst_scale_count);
         in.dst_scale.fill(rng, 4.0f, 16.0f);
@@ -370,25 +376,42 @@ inputs_t make_inputs(const problem_t &pb) {
     return in;
 }
 
-/// The f32 result before the store, [M][n_out].
+/// The f32 result before the store, [M][n_out].  A gated call takes beta,
+/// the bias and the post-ops on its [M][N] pre-activation, in weight column
+/// order, before the activation.
 std::vector<float> reference(const problem_t &pb, const inputs_t &in) {
     const int M = pb.M, N = pb.N, no = pb.n_out();
     const bool has_bias = pb.bias_dt != data_type_t::none;
     std::vector<float> out(static_cast<size_t>(M) * no);
+    // Pack column p of row m, before the post-ops.
     auto pre = [&](int m, int p) {
         float v = in.acc[static_cast<size_t>(m) * N + p];
         if (pb.alpha != 1.0f) v *= pb.alpha;
         if (pb.beta != 0.0f)
-            v += in.dst0.get(static_cast<int64_t>(m) * pb.ldc() + p) * pb.beta;
+            v += in.dst0.get(static_cast<int64_t>(m) * pb.ldc() + pb.logical(p))
+                    * pb.beta;
         if (has_bias) v += in.bias.get(pb.logical(p));
         return v;
     };
-    for (int m = 0; m < M; ++m)
-        for (int o = 0; o < no; ++o)
-            out[static_cast<size_t>(m) * no + o] = pb.gated == gated_t::none
-                    ? pre(m, o)
-                    : ref_gated(pb.gated, pre(m, 2 * o), pre(m, 2 * o + 1));
-    ref_postops(pb.po, in.postops, in.bin, M, no, out);
+    if (pb.gated == gated_t::none) {
+        for (int m = 0; m < M; ++m)
+            for (int o = 0; o < no; ++o)
+                out[static_cast<size_t>(m) * no + o] = pre(m, o);
+        ref_postops(pb.po, in.postops, in.bin, M, no, out);
+    } else {
+        std::vector<float> wide(static_cast<size_t>(M) * N);
+        for (int m = 0; m < M; ++m)
+            for (int p = 0; p < N; ++p)
+                wide[static_cast<size_t>(m) * N + pb.logical(p)] = pre(m, p);
+        ref_postops(pb.po, in.postops, in.bin, M, N, wide);
+        for (int m = 0; m < M; ++m)
+            for (int o = 0; o < no; ++o) {
+                const float *row = wide.data() + static_cast<size_t>(m) * N;
+                out[static_cast<size_t>(m) * no + o] = pb.interleaved
+                        ? ref_gated(pb.gated, row[o], row[N / 2 + o])
+                        : ref_gated(pb.gated, row[2 * o], row[2 * o + 1]);
+            }
+    }
     if (pb.int8 && pb.dst_scale_dt != data_type_t::none) {
         for (size_t i = 0; i < out.size(); ++i) {
             out[i] *= in.dst_scale.get(i % pb.dst_scale_count);
@@ -507,6 +530,11 @@ void check(const problem_t &pb, float tol = 3e-4f) {
             pb.bias_dt == data_type_t::none ? nullptr : in.bias.data(),
             dst.data(), pb.interleaved, ep);
     ASSERT_EQ(st, status_t::success);
+    // The tiles of a swiglu call store over pre-activation columns other
+    // tiles read for beta: beta reads a copy, as in native_brgemm_execute.
+    const buf_t beta_copy = in.dst0;
+    if (pb.gated == gated_t::swiglu_oai_mul && pb.beta != 0.0f)
+        ep.beta_src = beta_copy.data();
     run_tiles(pb, ep, in.acc);
 
     int bad = 0;
@@ -679,11 +707,10 @@ TEST(NativeBrgemmEpilogue, GatedWithPostOpsAndInt8Store) {
     pb.gated = gated_t::silu_and_mul;
     pb.interleaved = true;
     pb.bias_dt = data_type_t::bf16;
-    pb.po = {binary(post_op_type_t::binary_mul, data_type_t::bf16,
-                     {pb.M, pb.N / 2}),
+    pb.po = {
+            binary(post_op_type_t::binary_mul, data_type_t::bf16, {pb.M, pb.N}),
             eltwise(post_op_type_t::clip, -1.0f, 1.0f),
-            binary(post_op_type_t::binary_add, data_type_t::f32,
-                    {1, pb.N / 2})};
+            binary(post_op_type_t::binary_add, data_type_t::f32, {1, pb.N})};
     pb.tile_n = 64;
     check(pb, 1e-3f);
 
@@ -696,6 +723,92 @@ TEST(NativeBrgemmEpilogue, GatedWithPostOpsAndInt8Store) {
     pb.tile_n = 16;
     pb.seed = 9;
     check(pb);
+}
+
+// Gated calls with beta, post-ops and other destinations, as matmul_direct
+// defines them: beta reads the dst's N pre-activation columns (the gate and
+// up columns of an interleaved pack's pairs), the bias and the post-ops act
+// on the pre-activation, the activation and the store (requantized for an
+// INT8 u8 / s8 dst) follow; the columns past N / 2 stay as they were.
+TEST(NativeBrgemmEpilogue, GatedBetaPostOpsDestinations) {
+    SKIP_WITHOUT_AVX512();
+    const int M = 9, N = 128;
+    const std::vector<std::vector<po_spec_t>> chains = {{},
+            {eltwise(post_op_type_t::elu, 0.5f)},
+            {binary(post_op_type_t::binary_add, data_type_t::bf16, {M, N}),
+                    eltwise(post_op_type_t::square)},
+            {binary(post_op_type_t::binary_mul, data_type_t::f32, {1, N}),
+                    eltwise(post_op_type_t::abs),
+                    eltwise(post_op_type_t::clip, -1.5f, 1.5f)},
+            {eltwise(post_op_type_t::gelu_tanh),
+                    binary(post_op_type_t::binary_add, data_type_t::f32, {M, N},
+                            N + 8)}};
+    uint32_t seed = 500;
+    int variant = 0;
+    for (gated_t g : {gated_t::silu_and_mul, gated_t::gelu_and_mul,
+                 gated_t::swiglu_oai_mul})
+        for (data_type_t dst : {data_type_t::f32, data_type_t::bf16,
+                     data_type_t::f16, data_type_t::u8, data_type_t::s8})
+            for (size_t c = 0; c < chains.size(); ++c) {
+                const int v = variant++;
+                problem_t pb;
+                pb.M = M;
+                pb.N = N;
+                pb.gated = g;
+                pb.interleaved = g != gated_t::swiglu_oai_mul;
+                pb.dst_dt = dst;
+                // An INT8 call's alpha and beta are its tile's.
+                pb.int8 = (dst == data_type_t::u8 || dst == data_type_t::s8)
+                        && v % 2 == 0;
+                if (pb.int8) {
+                    pb.dst_scale_dt = data_type_t::f32;
+                    pb.dst_zp_dt = data_type_t::s32;
+                } else {
+                    pb.beta = v % 3 == 0 ? 0.5f : (v % 3 == 1 ? -1.0f : 0.0f);
+                    pb.alpha = v % 4 == 3 ? 1.5f : 1.0f;
+                }
+                pb.ldc_pad = N / 2 + 3;
+                pb.bias_dt = v % 2 ? data_type_t::f32 : data_type_t::bf16;
+                pb.po = chains[c];
+                pb.tile_n = v % 3 == 0 ? 16 : (v % 3 == 1 ? 32 : 64);
+                pb.tile_m = 4;
+                pb.threaded = v % 2 == 1;
+                pb.acc_lo = -4.0f;
+                pb.acc_hi = 4.0f;
+                pb.seed = seed++;
+                check(pb, 1e-3f);
+            }
+}
+
+// A gated call with a softmax, or with beta over a dst of fewer than N
+// columns, is not the epilogue's.
+TEST(NativeBrgemmEpilogue, GatedSoftmaxAndNarrowBetaUnimplemented) {
+    SKIP_WITHOUT_AVX512();
+    problem_t pb;
+    pb.N = 128;
+    pb.gated = gated_t::silu_and_mul;
+    pb.interleaved = true;
+    pb.po = {eltwise(post_op_type_t::softmax)};
+    {
+        inputs_t in = make_inputs(pb);
+        buf_t dst = in.dst0;
+        nat::native_epilogue_t ep;
+        EXPECT_EQ(nat::prepare_epilogue(make_desc(pb), make_params(pb, in),
+                          nullptr, dst.data(), pb.interleaved, ep),
+                status_t::unimplemented);
+    }
+    pb.po.clear();
+    pb.beta = 1.0f;
+    for (int pad : {0, pb.N / 2 - 1, pb.N / 2}) {
+        pb.ldc_pad = pad;
+        inputs_t in = make_inputs(pb);
+        buf_t dst = in.dst0;
+        nat::native_epilogue_t ep;
+        EXPECT_EQ(nat::prepare_epilogue(make_desc(pb), make_params(pb, in),
+                          nullptr, dst.data(), pb.interleaved, ep),
+                pad < pb.N / 2 ? status_t::unimplemented : status_t::success)
+                << "ldc " << pb.ldc();
+    }
 }
 
 TEST(NativeBrgemmEpilogue, AlphaBetaReferenceOrder) {
@@ -1014,15 +1127,15 @@ TEST(NativeBrgemmEpilogue, TileOffsetsWidthsAndScratchStride) {
             }
 }
 
+// A gated call does not take a softmax (GatedSoftmaxAndNarrowBetaUnimplemented).
 TEST(NativeBrgemmEpilogue, SoftmaxWholeRows) {
     SKIP_WITHOUT_AVX512();
     uint32_t seed = 500;
     for (bool threaded : {false, true})
-        for (gated_t g : {gated_t::none, gated_t::swiglu_oai_mul}) {
+        for (int n : {256, 128}) {
             problem_t pb;
             pb.M = 17;
-            pb.N = 256;
-            pb.gated = g;
+            pb.N = n;
             pb.tile_m = 6;
             pb.tile_n = 32;
             pb.threaded = threaded;
@@ -1219,10 +1332,15 @@ e2e_data_t make_e2e(const e2e_t &c) {
     }
     d.dst0.init(c.dst_dt, static_cast<int64_t>(c.M) * c.ldc());
     d.dst0.fill(rng, -1.0f, 1.0f);
+    // Past the columns the call reads: beta of a gated call reads N.
+    const int read = c.gated != gated_t::none && c.beta != 0.0f
+            ? std::min(c.N, c.ldc())
+            : c.n_out();
     for (int m = 0; m < c.M; ++m)
-        for (int j = c.n_out(); j < c.ldc(); ++j)
+        for (int j = read; j < c.ldc(); ++j)
             d.dst0.set(static_cast<int64_t>(m) * c.ldc() + j, 99.0f);
-    make_postops(c.po, c.M, c.n_out(), rng, d.bin, d.postops);
+    make_postops(c.po, c.M, c.gated == gated_t::none ? c.n_out() : c.N, rng,
+            d.bin, d.postops);
     return d;
 }
 
@@ -1399,6 +1517,11 @@ TEST(NativeBrgemmEpilogueE2E, PostOpsVsReference) {
 
 TEST(NativeBrgemmEpilogueE2E, GatedVsReferenceAndGroupCall) {
     SKIP_WITHOUT_AVX512_BF16();
+    // The one-op group call runs on the default route, which a process-wide
+    // algorithm replaces for the whole process.
+    const bool group_route = nt::default_route_reachable();
+    if (!group_route)
+        RecordProperty("group", "not_run (process-wide algorithm)");
     struct shape_t {
         int M, N, K;
     };
@@ -1426,7 +1549,7 @@ TEST(NativeBrgemmEpilogueE2E, GatedVsReferenceAndGroupCall) {
                 c.threads = v % 2 ? 8 : 1;
                 if (v % 5 == 2)
                     c.po = {binary(post_op_type_t::binary_mul,
-                                    data_type_t::bf16, {s.M, s.N / 2}),
+                                    data_type_t::bf16, {s.M, s.N}),
                             eltwise(post_op_type_t::clip, -0.5f, 0.5f)};
                 c.seed = seed++;
                 SCOPED_TRACE(c.str());
@@ -1437,6 +1560,11 @@ TEST(NativeBrgemmEpilogueE2E, GatedVsReferenceAndGroupCall) {
                 buf_t pre;
                 pre.init(data_type_t::f32, static_cast<int64_t>(c.M) * c.N);
                 ASSERT_EQ(run_reference(c, d, true, pre), status_t::success);
+                // The post-ops act on the pre-activation.
+                std::vector<float> wide(static_cast<size_t>(c.M) * c.N);
+                for (size_t i = 0; i < wide.size(); ++i)
+                    wide[i] = pre.get(static_cast<int64_t>(i));
+                ref_postops(c.po, d.postops, d.bin, c.M, c.N, wide);
                 const int I = c.N / 2;
                 std::vector<float> model(static_cast<size_t>(c.M) * I);
                 for (int m = 0; m < c.M; ++m)
@@ -1444,16 +1572,16 @@ TEST(NativeBrgemmEpilogueE2E, GatedVsReferenceAndGroupCall) {
                         const int gate = c.interleave() ? i : 2 * i;
                         const int up = c.interleave() ? I + i : 2 * i + 1;
                         model[static_cast<size_t>(m) * I + i] = ref_gated(g,
-                                pre.get(static_cast<int64_t>(m) * c.N + gate),
-                                pre.get(static_cast<int64_t>(m) * c.N + up));
+                                wide[static_cast<size_t>(m) * c.N + gate],
+                                wide[static_cast<size_t>(m) * c.N + up]);
                     }
-                ref_postops(c.po, d.postops, d.bin, c.M, I, model);
                 const float abs = 1e-4f + 2e-7f * c.K;
                 expect_native(c, d, native, [&](int m, int o) {
                     return model[static_cast<size_t>(m) * I + o];
                 }, 1e-4f, abs);
 
-                if (dst != data_type_t::bf16 || !c.po.empty()) continue;
+                if (dst != data_type_t::bf16 || !c.po.empty() || !group_route)
+                    continue;
                 buf_t group;
                 group.init(data_type_t::bf16, static_cast<int64_t>(c.M) * c.N);
                 ASSERT_EQ(run_group(c, d, group), status_t::success);
@@ -1509,11 +1637,146 @@ TEST(NativeBrgemmEpilogueE2E, RoutedGatedOutputLayouts) {
         }
 }
 
-// A gated call with post-ops, beta or an f16 dst keeps the one-op group
-// route's semantics: the native BRGEMM leaves it, and dst, untouched.
-TEST(NativeBrgemmEpilogueE2E, GatedCallTheGroupRouteDefinesIsDeclined) {
+/// The reference algorithm on the call without its gated act, into pre
+/// (f32 [M, N], ldc N) holding the dst's first N columns: alpha, beta, the
+/// bias and the post-ops of the pre-activation.
+status_t run_reference_pre(const e2e_t &c, const e2e_data_t &d, buf_t &pre) {
+    pre.init(data_type_t::f32, static_cast<int64_t>(c.M) * c.N);
+    for (int m = 0; m < c.M; ++m)
+        for (int n = 0; n < c.N; ++n)
+            pre.set(static_cast<int64_t>(m) * c.N + n,
+                    d.dst0.get(static_cast<int64_t>(m) * c.ldc() + n));
+    mm::matmul_params p = bf16_params(data_type_t::f32, c.bias_dt);
+    p.lowoha_algo = mm::matmul_algo_t::reference;
+    p.postop_ = d.postops;
+    mm::matmul_batch_params_t bp;
+    return mm::matmul_direct('r', c.transA, c.transB, c.M, c.N, c.K, c.alpha,
+            d.a.data(), c.lda(), d.w.data(), c.ldb(), d.bias_ptr(c), c.beta,
+            pre.data(), c.N, false, bp, p);
+}
+
+/// The one-op group call with the call's gated act, beta and post-ops, into
+/// dst (bf16 [M, N], ldc N) holding the dst's first N columns.
+status_t run_group_with(const e2e_t &c, const e2e_data_t &d, buf_t &dst) {
+    dst.init(data_type_t::bf16, static_cast<int64_t>(c.M) * c.N);
+    for (int m = 0; m < c.M; ++m)
+        for (int n = 0; n < c.N; ++n)
+            dst.set(static_cast<int64_t>(m) * c.N + n,
+                    d.dst0.get(static_cast<int64_t>(m) * c.ldc() + n));
+    mm::matmul_params p = bf16_params(data_type_t::bf16, c.bias_dt);
+    p.num_threads = c.threads;
+    p.postop_ = d.postops;
+    mm::grp_matmul_gated_act_params act;
+    act.act = static_cast<mm::grp_matmul_gated_act_t>(
+            static_cast<int>(c.gated));
+    return mm::group_matmul_direct({'r'}, {c.transA}, {c.transB}, {c.M}, {c.N},
+            {c.K}, {c.alpha}, {static_cast<const void *>(d.a.data())},
+            {c.lda()}, {static_cast<const void *>(d.w.data())}, {c.ldb()},
+            {d.bias_ptr(c)}, {c.beta}, {dst.data()}, {c.N}, {false}, {p},
+            nullptr, &act, nullptr);
+}
+
+// Gated calls with beta and post-ops through matmul_direct, as it defines
+// them: alpha, beta over the dst's N pre-activation columns, the bias and
+// the post-ops of the pre-activation, then the activation into the first
+// N / 2 columns.  The native BRGEMM serves them (the bits of the call on
+// its own); against the reference algorithm's pre-activation and the
+// activations of group_matmul_moe_act.cpp within their band, and against
+// the one-op group route, which rounds the pre-activation to the bf16 dst
+// before its activation pass, within that rounding (post-ops it also
+// applies), on the default route, which a process-wide algorithm replaces
+// for the whole process.
+TEST(NativeBrgemmEpilogueE2E, RoutedGatedBetaAndPostOps) {
     SKIP_WITHOUT_AVX512_BF16();
-    for (int variant = 0; variant < 3; ++variant) {
+    const bool group_route = nt::default_route_reachable();
+    if (!group_route)
+        RecordProperty("group", "not_run (process-wide algorithm)");
+    uint32_t seed = 3200;
+    int variant = 0;
+    for (gated_t g : {gated_t::silu_and_mul, gated_t::gelu_and_mul,
+                 gated_t::swiglu_oai_mul})
+        for (int k = 0; k < 6; ++k) {
+            const int v = variant++;
+            e2e_t c;
+            c.M = k == 5 ? 64 : 5;
+            c.N = 128;
+            c.K = k == 5 ? 300 : 96;
+            c.gated = g;
+            c.dst_dt = k % 2 ? data_type_t::f32 : data_type_t::bf16;
+            c.bias_dt = k % 3 == 0 ? data_type_t::f32 : data_type_t::bf16;
+            c.ldc_pad = c.N / 2 + (k == 1 ? 5 : 0);
+            c.threads = v % 2 ? 8 : 1;
+            c.transB = k == 1;
+            bool group_applies = true;
+            switch (k) {
+                case 0: c.beta = 0.5f; break;
+                case 1:
+                    c.beta = -1.0f;
+                    c.alpha = 0.5f;
+                    break;
+                case 2:
+                    c.po = {eltwise(post_op_type_t::gelu_erf),
+                            binary(post_op_type_t::binary_add,
+                                    data_type_t::bf16, {c.M, c.N})};
+                    break;
+                case 3:
+                    c.beta = 0.25f;
+                    c.po = {binary(post_op_type_t::binary_mul, data_type_t::f32,
+                                    {1, c.N}),
+                            eltwise(post_op_type_t::relu)};
+                    break;
+                case 4:
+                    c.po = {eltwise(post_op_type_t::elu, 0.5f)};
+                    group_applies = false;
+                    break;
+                default:
+                    c.beta = 1.0f;
+                    c.po = {eltwise(post_op_type_t::leaky_relu, 0.1f)};
+                    break;
+            }
+            c.seed = seed++;
+            SCOPED_TRACE(c.str());
+            e2e_data_t d = make_e2e(c);
+            buf_t native = d.dst0;
+            ASSERT_EQ(run_routed(c, d, native), status_t::success);
+            buf_t direct = d.dst0;
+            ASSERT_EQ(run_native(c, d, direct), status_t::success);
+            EXPECT_EQ(native.bytes, direct.bytes)
+                    << "not served by the native BRGEMM";
+
+            buf_t pre;
+            ASSERT_EQ(run_reference_pre(c, d, pre), status_t::success);
+            const int I = c.N / 2;
+            std::vector<float> model(static_cast<size_t>(c.M) * I);
+            for (int m = 0; m < c.M; ++m)
+                for (int i = 0; i < I; ++i) {
+                    const int gate = c.interleave() ? i : 2 * i;
+                    const int up = c.interleave() ? I + i : 2 * i + 1;
+                    model[static_cast<size_t>(m) * I + i] = ref_gated(g,
+                            pre.get(static_cast<int64_t>(m) * c.N + gate),
+                            pre.get(static_cast<int64_t>(m) * c.N + up));
+                }
+            expect_native(c, d, native, [&](int m, int o) {
+                return model[static_cast<size_t>(m) * I + o];
+            }, 1e-4f, 1e-4f + 2e-7f * c.K);
+
+            if (c.dst_dt != data_type_t::bf16 || !group_applies || !group_route)
+                continue;
+            buf_t group;
+            ASSERT_EQ(run_group_with(c, d, group), status_t::success);
+            expect_native(c, d, native, [&](int m, int o) {
+                return group.get(static_cast<int64_t>(m) * c.N + o);
+            }, 0.05f, 0.02f);
+        }
+}
+
+// A gated call with post-ops, beta over a dst of N columns or more, or an
+// f16 dst is the native BRGEMM's, with the bits of the call on its own; with
+// beta over a narrower dst (which the one-op group route refuses too) it
+// returns unimplemented, and dst untouched.
+TEST(NativeBrgemmEpilogueE2E, GatedCallsTheNativeBrgemmServes) {
+    SKIP_WITHOUT_AVX512_BF16();
+    for (int variant = 0; variant < 4; ++variant) {
         e2e_t c;
         c.M = 5;
         c.N = 128;
@@ -1521,7 +1784,8 @@ TEST(NativeBrgemmEpilogueE2E, GatedCallTheGroupRouteDefinesIsDeclined) {
         c.gated = gated_t::silu_and_mul;
         c.dst_dt = variant == 2 ? data_type_t::f16 : data_type_t::bf16;
         if (variant == 0) c.po = {eltwise(post_op_type_t::relu)};
-        if (variant == 1) c.beta = 0.5f;
+        if (variant == 1 || variant == 3) c.beta = 0.5f;
+        if (variant == 1) c.ldc_pad = c.N / 2;
         c.seed = 3100 + variant;
         SCOPED_TRACE(c.str());
         e2e_data_t d = make_e2e(c);
@@ -1529,13 +1793,23 @@ TEST(NativeBrgemmEpilogueE2E, GatedCallTheGroupRouteDefinesIsDeclined) {
         mm::matmul_params p = bf16_params(c.dst_dt, c.bias_dt);
         p.postop_ = d.postops;
         p.lowoha_algo = mm::matmul_algo_t::native_brgemm;
+        p.weight_cache_type = 0;
         status_t st = status_t::success;
-        EXPECT_FALSE(nat::native_layout_matmul('r', c.transA, c.transB, c.M,
-                c.N, c.K, c.alpha, d.a.data(), c.lda(), d.w.data(), c.ldb(),
-                d.bias_ptr(c), c.beta, dst.data(), c.ldc(), true, 1, c.threads,
-                c.gated, p, nullptr, st));
-        for (int64_t i = 0; i < static_cast<int64_t>(c.M) * c.ldc(); ++i)
-            ASSERT_EQ(dst.get(i), d.dst0.get(i)) << "element " << i;
+        const bool served = nat::native_layout_matmul('r', c.transA, c.transB,
+                c.M, c.N, c.K, c.alpha, d.a.data(), c.lda(), d.w.data(),
+                c.ldb(), d.bias_ptr(c), c.beta, dst.data(), c.ldc(), true, 1,
+                c.threads, c.gated, p, nullptr, st);
+        EXPECT_TRUE(served);
+        if (variant == 3) {
+            EXPECT_EQ(st, status_t::unimplemented);
+            for (int64_t i = 0; i < static_cast<int64_t>(c.M) * c.ldc(); ++i)
+                ASSERT_EQ(dst.get(i), d.dst0.get(i)) << "element " << i;
+            continue;
+        }
+        EXPECT_EQ(st, status_t::success);
+        buf_t direct = d.dst0;
+        ASSERT_EQ(run_native(c, d, direct), status_t::success);
+        EXPECT_EQ(dst.bytes, direct.bytes);
     }
 }
 

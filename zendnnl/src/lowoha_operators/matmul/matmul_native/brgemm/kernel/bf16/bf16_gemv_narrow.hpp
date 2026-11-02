@@ -74,7 +74,7 @@ inline constexpr int kBf16GemvNarrowMaxN = 4;
 ///   * `N`   — 1, 2, 3, or 4.  Values outside this range violate the
 ///             kernel's contract; higher-N callers should use
 ///             `bf16_gemv_bkc` instead (runtime dispatch is a tight
-///             switch in `bf16_gemv_direct`).
+///             choice in `bf16_gemv_choice`).
 ///   * `C_bf16` / `C_fp32` — exactly one non-null.  `dst_is_bf16`
 ///             selects which is written.
 ///   * `bias_f` — optional FP32 bias row, N elements.  `nullptr` skips.

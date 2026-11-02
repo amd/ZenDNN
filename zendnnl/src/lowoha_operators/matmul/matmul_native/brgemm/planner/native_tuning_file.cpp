@@ -74,7 +74,8 @@ static_assert(std::size(kMatchKeys) == kNumericKeys + kNamedKeys + kFlagKeys,
         "every match key has a kind");
 
 constexpr auto &kDtypeNames = kNativeDtypeNames;
-const data_type_t kDtypeTypes[] = {data_type_t::bf16, data_type_t::s8};
+const data_type_t kDtypeTypes[]
+        = {data_type_t::bf16, data_type_t::s8, data_type_t::f32};
 constexpr auto &kSrcNames = kNativeSrcNames;
 const data_type_t kSrcTypes[] = {
         data_type_t::bf16, data_type_t::f32, data_type_t::u8, data_type_t::s8};
@@ -651,7 +652,7 @@ int hw_key(const std::string &name) {
 /// The physical cores of the L3 domain the plan uses on hw.
 int plan_domain_cores(const native_hw_t &hw) {
     const UarchParams u = native_plan_uarch(hw);
-    return u.l3_domain_cores > 0 ? u.l3_domain_cores : u.ccx_cores;
+    return u.l3_domain_cores > 0 ? u.l3_domain_cores : u.family_l3_cores;
 }
 
 /// hw's value of numeric key k; -1 when hw does not report it.
@@ -668,7 +669,7 @@ int64_t hw_field(const native_hw_t &hw, int k) {
             v = hw.uarch.l2_detected ? hw.uarch.l2_bytes / 1024 : 0;
             break;
         case hk_l3_kib:
-            v = hw.uarch.l3_detected ? hw.uarch.l3_bytes_per_ccd / 1024 : 0;
+            v = hw.uarch.l3_detected ? hw.uarch.l3_domain_bytes / 1024 : 0;
             break;
         case hk_l3_cores: v = plan_domain_cores(hw); break;
         case hk_smt: v = hw.smt; break;
@@ -877,10 +878,11 @@ public:
         const uint32_t at = static_cast<uint32_t>(entries_.size());
         int64_t n = 0;
         int64_t k = 0;
+        // The one dtype of a mask of a single name: its index.
         const uint8_t d = m.named[0];
-        if ((d == 1 || d == 2) && exact(m.numeric[1], n)
-                && exact(m.numeric[2], k))
-            indexed_[index_key(d == 1 ? 0 : 1, n, k)].push_back(at);
+        const int dtype = d == 1 ? 0 : (d == 2 ? 1 : (d == 4 ? 2 : -1));
+        if (dtype >= 0 && exact(m.numeric[1], n) && exact(m.numeric[2], k))
+            indexed_[index_key(dtype, n, k)].push_back(at);
         else
             others_.push_back(at);
         entries_.push_back(std::move(e));
@@ -889,9 +891,10 @@ public:
     size_t size() const { return entries_.size(); }
 
 private:
+    /// n and k below 2^31, dtype below 4.
     static uint64_t index_key(int dtype, int64_t n, int64_t k) {
         return (static_cast<uint64_t>(n) << 33)
-                | (static_cast<uint64_t>(k) << 1)
+                | (static_cast<uint64_t>(k) << 2)
                 | static_cast<uint64_t>(dtype);
     }
 
@@ -946,7 +949,7 @@ struct feature_hw_t {
 
 void problem_features(
         const native_problem_t &p, const feature_hw_t &hw, double *f) {
-    const double esz = p.bf16() ? 2.0 : 1.0;
+    const double esz = p.f32() ? 4.0 : (p.bf16() ? 2.0 : 1.0);
     const double m = p.M, n = p.N, k = p.K;
     const double threads = p.threads, pack_nr = p.pack_nr;
     const int dst = type_index(kDstTypes, p.dst_dt);
@@ -982,7 +985,7 @@ class rules_source_t final : public native_config_source_t {
 public:
     explicit rules_source_t(const native_hw_t &hw) {
         hw_.l2 = hw.uarch.l2_bytes;
-        hw_.l3 = hw.uarch.l3_bytes_per_ccd;
+        hw_.l3 = hw.uarch.l3_detected ? hw.uarch.l3_domain_bytes : 0;
         hw_.l3_threads = hw.l3_domain_threads;
         hw_.smt = hw.smt;
         hw_.cores = hw.physical_cores;

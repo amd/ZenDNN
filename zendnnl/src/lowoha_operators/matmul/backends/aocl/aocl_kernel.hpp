@@ -303,8 +303,8 @@ void woqReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
 /**
  * @brief Execute single matrix multiplication using AOCL DLP backend
  *
- * Performs C = alpha * op(A) * op(B) + beta * C using AMD's optimized
- * AOCL library with support for post-operations and bias addition.
+ * Performs C = alpha * op(A) * op(B) + beta * C using the AOCL DLP
+ * library with support for post-operations and bias addition.
  * Automatically dispatches to appropriate data type specializations.
  *
  * @param layout Memory layout ('r' for row-major, 'c' for column-major)

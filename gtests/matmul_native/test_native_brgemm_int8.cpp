@@ -776,12 +776,10 @@ TEST(NativeBrgemmInt8Tile, AlphaBetaFollowReferenceOrder) {
                          data_type_t::f16, data_type_t::s32}) {
                 const int K = (variant % 2) ? 63 : 100;
                 const int pack_nr = (variant % 3) ? 32 : 64;
+                // An interleaved pack (a gated activation) reads C at the
+                // columns its pack columns hold.
                 const bool interleave = (variant % 4) == 1;
-                // An interleaved pack comes only with a gated activation,
-                // which no call with beta takes: alpha alone, other than 1.
-                const AlphaBeta ab = interleave
-                        ? AlphaBeta {variant % 8 == 1 ? 0.5f : -1.25f, 0.0f}
-                        : coeffs[variant % 5];
+                const AlphaBeta ab = coeffs[variant % 5];
                 ++variant;
                 const int M = 13, N = 128, ldc = N + 3;
                 std::mt19937 rng(static_cast<uint32_t>(variant));
@@ -1826,7 +1824,173 @@ std::vector<E2ECase> e2e_ref_cases() {
         f.f32_src = true;
         v.push_back(f);
     }
+    // Weights of N not a multiple of 32, whose last column tile reads and
+    // stores only the columns below N: integer destinations with the
+    // reference's roundings, the dequantization's bias, alpha / beta in the
+    // reference order, and dynamically quantized sources.
+    for (int N : {1, 17, 40, 100}) {
+        for (data_type_t dst : {u8, s8, s32})
+            v.push_back({7, N, 100, E2ESrc::static_u8, dst, f32, N % 2 == 0,
+                    false, 1.0f, 0.0f, dst != s32});
+        v.push_back({5, N, 64, E2ESrc::static_s8_row_zp, s8, f32, true, false,
+                0.5f, 1.5f});
+        v.push_back({33, N, 200, E2ESrc::dyn_sym, f32, bf16, false});
+        v.push_back({1, N, 64, E2ESrc::dyn_asym, bf16, f32, true});
+        v.push_back({13, N, 128, E2ESrc::static_u8, f32, none, false, true,
+                0.75f, 1.25f});
+    }
     return v;
+}
+
+// Gated INT8 calls with per-tensor source and per-channel weight scales
+// through matmul_direct under ALGO 11, as it defines them: alpha, beta (over
+// the dst's N pre-activation columns), the bias and the post-ops act on the
+// pre-activation in the reference algorithm's order, then the activation
+// and the store, requantized into a u8 / s8 dst.  The native BRGEMM serves
+// them, with the bits of the call on its own; against the reference
+// algorithm's pre-activation and the activations of group_matmul_moe_act.cpp
+// within their band (one step for an integer dst).
+TEST(NativeBrgemmInt8Gated, PerChannelMatchesTheReference) {
+    NATIVE_BRGEMM_INT8_SKIP_IF_NO_VNNI();
+    mm::clear_matmul_weight_caches();
+    const auto bf16 = data_type_t::bf16, f32 = data_type_t::f32,
+               u8 = data_type_t::u8, s8 = data_type_t::s8,
+               none = data_type_t::none;
+    const std::vector<E2ECase> cases = {{16, 256, 512, E2ESrc::dyn_sym, bf16,
+                                                f32, false, false, 1.0f, 0.5f},
+            {7, 128, 256, E2ESrc::static_u8, u8, bf16, false, false, 1.0f, 0.0f,
+                    true},
+            {9, 128, 200, E2ESrc::dyn_sym, f32, none, true, false, 0.5f, -1.0f},
+            {5, 128, 128, E2ESrc::static_u8, s8, f32, false, false, 1.0f, 1.0f},
+            {33, 256, 300, E2ESrc::static_u8, bf16, f32, false, true, 2.0f,
+                    0.25f, true}};
+    uint32_t seed = 4100;
+    for (mm::matmul_gated_act_t act : {mm::matmul_gated_act_t::silu_and_mul,
+                 mm::matmul_gated_act_t::gelu_and_mul,
+                 mm::matmul_gated_act_t::swiglu_oai_mul})
+        for (const E2ECase &c : cases) {
+            SCOPED_TRACE(::testing::Message()
+                    << "act " << static_cast<int>(act) << " M " << c.M
+                    << " dst " << dst_name(c.dst_dt) << " beta " << c.beta);
+            E2EProblem pb = make_e2e(c, seed++);
+            nbt::call_t &call = pb.call;
+            call.gated = act;
+            call.ldc = c.N;
+            const int I = c.N / 2;
+            auto dsts = e2e_dsts(c, seed, 2);
+
+            // The call through matmul_direct, then on its own.
+            {
+                const nbt::algo_pin_t pin(matmul_algo_t::native_brgemm);
+                nbt::call_t routed = call;
+                routed.dst = dsts[0].get();
+                ASSERT_EQ(nbt::run_matmul(routed), status_t::success);
+                EXPECT_GE(nbt::native_layouts(pb.wei.get()), 1u)
+                        << "not served by the native BRGEMM";
+            }
+            {
+                nat::GemmDescriptor d;
+                d.M = c.M;
+                d.N = c.N;
+                d.K = c.K;
+                d.lda = call.lda_or_tight();
+                d.ldb = call.ldb_or_tight();
+                d.ldc = c.N;
+                d.transA = call.transA;
+                d.transB = call.transB;
+                d.alpha = c.alpha;
+                d.beta = c.beta;
+                d.src_dt = call.params.dtypes.src;
+                d.wei_dt = data_type_t::s8;
+                d.dst_dt = c.dst_dt;
+                d.bias_dt = c.bias_dt;
+                d.src_elem_size = nbt::dt_bytes(d.src_dt);
+                d.wei_elem_size = 1;
+                d.dst_elem_size = nbt::dt_bytes(d.dst_dt);
+                d.bias = call.bias;
+                d.is_weights_const = true;
+                d.num_threads = call.params.num_threads;
+                d.gated_act = act;
+                nat::native_weight_ref_t ref;
+                ref.pack_nr = 32;
+                ref.weight = call.wei;
+                ref.weight_cache_mode = 0;
+                ref.interleave_split_halves
+                        = act != mm::matmul_gated_act_t::swiglu_oai_mul;
+                ASSERT_EQ(nat::native_brgemm_execute(d, ref, call.src,
+                                  dsts[1].get(), call.bias, call.params),
+                        status_t::success);
+            }
+            EXPECT_TRUE(nbt::within_steps(dsts[0].get(), c.N, dsts[1].get(),
+                    c.N, c.dst_dt, c.M, c.N, 0))
+                    << "vs the call on its own";
+
+            // The reference algorithm's pre-activation, f32 [M, N] holding
+            // the dst's values for beta, without the dst scale and zero
+            // point.
+            const size_t elems = static_cast<size_t>(c.M) * c.N;
+            const nbt::buffer_t init = nbt::random_buffer(
+                    c.dst_dt, elems, seed + 9, -20.0f, 20.0f);
+            nbt::buffer_t pre = nbt::make_buffer(elems * 4);
+            for (size_t i = 0; i < elems; ++i)
+                nbt::store_f32(pre.get(), f32, i,
+                        nbt::load_f32(init.get(), c.dst_dt, i));
+            nbt::call_t r = call;
+            r.gated = mm::matmul_gated_act_t::none;
+            r.params.dtypes.dst = f32;
+            r.params.quant_params.dst_scale = {};
+            r.params.quant_params.dst_zp = {};
+            ASSERT_EQ(nbt::run_reference(r, pb.wei.get(), pre.get()),
+                    status_t::success);
+            std::vector<float> out(static_cast<size_t>(c.M) * I);
+            nbt::gated_act_ref(pre.as<float>(), c.M, c.N, act, out.data());
+            const auto &qp = call.params.quant_params;
+            std::vector<float> want(static_cast<size_t>(c.M) * I);
+            for (size_t i = 0; i < want.size(); ++i) {
+                float v = out[i];
+                if (qp.dst_scale.buff != nullptr) {
+                    v = v
+                            * nbt::load_f32(
+                                    qp.dst_scale.buff, qp.dst_scale.dt, 0);
+                    v = v + nbt::load_f32(qp.dst_zp.buff, qp.dst_zp.dt, 0);
+                }
+                want[i] = v;
+            }
+            size_t bad = 0;
+            for (int m = 0; m < c.M; ++m)
+                for (int i = 0; i < I; ++i) {
+                    const float g = nbt::load_f32(dsts[0].get(), c.dst_dt,
+                            static_cast<size_t>(m) * c.N + i);
+                    const float w = want[static_cast<size_t>(m) * I + i];
+                    float tol = 3e-4f + 3e-4f * std::fabs(w);
+                    if (c.dst_dt == bf16) tol += std::fabs(w) / 256;
+                    if (c.dst_dt == u8 || c.dst_dt == s8) {
+                        const float lo = c.dst_dt == u8 ? 0.0f : -128.0f;
+                        const float hi = c.dst_dt == u8 ? 255.0f : 127.0f;
+                        if (std::fabs(g
+                                    - std::nearbyint(
+                                            std::min(std::max(w, lo), hi)))
+                                        > 1.0f
+                                && bad++ == 0)
+                            ADD_FAILURE() << "(" << m << ", " << i << ") got "
+                                          << g << " want " << w;
+                        continue;
+                    }
+                    if (!(std::fabs(g - w) <= tol) && bad++ == 0)
+                        ADD_FAILURE() << "(" << m << ", " << i << ") got " << g
+                                      << " want " << w;
+                }
+            EXPECT_EQ(bad, 0u);
+            // The columns past N / 2 keep the dst's values.
+            for (int m = 0; m < c.M; ++m)
+                for (int n = I; n < c.N; ++n) {
+                    const size_t at = static_cast<size_t>(m) * c.N + n;
+                    ASSERT_EQ(nbt::load_f32(dsts[0].get(), c.dst_dt, at),
+                            nbt::load_f32(init.get(), c.dst_dt, at))
+                            << "(" << m << ", " << n << ")";
+                }
+            mm::clear_matmul_weight_caches();
+        }
 }
 
 INSTANTIATE_TEST_SUITE_P(NativeBrgemmInt8, NativeBrgemmInt8E2EVsRef,
@@ -1938,7 +2102,13 @@ TEST(NativeBrgemmInt8Status, UnservedCallsReportUnimplemented) {
     p.quant_params.wei_scale.buff = scale.data();
     p.quant_params.wei_scale.dt = data_type_t::f32;
     p.quant_params.wei_scale.dims = {2, N};
-    EXPECT_EQ(prepare(desc, p, src.data(), call), status_t::unimplemented);
+    EXPECT_EQ(prepare(desc, p, src.data(), call), status_t::success)
+            << "a u8 source with per-group weight scales";
+    p.quant_params.src_scale.buff = scale.data();
+    p.quant_params.src_scale.dt = data_type_t::f32;
+    p.quant_params.src_scale.dims = {M, 1};
+    EXPECT_EQ(prepare(desc, p, src.data(), call), status_t::unimplemented)
+            << "a u8 source per token with per-group weight scales";
 
     p = good();
     p.dtypes.wei = data_type_t::s4;
@@ -1963,11 +2133,11 @@ TEST(NativeBrgemmInt8Status, UnservedCallsReportUnimplemented) {
     auto gated_with_beta = gated;
     gated_with_beta.beta = 0.5f;
     EXPECT_EQ(prepare(gated_with_beta, good(), src.data(), call),
-            status_t::unimplemented)
+            status_t::success)
             << "a gated activation with beta != 0";
     EXPECT_EQ(nat::check_int8_call(gated_with_beta, good(),
                       nat::decide_int8_call(gated_with_beta, good(), nullptr)),
-            status_t::unimplemented);
+            status_t::success);
     EXPECT_EQ(prepare(gated, good(), src.data(), call), status_t::success);
     EXPECT_EQ(prepare(with_beta, good(), src.data(), call), status_t::success);
 
@@ -2065,7 +2235,7 @@ TEST(NativeBrgemmInt8Decision, MatchesTheRules) {
 
                         nat::native_int8_call_t call;
                         const status_t st = prepare(desc, p, src.data(), call);
-                        if (group && dst != f32 && dst != bf16) {
+                        if (group && dst == f16) {
                             EXPECT_EQ(st, status_t::unimplemented);
                             continue;
                         }

@@ -24,6 +24,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <string>
 #include <utility>
 #include <vector>
 #include <condition_variable>
@@ -430,13 +431,17 @@ void refresh_rewritten_layouts_locked(const void *weight, bool done) {
 
 void log_pack(const native_raw_weight_t &w, int32_t wc, const char *where) {
     static const bool s_log = apilog_verbose_enabled();
-    if (s_log)
-        apilog_verbose("[MATMUL.NATIVE_BRGEMM PACK] weight=", w.weight,
-                " wei=", dtype_info(w.wei_dt), " K=", w.K, " N=", w.N,
-                " ldb=", w.ldb, " transB=", w.transB ? 1 : 0,
-                " interleave=", w.interleave_split_halves ? 1 : 0,
-                " pack_nr=", w.pack_nr, " wc=", wc, " into=", where,
-                w.aocl_blocked ? " from=aocl_blocked" : "");
+    if (!s_log) return;
+    // A layout of padded columns names its width.
+    const std::string padded = w.N % w.pack_nr != 0
+            ? " padded_n=" + std::to_string(native_padded_n(w.N, w.pack_nr))
+            : std::string();
+    apilog_verbose("[MATMUL.NATIVE_BRGEMM PACK] weight=", w.weight,
+            " wei=", dtype_info(w.wei_dt), " K=", w.K, " N=", w.N,
+            " ldb=", w.ldb, " transB=", w.transB ? 1 : 0,
+            " interleave=", w.interleave_split_halves ? 1 : 0,
+            " pack_nr=", w.pack_nr, " wc=", wc, " into=", where,
+            w.aocl_blocked ? " from=aocl_blocked" : "", padded);
 }
 
 using exclusive_lock_t = std::unique_lock<std::shared_mutex>;
@@ -829,12 +834,14 @@ lookup_t find_layout_exclusive(const layout_request_t &r, native_image_t &image,
 /// Weight cache mode 2 on a buffer with no image: rewrites it in place when
 /// its layout fits it (an AOCL prepack, or a contiguous bf16 weight).  done
 /// is set when the buffer is rewritten; a failed AOCL rewrite returns its
-/// status, a failed bf16 one leaves r to the out-of-place pack.  With the
-/// mutex held exclusively (rewrite_in_place).
+/// status, a failed bf16 one leaves r to the out-of-place pack.  A layout of
+/// padded columns (N not a multiple of pack_nr) is never written in place.
+/// With the mutex held exclusively (rewrite_in_place).
 status_t rewrite_if_fits(exclusive_lock_t &lock, const layout_request_t &r,
         bool &done, native_layout_t &out) {
     const native_raw_weight_t &w = r.w;
     done = false;
+    if (w.N % w.pack_nr != 0) return status_t::success;
     const size_t used = native_block_bytes(w.wei_dt, w.K, w.pack_nr)
             * static_cast<size_t>(w.N / w.pack_nr);
     const size_t plain = static_cast<size_t>(w.K) * w.N
@@ -1040,6 +1047,26 @@ bool native_weight_find_image(
 bool native_weight_packed_in_place(const void *weight, size_t owned_bytes) {
     native_image_check_t found;
     return native_weight_find_image(weight, owned_bytes, found);
+}
+
+native_raw_read_t native_weight_read_raw(const void *weight, size_t extent,
+        size_t owned_bytes, const std::function<void()> &read) {
+    native_cache_state_t &state = cache_state();
+    exclusive_lock_t lock(state.mutex);
+    state.packed.wait(lock, [&] { return state.packing.count(weight) == 0; });
+    if (state.image_count.load(std::memory_order_relaxed) != 0) {
+        bool interior = false, after = false;
+        if (live_image_locked(weight, extent, std::max(extent, owned_bytes),
+                    interior, after)
+                        != nullptr
+                || after)
+            return native_raw_read_t::image;
+    }
+    packing_t packing {state};
+    if (!packing.hold_locked(weight)) return native_raw_read_t::failed;
+    lock.unlock();
+    read();
+    return native_raw_read_t::done;
 }
 
 void clear_native_weight_caches() {

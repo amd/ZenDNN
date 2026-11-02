@@ -289,7 +289,7 @@ static std::vector<FusedAlgoTestParam> make_fused_algo_params() {
     // one thread per expert ? the bug stayed hidden.
     //
     // The shapes below hit the race-prone code on both a typical 16-thread
-    // developer run AND a 128-thread EPYC CI run (verified with a Python
+    // developer run AND a 128-thread CI run (verified with a Python
     // simulation of n_tile_execute's decision tree):
     //
     //   shape (M=8, E=8, d=1024):

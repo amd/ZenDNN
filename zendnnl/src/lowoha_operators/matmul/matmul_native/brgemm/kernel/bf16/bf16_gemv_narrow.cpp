@@ -300,10 +300,10 @@ void bf16_gemv_narrow(const uint16_t *A, int K, const uint16_t *B, int ldb,
             //     an integrator sees the contract break in the library log
             //     (the kernel API is `void` with no error return channel).
             // There is intentionally no scalar-GEMV fallback here because
-            // the upstream gate in `bf16_gemv_best_algo_impl` +
-            // `bf16_gemv_direct` already ensures we never reach this path
-            // on a valid dispatch, and a hidden fallback would mask
-            // routing bugs that should be fixed at the caller.
+            // the upstream gate in `bf16_gemv_choice` already ensures we
+            // never reach this path on a valid dispatch, and a hidden
+            // fallback would mask routing bugs that should be fixed at the
+            // caller.
             log_error("bf16_gemv_narrow: out-of-range N=", N,
                     " (must be 1..kBf16GemvNarrowMaxN=", kBf16GemvNarrowMaxN,
                     "); upstream should gate on N. "

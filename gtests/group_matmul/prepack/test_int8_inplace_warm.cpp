@@ -603,8 +603,8 @@ TEST_F(Int8InPlaceWarm, ColumnTileMustNotSpendTheWholeWeightCapacity) {
 /// 3 arm of `cross_warm` already refuses on this ground (`primary_attempted`);
 /// the prompt arm has the same exposure and needs the same test.
 ///
-/// Driven through the FP16 family because its ISA (AVX-512-FP16) is the one a
-/// Zen host does not have, which makes the zero-attempt warm reachable here
+/// Driven through the FP16 family because on a host without AVX-512-FP16 its
+/// warm attempts nothing, which makes the zero-attempt warm reachable here
 /// rather than hypothetical.  What is asserted is the GUARD, not FP16: on an
 /// empty cross-warm the process must fall back to out-of-place rather than
 /// keep the in-place mode it can no longer justify.

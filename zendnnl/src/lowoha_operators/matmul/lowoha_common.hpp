@@ -369,55 +369,6 @@ struct matmul_params {
     bool wei_is_column_tile = false;
 };
 
-/** @brief K-axis B-side sym-quant group size.
- *
- * Prefers wei_scale dims {G, N} → K/G.  Source scale is independent:
- * per-token {M} / {M,1} does not change this value.  Falls back to a
- * src_scale-derived grouping only when wei is not {G, N}.
- */
-inline int64_t sym_quant_group_size(
-        const matmul_quantization_params_t &quant_params, int M, int N, int K) {
-    const auto &wei_dims = quant_params.wei_scale.dims;
-    if (wei_dims.size() == 2 && wei_dims[0] > 0
-            && wei_dims[1] == static_cast<int64_t>(N)
-            && static_cast<int64_t>(K) % wei_dims[0] == 0) {
-        return static_cast<int64_t>(K) / wei_dims[0];
-    }
-
-    int64_t src_nelems = quant_params.src_scale.dims.empty() ? 0 : 1;
-    for (int64_t d : quant_params.src_scale.dims) {
-        src_nelems *= d;
-    }
-    const int64_t src_groups = (M > 0) ? src_nelems / M : 0;
-    return (src_groups > 0) ? static_cast<int64_t>(K) / src_groups
-                            : static_cast<int64_t>(K);
-}
-
-/** @brief True when wei scale dims are {G>1, N} (per-group along K). */
-inline bool has_per_group_wei_scale(
-        const matmul_quantization_params_t &quant_params, int N) {
-    const auto &wei_dims = quant_params.wei_scale.dims;
-    return quant_params.wei_scale.buff != nullptr && wei_dims.size() == 2
-            && wei_dims[0] > 1 && wei_dims[1] == static_cast<int64_t>(N);
-}
-
-/**
- * @brief True when wei scale dims are {1, N} (per-output-channel).
- *
- * The exact complement of `has_per_group_wei_scale` over 2-D weight
- * scales: that helper requires `dims[0] > 1`, this one `dims[0] == 1`.
- * This is the DA8W8 shape.  `sym_quant_group_size` maps it to a single
- * quant group spanning all of K (`K / dims[0]` == `K`), which is what
- * makes it representable by the same sym-quant reorder as the per-group
- * form rather than a distinct layout.
- */
-inline bool has_per_channel_wei_scale(
-        const matmul_quantization_params_t &quant_params, int N) {
-    const auto &wei_dims = quant_params.wei_scale.dims;
-    return quant_params.wei_scale.buff != nullptr && wei_dims.size() == 2
-            && wei_dims[0] == 1 && wei_dims[1] == static_cast<int64_t>(N);
-}
-
 /**
  * @brief Returns the cache mode allowed by both process and call settings.
  *

@@ -55,6 +55,7 @@
 #include "lowoha_operators/matmul/matmul_native/native_layout_policy.hpp"
 #include "lowoha_operators/matmul/matmul_native/native_matmul.hpp"
 #include "lowoha_operators/reorder/lowoha_reorder.hpp"
+#include "matmul_native/native_brgemm_test_utils.hpp"
 #include "moe_test_utils.hpp"
 
 namespace {
@@ -110,6 +111,7 @@ native::native_layout_query_t query(data_type_t wei, data_type_t src, int K,
 }
 
 bool isa_for(data_type_t wei) {
+    if (wei == data_type_t::f32) return native::native_base_isa();
     return wei == data_type_t::bf16 ? has_bf16() : has_vnni();
 }
 
@@ -117,6 +119,7 @@ void expect_native(const native::native_layout_query_t &q) {
     const native::native_layout_decision_t d = native::decide_native_layout(q);
     if (!isa_for(q.wei_dt)) {
         EXPECT_FALSE(d.native) << "no ISA for this weight type";
+        EXPECT_TRUE(d.isa) << d.reason;
         return;
     }
     EXPECT_TRUE(d.native) << d.reason << " (K=" << q.K << " N=" << q.N
@@ -133,6 +136,9 @@ void expect_aocl(const native::native_layout_query_t &q) {
                            << " group=" << q.wei_group_size;
     EXPECT_EQ(d.pack_nr, 0);
     EXPECT_STRNE(d.reason, "");
+    if (native::native_base_isa() && isa_for(q.wei_dt)) {
+        EXPECT_FALSE(d.isa) << d.reason;
+    }
 }
 
 // ── Layout rule ─────────────────────────────────────────────────────
@@ -154,8 +160,15 @@ TEST(NativeLayoutRule, S8WeightNeedsU8OrS8Source) {
     }
 }
 
+TEST(NativeLayoutRule, F32WeightNeedsF32Source) {
+    expect_native(query(data_type_t::f32, data_type_t::f32, 64, 64));
+    for (data_type_t src : {data_type_t::bf16, data_type_t::f16,
+                 data_type_t::s8, data_type_t::u8, data_type_t::none}) {
+        expect_aocl(query(data_type_t::f32, src, 64, 64));
+    }
+}
+
 TEST(NativeLayoutRule, OtherWeightTypesStayOnAocl) {
-    expect_aocl(query(data_type_t::f32, data_type_t::f32, 64, 64));
     expect_aocl(query(data_type_t::f16, data_type_t::f16, 64, 64));
     expect_aocl(query(data_type_t::s4, data_type_t::s8, 64, 64));
     expect_aocl(query(data_type_t::s4, data_type_t::bf16, 64, 64));
@@ -163,21 +176,29 @@ TEST(NativeLayoutRule, OtherWeightTypesStayOnAocl) {
     expect_aocl(query(data_type_t::none, data_type_t::bf16, 64, 64));
 }
 
-TEST(NativeLayoutRule, NIsAMultipleOf32) {
-    for (data_type_t wei : {data_type_t::bf16, data_type_t::s8}) {
-        const data_type_t src = wei == data_type_t::bf16 ? data_type_t::bf16
-                                                         : data_type_t::u8;
-        for (int N : {32, 64, 96, 4096, 11008})
+/// The source type the layout rule pairs with weight type wei.
+data_type_t source_for(data_type_t wei, data_type_t int8_src) {
+    return wei == data_type_t::s8 ? int8_src : wei;
+}
+
+// Any positive N: a weight whose N is not a multiple of 32 is held padded
+// to whole blocks.
+TEST(NativeLayoutRule, AnyPositiveN) {
+    for (data_type_t wei :
+            {data_type_t::bf16, data_type_t::s8, data_type_t::f32}) {
+        const data_type_t src = source_for(wei, data_type_t::u8);
+        for (int N : {1, 2, 3, 16, 31, 32, 33, 48, 64, 96, 100, 4095, 4096,
+                     11008, 151937})
             expect_native(query(wei, src, 64, N));
-        for (int N : {-32, 0, 1, 16, 31, 33, 48, 100, 4095})
+        for (int N : {-32, 0})
             expect_aocl(query(wei, src, 64, N, 4096));
     }
 }
 
 TEST(NativeLayoutRule, KIsPositiveAndS8KIsBounded) {
-    for (data_type_t wei : {data_type_t::bf16, data_type_t::s8}) {
-        const data_type_t src = wei == data_type_t::bf16 ? data_type_t::bf16
-                                                         : data_type_t::s8;
+    for (data_type_t wei :
+            {data_type_t::bf16, data_type_t::s8, data_type_t::f32}) {
+        const data_type_t src = source_for(wei, data_type_t::s8);
         for (int K : {1, 2, 3, 31, 63, 100, 4096})
             expect_native(query(wei, src, K, 64));
         for (int K : {0, -1})
@@ -187,6 +208,7 @@ TEST(NativeLayoutRule, KIsPositiveAndS8KIsBounded) {
     expect_native(query(data_type_t::s8, data_type_t::u8, kBound, 64));
     expect_aocl(query(data_type_t::s8, data_type_t::u8, kBound + 1, 64));
     expect_native(query(data_type_t::bf16, data_type_t::bf16, kBound + 1, 64));
+    expect_native(query(data_type_t::f32, data_type_t::f32, kBound + 1, 64));
 }
 
 TEST(NativeLayoutRule, S8PerGroupWeightScalesNeedWholeQuadGroups) {
@@ -205,9 +227,9 @@ TEST(NativeLayoutRule, S8PerGroupWeightScalesNeedWholeQuadGroups) {
 
 TEST(NativeLayoutRule, LdbCoversTheWeightRow) {
     constexpr int K = 64, N = 96;
-    for (data_type_t wei : {data_type_t::bf16, data_type_t::s8}) {
-        const data_type_t src = wei == data_type_t::bf16 ? data_type_t::bf16
-                                                         : data_type_t::u8;
+    for (data_type_t wei :
+            {data_type_t::bf16, data_type_t::s8, data_type_t::f32}) {
+        const data_type_t src = source_for(wei, data_type_t::u8);
         expect_native(query(wei, src, K, N, N, false));
         expect_native(query(wei, src, K, N, N + 5, false));
         expect_aocl(query(wei, src, K, N, N - 1, false));
@@ -329,15 +351,18 @@ TEST(NativeLayoutRulePack, Int8BytesEqualCustomKernelPackAt32) {
 }
 
 /// The layout of a K x N weight of wei, element by element as
-/// native_weight_view_t defines it: the reference of the pack.
+/// native_weight_view_t defines it: the reference of the pack.  The pack
+/// columns from N to whole blocks stay zero, column sums included.
 std::vector<uint8_t> reference_layout(data_type_t wei, const void *w, int K,
         int N, int ldb, bool transB, bool interleave) {
     const bool s8 = wei == data_type_t::s8;
-    const int per_group = s8 ? 4 : 2;
+    const int per_group = s8 ? 4 : (wei == data_type_t::f32 ? 1 : 2);
     const size_t es = size_of(wei);
     const int groups = native::native_k_groups(wei, K);
     const size_t block = native::native_block_bytes(wei, K, kNr);
-    std::vector<uint8_t> out(block * static_cast<size_t>(N / kNr), 0);
+    std::vector<uint8_t> out(
+            block * static_cast<size_t>(native::native_padded_n(N, kNr) / kNr),
+            0);
     const auto *src = static_cast<const uint8_t *>(w);
     for (int p = 0; p < N; ++p) {
         const int c = interleave ? ((p & 1) ? N / 2 + p / 2 : p / 2) : p;
@@ -428,9 +453,80 @@ TEST(NativeLayoutRulePack, PackEqualsTheLayoutAtEveryTail) {
     EXPECT_EQ(bad, 0u) << "of " << cases << " packs";
 }
 
+const char *wei_name(data_type_t wei) {
+    return wei == data_type_t::s8 ? "s8"
+                                  : (wei == data_type_t::f32 ? "f32" : "bf16");
+}
+
+// A weight of N not a multiple of 32 packs to whole blocks: its N columns
+// as the layout places them, then zero columns (s8 column sums zero) up to
+// native_padded_n, and nothing past the padded blocks; every type, both
+// storages, the interleave (N even), padded ldb, the K tails and the tiles
+// of a [K, N] weight of many rows, on one and several threads.
+TEST(NativeLayoutRulePack, PackPadsTheColumnsPastNWithZeros) {
+    if (!native::native_base_isa()) GTEST_SKIP() << "needs AVX-512 F / BW / VL";
+    uint32_t seed = 7000;
+    size_t cases = 0, bad = 0;
+    for (data_type_t wei :
+            {data_type_t::bf16, data_type_t::s8, data_type_t::f32})
+        for (int K : {1, 2, 3, 4, 5, 7, 8, 17, 31, 63, 64, 65, 129, 1024, 1025})
+            for (int N : {1, 2, 3, 4, 7, 8, 15, 16, 17, 30, 31, 33, 47, 48, 62,
+                         63, 65, 95, 100, 545})
+                for (int pad : {0, 3})
+                    for (bool transB : {false, true})
+                        for (bool interleave : {false, true})
+                            for (int threads : {1, 3}) {
+                                if (interleave && N % 2 != 0) continue;
+                                const int ldb = (transB ? K : N) + pad;
+                                const size_t es = size_of(wei);
+                                const std::vector<uint8_t> w = random_bytes(
+                                        static_cast<size_t>(transB ? N : K)
+                                                * ldb * es,
+                                        ++seed);
+                                const std::vector<uint8_t> want
+                                        = reference_layout(wei, w.data(), K, N,
+                                                ldb, transB, interleave);
+                                const size_t bytes
+                                        = native::native_packed_bytes(
+                                                wei, K, N, kNr);
+                                std::vector<uint8_t> got(bytes + 64, 0xA5);
+                                ++cases;
+                                const bool ok = bytes >= want.size()
+                                        && native::native_pack_weight(wei,
+                                                   w.data(), K, N, ldb, kNr,
+                                                   transB, interleave,
+                                                   got.data(), threads)
+                                                == status_t::success
+                                        && std::memcmp(got.data(), want.data(),
+                                                   want.size())
+                                                == 0
+                                        && std::all_of(
+                                                got.begin() + want.size(),
+                                                got.end(), [](uint8_t b) {
+                                    return b == 0xA5;
+                                });
+                                if (!ok && bad++ < 10)
+                                    ADD_FAILURE()
+                                            << wei_name(wei) << " K=" << K
+                                            << " N=" << N << " ldb=" << ldb
+                                            << " transB=" << transB
+                                            << " interleave=" << interleave
+                                            << " threads=" << threads;
+                            }
+    EXPECT_EQ(bad, 0u) << "of " << cases << " packs";
+    EXPECT_EQ(native::native_padded_n(1, kNr), 32);
+    EXPECT_EQ(native::native_padded_n(32, kNr), 32);
+    EXPECT_EQ(native::native_padded_n(33, kNr), 64);
+    EXPECT_EQ(native::native_packed_bytes(data_type_t::bf16, 64, 33, kNr),
+            native::native_packed_bytes(data_type_t::bf16, 64, 64, kNr));
+    EXPECT_TRUE(native::native_layout_fits(data_type_t::bf16, 64, 1, kNr));
+    EXPECT_FALSE(native::native_layout_fits(data_type_t::bf16, 64, 0, kNr));
+}
+
 // The pack reads no byte past the weight: a weight that ends where
 // unreadable memory starts packs as from an ordinary buffer, with a tight
-// and a padded ldb (whose last row ends before a whole row stride).
+// and a padded ldb (whose last row ends before a whole row stride), at N a
+// multiple of 32 and at N whose last block is padded.
 TEST(NativeLayoutRulePack, PackReadsNoBytePastTheWeight) {
 #ifdef _WIN32
     GTEST_SKIP() << "needs mprotect";
@@ -438,46 +534,51 @@ TEST(NativeLayoutRulePack, PackReadsNoBytePastTheWeight) {
     if (!native::native_base_isa()) GTEST_SKIP() << "needs AVX-512 F / BW / VL";
     const size_t page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
     uint32_t seed = 900;
-    for (data_type_t wei : {data_type_t::bf16, data_type_t::s8})
+    for (data_type_t wei :
+            {data_type_t::bf16, data_type_t::s8, data_type_t::f32})
         for (int K : {1, 3, 33, 63, 129, 1025})
-            for (bool transB : {false, true})
-                for (bool interleave : {false, true})
-                    for (int pad : {0, 5}) {
-                        SCOPED_TRACE(
-                                std::string(
-                                        wei == data_type_t::s8 ? "s8" : "bf16")
-                                + " K=" + std::to_string(K)
-                                + " transB=" + std::to_string(transB)
-                                + " interleave=" + std::to_string(interleave)
-                                + " pad=" + std::to_string(pad));
-                        const int N = 64;
-                        const int ldb = (transB ? K : N) + pad;
-                        const size_t bytes = native::native_raw_weight_bytes(
-                                wei, K, N, ldb, transB);
-                        const size_t mapped = (bytes + page - 1) / page * page;
-                        void *m = mmap(nullptr, mapped + page,
-                                PROT_READ | PROT_WRITE,
-                                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-                        ASSERT_NE(m, MAP_FAILED);
-                        auto *base = static_cast<uint8_t *>(m);
-                        ASSERT_EQ(mprotect(base + mapped, page, PROT_NONE), 0);
-                        uint8_t *w = base + mapped - bytes;
-                        const std::vector<uint8_t> src
-                                = random_bytes(bytes, ++seed);
-                        std::memcpy(w, src.data(), bytes);
-                        const std::vector<uint8_t> want = reference_layout(
-                                wei, w, K, N, ldb, transB, interleave);
-                        std::vector<uint8_t> got(
-                                native::native_packed_bytes(wei, K, N, kNr), 0);
-                        EXPECT_EQ(
-                                native::native_pack_weight(wei, w, K, N, ldb,
-                                        kNr, transB, interleave, got.data(), 2),
-                                status_t::success);
-                        EXPECT_EQ(std::memcmp(
-                                          got.data(), want.data(), want.size()),
-                                0);
-                        munmap(m, mapped + page);
-                    }
+            for (int N : {64, 1, 2, 17, 50, 95})
+                for (bool transB : {false, true})
+                    for (bool interleave : {false, true})
+                        for (int pad : {0, 5}) {
+                            if (interleave && N % 2 != 0) continue;
+                            SCOPED_TRACE(std::string(wei_name(wei))
+                                    + " K=" + std::to_string(K)
+                                    + " N=" + std::to_string(N) + " transB="
+                                    + std::to_string(transB) + " interleave="
+                                    + std::to_string(interleave)
+                                    + " pad=" + std::to_string(pad));
+                            const int ldb = (transB ? K : N) + pad;
+                            const size_t bytes
+                                    = native::native_raw_weight_bytes(
+                                            wei, K, N, ldb, transB);
+                            const size_t mapped
+                                    = (bytes + page - 1) / page * page;
+                            void *m = mmap(nullptr, mapped + page,
+                                    PROT_READ | PROT_WRITE,
+                                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                            ASSERT_NE(m, MAP_FAILED);
+                            auto *base = static_cast<uint8_t *>(m);
+                            ASSERT_EQ(mprotect(base + mapped, page, PROT_NONE),
+                                    0);
+                            uint8_t *w = base + mapped - bytes;
+                            const std::vector<uint8_t> src
+                                    = random_bytes(bytes, ++seed);
+                            std::memcpy(w, src.data(), bytes);
+                            const std::vector<uint8_t> want = reference_layout(
+                                    wei, w, K, N, ldb, transB, interleave);
+                            std::vector<uint8_t> got(
+                                    native::native_packed_bytes(wei, K, N, kNr),
+                                    0);
+                            EXPECT_EQ(native::native_pack_weight(wei, w, K, N,
+                                              ldb, kNr, transB, interleave,
+                                              got.data(), 2),
+                                    status_t::success);
+                            EXPECT_EQ(std::memcmp(got.data(), want.data(),
+                                              want.size()),
+                                    0);
+                            munmap(m, mapped + page);
+                        }
 #endif
 }
 
@@ -708,7 +809,7 @@ struct DynQuantCase {
     }
 };
 
-/// The descriptor native_matmul_execute builds for a row-major call.
+/// The descriptor native_layout_matmul builds for a row-major call.
 native::GemmDescriptor descriptor(int M, int N, int K, int lda, int ldb,
         int ldc, bool transB, const matmul_params &p) {
     native::GemmDescriptor d;
@@ -767,6 +868,28 @@ status_t routed_call(int M, int N, int K, const void *src, int lda,
     return mm::matmul_direct('r', false, transB, M, N, K, 1.0f, src, lda, wei,
             ldb, bias, 0.0f, dst, ldc, weights_const, bp, p,
             gated == matmul_gated_act_t::none ? nullptr : &act);
+}
+
+/// routed_call through run_matmul_direct: the status native_brgemm_refusal
+/// gives the call, which run_matmul_direct then checks matmul_direct
+/// returns, with dst untouched and an error line naming the reason.
+status_t refused_call(int M, int N, int K, const void *src, int lda,
+        const void *wei, int ldb, bool transB, void *dst, int ldc,
+        const matmul_params &p, int batch_a = 1,
+        matmul_gated_act_t gated = matmul_gated_act_t::none) {
+    mm::matmul_batch_params_t bp;
+    bp.Batch_A = batch_a;
+    mm::matmul_gated_act_params act;
+    act.act = gated;
+    const mm::matmul_gated_act_params *a
+            = gated == matmul_gated_act_t::none ? nullptr : &act;
+    const status_t refused
+            = mm::native_brgemm_refusal('r', false, transB, M, N, K, 1.0f, src,
+                    lda, wei, ldb, nullptr, 0.0f, dst, ldc, true, bp, p, a);
+    run_matmul_direct('r', false, transB, M, N, K, 1.0f, src, lda, wei, ldb,
+            nullptr, 0.0f, dst, ldc, true, bp, p, a);
+    EXPECT_TRUE(native_refusal_checked());
+    return refused;
 }
 
 /// The routed call went to native_brgemm_execute with the expected weight
@@ -1047,24 +1170,27 @@ TEST_F(NativeLayoutRuleRoute, GatedActivationOnRawWeightReachesNative) {
             }
 }
 
-// A weight the rule keeps off the layout, and a gated call with a post-op:
-// the one-op group route serves both under ALGO 11 as with ALGO unset.
-TEST_F(NativeLayoutRuleRoute, GatedCallNativeDoesNotTakeKeepsTheGroupRoute) {
-    const Bf16Case off_layout(4, 48, 64);
+// A gated call with a softmax: under ALGO 11 the native BRGEMM returns
+// unimplemented, with dst untouched; the one-op group route serves it with
+// ALGO unset.  A gated call over a weight of N not a multiple of 32 is
+// served over its padded layout, with the group route's result within its
+// band.
+TEST_F(NativeLayoutRuleRoute, GatedCallsNativeDoesNotServeReturnAnError) {
+    const Bf16Case padded(4, 48, 64);
     const Bf16Case on_layout(4, 64, 64);
     for (bool post_op : {false, true})
         for (matmul_gated_act_t act : {matmul_gated_act_t::silu_and_mul,
                      matmul_gated_act_t::gelu_and_mul,
                      matmul_gated_act_t::swiglu_oai_mul}) {
-            SCOPED_TRACE(std::string(post_op ? "post-op" : "N=48")
+            SCOPED_TRACE(std::string(post_op ? "softmax" : "N=48")
                     + " gated_act " + std::to_string(static_cast<int>(act)));
-            const Bf16Case &c = post_op ? on_layout : off_layout;
+            const Bf16Case &c = post_op ? on_layout : padded;
             matmul_params p = c.params();
             p.weight_cache_type = 1;
             if (post_op) {
-                mm::matmul_post_op relu;
-                relu.po_type = post_op_type_t::relu;
-                p.postop_.push_back(relu);
+                mm::matmul_post_op softmax;
+                softmax.po_type = post_op_type_t::softmax;
+                p.postop_.push_back(softmax);
             }
             std::vector<bfloat16_t> w_unset = c.wei, w_native = c.wei;
             std::vector<float> want(static_cast<size_t>(c.M) * c.N, kCanary);
@@ -1074,42 +1200,87 @@ TEST_F(NativeLayoutRuleRoute, GatedCallNativeDoesNotTakeKeepsTheGroupRoute) {
             const status_t want_status = routed_call(c.M, c.N, c.K,
                     c.src.data(), c.K, w_unset.data(), c.ldb, false,
                     want.data(), c.N, p, 1, true, nullptr, act);
+            EXPECT_EQ(want_status, status_t::success);
             reset_grp_matmul_caches();
             config_.cfg.set_algo(kAlgoNative);
-            const status_t st = routed_call(c.M, c.N, c.K, c.src.data(), c.K,
-                    w_native.data(), c.ldb, false, dst.data(), c.N, p, 1, true,
-                    nullptr, act);
-            EXPECT_EQ(native::native_weight_layouts(w_native.data()), 0u);
-            EXPECT_EQ(static_cast<int>(st), static_cast<int>(want_status));
-            if (st != status_t::success || want_status != status_t::success)
-                continue;
-            size_t bad = 0;
-            for (int m = 0; m < c.M; ++m)
-                for (int i = 0; i < c.N / 2; ++i) {
-                    const float g = dst[static_cast<size_t>(m) * c.N + i];
-                    const float r = want[static_cast<size_t>(m) * c.N + i];
-                    if (std::fabs(g - r) > 1e-2f * std::fabs(r) + 1e-3f) ++bad;
-                }
-            EXPECT_EQ(bad, 0u);
+            if (post_op) {
+                EXPECT_EQ(refused_call(c.M, c.N, c.K, c.src.data(), c.K,
+                                  w_native.data(), c.ldb, false, dst.data(),
+                                  c.N, p, 1, act),
+                        status_t::unimplemented);
+                EXPECT_EQ(native::native_weight_layouts(w_native.data()), 0u);
+            } else {
+                ASSERT_EQ(routed_call(c.M, c.N, c.K, c.src.data(), c.K,
+                                  w_native.data(), c.ldb, false, dst.data(),
+                                  c.N, p, 1, true, nullptr, act),
+                        status_t::success);
+                EXPECT_EQ(native::native_weight_layouts(w_native.data()), 1u);
+                const int cols = c.N / 2;
+                EXPECT_TRUE(native_brgemm_test::within_band(dst.data(), c.N,
+                        want.data(), c.N, data_type_t::f32, c.M, cols,
+                        rtol_bf16,
+                        native_brgemm_test::comparison_abs_bound(c.K,
+                                epsilon_bf16, 1.0f, 0.0f, true, false, false)));
+                for (int m = 0; m < c.M; ++m)
+                    for (int n = cols; n < c.N; ++n)
+                        EXPECT_EQ(
+                                dst[static_cast<size_t>(m) * c.N + n], kCanary)
+                                << "a write past the output columns at (" << m
+                                << ", " << n << ")";
+            }
+            EXPECT_EQ(std::memcmp(w_native.data(), c.wei.data(),
+                              c.wei.size() * sizeof(bfloat16_t)),
+                    0);
         }
 }
 
-TEST_F(NativeLayoutRuleRoute, IneligibleRawWeightKeepsItsRoute) {
+// A raw weight of N not a multiple of 32: a call that asks for the native
+// BRGEMM is served over a padded layout packed out of place at weight cache
+// modes 1 and 2 (the weight stays raw), with the result of the unset route
+// within the band, and no write past N.
+TEST_F(NativeLayoutRuleRoute, RawWeightOfAnyNIsServedOutOfPlace) {
     if (!has_bf16()) GTEST_SKIP() << "needs AVX512-BF16";
     const Bf16Case c(4, 48, 64);
-    for (bool per_call : {true, false}) {
-        SCOPED_TRACE(per_call ? "lowoha_algo=native_brgemm"
-                              : "ZENDNNL_MATMUL_ALGO=11");
-        config_.cfg.set_algo(per_call ? kAlgoNone : kAlgoNative);
-        matmul_params p = c.params();
-        if (per_call) p.lowoha_algo = matmul_algo_t::native_brgemm;
-        std::vector<float> dst(static_cast<size_t>(c.M) * c.N, kCanary);
-        ASSERT_EQ(routed_call(c.M, c.N, c.K, c.src.data(), c.K, c.wei.data(),
-                          c.ldb, false, dst.data(), c.N, p),
+    const int ldc = c.N + 3;
+    std::vector<float> want(static_cast<size_t>(c.M) * ldc, kCanary);
+    {
+        reset_grp_matmul_caches();
+        config_.cfg.set_algo(kAlgoNone);
+        std::vector<bfloat16_t> w = c.wei;
+        ASSERT_EQ(routed_call(c.M, c.N, c.K, c.src.data(), c.K, w.data(), c.ldb,
+                          false, want.data(), ldc, c.params()),
                 status_t::success);
-        EXPECT_EQ(native::native_weight_layouts(c.wei.data()), 0u);
-        expect_matches_reference(c, dst, c.N, 1e-2);
     }
+    for (bool per_call : {true, false})
+        for (int32_t wc : {1, 2}) {
+            SCOPED_TRACE(std::string(per_call ? "lowoha_algo=native_brgemm"
+                                              : "ZENDNNL_MATMUL_ALGO=11")
+                    + " wc=" + std::to_string(wc));
+            reset_grp_matmul_caches();
+            config_.cfg.set_algo(per_call ? kAlgoNone : kAlgoNative);
+            matmul_params p = c.params();
+            p.weight_cache_type = wc;
+            if (per_call) p.lowoha_algo = matmul_algo_t::native_brgemm;
+            std::vector<bfloat16_t> w = c.wei;
+            std::vector<float> dst(static_cast<size_t>(c.M) * ldc, kCanary);
+            for (int call = 0; call < 2; ++call)
+                ASSERT_EQ(routed_call(c.M, c.N, c.K, c.src.data(), c.K,
+                                  w.data(), c.ldb, false, dst.data(), ldc, p),
+                        status_t::success);
+            EXPECT_EQ(native::native_weight_layouts(w.data()), 1u);
+            EXPECT_FALSE(packed_in_place(w));
+            EXPECT_EQ(std::memcmp(w.data(), c.wei.data(),
+                              c.wei.size() * sizeof(bfloat16_t)),
+                    0);
+            EXPECT_TRUE(native_brgemm_test::within_band(dst.data(), ldc,
+                    want.data(), ldc, data_type_t::f32, c.M, c.N, rtol_bf16,
+                    native_brgemm_test::comparison_abs_bound(c.K, epsilon_bf16,
+                            1.0f, 0.0f, true, false, false)));
+            for (int m = 0; m < c.M; ++m)
+                for (int n = c.N; n < ldc; ++n)
+                    EXPECT_EQ(dst[static_cast<size_t>(m) * ldc + n], kCanary);
+        }
+    reset_grp_matmul_caches();
 }
 
 /// A matmul_direct call of the case on wei with the call shape and options
@@ -1122,7 +1293,7 @@ struct variant_t {
     int N = 0; ///< 0: the case's N
     data_type_t src_dt = data_type_t::bf16;
     matmul_gated_act_t gated = matmul_gated_act_t::none;
-    bool relu = false;
+    post_op_type_t po = post_op_type_t::none;
 };
 
 status_t variant_call(const Bf16Case &c, const variant_t &v, const void *src,
@@ -1131,9 +1302,9 @@ status_t variant_call(const Bf16Case &c, const variant_t &v, const void *src,
     matmul_params p = c.params();
     p.dtypes.src = v.src_dt;
     p.mem_format_a = v.mem_format_a;
-    if (v.relu) {
+    if (v.po != post_op_type_t::none) {
         mm::matmul_post_op po;
-        po.po_type = post_op_type_t::relu;
+        po.po_type = v.po;
         p.postop_.push_back(po);
     }
     mm::matmul_batch_params_t bp;
@@ -1150,8 +1321,7 @@ status_t variant_call(const Bf16Case &c, const variant_t &v, const void *src,
 
 /// The calls the native BRGEMM refuses on an otherwise qualifying bf16
 /// weight: a batched call, a column-major call, a reordered source, a gated
-/// call with a post-op, a source of another type, and a view whose N the
-/// layout rule refuses.
+/// call with a softmax, and a source of another type.
 std::vector<variant_t> refused_variants() {
     std::vector<variant_t> v;
     v.push_back({"batched"});
@@ -1160,19 +1330,17 @@ std::vector<variant_t> refused_variants() {
     v.back().layout = 'c';
     v.push_back({"reordered source"});
     v.back().mem_format_a = 'r';
-    v.push_back({"gated with a post-op"});
+    v.push_back({"gated with a softmax"});
     v.back().gated = matmul_gated_act_t::silu_and_mul;
-    v.back().relu = true;
+    v.back().po = post_op_type_t::softmax;
     v.push_back({"f32 source"});
     v.back().src_dt = data_type_t::f32;
-    v.push_back({"N off the layout"});
-    v.back().N = 48;
     return v;
 }
 
 // A buffer rewritten in place has the native BRGEMM as its only reader: a
-// call on it that the native BRGEMM refuses fails, leaves dst as it was and
-// the buffer holding the image.
+// call on it that the native BRGEMM refuses returns failure, leaves dst as
+// it was and the buffer holding the image.
 TEST_F(NativeLayoutRuleRoute, RefusedCallOnAnInPlaceImageFails) {
     if (!has_bf16()) GTEST_SKIP() << "needs AVX512-BF16";
     config_.cfg.set_algo(kAlgoNative);
@@ -1197,7 +1365,7 @@ TEST_F(NativeLayoutRuleRoute, RefusedCallOnAnInPlaceImageFails) {
         const void *a = v.src_dt == data_type_t::f32
                 ? static_cast<const void *>(src_f32.data())
                 : static_cast<const void *>(src.data());
-        EXPECT_NE(variant_call(c, v, a, w.data(), out), status_t::success);
+        EXPECT_EQ(variant_call(c, v, a, w.data(), out), status_t::failure);
         EXPECT_TRUE(std::all_of(out.begin(), out.end(), [](float x) {
             return x == kCanary;
         })) << "another route wrote dst";
@@ -1209,13 +1377,15 @@ TEST_F(NativeLayoutRuleRoute, RefusedCallOnAnInPlaceImageFails) {
     }
 }
 
-// The same calls on a raw weight are declined: the native BRGEMM keeps
-// nothing for the weight, the weight stays raw, and the routes that take
-// them write the product.
-TEST_F(NativeLayoutRuleRoute, RefusedCallOnARawWeightRunsElsewhere) {
+// The same calls on a raw weight that ask for the native BRGEMM return an
+// error, with dst untouched: the native BRGEMM keeps nothing for the weight
+// and the weight stays raw.  A batched call asks for it only by naming it
+// (NativeBrgemmDeclinedRoute.BatchedCallsAskForTheNativeBrgemmOnlyByName).
+TEST_F(NativeLayoutRuleRoute, RefusedCallOnARawWeightReturnsAnError) {
     if (!has_bf16()) GTEST_SKIP() << "needs AVX512-BF16";
     for (bool per_call : {true, false})
         for (const variant_t &v : refused_variants()) {
+            if (!per_call && v.batch_a > 1) continue;
             SCOPED_TRACE(std::string(v.name) + " "
                     + (per_call ? "lowoha_algo=native_brgemm"
                                 : "ZENDNNL_MATMUL_ALGO=11"));
@@ -1241,9 +1411,9 @@ TEST_F(NativeLayoutRuleRoute, RefusedCallOnARawWeightRunsElsewhere) {
                 matmul_params q = p;
                 q.dtypes.src = call.src_dt;
                 q.mem_format_a = call.mem_format_a;
-                if (call.relu) {
+                if (call.po != post_op_type_t::none) {
                     mm::matmul_post_op po;
-                    po.po_type = post_op_type_t::relu;
+                    po.po_type = call.po;
                     q.postop_.push_back(po);
                 }
                 mm::matmul_batch_params_t bp;
@@ -1251,28 +1421,25 @@ TEST_F(NativeLayoutRuleRoute, RefusedCallOnARawWeightRunsElsewhere) {
                 mm::matmul_gated_act_params act;
                 act.act = call.gated;
                 const bool col = call.layout != 'r';
-                return mm::matmul_direct(call.layout, false, false, c.M, c.N,
+                return run_matmul_direct(call.layout, false, false, c.M, c.N,
                         c.K, 1.0f, a, col ? c.M : c.K, w.data(),
                         col ? c.K : c.ldb, nullptr, 0.0f, out.data(),
                         col ? c.M : c.N, true, bp, q,
                         call.gated == matmul_gated_act_t::none ? nullptr
                                                                : &act);
             }();
+            EXPECT_NE(st, status_t::success);
             EXPECT_EQ(native::native_weight_layouts(w.data()), 0u);
             EXPECT_FALSE(packed_in_place(w));
-            if (st != status_t::success) continue;
-            // A plain row-major bf16 product is checked against the
-            // reference.
-            if (call.layout == 'r' && call.mem_format_a == 'n'
-                    && call.src_dt == data_type_t::bf16
-                    && call.gated == matmul_gated_act_t::none)
-                expect_matches_reference(c, out, c.N, 1e-2);
+            EXPECT_EQ(std::memcmp(w.data(), c.wei.data(),
+                              c.wei.size() * sizeof(bfloat16_t)),
+                    0);
         }
 }
 
 // A GGML-packed weight is never read in the native layout: the native
-// BRGEMM declines the call and leaves dst untouched.
-TEST_F(NativeLayoutRuleRoute, GgmlPackedWeightIsDeclined) {
+// BRGEMM returns unimplemented for a call on it and leaves dst untouched.
+TEST_F(NativeLayoutRuleRoute, GgmlPackedWeightReturnsAnError) {
     if (!has_vnni()) GTEST_SKIP() << "needs AVX512-VNNI";
     config_.cfg.set_algo(kAlgoNative);
     const Int8Case c(4, 64, 64);
@@ -1281,9 +1448,10 @@ TEST_F(NativeLayoutRuleRoute, GgmlPackedWeightIsDeclined) {
     std::vector<int8_t> w = c.wei;
     std::vector<float> dst(static_cast<size_t>(c.M) * c.N, kCanary);
     status_t st = status_t::success;
-    EXPECT_FALSE(native::native_layout_matmul('r', false, false, c.M, c.N, c.K,
+    EXPECT_TRUE(native::native_layout_matmul('r', false, false, c.M, c.N, c.K,
             1.0f, c.src.data(), c.K, w.data(), c.N, nullptr, 0.0f, dst.data(),
             c.N, true, 1, kThreads, matmul_gated_act_t::none, p, nullptr, st));
+    EXPECT_EQ(st, status_t::unimplemented);
     EXPECT_EQ(native::native_weight_layouts(w.data()), 0u);
     EXPECT_TRUE(std::all_of(
             dst.begin(), dst.end(), [](float x) { return x == kCanary; }));
@@ -1292,8 +1460,8 @@ TEST_F(NativeLayoutRuleRoute, GgmlPackedWeightIsDeclined) {
 
 // A buffer the custom kernel rewrote in place (a grouped call at weight
 // cache mode 2) is read by the custom kernel's routes only: under ALGO 11 a
-// dense call on it is not taken by the native BRGEMM, which keeps nothing
-// for it and leaves the image as it is.
+// dense call on it returns failure from the native BRGEMM, which keeps
+// nothing for it and leaves the image as it is.
 TEST_F(NativeLayoutRuleRoute, CustomKernelImageIsNotTaken) {
     if (!ck::bf16_isa_supported()) GTEST_SKIP() << "needs AVX512-BF16";
     constexpr int kExperts = 4, M = 8, N = 256, K = 256;
@@ -1342,8 +1510,9 @@ TEST_F(NativeLayoutRuleRoute, CustomKernelImageIsNotTaken) {
     p.dtypes.src = p.dtypes.wei = data_type_t::bf16;
     p.dtypes.dst = data_type_t::f32;
     p.num_threads = kThreads;
-    (void)routed_call(M, N, K, src[0].data(), K, wei[0].data(), N, false,
-            dst.data(), N, p);
+    EXPECT_EQ(refused_call(M, N, K, src[0].data(), K, wei[0].data(), N, false,
+                      dst.data(), N, p),
+            status_t::failure);
     EXPECT_EQ(native::native_weight_layouts(wei[0].data()), 0u);
     EXPECT_FALSE(packed_in_place(wei[0]));
     EXPECT_EQ(std::memcmp(wei[0].data(), image.data(),
@@ -1381,7 +1550,9 @@ TEST_F(NativeLayoutRuleRoute, F16DstIsServedEndToEnd) {
     }
 }
 
-TEST_F(NativeLayoutRuleRoute, BatchedCallTakesItsOtherRoute) {
+// A batched call that asks for the native BRGEMM returns unimplemented, with
+// dst untouched and the weight left raw.
+TEST_F(NativeLayoutRuleRoute, BatchedCallReturnsAnError) {
     if (!has_bf16()) GTEST_SKIP() << "needs AVX512-BF16";
     const Bf16Case c(4, 64, 64);
     std::vector<bfloat16_t> w = c.wei;
@@ -1392,17 +1563,11 @@ TEST_F(NativeLayoutRuleRoute, BatchedCallTakesItsOtherRoute) {
     p.lowoha_algo = matmul_algo_t::native_brgemm;
     p.weight_cache_type = 2;
     std::vector<float> dst(2 * static_cast<size_t>(c.M) * c.N, kCanary);
-    ASSERT_EQ(routed_call(c.M, c.N, c.K, src.data(), c.K, w.data(), c.ldb,
+    EXPECT_EQ(refused_call(c.M, c.N, c.K, src.data(), c.K, w.data(), c.ldb,
                       false, dst.data(), c.N, p, /*batch_a=*/2),
-            status_t::success);
+            status_t::unimplemented);
     EXPECT_EQ(native::native_weight_layouts(w.data()), 0u);
     EXPECT_FALSE(packed_in_place(w));
-    const std::ptrdiff_t batch_size = static_cast<std::ptrdiff_t>(c.M) * c.N;
-    for (int b = 0; b < 2; ++b) {
-        const std::vector<float> slice(dst.begin() + b * batch_size,
-                dst.begin() + (b + 1) * batch_size);
-        expect_matches_reference(c, slice, c.N, 1e-2);
-    }
 }
 
 TEST_F(NativeLayoutRuleRoute, DefaultRouteEngagesCustomKernel) {
@@ -1625,6 +1790,77 @@ TEST_F(NativeLayoutRuleRoute, AoclPrepackedInt8IsUnreorderedOnceUnderAlgo11) {
                         c.M, c.N, c.K, c.src.data(), false, c.ldb,
                         on_aocl_prepack(c.params(), tag, wc), want, image);
             }
+}
+
+// An AOCL prepack of a weight whose N is not a multiple of 32 under
+// ZENDNNL_MATMUL_ALGO=11: unreordered and packed to a padded layout, out of
+// place at every weight cache mode (the prepack keeps its bytes), each call
+// with the bits of the native call on the raw weight.
+TEST_F(NativeLayoutRuleRoute, AoclPrepackedPaddedWeightPacksOutOfPlace) {
+    for (bool int8 : {false, true}) {
+        if (int8 ? !has_vnni() : !has_bf16()) continue;
+        const matmul_params probe = int8 ? Int8Case(1, 32, 32).params()
+                                         : Bf16Case(1, 32, 32).params();
+        if (!aocl_inverse_available(probe))
+            GTEST_SKIP() << "no AOCL inverse in this build";
+        for (int N : {1, 8, 72})
+            for (bool transB : {true, false})
+                for (int32_t wc : {0, 1, 2}) {
+                    if (int8 && transB) continue;
+                    SCOPED_TRACE(std::string(int8 ? "u8 x s8" : "bf16")
+                            + " N=" + std::to_string(N)
+                            + " transB=" + std::to_string(transB)
+                            + " wc=" + std::to_string(wc));
+                    reset_grp_matmul_caches();
+                    config_.cfg.set_algo(kAlgoNative);
+                    const Bf16Case bc(5, N, 2048, transB);
+                    const Int8Case ic(5, N, 256);
+                    const int M = int8 ? ic.M : bc.M, K = int8 ? ic.K : bc.K;
+                    const int ldb = int8 ? ic.ldb : bc.ldb;
+                    const void *w = int8
+                            ? static_cast<const void *>(ic.wei.data())
+                            : static_cast<const void *>(bc.wei.data());
+                    const void *a = int8
+                            ? static_cast<const void *>(ic.src.data())
+                            : static_cast<const void *>(bc.src.data());
+                    const data_type_t wei
+                            = int8 ? data_type_t::s8 : data_type_t::bf16;
+                    std::vector<uint8_t> packed = aocl_prepack(w, wei,
+                            int8 ? data_type_t::u8 : data_type_t::bf16, K, N,
+                            ldb, transB);
+                    const std::vector<uint8_t> aocl_bytes = packed;
+                    const matmul_params base = int8 ? ic.params() : bc.params();
+                    std::vector<float> want(
+                            static_cast<size_t>(M) * N, kCanary);
+                    ASSERT_EQ(direct_call(M, N, K, a, K, weight_ref(w, kNr, 0),
+                                      ldb, transB, want.data(), N, base),
+                            status_t::success);
+                    if (int8)
+                        expect_reference_algorithm(ic, false, want);
+                    else
+                        expect_reference_algorithm(bc, transB, want);
+                    const matmul_params p
+                            = on_aocl_prepack(base, matmul_algo_t::none, wc);
+                    for (int call = 0; call < 2; ++call) {
+                        SCOPED_TRACE("call " + std::to_string(call));
+                        std::vector<float> dst(want.size(), kCanary);
+                        ASSERT_EQ(routed_call(M, N, K, a, K, packed.data(), ldb,
+                                          transB, dst.data(), N, p),
+                                status_t::success);
+                        EXPECT_EQ(std::memcmp(dst.data(), want.data(),
+                                          dst.size() * sizeof(float)),
+                                0);
+                        EXPECT_FALSE(packed_in_place(packed));
+                        EXPECT_EQ(packed, aocl_bytes);
+                        if (wc != 0) {
+                            EXPECT_EQ(native::native_weight_layouts(
+                                              packed.data()),
+                                    1u);
+                        }
+                    }
+                }
+    }
+    reset_grp_matmul_caches();
 }
 
 TEST_F(NativeLayoutRuleRoute, AoclPrepackedWeightKeepsAoclOnTheDefaultRoute) {

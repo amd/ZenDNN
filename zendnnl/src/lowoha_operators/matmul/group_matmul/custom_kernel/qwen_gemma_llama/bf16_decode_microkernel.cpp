@@ -473,15 +473,11 @@ static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
         constexpr int buf1 = (kBuffers == 2) ? 1 : 0;
 
         // ── No software prefetch in the K-loop (intentional) ────────────
-        // A `_mm_prefetch(B + N K-pairs ahead, _MM_HINT_T0)` per outer
-        // iteration was tried.  It regressed throughput because the Zen
-        // CPU hardware prefetcher already detects the streaming
-        // (kp_stride-strided) B access pattern reliably and the K-loop
-        // is not memory-latency bound at the shapes that reach this
-        // kernel.  Adding software prefetch consumed load-port issue
-        // slots and polluted L1 with addresses the hardware unit was
-        // already streaming, which hurt FMA dispatch.  Note kept here
-        // so a future contributor does not re-attempt the same fix.
+        // The hardware prefetcher follows the kp_stride-strided B stream,
+        // and the K-loop is not bound by memory latency at the shapes that
+        // reach this kernel: a software prefetch of B per outer iteration
+        // would take load-port issue slots from the FMAs' loads and L1
+        // lines from the stream the prefetcher already brings in.
 
         for (; kp + 1 < K_pair; kp += 2) {
             // ── Stage 1: load bv_next = B[kp+1], overlaps FMAs for kp ──
@@ -675,7 +671,7 @@ static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
 
 // Plain BF16 NR=32 kernel for MR 9..14. Unlike `ukernel_impl`, this keeps
 // exactly one two-ZMM B panel live. The large-MR accumulator set therefore
-// stays below Venice's 32-ZMM limit instead of spilling under the two-panel
+// stays within the 32 ZMM registers instead of spilling under the two-panel
 // software pipeline.
 template <int MR, int FixedLda = 0, int FixedK = 0>
 ZENDNNL_TARGET_NOINLINE("avx512f,avx512bf16,avx512bw,avx512vl,fma")

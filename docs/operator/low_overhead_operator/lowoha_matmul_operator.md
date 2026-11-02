@@ -195,6 +195,8 @@ struct matmul_post_op {
 
 > **Note:** On AOCL-DLP INT8 `sym_quant` / `dynamic_quant` kernel paths, the `mish` post-op is rejected by `validate_matmul_direct_inputs` (input validation runs by default unless `ZENDNNL_DIAGNOSTICS_ENABLE=0`).
 
+> **Note:** The native BRGEMM (`ZENDNNL_MATMUL_ALGO=11`, or `lowoha_algo = matmul_algo_t::native_brgemm`) also applies the `post_op_type_t::elu`, `square`, `abs`, `sqrt`, `exp`, `log` and `softmax` post-ops (`softmax` over each output row) on the BF16, INT8 and FP32 calls it serves; AOCL-DLP does not map them.
+
 **Binary Post-Op Dimensions:**
 
 For binary post-ops (`binary_add` and `binary_mul`), the `dims` field specifies the tensor shape:
@@ -1181,8 +1183,35 @@ The same algorithms can be selected by either the `matmul_algo_t` enum value (in
 | `4`                   | `aocl_dlp`           | AOCL-DLP backend |
 | `5`                   | `onednn`             | OneDNN backend |
 | `6`                   | `libxsmm`            | LibXSMM backend (initial batched default when LIBXSMM is built) |
+| `10`                  | `native_gemm`        | Native GEMM (BF16 and FP32) |
+| `11`                  | `native_brgemm`      | Native BRGEMM over the native VNNI weight layout: serves the calls listed under [Native BRGEMM](#native-brgemm) and returns an error for any other call |
 
 > **Note:** When `params.lowoha_algo` is `none` and the applicable runtime setting (`ZENDNNL_MATMUL_ALGO` for single MatMul or `ZENDNNL_BMM_ALGO` for batched MatMul) is unset, single MatMul falls back to `aocl_dlp_blocked`. Batched MatMul initially selects `libxsmm`, but uses it only in builds with `ZENDNNL_DEPENDS_LIBXSMM=ON`; otherwise it falls back to `aocl_dlp`, or to `reference` when AOCL-DLP is also unavailable. The default LIBXSMM-disabled build therefore runs LowOHA BMM with AOCL-DLP.
+
+### Native BRGEMM
+
+A call asks for the native BRGEMM with `params.lowoha_algo = matmul_algo_t::native_brgemm`, or, for a single (not batched) call, with `lowoha_algo` left `none` under `ZENDNNL_MATMUL_ALGO=11`, which selects the kernel of single calls: a batched call with `lowoha_algo` left `none` takes its kernel from `ZENDNNL_BMM_ALGO`. Dynamic dispatch (`0`) and the auto tuner never select it. The native BRGEMM runs such a call or returns an error: no other backend runs it.
+
+It serves a single (not batched), row-major call with a plain source (`mem_format_a = 'n'`) that has:
+- bf16 × bf16, u8 / s8 × s8 (or a bf16 / f32 source the call quantizes to u8 / s8: `dynamic_quant` with `dtypes.compute` u8 / s8), or f32 × f32 data types, into an f32, bf16, f16, u8, s8 or s32 dst (f32 or bf16 for f32 × f32), with a bias of f32, bf16, f16, s8, u8 or s32;
+- a raw weight (`mem_format_b = 'n'`), an AOCL-DLP blocked prepack whose pack has an unreorder (under `ZENDNNL_MATMUL_ALGO=11` only), or a buffer the native BRGEMM rewrote in place;
+- any N ≥ 1, K ≥ 1 and ldb at least the weight row (a weight whose N is not a multiple of 32 is packed with zero columns up to whole 32-column blocks, never in place, and only its N columns are read and written); for s8 weights, K within the int32 accumulation bound and per-group weight scales over groups of whole K quads. At M = 1 a bf16 call with N ≤ 4 on a [K, N] weight runs on the native BRGEMM's narrow GEMV kernel instead, and a call on a constant weight may run on one thread on its BKC GEMV kernels (the `[MATMUL.NATIVE_BRGEMM]` line shows `gemv=<kind>`). At weight cache mode 1 or 2 a BKC kernel caches its own pack of the weight (a bf16 weight of any size, an s8 weight within the L2), next to the native layout that the weight's calls of M > 1 cache when it is out of place (weight cache mode 1, or `lowoha_algo` `native_brgemm` without `ZENDNNL_MATMUL_ALGO=11`): the weight is then held three times. Once an in-place image holds the weight, its M = 1 calls run on the tiles;
+- for INT8, no weight zero point; f32, bf16 or f16 scales per tensor or per row for the source, per tensor, per column or per group for the weight; s32, s8 or u8 source zero points per tensor or per row (with per-group weight scales, one per tensor and only with a u8 source); an `{M, G}` source scale with an s8 source and no zero point;
+- the post-ops and gated activations of `matmul_direct`, except a softmax with a gated activation, and beta with a gated activation only over a dst of at least N columns.
+
+`matmul_direct` checks its inputs before any route runs, unless `ZENDNNL_DIAGNOSTICS_ENABLE=0` turns the checks off, and returns `status_t::failure` with an error line for a call they reject. With the checks on, three parts of the list above are narrower:
+- source scales: per tensor, or per row or `{M, G}` only with an s8 source or a bf16 / f32 source the call quantizes to s8, no source zero point, an f32 or bf16 dst, and weight scales per column or per group (`G × N` of them with an `{M, G}` source scale);
+- source zero points: per tensor only;
+- data types, by the type of the source whatever the weight (a bf16 / f32 source the call quantizes included): no f32 source into a bf16 or f16 dst, no bf16 source into an f16 dst, and no f16 source into a bf16 dst.
+
+The native BRGEMM serves the whole list only with the checks off. An f16 dst or bias also needs AVX512-FP16, which `matmul_direct` checks on every call before the checks above: without it such a call returns `status_t::isa_unsupported`.
+
+Any other call that asks for it returns, with dst untouched and one error line naming the reason:
+- `status_t::unimplemented` for what the native BRGEMM does not implement, for example weight zero points, s4 / u4 weights, batched calls, column-major calls, reordered sources, GGML packed weights, a softmax with a gated activation, an f16 dst with per-group weight scales, or an s8 source with a zero point on per-group weight scales;
+- `status_t::isa_unsupported` on a CPU without the instruction set its data types need (AVX-512 F, BW, VL and DQ and FMA, with AVX512-BF16 for bf16, AVX512-VNNI for INT8 and AVX512-FP16 for an f16 dst or bias);
+- `status_t::failure` for a weight buffer only another route reads (a custom-kernel image) and for a call the native BRGEMM does not serve on a buffer it rewrote in place, which no other route reads.
+
+Under `ZENDNNL_MATMUL_ALGO=11` a call on an AOCL-DLP blocked prepack whose `lowoha_algo` names AOCL-DLP blocked keeps its AOCL-DLP route when the native BRGEMM does not serve it. Group matmul never reaches the native BRGEMM: under `ZENDNNL_MATMUL_ALGO=11`, and for an op whose `lowoha_algo` is `native_brgemm`, it runs as with the algorithm unset.
 
 ### Via `matmul_params`
 

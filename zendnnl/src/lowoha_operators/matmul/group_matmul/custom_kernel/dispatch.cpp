@@ -578,12 +578,11 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
     // ── Run-once invariants (CPU + dtypes + activation) ──────────────
     // The dispatcher serves two ISA families: bf16 variants need
     // AVX-512 BF16 (VDPBF16PS); DQ-INT8 variants need AVX-512 VNNI
-    // (VPDPBUSD).  On AVX-512-VNNI CPUs, VNNI is a strict superset of
-    // BF16, but on broader x86 (e.g. Cascade Lake / Ice Lake) VNNI
-    // exists WITHOUT BF16.  Refuse early ONLY when NEITHER family's ISA
-    // is present; the precise per-variant ISA gate runs after
-    // `resolve_variant()` below (bf16 -> BF16, int8 -> VNNI) so a
-    // VNNI-only host can still serve the DQ-INT8 fast path.
+    // (VPDPBUSD).  A CPU with AVX-512 BF16 also has AVX-512 VNNI, but
+    // some x86 CPUs have VNNI WITHOUT BF16.  Refuse early ONLY when
+    // NEITHER family's ISA is present; the precise per-variant ISA gate
+    // runs after `resolve_variant()` below (bf16 -> BF16, int8 -> VNNI)
+    // so a VNNI-only host can still serve the DQ-INT8 fast path.
     if (!avx512bf16_available() && !avx512vnni_available()
             && !avx512f16_available())
         return refuse("no_avx512_bf16_vnni_or_fp16");
@@ -1723,9 +1722,8 @@ inline void dispatch_tile_int8(const CallContext &ctx, int expert_idx, int M,
 // L2-sized K chunks into s32 scratch, reuses each B chunk across all MR calls,
 // then applies the full-K compensation and dequant exactly once. O-block stays
 // outermost so each thread walks the full packed-weight block monotonically;
-// a K-major traversal won the isolated microbenchmark but regressed the Venice
-// model by 4.44% because it interleaved distant slices from several 1 MiB
-// blocks and defeated the cold-weight streaming pattern.
+// a K-major traversal would interleave distant slices from several 1 MiB
+// blocks and defeat the cold-weight streaming pattern.
 inline void dispatch_tile_int8_kblocked(const CallContext &ctx, int expert_idx,
         int M, int K, int n_tile, int col_start, const void *src, int lda,
         void *dst, int ldc, const void *src_scale, const void *wei_scale) {

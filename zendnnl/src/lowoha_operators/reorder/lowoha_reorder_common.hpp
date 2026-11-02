@@ -393,8 +393,7 @@ inline int32_t get_dynamic_quant_algo_override() {
  *                     introduced F16C in 2012 and AVX-512F in 2017, so the
  *                     superset relation holds in practice).
  *   - FP16-FMA      — native __m512h math, requires the AVX512-FP16 ISA
- *                     (Granite Rapids / Sapphire Rapids / Turin) and a
- *                     toolchain that supports __m512h intrinsics
+ *                     and a toolchain that supports __m512h intrinsics
  *                     (GCC 12+).
  *
  * This helper decides which backend the dispatchers should pick.

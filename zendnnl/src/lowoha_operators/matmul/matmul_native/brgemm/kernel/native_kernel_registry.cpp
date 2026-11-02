@@ -45,7 +45,7 @@ int full_rows(uint32_t mask) {
 } // namespace
 
 native_kernel_registry_t::native_kernel_registry_t(
-        bool bf16_isa, bool int8_isa) {
+        bool bf16_isa, bool int8_isa, bool f32_isa) {
     for (int w = 0; bf16_isa && w < kWidths; ++w) {
         native_kernel_caps_t c;
         c.kind = native_kernel_kind_t::bf16;
@@ -92,14 +92,29 @@ native_kernel_registry_t::native_kernel_registry_t(
         c.kind = native_kernel_kind_t::int8;
         c.nr = 16 << w;
         const int nv = c.nr / 16;
+        // A call takes the s8 or the u8 kernel by its source.
         uint32_t mask = 0;
         for (int mr = 1; mr <= kMaxRows; ++mr) {
-            if (select_native_int8_group_ukernel(mr, nv) != nullptr)
+            if (select_native_int8_group_ukernel(mr, nv, false) != nullptr
+                    && select_native_int8_group_ukernel(mr, nv, true)
+                            != nullptr)
                 mask |= 1u << (mr - 1);
         }
         c.max_mr = full_rows(mask);
         c.int8_schemes
                 = native_int8_scheme_bit(native_int8_scheme_t::per_group);
+        if (c.max_mr > 0) all_.push_back(c);
+    }
+    for (int w = 0; f32_isa && w < kWidths; ++w) {
+        native_kernel_caps_t c;
+        c.kind = native_kernel_kind_t::f32;
+        c.nr = 16 << w;
+        uint32_t mask = 0;
+        for (int mr = 1; mr <= kMaxRows; ++mr) {
+            f32_[w][mr] = select_native_fp32_ukernel(mr, c.nr / 16);
+            if (f32_[w][mr] != nullptr) mask |= 1u << (mr - 1);
+        }
+        c.max_mr = full_rows(mask);
         if (c.max_mr > 0) all_.push_back(c);
     }
 }
@@ -140,12 +155,18 @@ const bf16_brgemm_fn_t *native_kernel_registry_t::bf16_table(
     return bf16_[width_index(native_bf16_slab_cols(nr))];
 }
 
+const native_fp32_ukernel_fn_t *native_kernel_registry_t::f32_table(
+        int nr) const noexcept {
+    if (caps(native_kernel_kind_t::f32, nr) == nullptr) return nullptr;
+    return f32_[width_index(nr)];
+}
+
 const native_kernel_registry_t &native_kernel_registry() {
     // Never destroyed: calls may still plan while static objects are
     // destroyed.
     static const native_kernel_registry_t *const registry
-            = new native_kernel_registry_t(
-                    detect_uarch().avx512bf16, detect_uarch().avx512vnni);
+            = new native_kernel_registry_t(detect_uarch().avx512bf16,
+                    detect_uarch().avx512vnni, detect_uarch().avx512f);
     return *registry;
 }
 

@@ -36,9 +36,9 @@ namespace native {
 
 /// What the epilogue of a call does after the accumulation (first match):
 /// gated: a gated activation; postops: any post-op, INT8 requantization, or
-/// alpha / beta other than 1 / 0; bias: a bias the epilogue must add (BF16, or
-/// an INT8 bias the dequantization cannot take); store: the store only (no
-/// bias, or an INT8 bias the dequantization takes).
+/// alpha / beta other than 1 / 0; bias: a bias the epilogue must add (BF16 or
+/// FP32, or an INT8 bias the dequantization cannot take); store: the store
+/// only (no bias, or an INT8 bias the dequantization takes).
 enum class native_epilogue_class_t : uint8_t { store, bias, postops, gated };
 
 /// Everything a plan may depend on.  Equal problems get equal plans on one
@@ -50,9 +50,9 @@ struct native_problem_t {
     int pack_nr = 0; ///< native_weight_ref_t::pack_nr
     /// 1 inside a parallel region, else max(1, desc.num_threads).
     int threads = 1;
-    /// bf16, u8, s8, or bf16 / f32 quantized in the call.
+    /// bf16, u8, s8, f32, or bf16 / f32 quantized in the call.
     data_type_t src_dt = data_type_t::none;
-    data_type_t wei_dt = data_type_t::none; ///< bf16 or s8
+    data_type_t wei_dt = data_type_t::none; ///< bf16, s8 or f32
     data_type_t dst_dt = data_type_t::none;
     bool trans_a = false;
     bool dynamic_quant = false; ///< the call quantizes a bf16 / f32 source
@@ -64,14 +64,17 @@ struct native_problem_t {
     native_int8_scheme_t int8_scheme = native_int8_scheme_t::per_channel;
 
     bool bf16() const { return wei_dt == data_type_t::bf16; }
+    bool f32() const { return wei_dt == data_type_t::f32; }
+    bool int8() const { return wei_dt == data_type_t::s8; }
     bool operator==(const native_problem_t &o) const;
 };
 
 size_t hash_native_problem(const native_problem_t &p) noexcept;
 
 /// The problem of a call native_brgemm_execute serves.  decision is the
-/// call's decide_int8_call, read only for an s8 weight.  Cheap; no
-/// allocation.
+/// call's decide_int8_call, read only for an s8 weight.  N is the width its
+/// tiles run on: native_padded_n(desc.N, pack_nr), the call's N when that is
+/// a multiple of the blocks.  Cheap; no allocation.
 native_problem_t make_native_problem(const GemmDescriptor &desc,
         const matmul_params &params, const void *bias, int pack_nr,
         const native_int8_decision_t &decision);
@@ -88,11 +91,13 @@ struct native_plan_t {
     /// 32-column slabs, each inside one pack block, of whole blocks or of
     /// one block.
     int nr = 0;
-    int mr = 0; ///< BF16 rows per call; rows of the row-split rounding
+    /// BF16 and FP32 rows per call; rows of the row-split rounding
+    int mr = 0;
     int mb = 0; ///< rows per M block
     int m_blocks = 0;
     int n_tiles = 0;
-    int kc = 0; ///< BF16 K per pass; even unless it covers K
+    /// BF16 and FP32 K per pass; BF16 even unless it covers K
+    int kc = 0;
     int threads = 1; ///< compute team
     int col_groups = 0; ///< 0: slice schedule; > 0: row-group schedule
     /// > 0: the blocks schedule (col_groups 0): units of a row block by
@@ -138,8 +143,8 @@ const char *validate_native_plan(
         const native_plan_t &plan, const native_problem_t &p);
 
 /// The accumulators per thread a plan for p needs: one row call's for a BF16
-/// plan of one K pass; else a row block's for each tile a unit computes
-/// between K passes.
+/// or FP32 plan of one K pass; else a row block's for each tile a unit
+/// computes between K passes.
 size_t native_plan_scratch_floats(
         const native_plan_t &plan, const native_problem_t &p);
 

@@ -63,7 +63,7 @@ using common::f16x32_store_typed;
     InType=float16_t, OutType=float      — F16 load, widen to F32 on store
     InType=float,     OutType=float16_t  — narrow F32 to F16 on load, F16 store
 
-  Requires AVX512-FP16 ISA (Zen 5 / Sapphire Rapids or later).
+  Requires the AVX512-FP16 ISA.
   The caller must have verified ISA support before reaching this kernel.
 
   Template Parameters:

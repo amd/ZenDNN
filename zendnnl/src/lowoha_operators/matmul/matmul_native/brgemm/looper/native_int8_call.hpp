@@ -37,17 +37,21 @@ using zendnnl::error_handling::status_t;
 
 /// The decision of an INT8 call with weight scales params.quant_params and
 /// bias (params.dtypes.bias, or nullptr):
-///   * per_group when int8_scale_groups(params, desc.N) > 0, else
-///     per_channel;
+///   * per_group when int8_scale_groups(params, desc.N) > 0, or, with
+///     per-tensor or per-channel weight scales (or none), when
+///     int8_source_groups(params, desc.M, desc.N) > 0 (scales_after_groups);
+///     else per_channel;
 ///   * per_channel: the reference order with alpha other than 1, beta other
 ///     than 0 or a u8, s8 or s32 destination, which rounds the value to an
 ///     integer; the fused order otherwise;
 ///   * per_group: the reference order, alpha and beta after the groups (in
-///     the epilogue);
+///     the epilogue, or with scales_after_groups in the tile, before the
+///     weight scales);
 ///   * bias_in_dequant: a per-channel call of the fused order with an f32,
 ///     bf16 or f16 bias;
 ///   * direct_store: a per-channel call of the fused order, or a per-group
-///     call with alpha 1 and beta 0, with an f32 or bf16 destination.
+///     call with per-group weight scales, alpha 1 and beta 0, with an f32 or
+///     bf16 destination.
 native_int8_decision_t decide_int8_call(const GemmDescriptor &desc,
         const matmul_params &params, const void *bias);
 
@@ -57,6 +61,8 @@ struct native_int8_call_t {
     /// s8 when src_signed, which the per-channel tile reads as s8 + 128
     /// (compensated by a zero point raised by 128) and the group kernel reads
     /// as it is (the weight read as w + 128, compensated by group_shift).
+    /// The group kernel reads a u8 source and the weight as they are and
+    /// takes the zero point times each group's column sums of the weight.
     const uint8_t *A = nullptr;
     int lda = 0;
     bool src_signed = false;
@@ -76,19 +82,24 @@ struct native_int8_call_t {
     /// of row m and group g is at src_scale_stride * m +
     /// src_scale_group_stride * g.  The tile sums each group exactly, then
     /// adds (f32(sum) * src scale) * wei scale over the groups in order;
-    /// alpha, beta and the bias are the epilogue's.
+    /// alpha, beta and the bias are the epilogue's, unless:
     native_int8_scheme_t scheme = native_int8_scheme_t::per_channel;
+    /// decide_int8_call's: the group kernel takes unit weight scales, and
+    /// the tile applies alpha, beta and then wei_scale (per column or per
+    /// tensor) to the sum of the groups, one rounding each, in the reference
+    /// algorithm's order: (alpha * S + beta * C) * wei_scale.
+    bool scales_after_groups = false;
     int groups = 0;
     int group_quads = 0;
     int src_scale_group_stride = 0;
-    /// per_group: -128 times the sum of row m's source values over group g,
-    /// at m * groups + g: it cancels what the group kernel's reading of the
-    /// weight as w + 128 adds to the group's sum.  Written by
+    /// per_group, s8 source: -128 times the sum of row m's source values over
+    /// group g, at m * groups + g: it cancels what the group kernel's reading
+    /// of the weight as w + 128 adds to the group's sum.  Written by
     /// ready_group_shifts.
     int32_t *group_shift = nullptr;
-    /// per_group: the rows, claimed shift_chunk at a time; shift_rows[0] is
-    /// the next chunk a tile may claim, shift_rows[1 + c] is set once the
-    /// shifts of chunk c are written.
+    /// per_group, s8 source: the rows, claimed shift_chunk at a time;
+    /// shift_rows[0] is the next chunk a tile may claim, shift_rows[1 + c] is
+    /// set once the shifts of chunk c are written.
     int rows = 0;
     int shift_chunk = 1;
     std::unique_ptr<std::atomic<int>[]> shift_rows;
@@ -123,34 +134,44 @@ struct native_int8_call_t {
 };
 
 /// The INT8 tile serves the call's weight, source and quantization params
-/// with decision, decide_int8_call's for them (unimplemented otherwise).
-/// Does no work and reads no buffer, so a call it rejects can still take
-/// another route.  Weight zero points, K above kMaxSafeInt8AccumK and a
-/// gated activation with beta != 0 are not served.  Per-group weight scales
-/// need groups of whole K quads, an s8 source without a zero point (or a
-/// bf16 / f32 source quantized to s8), a per-tensor, per-token or {M, G}
-/// source scale and an f32 / bf16 dst.
+/// with decision, decide_int8_call's for them (unimplemented otherwise, with
+/// *why, when why is not null, naming the reason).  Does no work and reads
+/// no buffer.  Weight zero points, K above kMaxSafeInt8AccumK, and a gated
+/// activation with beta over a dst of fewer than N columns are not served.
+/// Per-group weight scales
+/// need groups of whole K quads, an f32, bf16, u8, s8 or s32 dst, and an s8
+/// source without a zero point (or a bf16 / f32 source quantized to s8) with
+/// a per-tensor, per-token or {M, G} source scale, or a u8 source (or a
+/// bf16 / f32 source quantized to u8) with a per-tensor scale and zero point.
 status_t check_int8_call(const GemmDescriptor &desc,
-        const matmul_params &params, const native_int8_decision_t &decision);
+        const matmul_params &params, const native_int8_decision_t &decision,
+        const char **why = nullptr);
 
 /// G of a per-group {G > 1, N} weight scale, 0 for any other.
 int int8_scale_groups(const matmul_params &params, int N);
 
-/// Quantizes a bf16 / f32 source per token or per tensor (or per group, with
-/// per-group weight scales) with matmul's reorder_quantization_wrapper
-/// (scales and zero points written back to the caller's buffers when it gave
-/// them), or adopts a u8 / s8 source with its per-tensor, per-token or
-/// per-group scale and zero point, for a call check_int8_call accepts with
-/// decision.  The source is copied only when it is transposed or K is not
-/// whole quads.  The copies (and the transpose before a dynamic
-/// quantization) work in blocks of copy_block rows (by copy_block columns
-/// when they transpose), on the requested threads when M * K >=
-/// copy_par_min.  The group shifts of a per-group call are left to its tiles
-/// (ready_group_shifts).
+/// G of a per-group {M, G > 1} source scale over a weight scale that
+/// int8_scale_groups does not take, 0 otherwise; 0 for a null source-scale
+/// buffer, unless the call quantizes its source.
+int int8_source_groups(const matmul_params &params, int M, int N);
+
+/// Quantizes a bf16 / f32 source per token or per tensor (or per group to
+/// s8, with per-group weight scales) with matmul's
+/// reorder_quantization_wrapper (scales and zero points written back to the
+/// caller's buffers when it gave them), or adopts a u8 / s8 source with its
+/// per-tensor, per-token or per-group scale and zero point, for a call
+/// check_int8_call accepts with decision.  The source is copied only when it
+/// is transposed or K is not whole quads.  The copies (and the transpose
+/// before a dynamic quantization) work in blocks of copy_block rows (by
+/// copy_block columns when they transpose), on the requested threads when
+/// M * K >= copy_par_min.  The group shifts of a per-group call with an s8
+/// source are left to its tiles (ready_group_shifts).  A call whose
+/// quantization params it cannot use is unimplemented, with *why (when why
+/// is not null) naming the reason.
 status_t prepare_int8_call(const GemmDescriptor &desc,
         const matmul_params &params, const native_int8_decision_t &decision,
         const void *src, int copy_block, int64_t copy_par_min,
-        native_int8_call_t &call);
+        native_int8_call_t &call, const char **why = nullptr);
 
 /// Makes the group shifts of rows m0 .. m0 + mr of a prepared per-group call
 /// ready: the tiles of a call claim the chunks of rows nobody has claimed

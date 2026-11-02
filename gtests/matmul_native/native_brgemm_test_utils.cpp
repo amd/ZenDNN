@@ -34,6 +34,7 @@
 #include "common/zendnnl_global.hpp"
 #include "group_matmul/moe_test_utils.hpp"
 #include "gtest_utils.hpp"
+#include "lowoha_operators/common/omp_thread_control.hpp"
 #include "lowoha_operators/matmul/group_matmul/common/group_matmul_parallel_common.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_brgemm_looper.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_weight_cache.hpp"
@@ -143,6 +144,67 @@ status_t run_matmul(const call_t &c) {
             c.src, c.lda_or_tight(), c.wei, c.ldb_or_tight(), c.bias, c.beta,
             c.dst, c.ldc_or_tight(), c.is_weights_const, batch, c.params,
             c.gated == mm::matmul_gated_act_t::none ? nullptr : &gated);
+}
+
+zendnnl::lowoha::matmul::native::native_gemv_t gemv_kernel(const call_t &c) {
+    namespace nat = zendnnl::lowoha::matmul::native;
+    if (c.M != 1 || c.params.mem_format_b != 'n'
+            || !nat::native_brgemm_requested(c.params, 1))
+        return nat::native_gemv_t::none;
+    nat::GemmDescriptor d;
+    d.M = c.M;
+    d.N = c.N;
+    d.K = c.K;
+    d.lda = c.lda_or_tight();
+    d.ldb = c.ldb_or_tight();
+    d.ldc = c.ldc_or_tight();
+    d.transA = c.transA;
+    d.transB = c.transB;
+    d.alpha = c.alpha;
+    d.beta = c.beta;
+    d.src_dt = c.params.dtypes.src;
+    d.wei_dt = c.params.dtypes.wei;
+    d.dst_dt = c.params.dtypes.dst;
+    d.bias_dt = c.params.dtypes.bias;
+    d.bias = c.bias;
+    d.is_weights_const = c.is_weights_const;
+    d.num_threads = zendnnl::lowoha::resolve_num_threads(
+            c.params.num_threads, zendnnl::lowoha::thread_guard::max_threads());
+    d.gated_act = c.gated;
+    return nat::decide_native_gemv(d, c.params).kernel;
+}
+
+status_t refusal_of(const call_t &c, std::string *reason) {
+    mm::matmul_batch_params_t batch;
+    mm::matmul_gated_act_params gated;
+    gated.act = c.gated;
+    const char *why = nullptr;
+    const status_t st = mm::native_brgemm_refusal('r', c.transA, c.transB, c.M,
+            c.N, c.K, c.alpha, c.src, c.lda_or_tight(), c.wei, c.ldb_or_tight(),
+            c.bias, c.beta, c.dst, c.ldc_or_tight(), c.is_weights_const, batch,
+            c.params,
+            c.gated == mm::matmul_gated_act_t::none ? nullptr : &gated, &why);
+    if (reason != nullptr) *reason = why != nullptr ? why : "";
+    return st;
+}
+
+::testing::AssertionResult refused_with(const call_t &c, status_t st) {
+    std::string reason;
+    const status_t refused = refusal_of(c, &reason);
+    if (refused != st)
+        return ::testing::AssertionFailure()
+                << "refused with status " << static_cast<int>(refused) << " ("
+                << reason << "), not " << static_cast<int>(st);
+    mm::matmul_batch_params_t batch;
+    mm::matmul_gated_act_params gated;
+    gated.act = c.gated;
+    run_matmul_direct('r', c.transA, c.transB, c.M, c.N, c.K, c.alpha, c.src,
+            c.lda_or_tight(), c.wei, c.ldb_or_tight(), c.bias, c.beta, c.dst,
+            c.ldc_or_tight(), c.is_weights_const, batch, c.params,
+            c.gated == mm::matmul_gated_act_t::none ? nullptr : &gated);
+    if (!native_refusal_checked())
+        return ::testing::AssertionFailure() << "not checked as refused";
+    return ::testing::AssertionSuccess() << reason;
 }
 
 namespace {
@@ -507,8 +569,8 @@ std::vector<std::string> native_enum_values(nat::native_key_type_t type) {
 
 std::string hw_match_text(const nat::native_hw_t &hw) {
     const nat::UarchParams plan = nat::native_plan_uarch(hw);
-    const int domain
-            = plan.l3_domain_cores > 0 ? plan.l3_domain_cores : plan.ccx_cores;
+    const int domain = plan.l3_domain_cores > 0 ? plan.l3_domain_cores
+                                                : plan.family_l3_cores;
     nlohmann::ordered_json m = nlohmann::ordered_json::object();
     const auto count = [&m](const char *key, int64_t v) {
         if (v > 0) m[key] = v;
@@ -524,8 +586,7 @@ std::string hw_match_text(const nat::native_hw_t &hw) {
     m["isa"] = isa;
     count("l1d_kib", hw.uarch.l1d_detected ? hw.uarch.l1d_bytes / 1024 : 0);
     count("l2_kib", hw.uarch.l2_detected ? hw.uarch.l2_bytes / 1024 : 0);
-    count("l3_kib",
-            hw.uarch.l3_detected ? hw.uarch.l3_bytes_per_ccd / 1024 : 0);
+    count("l3_kib", hw.uarch.l3_detected ? hw.uarch.l3_domain_bytes / 1024 : 0);
     count("l3_cores", domain);
     count("smt", hw.smt);
     count("l3_threads", hw.l3_domain_threads);

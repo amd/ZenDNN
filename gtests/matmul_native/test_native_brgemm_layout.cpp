@@ -1098,6 +1098,51 @@ TEST_F(NativeBrgemmLayoutTest, CacheCapacityPacksBeyondItForTheCall) {
     }
 }
 
+// A weight of N not a multiple of 32 has a layout of padded blocks, larger
+// than the weight: weight cache mode 2 packs it out of place into the cache,
+// as mode 1 does, even when the caller states a capacity the layout fits;
+// the cached layout serves both modes and the buffer is never written.
+TEST_F(NativeBrgemmLayoutTest, PaddedLayoutIsCachedOutOfPlace) {
+    for (int N : {1, 40, 72})
+        for (bool transB : {true, false}) {
+            problem_t pb = make_problem(1, N, 64, false, transB, 0, 0, 0, 71);
+            const size_t padded
+                    = nv::native_packed_bytes(data_type_t::bf16, pb.K, N, 32);
+            std::vector<uint8_t> want(padded, 0);
+            ASSERT_EQ(
+                    nv::native_pack_weight(data_type_t::bf16, pb.w.data(), pb.K,
+                            N, pb.ldb, 32, transB, false, want.data(), 1),
+                    status_t::success);
+            for (size_t capacity : {size_t {0}, padded + 4096}) {
+                SCOPED_TRACE("N=" + std::to_string(N)
+                        + " transB=" + std::to_string(transB)
+                        + " capacity=" + std::to_string(capacity));
+                std::vector<bfloat16_t> buf(
+                        std::max(pb.w.size(), capacity / 2 + 1),
+                        bfloat16_t(3.0f));
+                std::copy(pb.w.begin(), pb.w.end(), buf.begin());
+                const std::vector<bfloat16_t> before = buf;
+                for (int32_t wc : {2, 1, 2}) {
+                    nv::native_layout_t l;
+                    ASSERT_EQ(nv::get_native_layout(
+                                      raw_bf16(pb, buf.data(), 32, false), wc,
+                                      capacity, 2, l),
+                            status_t::success);
+                    EXPECT_NE(l.data, static_cast<const void *>(buf.data()));
+                    EXPECT_EQ(l.owned, nullptr);
+                    EXPECT_EQ(std::memcmp(l.data, want.data(), padded), 0);
+                }
+                EXPECT_EQ(nv::native_weight_layouts(buf.data()), 1u);
+                EXPECT_FALSE(packed_in_place(buf));
+                EXPECT_EQ(std::memcmp(buf.data(), before.data(),
+                                  buf.size() * sizeof(bfloat16_t)),
+                        0)
+                        << "the weight buffer is not written";
+                zendnnl::lowoha::matmul::clear_matmul_native_weight_caches();
+            }
+        }
+}
+
 TEST_F(NativeBrgemmLayoutTest, InPlaceImageServesOrRebuildsEveryRequest) {
     problem_t pb = make_problem(1, 128, 64, false, true, 0, 0, 0, 51);
     std::vector<bfloat16_t> w = pb.w;

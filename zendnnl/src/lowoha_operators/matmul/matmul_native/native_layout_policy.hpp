@@ -35,7 +35,8 @@ inline constexpr int kNativeLayoutPackNr = 32;
 struct native_layout_query_t {
     data_type_t wei_dt = data_type_t::none;
     /// Source type the kernel multiplies with: bf16 for BF16, u8 / s8 for
-    /// INT8, including a bf16 or f32 source the call quantizes dynamically.
+    /// INT8, including a bf16 or f32 source the call quantizes dynamically,
+    /// f32 for FP32.
     data_type_t src_dt = data_type_t::none;
     int K = 0;
     int N = 0;
@@ -50,14 +51,16 @@ struct native_layout_decision_t {
     bool native = false;
     int pack_nr = 0; ///< kNativeLayoutPackNr when native
     const char *reason = ""; ///< why the native layout is declined
+    bool isa = false; ///< declined for the CPU's instruction set
 };
 
 /// Whether ALGO 11 packs the weight in the native VNNI layout with pack_nr
 /// columns per block, read only by the native BRGEMM.  Native when all hold:
 ///   * a CPU with AVX-512 F, BW, VL and DQ and FMA (native_base_isa);
-///   * wei bf16 with src bf16 on a CPU with AVX512-BF16, or wei s8 with
-///     src u8 / s8 on a CPU with AVX512-VNNI;
-///   * N >= 32 and N % 32 == 0, K >= 1, ldb >= (transB ? K : N);
+///   * wei bf16 with src bf16 on a CPU with AVX512-BF16, wei s8 with src
+///     u8 / s8 on a CPU with AVX512-VNNI, or wei f32 with src f32;
+///   * N >= 1 (a weight of N not a multiple of 32 is held padded with zero
+///     columns to whole blocks), K >= 1, ldb >= (transB ? K : N);
 ///   * s8: K <= INT32_MAX / (255 * 128), the bound that keeps the int32
 ///     accumulation exact, and per-group weight scales only over groups of
 ///     whole K quads (a group size that divides K and is a multiple of 4).

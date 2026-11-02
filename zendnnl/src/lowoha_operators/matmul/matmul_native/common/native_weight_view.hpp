@@ -36,15 +36,19 @@ using zendnnl::error_handling::status_t;
 ///   bf16: [ceil(K / 2)][pack_nr][2] bf16, odd K padded with zero.
 ///   s8:   [ceil(K / 4)][pack_nr][4] s8, zero padded, then [pack_nr] int32
 ///         column sums over the real K.
+///   f32:  [K][pack_nr] f32.
 /// A gate / up weight packed with interleave_split_halves holds gate column i
-/// at pack column 2i and up column i at pack column 2i + 1.
+/// at pack column 2i and up column i at pack column 2i + 1.  The blocks hold
+/// native_padded_n(N, pack_nr) pack columns: the N of the weight, then zero
+/// columns (column sums zero) up to whole blocks; a gate / up pair never
+/// straddles N, which is even.
 struct native_weight_view_t {
     const uint8_t *base = nullptr;
     data_type_t wei_dt = data_type_t::none;
     int K = 0;
     int N = 0;
     int pack_nr = 0;
-    int k_groups = 0; ///< K pairs (bf16) or K quads (s8)
+    int k_groups = 0; ///< K pairs (bf16), K quads (s8) or K rows (f32)
     size_t block_bytes = 0; ///< one block, column sums included
     bool interleaved = false;
 
@@ -60,6 +64,7 @@ struct native_weight_view_t {
 
     /// Elements of wei_dt between consecutive K groups of one column.
     int group_stride() const {
+        if (wei_dt == data_type_t::f32) return pack_nr;
         return pack_nr * (wei_dt == data_type_t::bf16 ? 2 : 4);
     }
 
@@ -80,7 +85,7 @@ struct native_weight_ref_t {
     /// Effective weight cache mode (see get_native_layout): 0 packs for this
     /// call only, 1 uses the native layout cache, 2 rewrites the buffer in
     /// place when the image fits it (a bf16 raw weight, or an AOCL prepack),
-    /// else as 1.
+    /// else as 1 (an s8 or f32 raw weight, or a weight of padded columns).
     int32_t weight_cache_mode = 1;
     /// Writable bytes at weight (0: the logical extent, or for an AOCL
     /// prepack its size).

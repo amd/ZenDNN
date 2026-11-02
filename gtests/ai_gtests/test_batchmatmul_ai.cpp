@@ -14,6 +14,7 @@
 # * limitations under the License.
 # *******************************************************************************/
 
+#include "gtest_native_refusal.hpp"
 #include "gtest_utils_batchmatmul_ai.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
@@ -320,6 +321,7 @@ protected:
         status_t test_status = run_batchmatmul_test(tensors.input,
                 tensors.weights, tensors.bias, tensors.output, params,
                 tensors.binary_post_op_tensors);
+        if (native_refusal_verified()) return;
         AITestUtils::debug_print("[AI_BATCH_DEBUG] ZenDNNL kernel finished.");
 
         if (aocl_supported) {
@@ -411,6 +413,7 @@ protected:
         status_t test_status = run_batchmatmul_test(tensors.input,
                 tensors.weights, tensors.bias, tensors.output, params,
                 tensors.binary_post_op_tensors);
+        if (native_refusal_verified()) return;
 
         if (params.expect_success) {
             EXPECT_EQ(test_status, status_t::success)
@@ -454,6 +457,7 @@ protected:
         status_t test_status = run_batchmatmul_test(tensors.input,
                 tensors.weights, tensors.bias, tensors.output, params,
                 tensors.binary_post_op_tensors);
+        if (native_refusal_verified()) return;
 
         if (params.expect_success) {
             EXPECT_EQ(test_status, status_t::success)
@@ -706,7 +710,7 @@ private:
                 const matmul_algo_t lowoha_algo = kernel_select(
                         matmul_params_obj, batchA, batchB, batch_count, M, N, K,
                         matmul_params_obj.num_threads,
-                        bias.get_raw_handle_unsafe(), is_weights_const, false);
+                        bias.get_raw_handle_unsafe(), is_weights_const);
                 const bool is_libxsmm_kernel = (lowoha_algo
                                 == matmul_algo_t::libxsmm
                         || lowoha_algo == matmul_algo_t::libxsmm_blocked);
@@ -766,7 +770,7 @@ private:
                 }
 
                 // Call LOWOHA matmul_direct
-                status_t status = matmul_direct('r', // layout: row-major
+                status_t status = run_matmul_direct('r', // layout: row-major
                         false, false, // transA, transB
                         M, N, K, 1.0f, A_data, lda, B_data, ldb, bias_data,
                         0.0f, C_data, ldc,

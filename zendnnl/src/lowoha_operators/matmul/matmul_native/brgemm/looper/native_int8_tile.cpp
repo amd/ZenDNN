@@ -33,11 +33,25 @@ void compute_int8_tile(const native_plan_t &plan,
     // A direct store writes pack column n as output column n: a plain pack.
     assert(out == nullptr || !w.interleaved);
     if (call.scheme == native_int8_scheme_t::per_group) {
-        assert(call.src_signed && call.bias == nullptr);
-        compute_group_tile(plan, call, w, m0, mr, n0, nr, C, ldc, out);
+        assert(call.bias == nullptr);
+        compute_group_tile<false>(plan, call, w, m0, mr, n0, nr, C, ldc, out);
         return;
     }
-    compute_channel_tile(plan, call, w, m0, mr, n0, nr, C, ldc, out);
+    compute_channel_tile<false>(plan, call, w, m0, mr, n0, nr, C, ldc, out);
+}
+
+void compute_int8_tail_tile(const native_plan_t &plan,
+        const native_int8_call_t &call, const native_weight_view_t &w, int m0,
+        int mr, int n0, int cols, float *C, int ldc) {
+    assert(cols > 0 && n0 + cols == w.N && w.wei_dt == data_type_t::s8);
+    const int nr = (cols + 15) / 16 * 16;
+    if (call.scheme == native_int8_scheme_t::per_group) {
+        assert(call.bias == nullptr);
+        compute_group_tile<true>(
+                plan, call, w, m0, mr, n0, nr, C, ldc, nullptr);
+        return;
+    }
+    compute_channel_tile<true>(plan, call, w, m0, mr, n0, nr, C, ldc, nullptr);
 }
 
 } // namespace native

@@ -111,61 +111,6 @@ inline void pack_b_vnni_strip(const uint16_t *B, int ldb, bool transB,
     }
 }
 
-// BRGEMM overload: packs full K (no pc/kb subset)
-ZENDNNL_TARGET("avx512f,avx512bw")
-inline void pack_b_vnni_strip_full(const uint16_t *B, int ldb, bool transB,
-        int col_start, int nr_act, int K, int K_padded, uint16_t *packed) {
-
-    const int k_pairs = K_padded / 2;
-    const int out_stride = NR_PACK * VNNI_PAIR;
-
-    for (int kp = 0; kp < k_pairs; ++kp) {
-        uint16_t *d = packed + kp * out_stride;
-        const int k0 = kp * 2;
-        const int k1 = k0 + 1;
-
-        if (!transB && nr_act == NR_PACK) {
-            const uint16_t *row0
-                    = (k0 < K) ? B + k0 * ldb + col_start : nullptr;
-            const uint16_t *row1
-                    = (k1 < K) ? B + k1 * ldb + col_start : nullptr;
-            for (int n = 0; n < NR_PACK; n += 32) {
-                __m512i r0 = row0 ? _mm512_loadu_si512(row0 + n)
-                                  : _mm512_setzero_si512();
-                __m512i r1 = row1 ? _mm512_loadu_si512(row1 + n)
-                                  : _mm512_setzero_si512();
-                __m512i lo = _mm512_unpacklo_epi16(r0, r1);
-                __m512i hi = _mm512_unpackhi_epi16(r0, r1);
-                const __m512i idx_lo = _mm512_setr_epi32(
-                        0, 1, 2, 3, 16, 17, 18, 19, 4, 5, 6, 7, 20, 21, 22, 23);
-                const __m512i idx_hi = _mm512_setr_epi32(8, 9, 10, 11, 24, 25,
-                        26, 27, 12, 13, 14, 15, 28, 29, 30, 31);
-                _mm512_storeu_si512(d + n * VNNI_PAIR,
-                        _mm512_permutex2var_epi32(lo, idx_lo, hi));
-                _mm512_storeu_si512(d + (n + 16) * VNNI_PAIR,
-                        _mm512_permutex2var_epi32(lo, idx_hi, hi));
-            }
-        } else {
-            for (int n = 0; n < nr_act; ++n) {
-                uint16_t v0, v1;
-                if (!transB) {
-                    v0 = (k0 < K) ? B[k0 * ldb + (col_start + n)] : 0;
-                    v1 = (k1 < K) ? B[k1 * ldb + (col_start + n)] : 0;
-                } else {
-                    v0 = (k0 < K) ? B[(col_start + n) * ldb + k0] : 0;
-                    v1 = (k1 < K) ? B[(col_start + n) * ldb + k1] : 0;
-                }
-                d[n * VNNI_PAIR + 0] = v0;
-                d[n * VNNI_PAIR + 1] = v1;
-            }
-            for (int n = nr_act; n < NR_PACK; ++n) {
-                d[n * VNNI_PAIR + 0] = 0;
-                d[n * VNNI_PAIR + 1] = 0;
-            }
-        }
-    }
-}
-
 } // namespace native
 } // namespace matmul
 } // namespace lowoha
