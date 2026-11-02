@@ -101,15 +101,17 @@ using zendnnl::lowoha::matmul::matmul_params;
 // [1.a] Test data initialization
 //
 // Deterministic pattern: a[i] = scale * (int((i + e*seed_step) % mod) - shift).
-// The explicit int cast prevents size_t underflow that would produce garbage
-// like 1.7e+35 (see git history for the bug this fixes).
+// Multiply in size_t so e * seed_step cannot overflow int before the product
+// is widened by the addition to i. Narrow the modulo result back to int
+// before subtracting shift; a size_t subtraction wraps (~1.7e+35).
 // ───────────────────────────────────────────────────────────────────
 
 inline float make_value(
         size_t i, int e, int seed_step, int mod, int shift, float scale) {
-    return scale
-            * static_cast<float>(
-                    static_cast<int>((i + e * seed_step) % mod) - shift);
+    const size_t term = static_cast<size_t>(e) * static_cast<size_t>(seed_step);
+    const int reduced
+            = static_cast<int>((i + term) % static_cast<size_t>(mod)) - shift;
+    return scale * static_cast<float>(reduced);
 }
 
 template <typename T>
