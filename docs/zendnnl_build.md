@@ -465,10 +465,6 @@ ZenDNN build can be integrated to the framework build using these files as follo
 - Include the edited ZenDnnlFwkIntegrate.cmake in the framework build flow, where ZenDNN is to be built.
 - Make any other targets that depend on ZenDNN dependent on *fwk_zendnnl* target.
 
-**ManyLinux Docker Hack:**
-
-On the ManyLinux Docker toolchain, aocl-utils installs library binaries to `${ZENDNNL_INSTALL_PREFIX}/deps/aoclutils/lib64` instead of `${ZENDNNL_INSTALL_PREFIX}/deps/aoclutils/lib`, which causes the build to fail. `ZenDnnlFwkIntegrate.cmake` works around this by checking the `ZENDNNL_MANYLINUX_BUILD` environment variable: when set, it uses the aocl-utils library path suitable for ManyLinux Docker. The ManyLinux Dockerfile needs to set this environment variable.
-
 ### 4.4 ZenDNN Installation
 
 ZenDNN install folder can be configured by providing `ZENDNNL_INSTALL_PREFIX` at the command line. The default installation folder is `${ZENDNNL_SOURCE_DIR}/build/install`. All dependencies, libraries, examples, tests, and documentation will be installed in this folder with the following folder structure:
