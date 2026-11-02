@@ -860,7 +860,9 @@ TEST_F(TestWeightCacheInplace, BmmSharedWeightHonoursPerCallCacheOff) {
                                    : "ZP-compensation cache off");
         ZpCompCacheGuard zp_guard(zp_comp_cache);
         clear_matmul_test_caches();
-        wei = original;
+        ASSERT_EQ(wei.size(), original.size());
+        std::memcpy(wei.data(), original.data(),
+                original.size() * sizeof(original[0]));
         for (int pass = 0; pass < 2; ++pass) {
             if (pass == 1) {
                 for (size_t i = 0; i < plain; ++i) {
