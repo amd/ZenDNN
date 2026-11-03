@@ -136,8 +136,6 @@ set_target_properties(zendnnl
 #     INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR}"
 #     INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR};${ZENDNNL_INCLUDE_DIRECTORIES}")
 
-#   target_link_options(zendnnl_library INTERFACE "-fopenmp")
-
 #   target_link_libraries(zendnnl_library
 #     INTERFACE ${CMAKE_DL_LIBS}
 #     INTERFACE OpenMP::OpenMP_CXX
