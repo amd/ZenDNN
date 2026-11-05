@@ -166,7 +166,7 @@ std::vector<std::unique_ptr<refused_t>> refused_cases() {
 }
 
 // Each class, per call (lowoha_algo native_brgemm) and under
-// ZENDNNL_MATMUL_ALGO=11: native_brgemm_refusal gives its status and names
+// ZENDNNL_MATMUL_ALGO=10: native_brgemm_refusal gives its status and names
 // its reason, and matmul_direct returns that status, with dst holding its
 // values, the weight its bytes, no native layout of the weight, and an error
 // line naming the reason (run_matmul_direct).
@@ -178,7 +178,7 @@ TEST(NativeBrgemmRefusal, EveryClassReturnsItsStatus) {
             refused_t &r = *rp;
             SCOPED_TRACE(std::string(r.name)
                     + (per_call ? ", lowoha_algo native_brgemm"
-                                : ", ZENDNNL_MATMUL_ALGO=11"));
+                                : ", ZENDNNL_MATMUL_ALGO=10"));
             std::unique_ptr<nt::algo_pin_t> pin;
             if (per_call)
                 r.c.params.lowoha_algo = matmul_algo_t::native_brgemm;
@@ -197,7 +197,7 @@ TEST(NativeBrgemmRefusal, EveryClassReturnsItsStatus) {
 }
 
 // Calls of N not a multiple of 32, per call and under
-// ZENDNNL_MATMUL_ALGO=11: native_brgemm_refusal gives success, and
+// ZENDNNL_MATMUL_ALGO=10: native_brgemm_refusal gives success, and
 // matmul_direct serves them over a native layout of the weight, which stays
 // raw, with the reference algorithm's result within the band of the type.
 TEST(NativeBrgemmRefusal, CallsOfAnyNAreServed) {
@@ -208,7 +208,7 @@ TEST(NativeBrgemmRefusal, CallsOfAnyNAreServed) {
             refused_t &r = *rp;
             SCOPED_TRACE(std::string(r.name)
                     + (per_call ? ", lowoha_algo native_brgemm"
-                                : ", ZENDNNL_MATMUL_ALGO=11"));
+                                : ", ZENDNNL_MATMUL_ALGO=10"));
             nt::buffer_t ref = nt::make_buffer(r.dst.bytes);
             std::memcpy(ref.get(), r.prior.get(), r.dst.bytes);
             ASSERT_EQ(nt::run_reference(r.c, r.wei.get(), ref.get()),
@@ -241,7 +241,7 @@ TEST(NativeBrgemmRefusal, CallsOfAnyNAreServed) {
 // the caller's buffers: native_brgemm_refusal leaves the source scale and
 // zero point, dst, the source and the weight as they were (an s8
 // quantization with a scale per tensor and per row, a u8 one with a zero
-// point), per call and under ZENDNNL_MATMUL_ALGO=11.  matmul_direct then
+// point), per call and under ZENDNNL_MATMUL_ALGO=10.  matmul_direct then
 // serves the call and writes the scales it computed into those buffers.
 TEST(NativeBrgemmRefusal, TheCheckWritesNoCallerBuffer) {
     if (!native_isa())
@@ -263,7 +263,7 @@ TEST(NativeBrgemmRefusal, TheCheckWritesNoCallerBuffer) {
                 SCOPED_TRACE(std::string(dtype_info(src_dt)) + " source, "
                         + k.name
                         + (per_call ? ", lowoha_algo native_brgemm"
-                                    : ", ZENDNNL_MATMUL_ALGO=11"));
+                                    : ", ZENDNNL_MATMUL_ALGO=10"));
                 auto rp = make_case(
                         k.name, "", src_dt, s8, f32, M, N, K, seed += 4);
                 refused_t &r = *rp;
@@ -340,27 +340,27 @@ TEST(NativeBrgemmRefusal, BroadSuitesTakeOnlyRefusalsTheirCallsExplain) {
 // A call that names native_brgemm on a reordered weight (mem_format_b 'r'),
 // bf16 and u8 x s8: unimplemented, with dst holding its values and the
 // weight its bytes, and a reason naming what the call lacks: with the
-// algorithm unset, ZENDNNL_MATMUL_ALGO=11; under it, a weight the native
+// algorithm unset, ZENDNNL_MATMUL_ALGO=10; under it, a weight the native
 // BRGEMM takes as AOCL-DLP blocked.
 TEST(NativeBrgemmRefusal, AReorderedWeightIsRefusedForWhatTheCallLacks) {
     if (!native_isa())
         GTEST_SKIP() << "needs AVX512-BF16, AVX512-VNNI and AVX-512 F";
     uint32_t seed = 7400;
-    for (const bool algo11 : {false, true})
+    for (const bool algo10 : {false, true})
         for (const bool int8 : {false, true}) {
-            const nt::algo_pin_t pin(algo11 ? matmul_algo_t::native_brgemm
+            const nt::algo_pin_t pin(algo10 ? matmul_algo_t::native_brgemm
                                             : matmul_algo_t::none);
             auto rp = make_case(int8 ? "u8 x s8 on a reordered weight"
                                      : "bf16 on a reordered weight",
-                    algo11 ? "a reordered weight other than an AOCL-DLP "
-                             "blocked one under ZENDNNL_MATMUL_ALGO=11"
+                    algo10 ? "a reordered weight other than an AOCL-DLP "
+                             "blocked one under ZENDNNL_MATMUL_ALGO=10"
                            : "a reordered weight without "
-                             "ZENDNNL_MATMUL_ALGO=11",
+                             "ZENDNNL_MATMUL_ALGO=10",
                     int8 ? u8 : bf16, int8 ? s8 : bf16, int8 ? f32 : bf16, 4,
                     64, 64, seed += 4);
             refused_t &r = *rp;
             SCOPED_TRACE(std::string(r.name)
-                    + (algo11 ? ", ZENDNNL_MATMUL_ALGO=11"
+                    + (algo10 ? ", ZENDNNL_MATMUL_ALGO=10"
                               : ", ZENDNNL_MATMUL_ALGO unset"));
             r.c.params.mem_format_b = 'r';
             r.c.params.lowoha_algo = matmul_algo_t::native_brgemm;

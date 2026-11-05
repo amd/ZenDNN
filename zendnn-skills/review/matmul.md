@@ -49,11 +49,22 @@ Current pairing:
   `int8_ck_postops_supported` says yes: one relu or sigmoid with no buffer,
   or f32 `binary_mul` then f32 `binary_add` with shape `[M, N]` and leading
   dimension at least N. Alpha is 1 and beta is 0.
-- **AOCL-DLP**, including the default `aocl_dlp_blocked` path. Post-ops:
-  relu, leaky relu, gelu tanh, gelu erf, sigmoid, swish, tanh, clip, mish,
-  binary add, binary mul. Dtypes include f32, bf16 to bf16 or f32, u8 or s8
-  times s8, WOQ bf16 times s4 or u4, W4A8, and f16. WOQ, W4A8, symmetric
-  quant, and a non-f32 int8 source scale are forced here by `kernel_select`.
+- **AOCL-DLP**, including the default `aocl_dlp_blocked` path. Its chain
+  takes relu, leaky relu, gelu tanh, gelu erf, sigmoid, swish, tanh, clip,
+  mish, binary add, binary mul. A call with elu, square, abs, sqrt, exp,
+  log, or softmax that would run on AOCL-DLP runs on the reference kernel;
+  what that kernel does not serve (`reference_declines`: column-major,
+  AOCL-prepacked or GGML packed weights, per-group weight scales without a
+  source scale of the same groups, a bf16 or f32 source with s8 weights and
+  no source scale, a binary operand that is neither `{1, N}` nor rows of N)
+  and pooling return `status_t::unimplemented`. So do weight scales and
+  INT8 alpha / beta it cannot apply (`aocl_dlp_applies_wei_scale`,
+  `aocl_dlp_applies_wei_scale_type`, `aocl_dlp_applies_alpha_beta`), for every
+  kernel that passes calls to AOCL-DLP. Under the auto tuner they apply only
+  when a candidate runs the call on AOCL-DLP. `group_matmul_direct` refuses
+  an operation with those post-ops unless it runs on oneDNN. Dtypes include f32, bf16 to bf16 or f32, u8 or s8 times
+  s8, WOQ bf16 times s4 or u4, W4A8, and f16. WOQ, W4A8, symmetric quant, and
+  a non-f32 int8 source scale are forced here by `kernel_select`.
 - **oneDNN.** Post-ops: elu, relu, leaky relu, gelu tanh, gelu erf, tanh,
   square, abs, sqrt, exp, log, sigmoid, swish, mish, clip, binary add,
   binary mul. Not softmax or pooling. F16 and bf16 map to oneDNN types.
@@ -69,13 +80,19 @@ Current pairing:
   tanh, softmax, square, abs, sqrt, exp, log, clip, mish, binary add, and
   binary mul. It is the fallback when a requested backend is not built, and
   it still rejects an AOCL-reordered weight.
-- **Native.** f32 to f32; bf16 to bf16 or f32; u8 or s8 times s8 to f32,
-  bf16, s8, or u8. `transA`, mish, and a swish alpha other than 1 fall back
-  to AOCL-DLP. Native BRGEMM also falls back when alpha is 0. INT8 scales
-  stay per-tensor for the source, and per-tensor or per-channel for the
-  weight. Per-group and per-token INT8 fall back. The GEMM and INT8 BRGEMM
-  loopers fuse only relu, gelu tanh, gelu erf, sigmoid, tanh, and swish, and
-  send every other accepted post-op through the remaining epilogue. Check
+- **Native BRGEMM.** The calls it serves, with their data types, scales,
+  zero points, weight layouts, and post-ops, are the list in the Native
+  BRGEMM section of
+  `docs/operator/low_overhead_operator/lowoha_matmul_operator.md`: bf16
+  times bf16, u8 or s8 times s8 (a bf16 or f32 source it quantizes
+  included), and f32 times f32; per-tensor, per-row, or `{M, G}` source
+  scales and per-tensor, per-column, or per-group weight scales; and every
+  post-op and gated activation of `matmul_direct` except a softmax with a
+  gated activation. Its epilogue (`native_epilogue.cpp`) applies them, mish
+  included. It never falls back: a call outside that list returns an error
+  status (see Native matmul below). At M = 1 a GEMV kernel takes the call
+  only when `decide_native_gemv` chooses one (its post-ops among the ones
+  that kernel fuses), and the native tiles serve every other call. Check
   the kernel that runs, not only `native_epilogue.cpp`.
 
 Binary post-op leading dimension `-1` still becomes N. An f16 binary post-op
@@ -139,7 +156,7 @@ contract.
   survive. See `custom_kernel_cross_phase_weight_candidate`.
 - A cache hit is reused only by the backend, layout, and dtype that produced
   it. Reset and test-only clear hooks drop every entry the change adds.
-- Under `ZENDNNL_MATMUL_ALGO=11`, mode 2 may rewrite a buffer in place for
+- Under `ZENDNNL_MATMUL_ALGO=10`, mode 2 may rewrite a buffer in place for
   the native BRGEMM. `lowoha_algo == native_brgemm` alone still caches out
   of place, and so does a weight whose N is not a multiple of 32 (its layout
   holds zero columns up to whole blocks). Do not extend in-place rewrite to
@@ -171,8 +188,7 @@ or native change. Highlight any edit that moves them.
 
 `matmul/matmul_native/` stays off the default run until an algorithm selects
 it. `native_brgemm_selected` is `lowoha_algo == native_brgemm` or
-`ZENDNNL_MATMUL_ALGO=11`. `matmul_execute` also enters `native_gemm_execute`
-when `kernel_select` returns `native_gemm`.
+`ZENDNNL_MATMUL_ALGO=10`.
 
 - A change in this folder does not change the algorithm or the result of a
   default call (`lowoha_algo == none`, algo unset), which stays on
@@ -204,8 +220,8 @@ when `kernel_select` returns `native_gemm`.
 - oneDNN, libxsmm, and BMM tests still pass when the diff can reach their
   sources or their selection. A native-only diff still runs one default-path
   case that shows those backends were not selected.
-- Native tests force `native_gemm` or `native_brgemm` (algo 10 or 11). They
-  do not stand in for the default path.
+- Native tests force `native_brgemm` (algo 10). They do not stand in for the
+  default path.
 - A fallback test shows the declined kernel did not run, and that the
   destination matches the backend that did.
 - Each post-op and dtype pair the PR claims is tested on the path that

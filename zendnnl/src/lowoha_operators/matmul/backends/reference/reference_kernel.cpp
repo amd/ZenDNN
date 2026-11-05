@@ -193,6 +193,21 @@ void apply_softmax(int batch_size, int M, int N, float *output) {
             expRow[col] = expf((output[index]));
             sumExp += expRow[col];
         }
+        // A row whose exponentials overflow f32, or all underflow, is shifted
+        // by its finite maximum; every other row keeps the unshifted form.
+        if (!std::isfinite(sumExp) || sumExp == 0.0) {
+            const float *in = output + row * cols;
+            float mx = in[0];
+            for (uint64_t col = 1; col < cols; ++col)
+                mx = std::max(mx, in[col]);
+            if (std::isfinite(mx)) {
+                sumExp = 0.0;
+                for (uint64_t col = 0; col < cols; ++col) {
+                    expRow[col] = expf(in[col] - mx);
+                    sumExp += expRow[col];
+                }
+            }
+        }
 
         // Normalize each exponential by the sum to get softmax probabilities
         for (uint64_t col = 0; col < cols; ++col) {
@@ -331,6 +346,13 @@ void quantize_dst(const matmul_quantization_params_t &quant_params,
     }
 }
 
+// x rounded to nearest even within [lo, hi], NaN to lo; lo and hi are exact
+// in T.
+template <typename T>
+T saturate_to(float x, float lo, float hi) {
+    return static_cast<T>(std::nearbyint(x > lo ? (x < hi ? x : hi) : lo));
+}
+
 void store_output(int BS, int M, int N, int ldc, unsigned int offset_out,
         float *accum_buff_f32, void *output, data_type_t output_dtype) {
     LOG_DEBUG_INFO("Storing matmul_ref kernel output");
@@ -347,12 +369,8 @@ void store_output(int BS, int M, int N, int ldc, unsigned int offset_out,
                     + static_cast<size_t>(i) * N + static_cast<size_t>(j);
             const size_t out_idx = static_cast<size_t>(bs) * output_batch_stride
                     + static_cast<size_t>(i) * ldc + static_cast<size_t>(j);
-            float val = accum_buff_f32[ac_idx];
-            val = (val < 0.0f) ? 0.0f
-                               : ((val > static_cast<float>(UINT8_MAX))
-                                                 ? static_cast<float>(UINT8_MAX)
-                                                 : val);
-            out_u8[out_idx] = static_cast<uint8_t>(std::nearbyint(val));
+            out_u8[out_idx] = saturate_to<uint8_t>(
+                    accum_buff_f32[ac_idx], 0.0f, 255.0f);
         });
     } else if (output_dtype == data_type_t::s8) {
         auto *out_s8 = static_cast<int8_t *>(output);
@@ -361,13 +379,8 @@ void store_output(int BS, int M, int N, int ldc, unsigned int offset_out,
                     + static_cast<size_t>(i) * N + static_cast<size_t>(j);
             const size_t out_idx = static_cast<size_t>(bs) * output_batch_stride
                     + static_cast<size_t>(i) * ldc + static_cast<size_t>(j);
-            float val = accum_buff_f32[ac_idx];
-            val = (val < static_cast<float>(INT8_MIN))
-                    ? static_cast<float>(INT8_MIN)
-                    : ((val > static_cast<float>(INT8_MAX))
-                                      ? static_cast<float>(INT8_MAX)
-                                      : val);
-            out_s8[out_idx] = static_cast<int8_t>(std::nearbyint(val));
+            out_s8[out_idx] = saturate_to<int8_t>(
+                    accum_buff_f32[ac_idx], -128.0f, 127.0f);
         });
     } else if (output_dtype == data_type_t::s32) {
         auto *out_s32 = static_cast<int32_t *>(output);
@@ -376,13 +389,9 @@ void store_output(int BS, int M, int N, int ldc, unsigned int offset_out,
                     + static_cast<size_t>(i) * N + static_cast<size_t>(j);
             const size_t out_idx = static_cast<size_t>(bs) * output_batch_stride
                     + static_cast<size_t>(i) * ldc + static_cast<size_t>(j);
-            float val = accum_buff_f32[ac_idx];
-            val = (val < static_cast<float>(INT32_MIN))
-                    ? static_cast<float>(INT32_MIN)
-                    : ((val > static_cast<float>(INT32_MAX))
-                                      ? static_cast<float>(INT32_MAX)
-                                      : val);
-            out_s32[out_idx] = static_cast<int32_t>(std::nearbyint(val));
+            // 2147483520 is the largest float below 2^31.
+            out_s32[out_idx] = saturate_to<int32_t>(
+                    accum_buff_f32[ac_idx], -2147483648.0f, 2147483520.0f);
         });
     } else if (output_dtype == data_type_t::bf16) {
         auto *out_bf16 = static_cast<bfloat16_t *>(output);

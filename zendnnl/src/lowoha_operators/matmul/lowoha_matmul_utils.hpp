@@ -150,6 +150,14 @@ void apply_bmm_postop_offsets(
         matmul_params &params, int batch_idx, int m_start, int N);
 
 /**
+* @brief Validates the parameters of a call on s4 weights for the W4A8 path.
+*
+* @return status_t::failure for s4-weight parameters the W4A8 path does not
+*         take, status_t::success otherwise
+*/
+status_t validate_w4a8_inputs(const matmul_params &params, int M, int N, int K);
+
+/**
 * @brief Validates input parameters for matrix multiplication direct operation.
 *
 * This function performs comprehensive validation of all input parameters to ensure
@@ -166,10 +174,10 @@ void apply_bmm_postop_offsets(
 * @param Batch_B Number of batches for matrix B
 * @param params Const reference to matmul_params containing operation configuration
 * @param is_weights_const Boolean indicating if weights are constant
-* @return status_t::success if all validations pass, status_t::failure otherwise
+* @return status_t::success if all validations pass; status_t::unimplemented
+*         for prepacked s8 weights with an s8 source and a non-zero source
+*         zero point; status_t::failure for any other input it rejects
 */
-status_t validate_w4a8_inputs(const matmul_params &params, int M, int N, int K);
-
 status_t validate_matmul_direct_inputs(const void *src, const void *weight,
         const void *dst, const int M, const int N, const int K,
         const int Batch_A, const int Batch_B, const matmul_params &params,
@@ -269,6 +277,30 @@ inline bool is_sym_quant_config(const matmul_params &params) {
     }
     return checked_quant_param_num_elements(params.quant_params.src_scale.dims)
             > 1;
+}
+
+/**
+ * @brief The post-ops the AOCL-DLP chain takes ("none" adds nothing).
+ *
+ * A call on the AOCL-DLP route with another runs on the reference kernel;
+ * pooling runs on none.
+ */
+inline bool aocl_dlp_maps_post_op(post_op_type_t type) noexcept {
+    switch (type) {
+        case post_op_type_t::none:
+        case post_op_type_t::relu:
+        case post_op_type_t::leaky_relu:
+        case post_op_type_t::gelu_tanh:
+        case post_op_type_t::gelu_erf:
+        case post_op_type_t::sigmoid:
+        case post_op_type_t::swish:
+        case post_op_type_t::tanh:
+        case post_op_type_t::clip:
+        case post_op_type_t::mish:
+        case post_op_type_t::binary_add:
+        case post_op_type_t::binary_mul: return true;
+        default: return false;
+    }
 }
 
 /**

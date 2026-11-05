@@ -405,6 +405,9 @@ private:
     static void fill_boundary_data(void *ptr, size_t nelem, data_type_t dtype);
 
 public:
+    /// Restarts the generator of the tensors' values at s.
+    static void set_seed(uint32_t s) { rng.seed(s); }
+
     static tensor_t create_uniform_tensor(const std::vector<uint64_t> &dims,
             data_type_t dtype, const std::string &name = "");
 

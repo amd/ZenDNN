@@ -419,15 +419,16 @@ Example: `--input_file matmul.txt --op matmul --m 64 --postop relu` does not set
 
 Matmul / batch matmul only:
 
-1. `ZENDNNL_MATMUL_ALGO` (2D) or `ZENDNNL_BMM_ALGO` (3D) if set (enum `0`–`11` or `auto`)
+1. `ZENDNNL_MATMUL_ALGO` (2D) or `ZENDNNL_BMM_ALGO` (3D) if set (enum `0`–`10` or `auto`)
 2. File **`kernel`** column (or `--backend` in random mode)
 3. Random among backends enabled in the build
 
 `ZENDNNL_MATMUL_ALGO=4` forces AOCL DLP for every line, even when the file names another `kernel`.
 
-`ZENDNNL_MATMUL_ALGO=11` (or a `native_brgemm` kernel) runs the BF16 / INT8 cases the native BRGEMM qualifies for on
-it, in the native VNNI layout; the other cases run on AOCL-DLP (or the one-op group route), as `matmul_direct` does
-under ALGO 11. In `gtests/matmul_native/`, `NativeLayoutRule*` covers the layout rule and the route,
+`ZENDNNL_MATMUL_ALGO=10` (or a `native_brgemm` kernel) runs the BF16, INT8 and FP32 cases the native BRGEMM serves on
+it, in the native VNNI layout. The other cases are expected to return the error status `native_brgemm_refusal` gives
+them, with dst untouched, as `matmul_direct` turns them away: no other backend runs them (`run_matmul_direct` checks
+both and logs one `NATIVE_REFUSAL` line per case). In `gtests/matmul_native/`, `NativeLayoutRule*` covers the layout rule and the route,
 `NativeBrgemm*` the native BRGEMM, `NativeConfig*` and `NativeTuning*` its planner and tuning inputs, and
 `NativeWeightLifetime*` its weight lifetime.
 
@@ -544,7 +545,7 @@ fusedlayeradd,4:4096,true,true,f32,f32
 | **M, K, N** | Positive integers |
 | **BS** | Batch matmul or LOWOHA reorder batch size |
 | **postOp** | Chain with `:` (`relu:gelu_tanh`). Tokens: `relu`, `gelu_tanh`, `gelu_erf`, `sigmoid`, `swish`, `tanh`, `binary_add`, `binary_mul`, empty/`none`. Max length `POST_OPS_LIMIT` (default 3) |
-| **kernel** | `aocl_dlp`, `aocl_dlp_blocked`, `onednn`, `onednn_blocked`, `libxsmm`, `libxsmm_blocked`, `native_gemm`, `native_brgemm`. Overridden by matmul env vars above |
+| **kernel** | `aocl_dlp`, `aocl_dlp_blocked`, `onednn`, `onednn_blocked`, `libxsmm`, `libxsmm_blocked`, `native_brgemm`. Overridden by matmul env vars above |
 | **Booleans** | `true`/`1`, `false`/`0`, or empty (random). Other values skip the line |
 | **alpha, beta** | Float GEMM scales |
 | **src_dtype** | Matmul: `s8`, `u8`. LOWOHA reorder: also `f32`, `bf16` |

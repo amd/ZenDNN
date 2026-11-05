@@ -14,9 +14,9 @@
  * limitations under the License.
  ******************************************************************************/
 
-// Feature parity of the native BRGEMM (ALGO 11) over native-layout weights
+// Feature parity of the native BRGEMM (ALGO 10) over native-layout weights
 // with the single-expert custom-kernel route.  Every case runs the call
-// under ALGO 11 and checks that the native BRGEMM served it, then compares the
+// under ALGO 10 and checks that the native BRGEMM served it, then compares the
 // result with the reference algorithm and, when the custom kernel serves the
 // same call on the default route, with that result (INT8 bit-identical or
 // within one u8 step; BF16 within the BF16 band, bit identity reported).
@@ -428,24 +428,24 @@ TEST_P(NativeBrgemmParity, Matches) {
         for (int i = 0; i < c.calls; ++i) {
             std::memcpy(dst.get(), init.get(), init.bytes);
             ASSERT_EQ(nt::run_matmul(call), status_t::success)
-                    << "ALGO 11 call " << i;
+                    << "ALGO 10 call " << i;
             if (c.wc != 0 && on_gemv) {
                 EXPECT_EQ(nt::native_layouts(o.wei.get()), 0u)
-                        << "ALGO 11 call " << i << " on a GEMV kernel";
+                        << "ALGO 10 call " << i << " on a GEMV kernel";
             } else if (c.wc != 0) {
                 ASSERT_GE(nt::native_layouts(o.wei.get()), 1u)
-                        << "ALGO 11 call " << i
+                        << "ALGO 10 call " << i
                         << " was not served by the native BRGEMM over the "
                            "native VNNI layout";
             }
             if (int_dst) {
                 EXPECT_TRUE(nt::within_steps(dst.get(), o.ldc, ref.get(), o.ldc,
                         c.dst, c.M, cols, 1))
-                        << "ALGO 11 call " << i << " vs reference";
+                        << "ALGO 10 call " << i << " vs reference";
             } else {
                 EXPECT_TRUE(nt::within_band(dst.get(), o.ldc, ref.get(), o.ldc,
                         c.dst, c.M, cols, rtol, abs_bound))
-                        << "ALGO 11 call " << i << " vs reference";
+                        << "ALGO 10 call " << i << " vs reference";
             }
         }
     }

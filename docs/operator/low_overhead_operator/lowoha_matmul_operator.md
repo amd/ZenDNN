@@ -195,7 +195,7 @@ struct matmul_post_op {
 
 > **Note:** On AOCL-DLP INT8 `sym_quant` / `dynamic_quant` kernel paths, the `mish` post-op is rejected by `validate_matmul_direct_inputs` (input validation runs by default unless `ZENDNNL_DIAGNOSTICS_ENABLE=0`).
 
-> **Note:** The native BRGEMM (`ZENDNNL_MATMUL_ALGO=11`, or `lowoha_algo = matmul_algo_t::native_brgemm`) also applies the `post_op_type_t::elu`, `square`, `abs`, `sqrt`, `exp`, `log` and `softmax` post-ops (`softmax` over each output row) on the BF16, INT8 and FP32 calls it serves; AOCL-DLP does not map them.
+> **Note:** `matmul_direct` also takes the `post_op_type_t::elu`, `square`, `abs`, `sqrt`, `exp`, `log` and `softmax` post-ops (`softmax` over each output row). The native BRGEMM (`ZENDNNL_MATMUL_ALGO=10`, or `lowoha_algo = matmul_algo_t::native_brgemm`) applies them on the BF16, INT8 and FP32 calls it serves. The AOCL-DLP chain does not map them: a call on the AOCL-DLP route, the default with the algorithm unset, runs on the reference kernel when its chain holds one of them, or is refused where that kernel does not serve it, and a `pooling` post-op is refused; see [AOCL-DLP route](#aocl-dlp-route).
 
 **Binary Post-Op Dimensions:**
 
@@ -278,11 +278,14 @@ Scales are F32 or BF16. A zero-point, when present, is per-tensor: source and we
 | S8 | per-token | per-group | none | F32, BF16 |
 | S8 | per-group | per-group (same G) | none | F32, BF16 |
 | S8, M = 1 | per-token (one element) | per-group | none | F32, BF16 |
+| S8 | per-tensor | per-group | none | F32, BF16 |
 | BF16 or F32 | per-tensor | per-tensor | none, or per-tensor source | BF16 source: F32, BF16, S8, U8. F32 source: F32, BF16, S8, U8 |
 | BF16 or F32 | per-tensor | per-channel | none, or per-tensor source | same as the row above |
 | BF16 or F32 | per-token | per-channel | none | F32, BF16 |
 
 A per-group BF16 or F32 source is quantized to S8 first, then uses the S8 per-group row. A per-token source is not paired with a per-tensor weight. A per-group source is not paired with a per-channel or per-tensor weight.
+
+On the [AOCL-DLP route](#aocl-dlp-route), per-group weight scales `{G, N}` need a group size `K / G` that is a multiple of 4. The S8 rows with F32 or BF16 output run on AOCL-DLP's sym-quant kernel when the source scale is per-token or per-group, when the weight scale is per-group, or at M = 1 with one source value and a per-channel or per-group weight scale. That kernel reads F32 weight scales, or weight scales of the source scale's type; BF16 weight scales with F32 source scales return `status_t::unimplemented` there. The other rows take BF16 weight scales with either source scale type.
 
 **WOQ Quantization Granularity for weights:**
 
@@ -1183,19 +1186,22 @@ The same algorithms can be selected by either the `matmul_algo_t` enum value (in
 | `4`                   | `aocl_dlp`           | AOCL-DLP backend |
 | `5`                   | `onednn`             | OneDNN backend |
 | `6`                   | `libxsmm`            | LibXSMM backend (initial batched default when LIBXSMM is built) |
-| `10`                  | `native_gemm`        | Native GEMM (BF16 and FP32) |
-| `11`                  | `native_brgemm`      | Native BRGEMM over the native VNNI weight layout: serves the calls listed under [Native BRGEMM](#native-brgemm) and returns an error for any other call |
+| `7`                   | `batched_sgemm`      | AOCL-DLP's batch GEMM for batched calls (`ZENDNNL_BMM_ALGO`); a single call runs on AOCL-DLP |
+| `8`                   | `auto_tuner`         | Auto Tuner, as `auto` |
+| `9`                   | `reference`          | Reference kernel |
+| `10`                  | `native_brgemm`      | Native BRGEMM over the native VNNI weight layout: serves the calls listed under [Native BRGEMM](#native-brgemm) and returns an error for any other call |
+| `11`                  | `moe_custom_kernel`  | Group matmul's MoE custom kernel. A weight packed for it (`reorder_direct` with `prepack.algo = moe_custom_kernel`) is read only by group matmul's custom-kernel route: a single call on such a weight returns `status_t::failure`, and a single call on any other weight runs on AOCL-DLP |
 
 > **Note:** When `params.lowoha_algo` is `none` and the applicable runtime setting (`ZENDNNL_MATMUL_ALGO` for single MatMul or `ZENDNNL_BMM_ALGO` for batched MatMul) is unset, single MatMul falls back to `aocl_dlp_blocked`. Batched MatMul initially selects `libxsmm`, but uses it only in builds with `ZENDNNL_DEPENDS_LIBXSMM=ON`; otherwise it falls back to `aocl_dlp`, or to `reference` when AOCL-DLP is also unavailable. The default LIBXSMM-disabled build therefore runs LowOHA BMM with AOCL-DLP.
 
 ### Native BRGEMM
 
-A call asks for the native BRGEMM with `params.lowoha_algo = matmul_algo_t::native_brgemm`, or, for a single (not batched) call, with `lowoha_algo` left `none` under `ZENDNNL_MATMUL_ALGO=11`, which selects the kernel of single calls: a batched call with `lowoha_algo` left `none` takes its kernel from `ZENDNNL_BMM_ALGO`. Dynamic dispatch (`0`) and the auto tuner never select it. The native BRGEMM runs such a call or returns an error: no other backend runs it.
+A call asks for the native BRGEMM with `params.lowoha_algo = matmul_algo_t::native_brgemm`, or, for a single (not batched) call, with `lowoha_algo` left `none` under `ZENDNNL_MATMUL_ALGO=10`, which selects the kernel of single calls: a batched call with `lowoha_algo` left `none` takes its kernel from `ZENDNNL_BMM_ALGO`. Dynamic dispatch (`0`) and the auto tuner never select it. The native BRGEMM runs such a call or returns an error: no other backend runs it.
 
 It serves a single (not batched), row-major call with a plain source (`mem_format_a = 'n'`) that has:
 - bf16 × bf16, u8 / s8 × s8 (or a bf16 / f32 source the call quantizes to u8 / s8: `dynamic_quant` with `dtypes.compute` u8 / s8), or f32 × f32 data types, into an f32, bf16, f16, u8, s8 or s32 dst (f32 or bf16 for f32 × f32), with a bias of f32, bf16, f16, s8, u8 or s32;
-- a raw weight (`mem_format_b = 'n'`), an AOCL-DLP blocked prepack whose pack has an unreorder (under `ZENDNNL_MATMUL_ALGO=11` only), or a buffer the native BRGEMM rewrote in place;
-- any N ≥ 1, K ≥ 1 and ldb at least the weight row (a weight whose N is not a multiple of 32 is packed with zero columns up to whole 32-column blocks, never in place, and only its N columns are read and written); for s8 weights, K within the int32 accumulation bound and per-group weight scales over groups of whole K quads. At M = 1 a bf16 call with N ≤ 4 on a [K, N] weight runs on the native BRGEMM's narrow GEMV kernel instead, and a call on a constant weight may run on one thread on its BKC GEMV kernels (the `[MATMUL.NATIVE_BRGEMM]` line shows `gemv=<kind>`). At weight cache mode 1 or 2 a BKC kernel caches its own pack of the weight (a bf16 weight of any size, an s8 weight within the L2), next to the native layout that the weight's calls of M > 1 cache when it is out of place (weight cache mode 1, or `lowoha_algo` `native_brgemm` without `ZENDNNL_MATMUL_ALGO=11`): the weight is then held three times. Once an in-place image holds the weight, its M = 1 calls run on the tiles;
+- a raw weight (`mem_format_b = 'n'`), an AOCL-DLP blocked prepack whose pack has an unreorder (under `ZENDNNL_MATMUL_ALGO=10` only), or a buffer the native BRGEMM rewrote in place;
+- any N ≥ 1, K ≥ 1 and ldb at least the weight row (a weight whose N is not a multiple of 32 is packed with zero columns up to whole 32-column blocks, never in place, and only its N columns are read and written); for s8 weights, K within the int32 accumulation bound and per-group weight scales over groups of whole K quads. At M = 1 a bf16 call with N ≤ 4 on a [K, N] weight runs on the native BRGEMM's narrow GEMV kernel instead, and a call on a constant weight may run on one thread on its BKC GEMV kernels (the `[MATMUL.NATIVE_BRGEMM]` line shows `gemv=<kind>`). At weight cache mode 1 or 2 a BKC kernel caches its own pack of the weight (a bf16 weight of any size, an s8 weight within the L2), next to the native layout that the weight's calls of M > 1 cache when it is out of place (weight cache mode 1, or `lowoha_algo` `native_brgemm` without `ZENDNNL_MATMUL_ALGO=10`): the weight is then held three times. Once an in-place image holds the weight, its M = 1 calls run on the tiles;
 - for INT8, no weight zero point; f32, bf16 or f16 scales per tensor or per row for the source, per tensor, per column or per group for the weight; s32, s8 or u8 source zero points per tensor or per row (with per-group weight scales, one per tensor and only with a u8 source); an `{M, G}` source scale with an s8 source and no zero point;
 - the post-ops and gated activations of `matmul_direct`, except a softmax with a gated activation, and beta with a gated activation only over a dst of at least N columns.
 
@@ -1211,7 +1217,18 @@ Any other call that asks for it returns, with dst untouched and one error line n
 - `status_t::isa_unsupported` on a CPU without the instruction set its data types need (AVX-512 F, BW, VL and DQ and FMA, with AVX512-BF16 for bf16, AVX512-VNNI for INT8 and AVX512-FP16 for an f16 dst or bias);
 - `status_t::failure` for a weight buffer only another route reads (a custom-kernel image) and for a call the native BRGEMM does not serve on a buffer it rewrote in place, which no other route reads.
 
-Under `ZENDNNL_MATMUL_ALGO=11` a call on an AOCL-DLP blocked prepack whose `lowoha_algo` names AOCL-DLP blocked keeps its AOCL-DLP route when the native BRGEMM does not serve it. Group matmul never reaches the native BRGEMM: under `ZENDNNL_MATMUL_ALGO=11`, and for an op whose `lowoha_algo` is `native_brgemm`, it runs as with the algorithm unset.
+Under `ZENDNNL_MATMUL_ALGO=10` a call on an AOCL-DLP blocked prepack whose `lowoha_algo` names AOCL-DLP blocked keeps its AOCL-DLP route when the native BRGEMM does not serve it. Group matmul never reaches the native BRGEMM: under `ZENDNNL_MATMUL_ALGO=10`, and for an op whose `lowoha_algo` is `native_brgemm`, it runs as with the algorithm unset.
+
+### AOCL-DLP route
+
+With `lowoha_algo` left `none` and the algorithm unset, a single call runs on `aocl_dlp_blocked`. `aocl_dlp`, `aocl_dlp_blocked`, and every other kernel except the reference kernel and oneDNN pass the calls they do not serve to AOCL-DLP. On that route:
+- **Post-ops the chain does not map.** The AOCL-DLP chain applies relu, leaky relu, gelu tanh, gelu erf, sigmoid, swish, tanh, clip, mish, binary add and binary mul. A call whose chain holds elu, square, abs, sqrt, exp, log or softmax runs on the reference kernel instead, with one info line, and gets the results of the same call with `lowoha_algo = matmul_algo_t::reference`. It returns `status_t::unimplemented` where the reference kernel does not serve it: a column-major call, AOCL-prepacked or GGML packed weights, per-group weight scales of an S8 or S4 weight without a source scale of the same groups, a BF16 / F32 source with S8 weights and no source scale, or a binary operand that is neither `{1, N}` nor rows of N values. The reference kernel reads the weight buffer as given: every call on one weight buffer must take the same route, since at weight cache mode 2 AOCL-DLP may rewrite a constant weight in place.
+- **Refused post-ops.** A `pooling` post-op returns `status_t::unimplemented`, and so does a gated activation with any of the post-ops above.
+- **Weight scales.** With s8 weights, one weight scale value or one per column runs on any wiring. Per-group weight scales `{G, N}` run only on the S8 rows of the INT8 pair table with F32 or BF16 output, with no zero point, a group size `K / G` that is a multiple of 4 and `G × N` values. Those rows run on the sym-quant kernel, which reads F32 weight scales, or weight scales of the source scale's type. Any other weight scale returns `status_t::unimplemented`.
+- **INT8 alpha and beta.** AOCL-DLP's GEMMs with s8 weights, or with s4 weights and a u8 / s8 source, take alpha and beta as int32. An alpha or beta that is not an integer int32 holds returns `status_t::unimplemented`. A nonzero beta with s8 weights is applied in two places. For a u8 / s8 source with one source scale value into an S32, S8 or U8 destination, beta * C is added to the int32 sum before the scales. On the sym-quant kernel (S8 source, no zero point, F32 or BF16 destination), it is added after the scales, with per-token source scales (`{1, 1}` at M = 1 included), per-group source scales or per-group weight scales. Any other nonzero beta with s8 weights returns `status_t::unimplemented`: for example into an F32, BF16 or F16 destination with one source scale value and per-tensor or per-channel weight scales, or with a BF16 / F32 source the call does not quantize.
+- **Auto tuner.** Under `ZENDNNL_MATMUL_ALGO=auto` (8) these rules apply to the calls that run on AOCL-DLP. When every candidate of `ZENDNNL_MATMUL_AUTO_ALGO_CANDIDATES` is oneDNN or the reference kernel, no rule applies. Otherwise a call with a post-op the chain does not map runs on the reference kernel as above, and a call AOCL-DLP refuses for its weight scales, alpha or beta runs on the first candidate off AOCL-DLP, or is refused when there is none.
+
+A refused call leaves dst untouched and writes one error line. The one-op group route, which runs gated activations and the calls `single_matmul_group_routable` admits, applies the weight-scale count rule, the int32 alpha and beta rule, and the post-op rule of gated activations. `group_matmul_direct` refuses an operation with a post-op the chain does not map, or pooling, unless the operation runs on oneDNN. oneDNN and the reference kernel keep their own handling of these calls.
 
 ### Via `matmul_params`
 

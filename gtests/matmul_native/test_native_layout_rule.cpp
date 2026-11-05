@@ -14,7 +14,7 @@
  * limitations under the License.
  ******************************************************************************/
 
-/// The native layout rule, the native pack bytes and the ALGO 11 route of
+/// The native layout rule, the native pack bytes and the ALGO 10 route of
 /// matmul_direct.  A routed call is compared with a direct
 /// native_brgemm_execute call on the weight reference the route must build: the
 /// same status, the same bytes and a layout the native BRGEMM keeps for the
@@ -582,7 +582,7 @@ TEST(NativeLayoutRulePack, PackReadsNoBytePastTheWeight) {
 #endif
 }
 
-// ── ALGO 11 route ───────────────────────────────────────────────────
+// ── ALGO 10 route ───────────────────────────────────────────────────
 
 struct MatmulConfigGuard {
     matmul_config_t &cfg = matmul_config_t::instance();
@@ -827,9 +827,6 @@ native::GemmDescriptor descriptor(int M, int N, int K, int lda, int ldb,
     d.wei_dt = p.dtypes.wei;
     d.dst_dt = p.dtypes.dst;
     d.bias_dt = p.dtypes.bias;
-    d.src_elem_size = size_of(d.src_dt);
-    d.wei_elem_size = size_of(d.wei_dt);
-    d.dst_elem_size = size_of(d.dst_dt);
     d.bias = nullptr;
     d.is_weights_const = true;
     d.num_threads = p.num_threads;
@@ -930,7 +927,7 @@ void expect_matches_reference(const Case &c, const std::vector<float> &dst,
     EXPECT_EQ(bad, 0u) << "native result differs from the reference";
 }
 
-TEST_F(NativeLayoutRuleRoute, CustomKernelRouteOffKeepsAlgo11Native) {
+TEST_F(NativeLayoutRuleRoute, CustomKernelRouteOffKeepsAlgo10Native) {
     config_.cfg.set_custom_kernel_route(false);
     config_.cfg.set_algo(kAlgoNative);
     for (int32_t wc : {0, 1, 2}) {
@@ -972,7 +969,7 @@ TEST_F(NativeLayoutRuleRoute, RawEligibleWeightReachesNativeAndStaysOffAocl) {
     for (bool per_call : {true, false})
         for (int32_t wc : {0, 1, 2}) {
             SCOPED_TRACE(std::string(per_call ? "lowoha_algo=native_brgemm"
-                                              : "ZENDNNL_MATMUL_ALGO=11")
+                                              : "ZENDNNL_MATMUL_ALGO=10")
                     + " wc=" + std::to_string(wc));
             reset_grp_matmul_caches();
             config_.cfg.set_algo(per_call ? kAlgoNone : kAlgoNative);
@@ -998,7 +995,7 @@ TEST_F(NativeLayoutRuleRoute, RawEligibleWeightReachesNativeAndStaysOffAocl) {
                                      c.wei.size() * sizeof(bfloat16_t))
                     == 0;
             EXPECT_EQ(raw, wc != 2 || per_call)
-                    << "only the process-wide ALGO 11 rewrites in place";
+                    << "only the process-wide ALGO 10 rewrites in place";
             EXPECT_EQ(packed_in_place(routed_w), !raw);
         }
 }
@@ -1038,7 +1035,7 @@ TEST_F(NativeLayoutRuleRoute, RawEligibleDynamicQuantWeightReachesNative) {
                         std::string(src_dt == data_type_t::f32 ? "src=f32 "
                                                                : "src=bf16 ")
                         + (per_call ? "lowoha_algo=native_brgemm"
-                                    : "ZENDNNL_MATMUL_ALGO=11")
+                                    : "ZENDNNL_MATMUL_ALGO=10")
                         + " wc=" + std::to_string(wc));
                 reset_grp_matmul_caches();
                 config_.cfg.set_algo(per_call ? kAlgoNone : kAlgoNative);
@@ -1090,11 +1087,11 @@ TEST_F(NativeLayoutRuleRoute, NonConstantRawWeightPacksForTheCallOnly) {
     EXPECT_FALSE(packed_in_place(routed_w));
 }
 
-TEST_F(NativeLayoutRuleRoute, InPlaceImageIsServedByNativeUnderAlgo11) {
+TEST_F(NativeLayoutRuleRoute, InPlaceImageIsServedByNativeUnderAlgo10) {
     if (!has_bf16()) GTEST_SKIP() << "needs AVX512-BF16";
     for (bool per_call : {true, false}) {
         SCOPED_TRACE(per_call ? "lowoha_algo=native_brgemm"
-                              : "ZENDNNL_MATMUL_ALGO=11");
+                              : "ZENDNNL_MATMUL_ALGO=10");
         reset_grp_matmul_caches();
         const Bf16Case c(4, 64, 64);
         std::vector<bfloat16_t> routed_w = c.wei, direct_w = c.wei;
@@ -1141,7 +1138,7 @@ TEST_F(NativeLayoutRuleRoute, GatedActivationOnRawWeightReachesNative) {
                      matmul_gated_act_t::swiglu_oai_mul})
             for (int ldc : {c.N, c.N / 2}) {
                 SCOPED_TRACE(std::string(per_call ? "lowoha_algo=native_brgemm"
-                                                  : "ZENDNNL_MATMUL_ALGO=11")
+                                                  : "ZENDNNL_MATMUL_ALGO=10")
                         + " gated_act " + std::to_string(static_cast<int>(act))
                         + " ldc=" + std::to_string(ldc));
                 reset_grp_matmul_caches();
@@ -1170,9 +1167,11 @@ TEST_F(NativeLayoutRuleRoute, GatedActivationOnRawWeightReachesNative) {
             }
 }
 
-// A gated call with a softmax: under ALGO 11 the native BRGEMM returns
-// unimplemented, with dst untouched; the one-op group route serves it with
-// ALGO unset.  A gated call over a weight of N not a multiple of 32 is
+// A gated call with a softmax: under ALGO 10 the native BRGEMM returns
+// unimplemented, with dst untouched; with ALGO unset the one-op group route
+// runs it on AOCL-DLP, which takes a gated activation only with post-ops its
+// chain applies (unimplemented, dst untouched), and serves it in a build
+// without AOCL-DLP.  A gated call over a weight of N not a multiple of 32 is
 // served over its padded layout, with the group route's result within its
 // band.
 TEST_F(NativeLayoutRuleRoute, GatedCallsNativeDoesNotServeReturnAnError) {
@@ -1200,7 +1199,14 @@ TEST_F(NativeLayoutRuleRoute, GatedCallsNativeDoesNotServeReturnAnError) {
             const status_t want_status = routed_call(c.M, c.N, c.K,
                     c.src.data(), c.K, w_unset.data(), c.ldb, false,
                     want.data(), c.N, p, 1, true, nullptr, act);
-            EXPECT_EQ(want_status, status_t::success);
+            const bool unset_refuses = ZENDNNL_DEPENDS_AOCLDLP && post_op;
+            EXPECT_EQ(want_status,
+                    unset_refuses ? status_t::unimplemented
+                                  : status_t::success);
+            if (unset_refuses) {
+                EXPECT_EQ(std::count(want.begin(), want.end(), kCanary),
+                        static_cast<std::ptrdiff_t>(want.size()));
+            }
             reset_grp_matmul_caches();
             config_.cfg.set_algo(kAlgoNative);
             if (post_op) {
@@ -1254,7 +1260,7 @@ TEST_F(NativeLayoutRuleRoute, RawWeightOfAnyNIsServedOutOfPlace) {
     for (bool per_call : {true, false})
         for (int32_t wc : {1, 2}) {
             SCOPED_TRACE(std::string(per_call ? "lowoha_algo=native_brgemm"
-                                              : "ZENDNNL_MATMUL_ALGO=11")
+                                              : "ZENDNNL_MATMUL_ALGO=10")
                     + " wc=" + std::to_string(wc));
             reset_grp_matmul_caches();
             config_.cfg.set_algo(per_call ? kAlgoNone : kAlgoNative);
@@ -1388,7 +1394,7 @@ TEST_F(NativeLayoutRuleRoute, RefusedCallOnARawWeightReturnsAnError) {
             if (!per_call && v.batch_a > 1) continue;
             SCOPED_TRACE(std::string(v.name) + " "
                     + (per_call ? "lowoha_algo=native_brgemm"
-                                : "ZENDNNL_MATMUL_ALGO=11"));
+                                : "ZENDNNL_MATMUL_ALGO=10"));
             reset_grp_matmul_caches();
             config_.cfg.set_algo(per_call ? kAlgoNone : kAlgoNative);
             const Bf16Case c(4, v.N != 0 ? v.N : 64, 64);
@@ -1459,7 +1465,7 @@ TEST_F(NativeLayoutRuleRoute, GgmlPackedWeightReturnsAnError) {
 }
 
 // A buffer the custom kernel rewrote in place (a grouped call at weight
-// cache mode 2) is read by the custom kernel's routes only: under ALGO 11 a
+// cache mode 2) is read by the custom kernel's routes only: under ALGO 10 a
 // dense call on it returns failure from the native BRGEMM, which keeps
 // nothing for it and leaves the image as it is.
 TEST_F(NativeLayoutRuleRoute, CustomKernelImageIsNotTaken) {
@@ -1529,7 +1535,7 @@ TEST_F(NativeLayoutRuleRoute, F16DstIsServedEndToEnd) {
         GTEST_SKIP() << "matmul_direct takes an f16 dst only with AVX512-FP16";
     for (bool per_call : {true, false}) {
         SCOPED_TRACE(per_call ? "lowoha_algo=native_brgemm"
-                              : "ZENDNNL_MATMUL_ALGO=11");
+                              : "ZENDNNL_MATMUL_ALGO=10");
         reset_grp_matmul_caches();
         config_.cfg.set_algo(per_call ? kAlgoNone : kAlgoNative);
         const Bf16Case c(5, 64, 96);
@@ -1608,7 +1614,7 @@ TEST_F(NativeLayoutRuleRoute, DefaultRouteEngagesCustomKernel) {
     EXPECT_EQ(native::native_weight_layouts(c.wei.data()), 0u);
 }
 
-// ── AOCL-DLP prepacks under process ALGO 11 ─────────────────────────
+// ── AOCL-DLP prepacks under process ALGO 10 ─────────────────────────
 
 /// An aocl_dlp_blocked prepack of w, in a buffer of the size the prepack
 /// asks for.
@@ -1624,7 +1630,7 @@ std::vector<uint8_t> aocl_prepack(const void *w, data_type_t wei,
     return out;
 }
 
-/// The request an ALGO 11 call on an AOCL prepack makes of the native weight
+/// The request an ALGO 10 call on an AOCL prepack makes of the native weight
 /// cache.
 native::native_raw_weight_t aocl_request(const void *buffer, data_type_t wei,
         int K, int N, bool transB, bool interleave = false) {
@@ -1722,7 +1728,7 @@ void expect_aocl_prepack_served_natively(std::vector<uint8_t> &packed,
     }
 }
 
-TEST_F(NativeLayoutRuleRoute, AoclPrepackedBf16IsUnreorderedOnceUnderAlgo11) {
+TEST_F(NativeLayoutRuleRoute, AoclPrepackedBf16IsUnreorderedOnceUnderAlgo10) {
     if (!has_bf16()) GTEST_SKIP() << "needs AVX512-BF16";
     if (!aocl_inverse_available(Bf16Case(1, 32, 32).params()))
         GTEST_SKIP() << "no AOCL inverse in this build";
@@ -1759,7 +1765,7 @@ TEST_F(NativeLayoutRuleRoute, AoclPrepackedBf16IsUnreorderedOnceUnderAlgo11) {
                 }
 }
 
-TEST_F(NativeLayoutRuleRoute, AoclPrepackedInt8IsUnreorderedOnceUnderAlgo11) {
+TEST_F(NativeLayoutRuleRoute, AoclPrepackedInt8IsUnreorderedOnceUnderAlgo10) {
     if (!has_vnni()) GTEST_SKIP() << "needs AVX512-VNNI";
     if (!aocl_inverse_available(Int8Case(1, 32, 32).params()))
         GTEST_SKIP() << "no AOCL inverse in this build";
@@ -1793,7 +1799,7 @@ TEST_F(NativeLayoutRuleRoute, AoclPrepackedInt8IsUnreorderedOnceUnderAlgo11) {
 }
 
 // An AOCL prepack of a weight whose N is not a multiple of 32 under
-// ZENDNNL_MATMUL_ALGO=11: unreordered and packed to a padded layout, out of
+// ZENDNNL_MATMUL_ALGO=10: unreordered and packed to a padded layout, out of
 // place at every weight cache mode (the prepack keeps its bytes), each call
 // with the bits of the native call on the raw weight.
 TEST_F(NativeLayoutRuleRoute, AoclPrepackedPaddedWeightPacksOutOfPlace) {
@@ -1906,7 +1912,7 @@ TEST_F(NativeLayoutRuleRoute, AoclPrepackedWeightKeepsAoclOnTheDefaultRoute) {
         }
 }
 
-TEST_F(NativeLayoutRuleRoute, AoclSymQuantPrepackStaysOnAoclUnderAlgo11) {
+TEST_F(NativeLayoutRuleRoute, AoclSymQuantPrepackStaysOnAoclUnderAlgo10) {
     for (int32_t wc : {1, 2}) {
         SCOPED_TRACE("wc=" + std::to_string(wc));
         reset_grp_matmul_caches();
@@ -1990,7 +1996,7 @@ TEST_F(NativeLayoutRuleRoute, AoclPrepackedCallNativeDoesNotServeStaysOnAocl) {
     }
 }
 
-TEST_F(NativeLayoutRuleRoute, AoclPrepackedGatedActivationUnderAlgo11) {
+TEST_F(NativeLayoutRuleRoute, AoclPrepackedGatedActivationUnderAlgo10) {
     if (!has_bf16()) GTEST_SKIP() << "needs AVX512-BF16";
     const Bf16Case c(3, 128, 64);
     if (!aocl_inverse_available(c.params()))

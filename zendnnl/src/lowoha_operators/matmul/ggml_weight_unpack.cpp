@@ -580,8 +580,6 @@ int ggml_unpack_weight_buffer(const void *weight_data, int ggml_type,
 // GGML allocation from the caller (often read-only) is never written.
 // n_tile_execute still reorders each N-tile from the raw bytes while the buffer
 // remains unreordered (`execute_tile` caps its tile WC to out-of-place).
-//
-// Cached under the `native_gemm` key marker.
 static status_t unpack_ggml_raw_s8_and_cache(const void *&weight, int N, int K,
         int ldb, char trans, matmul_params &params, int ggml_type,
         bool is_superblock, bool is_weights_const) {
@@ -595,7 +593,7 @@ static status_t unpack_ggml_raw_s8_and_cache(const void *&weight, int N, int K,
 
     Key_matmul cache_key(trans == 't', static_cast<unsigned int>(K),
             static_cast<unsigned int>(N), static_cast<unsigned int>(ldb),
-            weight, static_cast<uint32_t>(matmul_algo_t::native_gemm),
+            weight, static_cast<uint32_t>(matmul_algo_t::none),
             ggml_layout_hash(ggml_type, is_superblock));
 
     lru_cache_t<Key_matmul, void *> &weight_cache

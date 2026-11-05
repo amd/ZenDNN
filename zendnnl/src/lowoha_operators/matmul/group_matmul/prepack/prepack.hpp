@@ -337,10 +337,9 @@ struct PrepackRequest {
 
     // Per-thread N-slice alignment that ALGO 3's `aligned_n_split`
     // will use at run time.  Only consumed by `prepack_n_tile`.
-    // For the AOCL DLP path it's typically 1 (`backend_n_align` for
-    // `aocl_dlp_blocked`) or 2 (when `tight_fused_epilogue` widens it
-    // to keep gate/up pairs on the same thread); for the custom-kernel
-    // path it widens to `kctx.pack_nr` (32 or 64).
+    // For the AOCL DLP path it's 1, or 2 when `tight_fused_epilogue`
+    // widens it to keep gate/up pairs on the same thread; for the
+    // custom-kernel path it widens to `kctx.pack_nr` (32 or 64).
     //
     // Zero (default) is the "no align context" sentinel — the
     // production ALGO 3 call site always resolves the runtime value

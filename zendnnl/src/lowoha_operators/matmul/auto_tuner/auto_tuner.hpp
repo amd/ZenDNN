@@ -74,7 +74,8 @@ namespace matmul {
  * @note The env var is parsed and validated exactly once on the first call;
  *       every subsequent call returns a reference to the same cached vector.
  *       Changes to the env var after the first call are not observed. Parse
- *       errors (invalid integers, out-of-range ids, reserved ids) are logged
+ *       errors (invalid integers, ids that are not a matmul algorithm,
+ *       reserved ids) are logged
  *       once during that first call and never again, so this is safe to call
  *       from hot paths without log spam or repeated getenv/parsing cost.
  *

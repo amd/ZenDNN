@@ -1369,9 +1369,6 @@ status_t run_native(const e2e_t &c, const e2e_data_t &d, buf_t &dst) {
     desc.wei_dt = data_type_t::bf16;
     desc.dst_dt = c.dst_dt;
     desc.bias_dt = c.bias_dt;
-    desc.src_elem_size = 2;
-    desc.wei_elem_size = 2;
-    desc.dst_elem_size = size_of(c.dst_dt);
     desc.bias = d.bias_ptr(c);
     desc.is_weights_const = true;
     desc.num_threads = c.threads;
@@ -1907,9 +1904,6 @@ void run_int8_pair(const int8_case_t &c, buf_t &native, buf_t &ref) {
     desc.wei_dt = data_type_t::s8;
     desc.dst_dt = c.dst_dt;
     desc.bias_dt = c.bias_dt;
-    desc.src_elem_size = 1;
-    desc.wei_elem_size = 1;
-    desc.dst_elem_size = size_of(c.dst_dt);
     desc.bias = b;
     desc.is_weights_const = true;
     desc.num_threads = c.threads;
@@ -2042,9 +2036,6 @@ status_t run_zero_weight(bool int8, gated_t gated,
     desc.wei_dt = p.dtypes.wei;
     desc.dst_dt = data_type_t::f32;
     desc.bias_dt = data_type_t::f32;
-    desc.src_elem_size = int8 ? 1 : 2;
-    desc.wei_elem_size = int8 ? 1 : 2;
-    desc.dst_elem_size = 4;
     desc.bias = bias.data();
     desc.is_weights_const = true;
     desc.num_threads = 4;

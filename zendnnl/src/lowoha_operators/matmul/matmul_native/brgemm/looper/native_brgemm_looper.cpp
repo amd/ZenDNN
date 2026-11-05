@@ -651,8 +651,8 @@ status_t run_tiles(const GemmDescriptor &desc,
 }
 
 /// native_brgemm_execute, or with CheckOnly native_brgemm_check: the call on
-/// its GEMV choice, which turns away what the tiles' check_call turns away,
-/// else on the native tiles (run_tiles).
+/// its GEMV choice, which turns away what the tiles' check_call and the
+/// layout rule's ldb bound turn away, else on the native tiles (run_tiles).
 template <bool CheckOnly>
 ZENDNNL_ALWAYS_INLINE inline status_t run_call(const GemmDescriptor &desc,
         const native_weight_ref_t &weight, const void *src, void *dst,
@@ -665,6 +665,11 @@ ZENDNNL_ALWAYS_INLINE inline status_t run_call(const GemmDescriptor &desc,
     const status_t checked = check_call_operands(
             make_call(desc, weight, src, dst, bias, params), why);
     if (checked != status_t::success) return checked;
+    // Weight rows ldb apart, at least a row long, as the layout rule takes
+    // them for the tiles.
+    if (desc.ldb < (desc.transB ? desc.K : desc.N))
+        return turned_away(status_t::unimplemented,
+                "ldb below the weight row length", why);
     if (CheckOnly) return status_t::success;
     static const bool s_log = apilog_verbose_enabled();
     const status_t gst = run_native_gemv(gemv, desc, src, weight.weight, dst,

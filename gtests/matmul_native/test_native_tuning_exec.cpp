@@ -14,7 +14,7 @@
  * limitations under the License.
  ******************************************************************************/
 
-// Tuning inputs of the native BRGEMM (ALGO 11) through matmul_direct.  The
+// Tuning inputs of the native BRGEMM (ALGO 10) through matmul_direct.  The
 // process planner reads ZENDNNL_MATMUL_NATIVE_CONFIG and
 // ZENDNNL_MATMUL_NATIVE_TUNING_FILE once, so the calls under a setting run
 // in a child process; the outputs under the built-in plan come from the

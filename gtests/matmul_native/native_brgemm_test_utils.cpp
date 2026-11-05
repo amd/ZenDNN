@@ -340,6 +340,15 @@ void gated_act_ref(const float *pre, int M, int N, mm::matmul_gated_act_t act,
     }
 }
 
+lru_capacity_pin_t::lru_capacity_pin_t(uint32_t capacity)
+    : prev_(matmul_config_t::instance().get_lru_cache_capacity()) {
+    matmul_config_t::instance().set_lru_cache_capacity(capacity);
+}
+
+lru_capacity_pin_t::~lru_capacity_pin_t() {
+    matmul_config_t::instance().set_lru_cache_capacity(prev_);
+}
+
 algo_pin_t::algo_pin_t(matmul_algo_t algo)
     : prev_(matmul_config_t::instance().get_algo()) {
     // resolve_matmul_backend() latches the algo it first sees for the whole process;

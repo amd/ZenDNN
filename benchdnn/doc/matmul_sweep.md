@@ -252,27 +252,27 @@ The runner adds process-level sweeps and forwards in-binary sweep flags:
 ./scripts/run_matmul_benchmark_sweep.sh -a 1 -i bf16 -d all
 
 # LLM decode shapes
-./scripts/run_matmul_benchmark_sweep.sh -a 1,11 \
+./scripts/run_matmul_benchmark_sweep.sh -a 1,10 \
   -i benchdnn/input/matmul/benchmark_sweep/llm_matmul_shapes.txt \
   -m 1:4:8:16:32:64:128:256:512:1024:2048 \
   -d all -t 128
 
 # Full coverage: LLM + vision/multimodal (LLM M list)
 for f in llm_matmul_shapes.txt prefill_vision_kn_shapes.txt; do
-  ./scripts/run_matmul_benchmark_sweep.sh -a 1,11 \
+  ./scripts/run_matmul_benchmark_sweep.sh -a 1,10 \
     -i "benchdnn/input/matmul/benchmark_sweep/$f" \
     -m 1:4:8:16:32:64:128:256:512:1024:2048:4096:8192:16384 \
     -d all -t 128
 done
 
 # Full coverage: non-LLM (MiniLM / BERT / DistilBERT / DLRMv2 M list)
-./scripts/run_matmul_benchmark_sweep.sh -a 1,11 \
+./scripts/run_matmul_benchmark_sweep.sh -a 1,10 \
   -i benchdnn/input/matmul/benchmark_sweep/non_llm_matmul_shapes.txt \
   -m 1:10:64:100:384:1000:1100:10000:10100 \
   -d all -t 128
 
 # Same non-LLM file, keep duplicate DistilBERT/BERT rows
-./scripts/run_matmul_benchmark_sweep.sh -a 1,11 \
+./scripts/run_matmul_benchmark_sweep.sh -a 1,10 \
   -i benchdnn/input/matmul/benchmark_sweep/non_llm_matmul_shapes.txt \
   -m 1:10:64:100:384:1000:1100:10000:10100 \
   -d all --keep-duplicates -t 128

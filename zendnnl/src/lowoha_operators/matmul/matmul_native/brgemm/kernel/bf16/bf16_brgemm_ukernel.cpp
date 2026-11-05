@@ -127,10 +127,6 @@ void bf16_brgemm_ukernel(const uint16_t *__restrict A, int lda,
 }
 
 // ── Explicit instantiations ──────────────────────────────────────────────
-// Same register pressure analysis as the GEMM ukernel (see
-// bf16_gemm_ukernel.cpp); BRGEMM has one extra parameter (BK) but
-// identical ZMM usage in the K-loop.
-//
 // Live ZMM count = MR×NV (accumulators) + NV (b vectors) + 1 (a
 // broadcast).  AVX-512 has 32 ZMM registers.
 //

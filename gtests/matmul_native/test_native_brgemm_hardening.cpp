@@ -434,7 +434,7 @@ TEST_F(NativeBrgemmHardeningInPlace, PerCallSelectionNeverRewritesInPlace) {
     EXPECT_EQ(std::memcmp(w.get(), a.get(), a.bytes), 0);
 }
 
-// Under ALGO 11 a call that selects another algorithm on an image is served
+// Under ALGO 10 a call that selects another algorithm on an image is served
 // from the image.
 TEST_F(NativeBrgemmHardeningInPlace, OtherAlgorithmOnImageIsServedFromIt) {
     pin(matmul_algo_t::native_brgemm);

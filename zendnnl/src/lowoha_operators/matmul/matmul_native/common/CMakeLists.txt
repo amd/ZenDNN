@@ -14,10 +14,9 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-# Shared infrastructure for Native Matmul (used by both GEMM and BRGEMM)
+# Shared infrastructure for Native Matmul
 set(matmul_native_common_sources
   cost_model.cpp
-  postop.cpp
   kernel_cache.cpp
   native_pack.cpp
   native_weight_cache.cpp
@@ -37,12 +36,9 @@ set(matmul_native_common_headers
   native_weight_ends.hpp
   native_int8_scheme.hpp
   cost_model.hpp
-  postop.hpp
   kernel_cache.hpp
   avx512_math.hpp
-  native_utils.hpp
-  bf16_packing.hpp
-  fp32_packing.hpp)
+  native_utils.hpp)
 
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
   target_sources(zendnnl_archive

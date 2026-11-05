@@ -37,7 +37,6 @@ struct GemmDescriptor {
     bool transA, transB;
     float alpha, beta;
     data_type_t src_dt, wei_dt, dst_dt, bias_dt;
-    size_t src_elem_size, wei_elem_size, dst_elem_size;
     const void *bias;
     bool is_weights_const;
     int num_threads;
@@ -59,9 +58,6 @@ struct GemmDescriptor {
         , wei_dt(data_type_t::f32)
         , dst_dt(data_type_t::f32)
         , bias_dt(data_type_t::none)
-        , src_elem_size(4)
-        , wei_elem_size(4)
-        , dst_elem_size(4)
         , bias(nullptr)
         , is_weights_const(false)
         , num_threads(1) {}

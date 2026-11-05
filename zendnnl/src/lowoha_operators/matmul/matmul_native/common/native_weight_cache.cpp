@@ -126,6 +126,12 @@ struct native_cache_state_t {
     std::unordered_set<const void *> packing;
     std::condition_variable_any packed;
     pack_map_t packs;
+    /// The layouts of entries dropped because their buffer no longer held
+    /// the bytes they were packed from.  Calls read a layout outside the
+    /// mutex, so a call on another thread may still run on one: they are
+    /// freed by clear_native_weight_caches only, and count toward the cache
+    /// capacity with packs.
+    std::vector<std::unique_ptr<uint8_t, native_aligned_free_t>> retired;
     /// Keyed by buffer start; a pointer inside an image resolves to it.
     image_map_t images;
     std::atomic<size_t> image_count {0};
@@ -797,6 +803,14 @@ lookup_t find_layout_exclusive(const layout_request_t &r, native_image_t &image,
             apilog_info("native weight: the buffer at ", r.w.weight,
                     " no longer holds the weight its cached layout was "
                     "packed from; packed again from its bytes");
+            try {
+                state.retired.push_back(std::move(hit->second.buf));
+            } catch (const std::bad_alloc &) {
+                log_error(
+                        "native weight: no memory to keep a replaced "
+                        "layout");
+                return lookup_t::failed;
+            }
             bump_generation_locked();
             state.packs.erase(hit);
         }
@@ -904,7 +918,8 @@ status_t pack_out_of_place(exclusive_lock_t &lock, const layout_request_t &r,
             = pack_from_source(w, image, r.owned, buf.get(), r.num_threads);
     if (st != status_t::success) return st;
     lock.lock();
-    if (state.packs.size() < get_weight_cache_capacity()) {
+    if (state.packs.size() + state.retired.size()
+            < get_weight_cache_capacity()) {
         try {
             auto slot = state.packs.try_emplace(r.key);
             native_cached_pack_t &entry = slot.first->second;
@@ -1074,6 +1089,7 @@ void clear_native_weight_caches() {
     exclusive_lock_t lock(state.mutex);
     bump_generation_locked();
     state.packs.clear();
+    state.retired.clear();
     state.images.clear();
     publish_spans_locked();
 }

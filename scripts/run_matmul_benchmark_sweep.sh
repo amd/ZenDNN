@@ -10,14 +10,14 @@ set -euo pipefail
 # Options:
 #   --op <matmul|bmm|grp_matmul>  Operator (default: matmul)
 #   -a, --algo <N>[,N,...]        Algo number(s) to benchmark (required for matmul/bmm)
-#                                 Comma-separated or repeated: -a 1,11 or -a 1 -a 11
+#                                 Comma-separated or repeated: -a 1,10 or -a 1 -a 10
 #                                   1  = AOCL DLP Blocked
-#                                   3  = OneDNN BRGEMM
+#                                   2  = OneDNN Blocked
+#                                   3  = LibxSMM Blocked
 #                                   4  = AOCL DLP
 #                                   5  = OneDNN
 #                                   6  = LibxSMM
-#                                   10 = Native GEMM
-#                                   11 = Native BRGEMM
+#                                   10 = Native BRGEMM
 #   -v, --ver <N>[,N,...]         Group matmul selector(s) (for grp_matmul)
 #                                   0  = Auto (selects V1, V2, or V3 based on shape)
 #                                   1  = Sequential (experts serial, all threads per GEMM)
@@ -69,11 +69,11 @@ set -euo pipefail
 #   gptoss_full      -> input/grp_matmul/moe_fused_gate_up_down/gpt_oss_moe_full_block.txt
 #
 # Examples:
-#   ./run_matmul_benchmark_sweep.sh -a 1,11 -i bf16 -t 128
-#   ./run_matmul_benchmark_sweep.sh -a 1,11 -i bf16 -t 32,64,128   # core sweep
-#   ./run_matmul_benchmark_sweep.sh -a 1,11 -i bf16 -C hot,cold     # cache sweep
-#   ./run_matmul_benchmark_sweep.sh -a 1,11 -i bf16 -m 1:128:512    # M sweep (in-binary)
-#   ./run_matmul_benchmark_sweep.sh -a 1,11 -i bf16 -d all          # dtype sweep (in-binary)
+#   ./run_matmul_benchmark_sweep.sh -a 1,10 -i bf16 -t 128
+#   ./run_matmul_benchmark_sweep.sh -a 1,10 -i bf16 -t 32,64,128   # core sweep
+#   ./run_matmul_benchmark_sweep.sh -a 1,10 -i bf16 -C hot,cold     # cache sweep
+#   ./run_matmul_benchmark_sweep.sh -a 1,10 -i bf16 -m 1:128:512    # M sweep (in-binary)
+#   ./run_matmul_benchmark_sweep.sh -a 1,10 -i bf16 -d all          # dtype sweep (in-binary)
 #   ./run_matmul_benchmark_sweep.sh --op grp_matmul -v 1,2,3 -i mixtral_full -t 128
 #   ./run_matmul_benchmark_sweep.sh --op grp_matmul -v 1,2,3 -i prompt -t 128
 #   ./run_matmul_benchmark_sweep.sh --op bmm -a 4,5,6 -i sdpa -t 128
@@ -237,7 +237,7 @@ elif [[ "$OP" == "bmm" ]]; then
     fi
 else
     if [ ${#ALGOS[@]} -eq 0 ]; then
-        echo "ERROR: -a/--algo is required (e.g. -a 1 or -a 1,11)"; show_help
+        echo "ERROR: -a/--algo is required (e.g. -a 1 or -a 1,10)"; show_help
     fi
 fi
 

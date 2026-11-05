@@ -54,7 +54,7 @@ struct native_layout_decision_t {
     bool isa = false; ///< declined for the CPU's instruction set
 };
 
-/// Whether ALGO 11 packs the weight in the native VNNI layout with pack_nr
+/// Whether ALGO 10 packs the weight in the native VNNI layout with pack_nr
 /// columns per block, read only by the native BRGEMM.  Native when all hold:
 ///   * a CPU with AVX-512 F, BW, VL and DQ and FMA (native_base_isa);
 ///   * wei bf16 with src bf16 on a CPU with AVX512-BF16, wei s8 with src

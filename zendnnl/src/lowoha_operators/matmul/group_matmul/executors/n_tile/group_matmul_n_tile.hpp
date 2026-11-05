@@ -302,9 +302,10 @@ inline void prepare_n_tile_custom_kernel(grp_matmul_gated_act_t act,
 /// Effective N-column alignment for the per-thread split:
 ///   max(backend_nr, kctx.pack_nr if the custom kernel will RUN, 2 if
 ///   pair_aligned).
-/// `backend_nr` from backend_n_align(algo); `pair_aligned`=true when
-/// activation requires even col boundaries (e.g. swiglu_oai_mul must
-/// keep gate+up pairs on the same thread).
+/// `backend_nr` is 1 (the backends group matmul runs take any column
+/// split); `pair_aligned`=true when activation requires even col
+/// boundaries (e.g. swiglu_oai_mul must keep gate+up pairs on the same
+/// thread).
 ///
 /// `ck_will_run` is the resolved `use_custom`, NOT `kctx.enabled`.  The two
 /// differ whenever the context prepared successfully but the call was then

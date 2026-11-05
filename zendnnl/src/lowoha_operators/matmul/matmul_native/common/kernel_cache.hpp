@@ -36,11 +36,10 @@ namespace lowoha {
 namespace matmul {
 namespace native {
 
-/// Canonical panel width for B prepacking.
-/// Must be >= max NR across all kernel variants (64).
-/// All kernels work with this panel width regardless of their own NR.
-/// A kernel with NR=48 loads 3 of 4 ZMMs per k-row; the unused 16 floats
-/// are zero-padded and ignored.
+/// Column width of the panels the BKC GEMV kernels compute.  The INT8
+/// kernel loads a whole panel for a block narrower than that, so an INT8
+/// BKC pack is allocated with NR_PACK * INT8_VNNI_GRP guard bytes past its
+/// end (bkc_guard).
 inline constexpr int NR_PACK = 64;
 
 /// Packing granularity for BKC (Blocked K-Contiguous) GEMV format.
@@ -49,46 +48,6 @@ inline constexpr int NR_PACK = 64;
 /// The GEMV kernel's 16-wide tail handles any remainder via masking.
 /// Must be a power of 2 and divide NR_PACK (so full-panel dispatch is safe).
 inline constexpr int BKC_NR_PAD = 16;
-
-/// Custom deleter for aligned_alloc'd memory.
-struct AlignedFreeDeleter {
-    void operator()(float *p) const { zendnnl_aligned_free(p); }
-};
-
-/// Prepacked weight buffer: NR_PACK-wide K-contiguous panels.
-///
-/// Layout:
-///   n_panels = ceil(N / NR_PACK)
-///   Panel p covers columns [p*NR_PACK .. min((p+1)*NR_PACK, N)-1]
-///   Within panel: packed[kk * NR_PACK + nr]
-///   Total size: n_panels * K * NR_PACK floats
-///
-/// This is the optimal AVX-512 layout:
-///   - b_stride = NR_PACK = 64 (256 bytes between k-rows)
-///   - HW prefetcher handles 256-byte stride perfectly
-///   - Micro-tile's B working set (KB × 64 × 4) fits in L2
-///   - Any kernel NR (16, 32, 48, 64) reads a prefix of the panel
-///   - Decoupled from MR/NR: cache key has no tile dependency
-///
-/// Indexing:
-///   get_panel(pc, panel_idx) → buf + panel_idx * K * NR_PACK + pc * NR_PACK
-///   b_stride = NR_PACK
-struct PrepackedWeight {
-    std::unique_ptr<float[], AlignedFreeDeleter> buf;
-    const float *data; ///< Points to buf.get() (always owns for panel format)
-    int K; ///< K dimension
-    int N; ///< Original N dimension
-    int n_panels; ///< ceil(N / NR_PACK)
-
-    /// Get B panel pointer for K-offset pc, N-panel index.
-    const float *get_panel(int pc, int panel_idx) const {
-        return data + static_cast<size_t>(panel_idx) * K * NR_PACK
-                + static_cast<size_t>(pc) * NR_PACK;
-    }
-
-    /// Row stride for microkernel (constant).
-    static constexpr int stride() { return NR_PACK; }
-};
 
 /// Cache key for packed weights — independent of microkernel NR.
 ///
@@ -158,8 +117,8 @@ std::atomic<uint64_t> &weight_cache_generation();
 /// (the enclosing cache class holds its own std::mutex).
 ///
 /// Capacity policy: EVICTION IS DISABLED.  When a caller goes
-/// through `get_or_prepack()` / `get_or_pack()`, the returned raw
-/// pointer is consumed by the GEMM/BRGEMM looper AFTER the cache
+/// through `get_or_pack()`, the returned raw
+/// pointer is consumed by the GEMV looper AFTER the cache
 /// mutex is released — a concurrent `insert()` on another thread
 /// that evicted the same entry would call `std::free()` on the
 /// packed buffer while the first thread is still reading it, a
@@ -175,7 +134,7 @@ std::atomic<uint64_t> &weight_cache_generation();
 /// get_weight_cache_capacity()` — `insert()`
 /// returns `nullptr` and the caller's `std::unique_ptr<V>` falls
 /// out of scope, freeing the just-packed buffer immediately.  The
-/// caller of `get_or_prepack()` / `get_or_pack()` already handles
+/// caller of `get_or_pack()` already handles
 /// a `nullptr` return by falling back to its thread-local repack
 /// path (see `bkc_resolve_packed_B_st` fallback block for an
 /// example), so correctness is preserved; the only cost is paying
@@ -219,7 +178,7 @@ public:
     /// the fast paths look the key up again on their next call.
     V *insert(const PrepackedWeightKey &k, std::unique_ptr<V> v) {
         // ── Capacity enforcement (REFUSE-NEW, not evict-old) ──────────
-        // Eviction of an existing entry is unsafe because GEMM/BRGEMM
+        // Eviction of an existing entry is unsafe because GEMV
         // loopers hold the raw pointer returned by `find_and_touch()`
         // across the entire kernel call AFTER releasing the cache
         // mutex.  A concurrent `std::free` on that pointer would UAF;
@@ -230,7 +189,7 @@ public:
         // values they replaced) we refuse the new insert or
         // replacement: `v` drops out of scope, the just-packed buffer is
         // freed by the caller's `unique_ptr`, and we return `nullptr`.
-        // The caller of `get_or_prepack()` / `get_or_pack()` already
+        // The caller of `get_or_pack()` already
         // handles `nullptr` as a pack miss and falls back to its
         // thread-local repack path (see `bkc_resolve_packed_B_st` for
         // the canonical fallback pattern) — correctness is preserved,
@@ -282,30 +241,8 @@ private:
             map_;
 };
 
-/// Thread-safe singleton cache for prepacked weight matrices.
-class PrepackedWeightCache {
-public:
-    static PrepackedWeightCache &instance();
-    const PrepackedWeight *get_or_prepack(
-            const PrepackedWeightKey &key, const float *weight);
-    /// Clear all cached entries. Must only be called when no thread is using
-    /// any previously returned pointer (e.g., between test cases or after a
-    /// global barrier). Violating this causes use-after-free.
-    void clear() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        cache_.clear();
-    }
-    PrepackedWeightCache(const PrepackedWeightCache &) = delete;
-    PrepackedWeightCache &operator=(const PrepackedWeightCache &) = delete;
-
-private:
-    PrepackedWeightCache() = default;
-    LRUWeightMap<PrepackedWeight> cache_;
-    std::mutex mutex_;
-};
-
 // ============================================================================
-// BF16 VNNI prepacked weight cache
+// BF16 Blocked K-contiguous (BKC) VNNI packed weight cache (for BKC GEMV kernel)
 // ============================================================================
 
 /// VNNI pair constant: 2 BF16 values per element position per k-pair.
@@ -315,58 +252,6 @@ inline constexpr int VNNI_PAIR = 2;
 struct AlignedFreeU16Deleter {
     void operator()(uint16_t *p) const { zendnnl_aligned_free(p); }
 };
-
-/// BF16 VNNI prepacked weight buffer.
-///
-/// Layout: for each NR_PACK-wide panel and each k-pair:
-///   packed[kp * NR_PACK * 2 + n * 2 + 0] = B[2*kp  ][panel*NR_PACK + n]
-///   packed[kp * NR_PACK * 2 + n * 2 + 1] = B[2*kp+1][panel*NR_PACK + n]
-///
-/// K is padded to even for VNNI alignment.
-struct BF16PrepackedWeight {
-    std::unique_ptr<uint16_t[], AlignedFreeU16Deleter> buf;
-    const uint16_t *data; ///< Points to buf.get()
-    int K; ///< Original K
-    int K_padded; ///< K rounded up to even
-    int N;
-    int n_panels;
-
-    /// Get B panel pointer for k-pair index kp, N-panel index.
-    const uint16_t *get_panel(int kp, int panel_idx) const {
-        const int vnni_stride = NR_PACK * VNNI_PAIR;
-        const int k_pairs = K_padded / 2;
-        return data + static_cast<size_t>(panel_idx) * k_pairs * vnni_stride
-                + static_cast<size_t>(kp) * vnni_stride;
-    }
-
-    /// Row stride in uint16_t units for one k-pair.
-    static constexpr int stride() { return NR_PACK * VNNI_PAIR; }
-};
-
-/// Thread-safe singleton cache for BF16 VNNI prepacked weight matrices.
-class BF16PrepackedWeightCache {
-public:
-    static BF16PrepackedWeightCache &instance();
-    const BF16PrepackedWeight *get_or_prepack(
-            const PrepackedWeightKey &key, const uint16_t *weight);
-    /// @copydoc PrepackedWeightCache::clear()
-    void clear() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        cache_.clear();
-    }
-    BF16PrepackedWeightCache(const BF16PrepackedWeightCache &) = delete;
-    BF16PrepackedWeightCache &operator=(const BF16PrepackedWeightCache &)
-            = delete;
-
-private:
-    BF16PrepackedWeightCache() = default;
-    LRUWeightMap<BF16PrepackedWeight> cache_;
-    std::mutex mutex_;
-};
-
-// ============================================================================
-// BF16 Blocked K-contiguous (BKC) VNNI packed weight cache (for BKC GEMV kernel)
-// ============================================================================
 
 /// BF16 Blocked K-contiguous (BKC) VNNI packed weight buffer.
 ///
@@ -416,7 +301,9 @@ public:
     /// other bytes; nullptr when it cannot be cached.
     const BF16BKCWeight *get_or_pack(const PrepackedWeightKey &key,
             const uint16_t *weight, size_t bytes);
-    /// @copydoc PrepackedWeightCache::clear()
+    /// Clear all cached entries. Must only be called when no thread is using
+    /// any previously returned pointer (e.g., between test cases or after a
+    /// global barrier). Violating this causes use-after-free.
     void clear() {
         std::lock_guard<std::mutex> lock(mutex_);
         cache_.clear();
@@ -482,7 +369,7 @@ public:
     const INT8KContiguousWeight *get_or_pack(
             const PrepackedWeightKey &key, const int8_t *weight, size_t bytes);
 
-    /// @copydoc PrepackedWeightCache::clear()
+    /// @copydoc BF16BKCWeightCache::clear()
     void clear() {
         std::lock_guard<std::mutex> lock(mutex_);
         cache_.clear();

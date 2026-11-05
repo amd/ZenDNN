@@ -4430,7 +4430,8 @@ void n_tile_execute(const std::vector<char> &layout,
     }
 
     const matmul_algo_t algo = resolve_matmul_backend();
-    int nr_align = backend_n_align(algo);
+    // The backends group matmul runs take any column split.
+    int nr_align = 1;
 
     const size_t wei_elem = size_of(params[rep].dtypes.wei);
     const size_t dst_elem = size_of(params[rep].dtypes.dst);

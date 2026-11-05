@@ -174,7 +174,6 @@ protected:
             const bool enable_f32_relaxation = (dst_dt == data_type_t::f32)
                     && (algo == matmul_algo_t::libxsmm
                             || algo == matmul_algo_t::libxsmm_blocked
-                            || algo == matmul_algo_t::native_gemm
                             || algo == matmul_algo_t::native_brgemm);
             if (ok) {
                 for (size_t i = 0; i < num_ops && ok; ++i)

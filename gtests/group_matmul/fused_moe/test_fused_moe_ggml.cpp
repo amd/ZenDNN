@@ -415,9 +415,9 @@ void run_fused_ggml_scenario(const std::string &label,
     //    active subset via the active-only non-fused path, so reaching 2*E
     //    proves the fused call warmed the inactive experts too.) ──
     // In N-tile mode the ALGO-1 reference ('r' layout) and the ALGO-3/AUTO test
-    // ('n' layout) cache under DISTINCT keys (native_gemm vs aocl_dlp_blocked),
-    // so the total is not 2*E; the full-pool warm invariant is already covered by
-    // the two-pass / vertical-fusion modes above.
+    // ('n' layout) cache under DISTINCT keys, so the total is not 2*E; the
+    // full-pool warm invariant is already covered by the two-pass /
+    // vertical-fusion modes above.
     if (ntile_algo_pin < 0) {
         EXPECT_EQ(zendnnl::lowoha::matmul::ggml_weight_unpack_cache_size(),
                 static_cast<size_t>(2 * E))

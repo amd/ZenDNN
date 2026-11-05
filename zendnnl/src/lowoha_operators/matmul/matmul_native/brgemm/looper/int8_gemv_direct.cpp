@@ -28,6 +28,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <immintrin.h>
+#include <memory>
 
 namespace zendnnl {
 namespace lowoha {
@@ -50,22 +51,23 @@ bool int8_resolve_bias_f(const GemmDescriptor &desc, int N, const void *bias,
     }
     if (desc.bias_dt != data_type_t::bf16) return false;
 
-    static thread_local float *s_bias_f = nullptr;
+    static thread_local std::unique_ptr<float, native_aligned_free_t> s_bias_f;
     static thread_local size_t s_bias_cap = 0;
 
     if (s_bias_cap < static_cast<size_t>(N)) {
-        zendnnl_aligned_free(s_bias_f);
-        s_bias_f = static_cast<float *>(zendnnl_aligned_alloc(64,
-                ((static_cast<size_t>(N) * sizeof(float) + 63) & ~size_t(63))));
+        s_bias_f.reset(static_cast<float *>(zendnnl_aligned_alloc(64,
+                ((static_cast<size_t>(N) * sizeof(float) + 63)
+                        & ~size_t(63)))));
         s_bias_cap = s_bias_f ? static_cast<size_t>(N) : 0;
         if (!s_bias_f) return false;
     }
+    float *bias_f = s_bias_f.get();
     const uint16_t *bb = static_cast<const uint16_t *>(bias);
     for (int n = 0; n < N; ++n) {
         uint32_t bits = static_cast<uint32_t>(bb[n]) << 16;
-        std::memcpy(&s_bias_f[n], &bits, sizeof(float));
+        std::memcpy(&bias_f[n], &bits, sizeof(float));
     }
-    *bias_f_out = s_bias_f;
+    *bias_f_out = bias_f;
     return true;
 }
 
@@ -152,31 +154,32 @@ status_t int8_gemv_run(const native_gemv_plan_t &plan,
     // ── Prepare A as u8 ──
     // If source is s8, convert to u8 by adding 128 and adjust zero point.
     const uint8_t *A_u8 = nullptr;
-    static thread_local uint8_t *s_a_buf = nullptr;
-    static thread_local size_t s_a_cap = 0;
     int32_t effective_zp = src_zp;
 
     if (src_is_u8) {
         A_u8 = static_cast<const uint8_t *>(src);
     } else {
+        static thread_local std::unique_ptr<uint8_t, native_aligned_free_t>
+                s_a_buf;
+        static thread_local size_t s_a_cap = 0;
         // s8 → u8: add 128, adjust zp
         if (s_a_cap < static_cast<size_t>(K)) {
-            zendnnl_aligned_free(s_a_buf);
-            s_a_buf = static_cast<uint8_t *>(
-                    zendnnl_aligned_alloc(64, ((K + 63) & ~size_t(63))));
+            s_a_buf.reset(static_cast<uint8_t *>(
+                    zendnnl_aligned_alloc(64, ((K + 63) & ~size_t(63)))));
             s_a_cap = s_a_buf ? K : 0;
         }
         if (!s_a_buf) return status_t::failure;
+        uint8_t *a_buf = s_a_buf.get();
         const int8_t *a_s8 = static_cast<const int8_t *>(src);
         const __m512i v128 = _mm512_set1_epi8(static_cast<int8_t>(-128));
         int k = 0;
         for (; k + 63 < K; k += 64) {
             __m512i s = _mm512_loadu_si512(a_s8 + k);
-            _mm512_storeu_si512(s_a_buf + k, _mm512_sub_epi8(s, v128));
+            _mm512_storeu_si512(a_buf + k, _mm512_sub_epi8(s, v128));
         }
         for (; k < K; ++k)
-            s_a_buf[k] = static_cast<uint8_t>(static_cast<int>(a_s8[k]) + 128);
-        A_u8 = s_a_buf;
+            a_buf[k] = static_cast<uint8_t>(static_cast<int>(a_s8[k]) + 128);
+        A_u8 = a_buf;
         effective_zp = src_zp + 128;
     }
 
@@ -233,34 +236,34 @@ status_t int8_gemv_run(const native_gemv_plan_t &plan,
         }
     }
     if (!B_kc) {
-        static thread_local int8_t *s_bkc = nullptr;
+        static thread_local std::unique_ptr<int8_t, native_aligned_free_t>
+                s_bkc;
         static thread_local size_t s_bkc_cap = 0;
-        static thread_local int32_t *s_cs = nullptr;
+        static thread_local std::unique_ptr<int32_t, native_aligned_free_t>
+                s_cs;
         static thread_local size_t s_cs_cap = 0;
 
         const size_t need_pack = static_cast<size_t>(K_padded) * N_padded;
         constexpr size_t bkc_guard = NR_PACK * INT8_VNNI_GRP;
         if (s_bkc_cap < need_pack + bkc_guard) {
-            zendnnl_aligned_free(s_bkc);
-            s_bkc = static_cast<int8_t *>(zendnnl_aligned_alloc(
-                    64, ((need_pack + bkc_guard + 63) & ~size_t(63))));
+            s_bkc.reset(static_cast<int8_t *>(zendnnl_aligned_alloc(
+                    64, ((need_pack + bkc_guard + 63) & ~size_t(63)))));
             s_bkc_cap = s_bkc ? need_pack + bkc_guard : 0;
         }
         if (!s_bkc) return status_t::failure;
 
         if (s_cs_cap < static_cast<size_t>(N_padded)) {
-            zendnnl_aligned_free(s_cs);
-            s_cs = static_cast<int32_t *>(zendnnl_aligned_alloc(
-                    64, ((N_padded * sizeof(int32_t) + 63) & ~size_t(63))));
+            s_cs.reset(static_cast<int32_t *>(zendnnl_aligned_alloc(
+                    64, ((N_padded * sizeof(int32_t) + 63) & ~size_t(63)))));
             s_cs_cap = s_cs ? N_padded : 0;
         }
         if (!s_cs) return status_t::failure;
 
-        pack_b_int8_bkc(B_raw, ldb, K, N, desc.transB, s_bkc, s_cs);
-        std::memset(s_bkc + need_pack, 0, bkc_guard);
+        pack_b_int8_bkc(B_raw, ldb, K, N, desc.transB, s_bkc.get(), s_cs.get());
+        std::memset(s_bkc.get() + need_pack, 0, bkc_guard);
 
-        B_kc = s_bkc;
-        col_sum = s_cs;
+        B_kc = s_bkc.get();
+        col_sum = s_cs.get();
         pack_source = "thread_local";
     }
 

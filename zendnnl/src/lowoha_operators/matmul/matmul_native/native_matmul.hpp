@@ -19,7 +19,6 @@
 
 #include "common/profiler.hpp"
 #include "lowoha_operators/matmul/lowoha_common.hpp"
-#include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 #include "lowoha_operators/matmul/matmul_native/native_layout_policy.hpp"
 
 namespace zendnnl {
@@ -33,7 +32,7 @@ namespace native {
 native_layout_query_t native_layout_query_for(
         const matmul_params &params, int K, int N, int ldb, bool transB);
 
-/// The native BRGEMM looks at the call: under ZENDNNL_MATMUL_ALGO=11 every
+/// The native BRGEMM looks at the call: under ZENDNNL_MATMUL_ALGO=10 every
 /// call, whatever it selects (a buffer it rewrote in place has no other
 /// reader), else a call with lowoha_algo == native_brgemm.
 inline bool native_brgemm_selected(const matmul_params &params) {
@@ -43,7 +42,7 @@ inline bool native_brgemm_selected(const matmul_params &params) {
 
 /// The call asks for the native BRGEMM as its kernel: lowoha_algo ==
 /// native_brgemm, or a single call (batch_count 1) with no lowoha_algo
-/// under ZENDNNL_MATMUL_ALGO=11, which selects the kernel of single calls
+/// under ZENDNNL_MATMUL_ALGO=10, which selects the kernel of single calls
 /// (a batched call takes its kernel from ZENDNNL_BMM_ALGO).
 inline bool native_brgemm_requested(
         const matmul_params &params, int batch_count) {
@@ -58,7 +57,7 @@ inline bool native_brgemm_requested(
 ///     carries;
 ///   * a call on a buffer an earlier native call rewrote in place (whatever
 ///     algorithm the call selects);
-///   * a call on an aocl_dlp_blocked prepack under ZENDNNL_MATMUL_ALGO=11
+///   * a call on an aocl_dlp_blocked prepack under ZENDNNL_MATMUL_ALGO=10
 ///     whose pack has an inverse, when the native BRGEMM serves it.
 /// Returns false for any other call, with the weight and dst untouched: the
 /// caller continues on its other routes.  Returns true otherwise, with
@@ -68,13 +67,15 @@ inline bool native_brgemm_requested(
 /// source, that uses only what the native BRGEMM implements; an M = 1 call
 /// on its raw weight runs on the GEMV kernel decide_native_gemv chooses for
 /// it, if any, over the raw weight, and the layout rule does not apply to
-/// it.  Any other call it takes is not served: status is unimplemented
+/// it (an ldb below the weight row length is turned away with
+/// unimplemented, as from the tiles).  Any other call it takes is not
+/// served: status is unimplemented
 /// (isa_unsupported on a CPU without the instruction set its data types
 /// need; failure for a buffer rewritten in place, which no other route
 /// reads, or for bad arguments), checked before any work, with dst and the
 /// weight untouched, and one line at the error level names the reason.
 /// Weight cache mode 2 rewrites a buffer in place only under
-/// ZENDNNL_MATMUL_ALGO=11; with lowoha_algo == native_brgemm alone it caches
+/// ZENDNNL_MATMUL_ALGO=10; with lowoha_algo == native_brgemm alone it caches
 /// out of place.  A call it takes logs the line matmul_direct logs, batch
 /// giving its batch fields (batch_count both when null).
 bool native_layout_matmul(char layout, bool transA, bool transB, int M, int N,
@@ -99,26 +100,6 @@ bool native_layout_check(char layout, bool transA, bool transB, int M, int N,
         bool is_weights_const, int batch_count, int num_threads,
         matmul_gated_act_t gated_act, const matmul_params &params,
         status_t &status, const char *&reason);
-
-/// Whether the native GEMM (native_gemm_execute) has a kernel for the data
-/// types of params on a CPU with uarch: an f32 source and weight always, a
-/// bf16 source and weight with AVX512-BF16.  The native BRGEMM judges its
-/// own calls (native_brgemm_check).
-bool native_gemm_has_kernel(
-        const matmul_params &params, const UarchParams &uarch);
-
-/// The native GEMM (ZENDNNL_MATMUL_ALGO=10, native_gemm): the BF16 and FP32
-/// GEMM loopers (planner, looper and GEMM kernel; no BRGEMM kernel, no GEMV
-/// path), called from matmul_execute when kernel == native_gemm or the auto
-/// tuner selects it.  Returns true if the operation was handled, false if
-/// the caller should fall back to an alternative kernel: always when
-/// native_gemm_has_kernel does not hold on the detected CPU, and for an
-/// alpha other than 1 with a beta other than 0 whose beta / alpha is not
-/// finite (alpha 0), which the loopers cannot pass to their kernels.
-bool native_gemm_execute(char layout, bool transA, bool transB, int M, int N,
-        int K, float alpha, const void *src, int lda, const void *weight,
-        int ldb, const void *bias, float beta, void *dst, int ldc,
-        bool is_weights_const, int num_threads, matmul_params &params);
 
 } // namespace native
 } // namespace matmul

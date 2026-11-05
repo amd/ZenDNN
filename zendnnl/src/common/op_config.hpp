@@ -80,11 +80,34 @@ enum class matmul_algo_t : int32_t {
     batched_sgemm = 7, /*!< Batched SGEMM */
     auto_tuner = 8, /*!< Auto Tuner */
     reference = 9, /*!< Reference */
-    native_gemm = 10, /*!< Native GEMM microkernel */
-    native_brgemm = 11, /*!< Native BRGEMM microkernel */
-    moe_custom_kernel = 12, /*!< group_matmul MoE custom-kernel */
+    native_brgemm = 10, /*!< Native BRGEMM microkernel */
+    moe_custom_kernel = 11, /*!< group_matmul MoE custom-kernel */
     algo_count /*!< Algo count */
 };
+
+/** @brief True when algo is the value of a matmul algorithm.
+ *
+ *  none, algo_count and a value that names no enumerator are not.
+ */
+constexpr bool is_valid_matmul_algo(int32_t algo) {
+    switch (static_cast<matmul_algo_t>(algo)) {
+        case matmul_algo_t::dynamic_dispatch:
+        case matmul_algo_t::aocl_dlp_blocked:
+        case matmul_algo_t::onednn_blocked:
+        case matmul_algo_t::libxsmm_blocked:
+        case matmul_algo_t::aocl_dlp:
+        case matmul_algo_t::onednn:
+        case matmul_algo_t::libxsmm:
+        case matmul_algo_t::batched_sgemm:
+        case matmul_algo_t::auto_tuner:
+        case matmul_algo_t::reference:
+        case matmul_algo_t::native_brgemm:
+        case matmul_algo_t::moe_custom_kernel: return true;
+        case matmul_algo_t::none:
+        case matmul_algo_t::algo_count: break;
+    }
+    return false;
+}
 
 /**
 * @class matmul_config_t

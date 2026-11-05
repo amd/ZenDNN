@@ -14,10 +14,10 @@
  * limitations under the License.
  ******************************************************************************/
 
-/// ALGO 11 selects the native BRGEMM of matmul_direct only.
+/// ALGO 10 selects the native BRGEMM of matmul_direct only.
 /// group_matmul_direct (each scheduling algorithm with the custom kernel off
 /// and on, the per-expert slice, the sequential chain, fused MoE) writes
-/// under a pinned ZENDNNL_MATMUL_ALGO=11, and with lowoha_algo =
+/// under a pinned ZENDNNL_MATMUL_ALGO=10, and with lowoha_algo =
 /// native_brgemm on its ops, the bits it writes with the algorithm unset,
 /// and the native BRGEMM serves none of its calls.  INT8 experts (u8 / s8
 /// sources, per-token and per-tensor source scales in f32 and bf16, zero
@@ -84,21 +84,21 @@ matmul_algo_t unset_kernel() {
 #endif
 }
 
-/// How a run selects the algorithm: unset, a pinned ZENDNNL_MATMUL_ALGO=11,
+/// How a run selects the algorithm: unset, a pinned ZENDNNL_MATMUL_ALGO=10,
 /// or lowoha_algo = native_brgemm on every op with the algorithm unset.
-enum class algo_mode_t { unset, algo11, per_call };
+enum class algo_mode_t { unset, algo10, per_call };
 
 constexpr algo_mode_t kModes[]
-        = {algo_mode_t::unset, algo_mode_t::algo11, algo_mode_t::per_call};
+        = {algo_mode_t::unset, algo_mode_t::algo10, algo_mode_t::per_call};
 
 const char *mode_name(algo_mode_t m) {
-    return m == algo_mode_t::algo11      ? "ZENDNNL_MATMUL_ALGO=11"
+    return m == algo_mode_t::algo10      ? "ZENDNNL_MATMUL_ALGO=10"
             : m == algo_mode_t::per_call ? "lowoha_algo=native_brgemm"
                                          : "unset";
 }
 
 matmul_algo_t pinned_algo(algo_mode_t m) {
-    return m == algo_mode_t::algo11 ? matmul_algo_t::native_brgemm
+    return m == algo_mode_t::algo10 ? matmul_algo_t::native_brgemm
                                     : matmul_algo_t::none;
 }
 
@@ -546,12 +546,12 @@ status_t run_group(std::vector<expert_t> &experts, algo_mode_t mode,
 }
 
 // The inner kernel of the experts is the one an unset algorithm resolves to
-// whenever the process starts with ZENDNNL_MATMUL_ALGO=11 or unset, and the
+// whenever the process starts with ZENDNNL_MATMUL_ALGO=10 or unset, and the
 // per-expert slice on it writes the same bits under each mode.
 TEST(NativeBrgemmGroupScope, ExpertSliceRunsTheUnsetKernel) {
     SKIP_WITHOUT_NATIVE_ISA();
     const char *env = std::getenv("ZENDNNL_MATMUL_ALGO");
-    if (env != nullptr && env[0] != '\0' && std::strcmp(env, "11") != 0)
+    if (env != nullptr && env[0] != '\0' && std::strcmp(env, "10") != 0)
         GTEST_SKIP() << "the process starts with ZENDNNL_MATMUL_ALGO=" << env;
     EXPECT_EQ(static_cast<int>(mm::resolve_matmul_backend()),
             static_cast<int>(unset_kernel()));
@@ -909,7 +909,7 @@ TEST(NativeBrgemmPaddedRoute, CallsRunOnTheNativeBrgemm) {
             EXPECT_TRUE(matches(e));
             alive.push_back(std::move(e));
         }
-        for (algo_mode_t mode : {algo_mode_t::algo11, algo_mode_t::per_call}) {
+        for (algo_mode_t mode : {algo_mode_t::algo10, algo_mode_t::per_call}) {
             expert_t e = make_expert(c);
             compute_reference(e, e.src.get(), e.lda());
             EXPECT_EQ(run_direct(e, mode), status_t::success)
@@ -936,7 +936,7 @@ TEST(NativeBrgemmPaddedRoute, CallsRunOnTheNativeBrgemm) {
         SCOPED_TRACE("served " + c.str());
         expert_t e = make_expert(c);
         compute_reference(e, e.src.get(), e.lda());
-        ASSERT_EQ(run_direct(e, algo_mode_t::algo11), status_t::success);
+        ASSERT_EQ(run_direct(e, algo_mode_t::algo10), status_t::success);
         EXPECT_GE(nbt::native_layouts(e.wei.get()), 1u);
         EXPECT_TRUE(matches(e));
         alive.push_back(std::move(e));
@@ -947,7 +947,7 @@ TEST(NativeBrgemmPaddedRoute, CallsRunOnTheNativeBrgemm) {
 // A batched call: the native BRGEMM serves only single calls.  A batched
 // call that names it (lowoha_algo native_brgemm) returns unimplemented,
 // with dst untouched; one with no lowoha_algo takes its kernel from
-// ZENDNNL_BMM_ALGO, so under ZENDNNL_MATMUL_ALGO=11, which selects the
+// ZENDNNL_BMM_ALGO, so under ZENDNNL_MATMUL_ALGO=10, which selects the
 // kernel of single calls, it runs on its batched route with the bits it has
 // with the algorithm unset, and the weight stays raw.
 TEST(NativeBrgemmDeclinedRoute, BatchedCallsAskForTheNativeBrgemmOnlyByName) {
@@ -991,7 +991,7 @@ TEST(NativeBrgemmDeclinedRoute, BatchedCallsAskForTheNativeBrgemmOnlyByName) {
                     << "the weight was rewritten";
         }
         EXPECT_EQ(std::memcmp(dst[0].get(), dst[1].get(), dst_bytes), 0)
-                << "ZENDNNL_MATMUL_ALGO=11 changed the batched call's bits";
+                << "ZENDNNL_MATMUL_ALGO=10 changed the batched call's bits";
     }
     mm::clear_matmul_weight_caches();
 }

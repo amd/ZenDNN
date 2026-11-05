@@ -308,7 +308,7 @@ static inline __m512 apply_fused_postop(__m512 v, fused_postop_t op) {
         case fused_postop_t::tanh_op: return avx512_tanh(v);
         case fused_postop_t::swish:
             // Note: fused swish always uses alpha=1. Non-unit alpha must use
-            // the non-fused postop path (apply_postops_tile in postop.cpp).
+            // the post-op chain of the epilogue (native_epilogue.cpp).
             return _mm512_mul_ps(v, avx512_sigmoid(v));
         default: return v;
     }

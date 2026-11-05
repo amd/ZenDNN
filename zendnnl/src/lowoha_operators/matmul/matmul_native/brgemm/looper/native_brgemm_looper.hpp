@@ -39,10 +39,12 @@ namespace native {
 /// a release build does not check them.  With a GEMV choice (gemv.kernel
 /// not none, decide_native_gemv's for the call) the call runs on that GEMV
 /// kernel over weight.weight, its raw weight, instead (run_native_gemv); the
-/// layout rule and pack_nr do not apply to it, unless an in-place rewrite of
-/// the buffer replaced the raw weight before the kernel's pack read it: the
-/// call then runs on the native tiles from the image, under the layout rule
-/// (failure when it does not take the call, which no other route can run).
+/// layout rule and pack_nr do not apply to it (an ldb below the weight row
+/// length is turned away with unimplemented, as from the tiles), unless an
+/// in-place rewrite of the buffer replaced the raw weight before the
+/// kernel's pack read it: the call then runs on the native tiles from the
+/// image, under the layout rule (failure when it does not take the call,
+/// which no other route can run).
 status_t native_brgemm_execute(const GemmDescriptor &desc,
         const native_weight_ref_t &weight, const void *src, void *dst,
         const void *bias, const matmul_params &params,

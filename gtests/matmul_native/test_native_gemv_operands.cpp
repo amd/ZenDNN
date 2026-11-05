@@ -27,6 +27,12 @@
 #include <thread>
 #include <vector>
 
+#if defined(__GLIBC__) \
+        && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 33))
+#include <malloc.h>
+#define NATIVE_GEMV_TEST_HEAP_IN_USE 1
+#endif
+
 #include <gtest/gtest.h>
 
 #include "gtest_utils.hpp"
@@ -367,7 +373,7 @@ TEST(NativeGemvOperands, GemvCallsPastTheCacheCapacityPackForTheCall) {
 }
 
 // A constant weight whose buffer takes a new weight between calls, per call
-// at weight cache mode 1 and under ZENDNNL_MATMUL_ALGO=11 at mode 2: the
+// at weight cache mode 1 and under ZENDNNL_MATMUL_ALGO=10 at mode 2: the
 // M = 1 calls on the BF16 and INT8 BKC kernels get the new weight's result,
 // on the calling thread and on another one, as the calls of M > 1 on the
 // native tiles do.
@@ -382,17 +388,17 @@ TEST(NativeGemvOperands, GemvPacksFollowNewBytesOfTheirWeight) {
             {kS8, kS8, g::int8_bkc}};
     const int N = 64, K = 128, rows = 4;
     uint32_t seed = 8200;
-    for (const bool algo11 : {false, true})
+    for (const bool algo10 : {false, true})
         for (const auto &cs : cases) {
             SCOPED_TRACE(std::string(nat::native_gemv_name(cs.kernel)) + ", "
                     + (cs.src == kS8 ? "s8" : "") + (cs.src == kU8 ? "u8" : "")
-                    + (algo11 ? " ZENDNNL_MATMUL_ALGO=11, weight cache mode 2"
+                    + (algo10 ? " ZENDNNL_MATMUL_ALGO=10, weight cache mode 2"
                               : " lowoha_algo native_brgemm, weight cache "
                                 "mode 1"));
             restore.cfg.set_weight_cache(2);
             std::unique_ptr<nt::algo_pin_t> pin;
             gemv_call_t call(cs.src, cs.wei, kF32, N, K, seed += 8);
-            if (algo11) {
+            if (algo10) {
                 call.c.params.lowoha_algo = matmul_algo_t::none;
                 pin.reset(new nt::algo_pin_t(matmul_algo_t::native_brgemm));
             } else {
@@ -452,7 +458,7 @@ TEST(NativeGemvOperands, GemvPacksFollowNewBytesOfTheirWeight) {
 // each change, which packs the weight again and replaces its cached pack,
 // while other threads keep running M = 1 calls on the weight: on the BF16
 // and INT8 BKC kernels, per call at weight cache mode 1 and under
-// ZENDNNL_MATMUL_ALGO=11 at mode 2.  No call reads a pack after it is freed
+// ZENDNNL_MATMUL_ALGO=10 at mode 2.  No call reads a pack after it is freed
 // (AddressSanitizer reports such a read), and every call gets the bits of
 // the first call, which match the reference algorithm.  The caches are
 // cleared between rounds, when no call runs.
@@ -467,16 +473,16 @@ TEST(NativeGemvOperands, ReplacedGemvPacksOutliveTheCallsReadingThem) {
     constexpr size_t kHead = 64;
     const int N = 256, K = 512, kReaders = 4, kRounds = 4, kChanges = 48;
     uint32_t seed = 8700;
-    for (const bool algo11 : {false, true})
+    for (const bool algo10 : {false, true})
         for (const auto &cs : cases) {
             SCOPED_TRACE(std::string(nat::native_gemv_name(cs.kernel))
-                    + (algo11 ? ", ZENDNNL_MATMUL_ALGO=11, weight cache mode 2"
+                    + (algo10 ? ", ZENDNNL_MATMUL_ALGO=10, weight cache mode 2"
                               : ", lowoha_algo native_brgemm, weight cache "
                                 "mode 1"));
             restore.cfg.set_weight_cache(2);
             std::unique_ptr<nt::algo_pin_t> pin;
             gemv_call_t call(cs.src, cs.wei, kF32, N, K, seed += 8);
-            if (algo11) {
+            if (algo10) {
                 call.c.params.lowoha_algo = matmul_algo_t::none;
                 pin.reset(new nt::algo_pin_t(matmul_algo_t::native_brgemm));
             } else {
@@ -552,9 +558,6 @@ nat::GemmDescriptor descriptor_of(const nt::call_t &c) {
     d.wei_dt = c.params.dtypes.wei;
     d.dst_dt = c.params.dtypes.dst;
     d.bias_dt = c.params.dtypes.bias;
-    d.src_elem_size = nt::dt_bytes(d.src_dt);
-    d.wei_elem_size = nt::dt_bytes(d.wei_dt);
-    d.dst_elem_size = nt::dt_bytes(d.dst_dt);
     d.bias = c.bias;
     d.is_weights_const = c.is_weights_const;
     d.num_threads = c.params.num_threads;
@@ -588,7 +591,7 @@ struct rows_call_t {
     }
 };
 
-/// Under ZENDNNL_MATMUL_ALGO=11 at weight cache mode 2 a first call of the
+/// Under ZENDNNL_MATMUL_ALGO=10 at weight cache mode 2 a first call of the
 /// tiles rewrites a bf16 buffer in place.
 struct in_place_mode_t {
     const config_restore_t restore;
@@ -759,6 +762,136 @@ TEST(NativeGemvOperands, GemvChoicesTurnAwayWhatTheTilesTurnAway) {
             expect_turned_away(tiles, dst, nat::native_gemv_plan_t {},
                     nat::kNativeLayoutPackNr);
         }
+}
+
+// An M = 1 call on a GEMV choice whose weight rows are ldb apart with ldb
+// below the row length (N - 1 for a [K, N] weight, K - 1 for [N, K]) is
+// turned away as the same call at M = 2 is: native_brgemm_refusal and
+// matmul_direct return unimplemented and leave dst untouched, and
+// native_brgemm_execute, given the GEMV choice, returns unimplemented with
+// the layout rule's reason.
+TEST(NativeGemvOperands, GemvChoicesTurnAwayAnLdbBelowTheWeightRow) {
+    if (!gemv_isa()) GTEST_SKIP() << "needs AVX512-BF16 and AVX512-VNNI";
+    using g = nat::native_gemv_t;
+    const struct {
+        data_type_t src, wei;
+        int N;
+        bool transB;
+        g kernel;
+    } cases[] = {{kBf16, kBf16, 64, false, g::bf16_bkc},
+            {kBf16, kBf16, 64, true, g::bf16_bkc},
+            {kBf16, kBf16, 4, false, g::bf16_narrow},
+            {kU8, kS8, 64, false, g::int8_bkc},
+            {kS8, kS8, 64, true, g::int8_bkc}};
+    const int K = 128;
+    uint32_t seed = 9100;
+    for (const auto &cs : cases) {
+        SCOPED_TRACE(std::string(nat::native_gemv_name(cs.kernel))
+                + (cs.transB ? ", transB" : ""));
+        gemv_call_t call(cs.src, cs.wei, kF32, cs.N, K, seed += 4, cs.transB);
+        nt::call_t c = call.c;
+        c.ldb = (cs.transB ? K : cs.N) - 1;
+        const nat::GemmDescriptor desc = descriptor_of(c);
+        const nat::native_gemv_plan_t gemv
+                = nat::decide_native_gemv(desc, c.params);
+        ASSERT_EQ(static_cast<int>(gemv.kernel), static_cast<int>(cs.kernel));
+        const auto untouched = [](const nt::buffer_t &out,
+                                       const std::vector<uint8_t> &prior) {
+            return std::memcmp(out.get(), prior.data(), prior.size()) == 0;
+        };
+
+        std::memset(call.dst.get(), 0x5a, call.dst.bytes);
+        const std::vector<uint8_t> prior(call.dst.as<uint8_t>(),
+                call.dst.as<uint8_t>() + call.dst.bytes);
+        nat::native_weight_ref_t ref;
+        ref.weight = c.wei;
+        ref.weight_cache_mode = 1;
+        const char *why = nullptr;
+        EXPECT_EQ(nat::native_brgemm_execute(desc, ref, c.src, c.dst, nullptr,
+                          c.params, gemv, &why),
+                status_t::unimplemented);
+        EXPECT_STREQ(why, "ldb below the weight row length");
+        EXPECT_TRUE(untouched(call.dst, prior));
+        EXPECT_EQ(nt::run_matmul(c), status_t::unimplemented) << "M = 1";
+        EXPECT_TRUE(untouched(call.dst, prior));
+        EXPECT_TRUE(nt::refused_with(c, status_t::unimplemented)) << "M = 1";
+
+        // The same call at M = 2, on the tiles.
+        nt::call_t tiles = c;
+        tiles.M = 2;
+        const nt::buffer_t src = nt::random_buffer(cs.src,
+                static_cast<size_t>(tiles.M) * K, seed + 1,
+                cs.src == kBf16 ? -1.0f : 0.0f, cs.src == kBf16 ? 1.0f : 15.0f);
+        const nt::buffer_t dst
+                = nt::make_buffer(static_cast<size_t>(tiles.M) * cs.N * 4);
+        std::memset(dst.get(), 0x5a, dst.bytes);
+        const std::vector<uint8_t> tiles_prior(
+                dst.as<uint8_t>(), dst.as<uint8_t>() + dst.bytes);
+        tiles.src = src.get();
+        tiles.dst = dst.get();
+        EXPECT_EQ(nt::run_matmul(tiles), status_t::unimplemented) << "M = 2";
+        EXPECT_TRUE(untouched(dst, tiles_prior));
+        EXPECT_TRUE(nt::refused_with(tiles, status_t::unimplemented))
+                << "M = 2";
+        EXPECT_EQ(nt::native_layouts(c.wei), 0u);
+    }
+}
+
+// The buffers the GEMV kernels keep for their thread go with it: threads
+// that grow every one of them (a bf16 bias converted to f32, the pack of a
+// weight at weight cache mode 0 with its column sums, an s8 source made u8)
+// and exit leave the heap in use as it was, within half of the smallest of
+// them (the u8 copy of the source) per thread, so each one counts.
+TEST(NativeGemvOperands, GemvBuffersGoWithTheirThread) {
+#ifdef NATIVE_GEMV_TEST_HEAP_IN_USE
+    if (!gemv_isa()) GTEST_SKIP() << "needs AVX512-BF16 and AVX512-VNNI";
+    using g = nat::native_gemv_t;
+    const int bf16_n = 2048, int8_n = 1024;
+    gemv_call_t bf16(kBf16, kBf16, kF32, bf16_n, bf16_n, 9300);
+    gemv_call_t int8(kS8, kS8, kF32, int8_n, int8_n, 9310);
+    const nt::buffer_t bf16_bias = nt::random_buffer(
+            kBf16, static_cast<size_t>(bf16_n), 9301, -1.0f, 1.0f);
+    const nt::buffer_t int8_bias = nt::random_buffer(
+            kBf16, static_cast<size_t>(int8_n), 9311, -1.0f, 1.0f);
+    bf16.set_bias(bf16_bias.get(), kBf16);
+    int8.set_bias(int8_bias.get(), kBf16);
+    bf16.c.params.weight_cache_type = 0;
+    int8.c.params.weight_cache_type = 0;
+    ASSERT_EQ(static_cast<int>(bf16.kernel()), static_cast<int>(g::bf16_bkc));
+    ASSERT_EQ(static_cast<int>(int8.kernel()), static_cast<int>(g::int8_bkc));
+    const auto run_both = [&] {
+        return nt::run_matmul(bf16.c) == status_t::success
+                && nt::run_matmul(int8.c) == status_t::success;
+    };
+    ASSERT_TRUE(run_both());
+    const auto in_use = [] {
+        const struct mallinfo2 m = mallinfo2();
+        return m.uordblks + m.hblkhd;
+    };
+    // mallinfo2 counts glibc's heap only: under another allocator (a
+    // sanitizer build, a preloaded one) the heap in use does not move.
+    const size_t probe_bytes = static_cast<size_t>(bf16_n) * bf16_n * 2;
+    const size_t at = in_use();
+    void *probe = zendnnl_aligned_alloc(64, probe_bytes);
+    const bool heap_counted = probe != nullptr && in_use() >= at + probe_bytes;
+    zendnnl_aligned_free(probe);
+    const size_t smallest = static_cast<size_t>(int8_n);
+    const size_t before = in_use();
+    constexpr int kThreads = 32;
+    int failed = 0;
+    for (int t = 0; t < kThreads; ++t)
+        std::thread([&] {
+            if (!run_both()) ++failed;
+        }).join();
+    const size_t after = in_use();
+    EXPECT_EQ(failed, 0);
+    if (!heap_counted) GTEST_SKIP() << "the heap in use is not glibc's";
+    EXPECT_LT(after, before + kThreads * smallest / 2)
+            << "the threads that exited left " << (after - before)
+            << " bytes in use";
+#else
+    GTEST_SKIP() << "counts the heap in use with glibc's mallinfo2";
+#endif
 }
 
 } // namespace

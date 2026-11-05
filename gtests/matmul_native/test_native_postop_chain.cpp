@@ -15,9 +15,8 @@
  ******************************************************************************/
 
 // Post-op chains of two ops, an activation the kernel epilogues can fuse and
-// an op they cannot, in both orders: every native route (the native GEMM's
-// FP32 and BF16 loopers, and the native BRGEMM's BF16, INT8 and FP32 calls)
-// and every looper of the native GEMM applies them in chain order.
+// an op they cannot, in both orders: the native BRGEMM's BF16, INT8 and FP32
+// calls apply them in chain order.
 
 #include <string>
 #include <vector>
@@ -25,9 +24,6 @@
 #include <gtest/gtest.h>
 
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
-#include "lowoha_operators/matmul/matmul_native/common/gemm_descriptor.hpp"
-#include "lowoha_operators/matmul/matmul_native/gemm/looper/bf16_gemm_looper.hpp"
-#include "lowoha_operators/matmul/matmul_native/gemm/looper/fp32_gemm_looper.hpp"
 #include "lowoha_operators/matmul/matmul_native/native_layout_policy.hpp"
 #include "native_brgemm_test_utils.hpp"
 
@@ -78,8 +74,7 @@ std::string chain_name(const chain_t &chain) {
 
 /// One call of a chain: f32 binary operands of [M, N], or of [1, N] for a
 /// row operand, clip to [-0.5, 0.75], relu with alpha 0, every alpha
-/// explicit (the loopers called directly do not see matmul_direct's
-/// defaults).
+/// explicit.
 struct chain_call_t {
     nt::call_t c;
     nt::buffer_t src, wei, bias, dst, ref, operand;
@@ -150,28 +145,6 @@ struct chain_call_t {
     }
 };
 
-nat::GemmDescriptor descriptor(const nt::call_t &c, int threads) {
-    nat::GemmDescriptor d;
-    d.M = c.M;
-    d.N = c.N;
-    d.K = c.K;
-    d.lda = c.K;
-    d.ldb = c.N;
-    d.ldc = c.N;
-    d.alpha = c.alpha;
-    d.beta = c.beta;
-    d.src_dt = c.params.dtypes.src;
-    d.wei_dt = c.params.dtypes.wei;
-    d.dst_dt = c.params.dtypes.dst;
-    d.bias_dt = c.params.dtypes.bias;
-    d.src_elem_size = nt::dt_bytes(d.src_dt);
-    d.wei_elem_size = nt::dt_bytes(d.wei_dt);
-    d.dst_elem_size = nt::dt_bytes(d.dst_dt);
-    d.bias = c.bias;
-    d.num_threads = threads;
-    return d;
-}
-
 struct route_t {
     const char *name;
     matmul_algo_t algo;
@@ -187,16 +160,11 @@ bool runs_here(const route_t &r) {
     return r.algo != matmul_algo_t::native_brgemm || nat::native_base_isa();
 }
 
-// Through matmul_direct: native_gemm (FP32 and BF16 GEMM loopers) and
-// native_brgemm (the native BRGEMM's tiles and epilogue: BF16 at M = 7, 8
-// and 40, INT8 at M = 1 on one thread and at M = 40, FP32 at M = 7 and 40),
-// each with alpha 1 and 1.5.
+// Through matmul_direct: native_brgemm (the native BRGEMM's tiles and
+// epilogue: BF16 at M = 7, 8 and 40, INT8 at M = 1 on one thread and at
+// M = 40, FP32 at M = 7 and 40), each with alpha 1 and 1.5.
 TEST(NativePostopChain, EveryNativeRouteKeepsTheChainOrder) {
     const route_t routes[] = {
-            {"native_gemm f32", matmul_algo_t::native_gemm, data_type_t::f32,
-                    data_type_t::f32, data_type_t::f32, 40, 96, 64, 4},
-            {"native_gemm bf16", matmul_algo_t::native_gemm, data_type_t::bf16,
-                    data_type_t::bf16, data_type_t::f32, 40, 96, 64, 4},
             {"native_brgemm bf16 M 8", matmul_algo_t::native_brgemm,
                     data_type_t::bf16, data_type_t::bf16, data_type_t::f32, 8,
                     96, 64, 4},
@@ -232,86 +200,6 @@ TEST(NativePostopChain, EveryNativeRouteKeepsTheChainOrder) {
                 ASSERT_EQ(nt::run_matmul(cc.c), status_t::success);
                 EXPECT_TRUE(cc.matches_reference());
             }
-    }
-}
-
-using looper_fn = void (*)(const nat::GemmDescriptor &,
-        const nat::UarchParams &, const void *, const void *, void *,
-        const void *, mm::matmul_params &);
-
-struct looper_t {
-    const char *name;
-    looper_fn fn;
-    data_type_t src, wei;
-    bool needs_avx512, needs_bf16;
-};
-
-/// The loopers of the native GEMM.
-const std::vector<looper_t> &loopers() {
-    static const std::vector<looper_t> l = {
-            {"fp32 gemm", nat::gemm_execute, data_type_t::f32, data_type_t::f32,
-                    false, false},
-            {"bf16 gemm", nat::bf16_gemm_execute, data_type_t::bf16,
-                    data_type_t::bf16, true, true},
-    };
-    return l;
-}
-
-bool runs_here(const looper_t &l) {
-    const nat::UarchParams &u = nat::detect_uarch();
-    return !((l.needs_avx512 && !u.avx512f) || (l.needs_bf16 && !u.avx512bf16));
-}
-
-// Each looper of the native GEMM, called directly, with its own tile edges:
-// M and N not multiples of its tiles.
-TEST(NativePostopChain, EveryLooperKeepsTheChainOrder) {
-    const nat::UarchParams &u = nat::detect_uarch();
-    uint32_t seed = 700;
-    for (const looper_t &l : loopers()) {
-        if (!runs_here(l)) continue;
-        const int M = 29, N = 80, K = 48;
-        for (const int threads : {1, 4})
-            for (const chain_t &chain : chains())
-                for (const float alpha : {1.0f, 1.5f}) {
-                    SCOPED_TRACE(std::string(l.name) + " " + chain_name(chain)
-                            + " threads " + std::to_string(threads) + " alpha "
-                            + std::to_string(alpha));
-                    chain_call_t cc(M, N, K, l.src, l.wei, data_type_t::f32,
-                            chain, alpha, seed += 8);
-                    const nat::GemmDescriptor d = descriptor(cc.c, threads);
-                    l.fn(d, u, cc.c.src, cc.c.wei, cc.c.dst, cc.c.bias,
-                            cc.c.params);
-                    EXPECT_TRUE(cc.matches_reference());
-                }
-    }
-}
-
-// A binary operand of [M, N] or [1, N], alone or after an activation, is
-// read at each output element's row and column, over every tile of each
-// looper.
-TEST(NativePostopChain, BinaryOperandsFollowTheTileInEveryLooper) {
-    const nat::UarchParams &u = nat::detect_uarch();
-    const std::vector<chain_t> binary = {
-            {post_op_type_t::binary_add},
-            {post_op_type_t::binary_mul},
-            {post_op_type_t::relu, post_op_type_t::binary_add},
-    };
-    uint32_t seed = 900;
-    for (const looper_t &l : loopers()) {
-        if (!runs_here(l)) continue;
-        for (const bool row_operand : {false, true})
-            for (const chain_t &chain : binary)
-                for (const int threads : {1, 4}) {
-                    SCOPED_TRACE(std::string(l.name) + " " + chain_name(chain)
-                            + (row_operand ? " [1, N]" : " [M, N]")
-                            + " threads " + std::to_string(threads));
-                    chain_call_t cc(29, 80, 48, l.src, l.wei, data_type_t::f32,
-                            chain, 1.5f, seed += 8, row_operand);
-                    const nat::GemmDescriptor d = descriptor(cc.c, threads);
-                    l.fn(d, u, cc.c.src, cc.c.wei, cc.c.dst, cc.c.bias,
-                            cc.c.params);
-                    EXPECT_TRUE(cc.matches_reference());
-                }
     }
 }
 

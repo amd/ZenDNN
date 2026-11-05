@@ -1641,9 +1641,6 @@ status_t run_native(const E2EProblem &pb, void *dst) {
     d.wei_dt = c.params.dtypes.wei;
     d.dst_dt = c.params.dtypes.dst;
     d.bias_dt = c.params.dtypes.bias;
-    d.src_elem_size = nbt::dt_bytes(d.src_dt);
-    d.wei_elem_size = 1;
-    d.dst_elem_size = nbt::dt_bytes(d.dst_dt);
     d.bias = c.bias;
     d.is_weights_const = true;
     d.num_threads = c.params.num_threads;
@@ -1843,7 +1840,7 @@ std::vector<E2ECase> e2e_ref_cases() {
 }
 
 // Gated INT8 calls with per-tensor source and per-channel weight scales
-// through matmul_direct under ALGO 11, as it defines them: alpha, beta (over
+// through matmul_direct under ALGO 10, as it defines them: alpha, beta (over
 // the dst's N pre-activation columns), the bias and the post-ops act on the
 // pre-activation in the reference algorithm's order, then the activation
 // and the store, requantized into a u8 / s8 dst.  The native BRGEMM serves
@@ -1904,9 +1901,6 @@ TEST(NativeBrgemmInt8Gated, PerChannelMatchesTheReference) {
                 d.wei_dt = data_type_t::s8;
                 d.dst_dt = c.dst_dt;
                 d.bias_dt = c.bias_dt;
-                d.src_elem_size = nbt::dt_bytes(d.src_dt);
-                d.wei_elem_size = 1;
-                d.dst_elem_size = nbt::dt_bytes(d.dst_dt);
                 d.bias = call.bias;
                 d.is_weights_const = true;
                 d.num_threads = call.params.num_threads;

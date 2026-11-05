@@ -338,12 +338,11 @@ MatmulType::MatmulType(const MatmulInput &matmul_input, uint32_t test_index,
 
     // LOWOHA-only mode: do not randomize use_LOWOHA. It was already set above
     // (default true, or honoring --lowoha when explicitly provided). Algorithms
-    // that require LOWOHA (LIBXSMM, native_gemm/native_brgemm) still force it on
+    // that require LOWOHA (LIBXSMM, native_brgemm) still force it on
     // unless the user explicitly disabled LOWOHA -- in that case the test will
     // be skipped at SetUp() time, so we leave use_LOWOHA false here.
-    const bool algo_forces_lowoha = is_libxsmm_algo(algo)
-            || algo == matmul_algo_t::native_gemm
-            || algo == matmul_algo_t::native_brgemm;
+    const bool algo_forces_lowoha
+            = is_libxsmm_algo(algo) || algo == matmul_algo_t::native_brgemm;
     const bool user_disabled_lowoha = user_specified_lowoha && !use_LOWOHA;
     if (algo_forces_lowoha && !user_disabled_lowoha) { use_LOWOHA = true; }
     if (is_libxsmm_algo(algo)) {
@@ -378,17 +377,6 @@ MatmulType::MatmulType(const MatmulInput &matmul_input, uint32_t test_index,
                 po_types[i] = post_op_type_t::none;
             } else {
                 kept_gelu_erf = true;
-            }
-        }
-    }
-
-    // mish is not implemented in the native (gemm/brgemm) post-op
-    // dispatchers, so neutralize it for those algos to avoid silent skips.
-    if (algo == matmul_algo_t::native_gemm
-            || algo == matmul_algo_t::native_brgemm) {
-        for (uint32_t i = 0; i < po_types.size(); ++i) {
-            if (po_types[i] == post_op_type_t::mish) {
-                po_types[i] = post_op_type_t::none;
             }
         }
     }
@@ -1925,7 +1913,6 @@ matmul_algo_t strToAlgo(std::string str) {
     if (str == "onednn_blocked") { return matmul_algo_t::onednn_blocked; }
     if (str == "libxsmm") { return matmul_algo_t::libxsmm; }
     if (str == "libxsmm_blocked") { return matmul_algo_t::libxsmm_blocked; }
-    if (str == "native_gemm") { return matmul_algo_t::native_gemm; }
     if (str == "native_brgemm") { return matmul_algo_t::native_brgemm; }
     EXCEPTION("Invalid algorithm: " + str);
 }
@@ -1938,7 +1925,6 @@ std::string algoToStr(matmul_algo_t algo) {
         case matmul_algo_t::onednn_blocked: return "onednn_blocked";
         case matmul_algo_t::libxsmm: return "libxsmm";
         case matmul_algo_t::libxsmm_blocked: return "libxsmm_blocked";
-        case matmul_algo_t::native_gemm: return "native_gemm";
         case matmul_algo_t::native_brgemm: return "native_brgemm";
         default: return "none";
     }

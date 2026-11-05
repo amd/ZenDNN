@@ -66,8 +66,8 @@ set_arch("zen5")   # default until [ARCH] detected
 ELEM_BYTES = {"u8":1, "s8":1, "s4":0.5, "bf16":2, "f16":2, "f32":4}
 
 ALGO_NAMES = {
-    "1": "DLP-Blocked", "2": "DLP-2", "3": "DLP-Reorder",
-    "10": "Native-GEMM", "11": "Native-BRGEMM",
+    "1": "DLP-Blocked", "2": "oneDNN-Blocked", "3": "LIBXSMM-Blocked",
+    "10": "Native-BRGEMM",
 }
 
 # ── Shared helpers ──────────────────────────────────────────────────────────
@@ -993,10 +993,17 @@ modes:
   {prog} --perf [flags] <file>          HW counter analysis (perf stat)
 
 examples:
-  {prog} build/benchmark_bf16_algo11_1c.txt
-  {prog} --compare build/benchmark_algo1_1c.txt build/benchmark_algo11_1c.txt
+  {prog} build/benchmark_bf16_algo10_1c.txt
+  {prog} --compare build/benchmark_algo1_1c.txt build/benchmark_algo10_1c.txt
   {prog} --perf -v -b build/benchmark_perf_raw.txt
   {prog} --perf -t 64 -c L2 build/benchmark_64c_perf_raw.txt
+
+labels:
+  A file's label is the ZENDNNL_MATMUL_ALGO number after "algo" in its name,
+  read with the current numbers (10 is the native BRGEMM). Result files
+  saved when 10 was the native GEMM and 11 the native BRGEMM keep those
+  numbers in their names, so they get the wrong labels: rename them, or read
+  the kernel that ran from the Kernel_Name column of their rows.
 """)
 
     # mode selection

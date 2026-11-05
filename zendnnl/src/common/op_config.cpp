@@ -212,9 +212,7 @@ void matmul_config_t::set_env_config() {
         } else {
             try {
                 int32_t algo = std::stoi(algoStr);
-                if (algo > static_cast<int32_t>(matmul_algo_t::none)
-                        && algo < static_cast<int32_t>(
-                                   matmul_algo_t::algo_count)) {
+                if (is_valid_matmul_algo(algo)) {
                     matmul_algo = static_cast<int32_t>(matmul_algo_t(algo));
                 } else {
                     matmul_algo
@@ -240,9 +238,7 @@ void matmul_config_t::set_env_config() {
         } else {
             try {
                 int32_t algo = std::stoi(bmm_algoStr);
-                if (algo > static_cast<int32_t>(matmul_algo_t::none)
-                        && algo < static_cast<int32_t>(
-                                   matmul_algo_t::algo_count)) {
+                if (is_valid_matmul_algo(algo)) {
                     bmm_algo = static_cast<int32_t>(matmul_algo_t(algo));
                 } else {
                     bmm_algo = static_cast<int32_t>(matmul_algo_t::algo_count);
@@ -543,8 +539,6 @@ matmul_algo_t matmul_config_t::str_to_matmul_algo(std::string algo) {
         return matmul_algo_t::batched_sgemm;
     } else if (algo == "auto_tuner") {
         return matmul_algo_t::auto_tuner;
-    } else if (algo == "native_gemm") {
-        return matmul_algo_t::native_gemm;
     } else if (algo == "native_brgemm") {
         return matmul_algo_t::native_brgemm;
     }

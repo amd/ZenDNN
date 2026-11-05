@@ -24,6 +24,7 @@
 #include "aocl_dlp.h"
 #endif
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -77,9 +78,25 @@ inline bool src_scale_is_collapsed_per_token(
 }
 
 /**
+ * @brief A per-tensor source scale over several rows with {G > 1, N} weight
+ *        scales.
+ *
+ * AOCL-DLP applies per-group weight scales only on the sym-quant kernel,
+ * which reads one source value per row: the wiring repeats the one value
+ * for every row.
+ */
+inline bool src_scale_is_broadcast_per_token(
+        const matmul_quantization_params_t &quant_params, int M, int N) {
+    return quant_params.src_scale.buff != nullptr
+            && get_num_elements(quant_params.src_scale.dims) == 1 && M > 1
+            && has_per_group_wei_scale(quant_params, N);
+}
+
+/**
  * @brief The source scale of an s8 source selects the AOCL-DLP sym-quant
- *        kernel: more than one element (per token or per group), or a
- *        per-token scale collapsed to one token.
+ *        kernel: more than one element (per token or per group), a per-token
+ *        scale collapsed to one token, or a per-tensor scale with per-group
+ *        weight scales.
  *
  * src_count is `get_num_elements(quant_params.src_scale.dims)`.  The kernel
  * choice (aocl_kernel.cpp) and the scale wiring (aocl_postop.cpp) both decide
@@ -90,7 +107,130 @@ inline bool src_scale_selects_sym_quant(
         int M, int N) {
     return quant_count_granularity(src_count, M)
             != quant_count_granularity_t::per_tensor
-            || src_scale_is_collapsed_per_token(quant_params, M, N);
+            || src_scale_is_collapsed_per_token(quant_params, M, N)
+            || src_scale_is_broadcast_per_token(quant_params, M, N);
+}
+
+/**
+ * @brief The AOCL-DLP route applies the weight scale of an s8-weight call.
+ *
+ * One value, or one value per column, it applies on any wiring, in the
+ * types aocl_dlp_applies_wei_scale_type admits.  Per-group weight scales it
+ * applies only on the s8 x s8 sym-quant kernel (no source zero point, f32 /
+ * bf16 destination, src_scale_selects_sym_quant), in groups of whole quads
+ * with K / group values per column: the SCALE post-op refuses any other
+ * length, the sym-quant reorder any other group, and either leaves the
+ * destination unwritten.
+ *
+ * @param src The source type AOCL-DLP multiplies: the compute type of a
+ *            source the call quantizes.
+ */
+inline bool aocl_dlp_applies_wei_scale(
+        const matmul_params &params, data_type_t src, int M, int N, int K) {
+    const auto &qp = params.quant_params;
+    if (params.dtypes.wei != data_type_t::s8 || qp.wei_scale.buff == nullptr)
+        return true;
+    const size_t count = get_num_elements(qp.wei_scale.dims);
+    if (count == 1 || count == static_cast<size_t>(N)) return true;
+    if (src != data_type_t::s8 || qp.src_zp.buff != nullptr
+            || (params.dtypes.dst != data_type_t::f32
+                    && params.dtypes.dst != data_type_t::bf16)
+            || !src_scale_selects_sym_quant(
+                    qp, get_num_elements(qp.src_scale.dims), M, N))
+        return false;
+    const int64_t group = sym_quant_group_size(qp, M, N, K);
+    return quant_group_size_is_whole_quads(K, group)
+            && count == static_cast<size_t>(K / group) * static_cast<size_t>(N);
+}
+
+/**
+ * @brief The AOCL-DLP sym-quant kernel reads these weight scales: f32 ones,
+ *        or ones of the source scale's type; it leaves the destination
+ *        unwritten with others.
+ */
+inline bool sym_quant_reads_wei_scale(
+        const matmul_quantization_params_t &quant_params) {
+    return quant_params.wei_scale.dt == data_type_t::f32
+            || quant_params.wei_scale.dt == quant_params.src_scale.dt;
+}
+
+/**
+ * @brief The AOCL-DLP route reads the weight scale of an s8-weight call in
+ *        its type: the s8 x s8 sym-quant kernel (no source zero point, f32 /
+ *        bf16 destination, src_scale_selects_sym_quant) only as
+ *        sym_quant_reads_wei_scale says; the SCALE post-ops read the type
+ *        they are given.
+ *
+ * @param src As for aocl_dlp_applies_wei_scale.
+ */
+inline bool aocl_dlp_applies_wei_scale_type(
+        const matmul_params &params, data_type_t src, int M, int N) {
+    const auto &qp = params.quant_params;
+    if (params.dtypes.wei != data_type_t::s8 || qp.wei_scale.buff == nullptr
+            || sym_quant_reads_wei_scale(qp))
+        return true;
+    return src != data_type_t::s8 || qp.src_zp.buff != nullptr
+            || (params.dtypes.dst != data_type_t::f32
+                    && params.dtypes.dst != data_type_t::bf16)
+            || !src_scale_selects_sym_quant(
+                    qp, get_num_elements(qp.src_scale.dims), M, N);
+}
+
+/// v is an integer that int32 holds.
+inline bool holds_int32(float v) {
+    return v >= -2147483648.0f && v < 2147483648.0f && v == std::trunc(v);
+}
+
+/**
+ * @brief AOCL-DLP's GEMMs of an s8 weight, and of an s4 weight with a u8 /
+ *        s8 source, take the call's alpha and beta: those GEMMs sum in int32
+ *        and take alpha and beta as int32, so both must be integers that
+ *        int32 holds.
+ *
+ * @param src The source type AOCL-DLP multiplies: the compute type of a
+ *            source the call quantizes.
+ */
+inline bool aocl_dlp_takes_alpha_beta(
+        const matmul_params &params, data_type_t src, float alpha, float beta) {
+    if (alpha == 1.0f && beta == 0.0f) return true;
+    const data_type_t wei = params.dtypes.wei;
+    const bool int_src = src == data_type_t::u8 || src == data_type_t::s8;
+    if (wei != data_type_t::s8 && !(wei == data_type_t::s4 && int_src))
+        return true;
+    return holds_int32(alpha) && holds_int32(beta);
+}
+
+/**
+ * @brief The AOCL-DLP route applies the alpha and beta of a call, which it
+ *        takes (aocl_dlp_takes_alpha_beta), as matmul_direct defines them.
+ *
+ * beta * C of an integer GEMM goes after the scales for per-token or
+ * per-group source scales and for per-group weight scales, else into the
+ * integer sum before them.  The sym-quant kernels add it after the scales,
+ * also for the one source value at M == 1 they take with per-channel weight
+ * scales; the kernels of a u8 / s8 source and one source scale value add it
+ * to the int32 sum, with C converted to int32 (rounded when it is f32, bf16
+ * or f16), so only an integer C (an s32, s8 or u8 destination) is added as
+ * it is; those of a bf16 / f32 source refuse a nonzero beta with any source
+ * scale and leave the destination unwritten.
+ *
+ * @param src As for aocl_dlp_takes_alpha_beta.
+ */
+inline bool aocl_dlp_applies_alpha_beta(const matmul_params &params,
+        data_type_t src, int M, int N, float alpha, float beta) {
+    if (!aocl_dlp_takes_alpha_beta(params, src, alpha, beta)) return false;
+    const data_type_t dst = params.dtypes.dst;
+    if (beta == 0.0f || params.dtypes.wei != data_type_t::s8) return true;
+    if (src != data_type_t::u8 && src != data_type_t::s8) return false;
+    const auto &qp = params.quant_params;
+    const size_t src_count = get_num_elements(qp.src_scale.dims);
+    if (src == data_type_t::s8 && qp.src_zp.buff == nullptr
+            && (dst == data_type_t::f32 || dst == data_type_t::bf16)
+            && src_scale_selects_sym_quant(qp, src_count, M, N))
+        return src_count > 1 || quant_param_is_per_token(qp.src_scale, M)
+                || has_per_group_wei_scale(qp, N);
+    return dst == data_type_t::s32 || dst == data_type_t::s8
+            || dst == data_type_t::u8;
 }
 
 #if ZENDNNL_DEPENDS_AOCLDLP

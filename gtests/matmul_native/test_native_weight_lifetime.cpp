@@ -220,7 +220,7 @@ protected:
         cache_.reset();
         ::reset_grp_matmul_caches();
     }
-    /// The process-wide ALGO 11, under which weight cache mode 2 rewrites a
+    /// The process-wide ALGO 10, under which weight cache mode 2 rewrites a
     /// bf16 buffer in place.
     void pin_native() {
         algo_ = std::make_unique<nt::algo_pin_t>(matmul_algo_t::native_brgemm);
@@ -739,6 +739,97 @@ TEST_F(NativeWeightLifetime, StaleLayoutGoesForEveryThread) {
         EXPECT_EQ(memo_after, 0u)
                 << "the other thread's entry outlived the stale layout";
         mm::clear_matmul_native_weight_caches();
+    }
+}
+
+// One thread keeps giving a constant weight new bytes in its first
+// kEndBytes, which the zero first source column multiplies, and runs a call
+// after each change, which packs the weight again and drops its cached
+// layout, while other threads keep running calls on the weight at weight
+// cache mode 1.  No call reads a dropped layout after it is freed
+// (AddressSanitizer reports such a read), and every call gets the bits of
+// the first call.  The caches are cleared between rounds, when no call runs.
+TEST_F(NativeWeightLifetime, DroppedLayoutsOutliveTheCallsReadingThem) {
+    const int K = 512, N = 256;
+    constexpr int kReaders = 4, kRounds = 4, kChanges = 48;
+    for (data_type_t dt : {kBf16, kS8}) {
+        SCOPED_TRACE(dt == kBf16 ? "bf16" : "s8");
+        ::reset_grp_matmul_caches();
+        const weight_t w = make_weight(dt, K, N, N, false, 671);
+        const weight_t other = make_weight(dt, K, N, N, false, 672);
+        uint8_t heads[2][kEndBytes];
+        std::memcpy(heads[0], w.ptr(), kEndBytes);
+        std::memcpy(heads[1], other.ptr(), kEndBytes);
+        dense_t first(dt, K);
+        for (int m = 0; m < dense_t::M; ++m)
+            nt::store_f32(first.src.get(), first.src_dt(),
+                    static_cast<size_t>(m) * K, 0.0f);
+        ASSERT_EQ(first.run(w, 1), status_t::success);
+        ASSERT_TRUE(first.matches(w));
+        const std::vector<float> want = first.dst;
+
+        for (int round = 0; round < kRounds; ++round) {
+            SCOPED_TRACE("round " + std::to_string(round));
+            std::atomic<bool> stop {false};
+            std::atomic<int> started {0}, bad {0};
+            const auto run_one = [&](dense_t &d) {
+                if (d.run(w, 1) != status_t::success || d.dst != want)
+                    bad.fetch_add(1);
+            };
+            {
+                joiner_t readers;
+                for (int r = 0; r < kReaders; ++r)
+                    readers.threads.emplace_back([&] {
+                        dense_t d = first;
+                        run_one(d);
+                        started.fetch_add(1);
+                        while (!stop.load())
+                            run_one(d);
+                    });
+                while (started.load() < kReaders)
+                    std::this_thread::yield();
+                dense_t d = first;
+                for (int i = 1; i <= kChanges; ++i) {
+                    std::memcpy(w.buf.get(), heads[i % 2], kEndBytes);
+                    run_one(d);
+                }
+                stop.store(true);
+            }
+            std::memcpy(w.buf.get(), heads[0], kEndBytes);
+            EXPECT_EQ(bad.load(), 0) << "calls with another result";
+            mm::clear_matmul_native_weight_caches();
+        }
+    }
+}
+
+// The layouts a weight's new bytes drop stay held until the caches are
+// cleared, with the cached ones: at ZENDNNL_LRU_CACHE_CAPACITY 2, the third
+// layout of a weight whose bytes changed twice is packed for its call.
+TEST_F(NativeWeightLifetime, DroppedLayoutsCountTowardTheCapacity) {
+    const nt::lru_capacity_pin_t capacity(2);
+    const int K = 64, N = 64;
+    for (data_type_t dt : {kBf16, kS8}) {
+        SCOPED_TRACE(dt == kBf16 ? "bf16" : "s8");
+        ::reset_grp_matmul_caches();
+        const weight_t w = make_weight(dt, K, N, N, false, 681);
+        dense_t d(dt, K);
+        ASSERT_EQ(d.run(w, 1), status_t::success);
+        EXPECT_TRUE(d.matches(w));
+        EXPECT_EQ(nt::native_layouts(w.ptr()), 1u);
+        fill(w, 682);
+        ASSERT_EQ(d.run(w, 1), status_t::success);
+        EXPECT_TRUE(d.matches(w));
+        EXPECT_EQ(nt::native_layouts(w.ptr()), 1u)
+                << "the new layout cached next to the dropped one";
+        fill(w, 683);
+        ASSERT_EQ(d.run(w, 1), status_t::success);
+        EXPECT_TRUE(d.matches(w));
+        EXPECT_EQ(nt::native_layouts(w.ptr()), 0u)
+                << "two layouts held: packed for the call";
+        mm::clear_matmul_native_weight_caches();
+        ASSERT_EQ(d.run(w, 1), status_t::success);
+        EXPECT_TRUE(d.matches(w));
+        EXPECT_EQ(nt::native_layouts(w.ptr()), 1u) << "cached after the clear";
     }
 }
 

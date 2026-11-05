@@ -184,18 +184,6 @@ inline int aocl_stable_n_thr(int num_threads, int /*N*/) {
     return std::max(1, num_threads / get_grp_matmul_aocl_target_slots());
 }
 
-/// N alignment the inner kernel prefers for each per-thread slice
-/// (1 = no alignment).  ALGO 3's column partitioner (aligned_n_split)
-/// honours it when the slowest thread stays within 2× of the fastest
-/// after rounding; otherwise it falls back to the unaligned even split.
-inline int backend_n_align(matmul_algo_t algo) {
-    switch (algo) {
-        case matmul_algo_t::native_brgemm:
-        case matmul_algo_t::native_gemm: return 64;
-        default: return 1;
-    }
-}
-
 /// The per-thread N-slice alignment an upcoming ALGO 3 decode will split
 /// on, resolved from a prompt-shaped call so `cross_warm` can warm
 /// per-tile AOCL DLP keys the decode will actually query.
@@ -237,7 +225,7 @@ inline int backend_n_align(matmul_algo_t algo) {
 /// pass their observed tightness.
 inline int n_tile_decode_nr_align(
         grp_matmul_gated_act_t act, bool ck_enabled, bool decode_arena_tight) {
-    const int backend_nr = backend_n_align(matmul_algo_t::aocl_dlp_blocked);
+    const int backend_nr = 1;
     // Mirrors `n_tile_nr_align`: the custom kernel widens to its
     // own pack_nr and owns the pairing, so only the CK-off tight case needs
     // the pair alignment.  When the custom kernel will run, the per-tile

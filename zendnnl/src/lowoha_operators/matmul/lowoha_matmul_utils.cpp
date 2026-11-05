@@ -537,7 +537,6 @@ const char *kernel_to_string(matmul_algo_t kernel) {
         case matmul_algo_t::dynamic_dispatch: return "dynamic_dispatch";
         case matmul_algo_t::reference: return "reference";
         case matmul_algo_t::auto_tuner: return "auto_tuner";
-        case matmul_algo_t::native_gemm: return "native_gemm";
         case matmul_algo_t::native_brgemm: return "native_brgemm";
         case matmul_algo_t::moe_custom_kernel: return "moe_custom_kernel";
         default: return "none";
@@ -998,7 +997,7 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
             || (!ZENDNNL_DEPENDS_LIBXSMM
                     && (kernel == matmul_algo_t::libxsmm
                             || kernel == matmul_algo_t::libxsmm_blocked))
-            || (kernel >= matmul_algo_t::algo_count)) {
+            || !is_valid_matmul_algo(static_cast<int32_t>(kernel))) {
 #if ZENDNNL_DEPENDS_AOCLDLP
         kernel = matmul_algo_t::aocl_dlp;
 #else

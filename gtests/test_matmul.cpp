@@ -123,7 +123,6 @@ TEST_P(TestMatmul, F32_F32) {
             = (status == status_t::success && ref_status == status_t::success);
     bool enable_f32_relaxation = (algo == matmul_algo_t::libxsmm
             || algo == matmul_algo_t::libxsmm_blocked
-            || algo == matmul_algo_t::native_gemm
             || algo == matmul_algo_t::native_brgemm);
     if (is_test_successful) {
         compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, k,
@@ -699,7 +698,6 @@ TEST_P(TestMatmul, BF16_F32) {
             = (status == status_t::success && ref_status == status_t::success);
     bool enable_f32_relaxation = (algo == matmul_algo_t::libxsmm
             || algo == matmul_algo_t::libxsmm_blocked
-            || algo == matmul_algo_t::native_gemm
             || algo == matmul_algo_t::native_brgemm);
     if (is_test_successful) {
         compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, k,
@@ -912,7 +910,6 @@ TEST_P(TestMatmul, F32_F32_Stride) {
             = (status == status_t::success && ref_status == status_t::success);
     bool enable_f32_relaxation = (algo == matmul_algo_t::libxsmm
             || algo == matmul_algo_t::libxsmm_blocked
-            || algo == matmul_algo_t::native_gemm
             || algo == matmul_algo_t::native_brgemm);
     if (is_test_successful) {
         compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, k,
@@ -980,7 +977,6 @@ TEST_P(TestMatmul, BF16_F32_Stride) {
 
     bool enable_f32_relaxation = (algo == matmul_algo_t::libxsmm
             || algo == matmul_algo_t::libxsmm_blocked
-            || algo == matmul_algo_t::native_gemm
             || algo == matmul_algo_t::native_brgemm);
     if (is_test_successful) {
         compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, k,

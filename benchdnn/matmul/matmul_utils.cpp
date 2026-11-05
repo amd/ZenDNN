@@ -572,7 +572,7 @@ void inputFileParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
                                 "onednn_blocked, libxsmm_blocked, aocl_dlp, "
                                 "onednn, libxsmm, "
                                 "batched_sgemm, auto, auto_tuner, "
-                                "dynamic_dispatch, native_gemm, "
+                                "dynamic_dispatch, "
                                 "native_brgemm, reference, none. Using '",
                                 kernel_name, "' instead.");
                         cfg.kernel_name = kernel_name;
@@ -991,7 +991,7 @@ void inputModelFileParser(std::ifstream &infile,
                             "'. Supported: aocl_dlp_blocked, onednn_blocked, "
                             "libxsmm_blocked, aocl_dlp, onednn, libxsmm, "
                             "batched_sgemm, auto, auto_tuner, "
-                            "dynamic_dispatch, native_gemm, native_brgemm, "
+                            "dynamic_dispatch, native_brgemm, "
                             "reference, none. Using '",
                             kernel_name, "' instead.");
                     cfg.kernel_name = kernel_name;
@@ -1069,7 +1069,7 @@ void inputCommandLineParser(std::vector<MatmulConfig> &configs,
                         "'. Supported: aocl_dlp_blocked, onednn_blocked, "
                         "libxsmm_blocked, aocl_dlp, onednn, libxsmm, "
                         "batched_sgemm, auto, auto_tuner, "
-                        "dynamic_dispatch, native_gemm, native_brgemm, "
+                        "dynamic_dispatch, native_brgemm, "
                         "reference, none. Using '",
                         kernel_name, "' instead.");
                 cfg.kernel_name = kernel_name;

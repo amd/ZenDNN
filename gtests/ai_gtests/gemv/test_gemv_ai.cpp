@@ -15,6 +15,7 @@
  *******************************************************************************/
 
 #include "gtest_native_refusal.hpp"
+#include "gtest_utils.hpp"
 #include "gtest_utils_gemv_ai.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
@@ -88,6 +89,11 @@ protected:
                          << "Omit --lowoha or pass --lowoha true to run these "
                             "tests.";
         }
+        // A case's values follow --seed and its name, whatever ran before it.
+        uint32_t h = 2166136261u ^ static_cast<uint32_t>(seed);
+        for (const char ch : GetParam().test_name)
+            h = (h ^ static_cast<uint8_t>(ch)) * 16777619u;
+        AITensorFactory::set_seed(h);
     }
     void TearDown() override {
         // Clear all weight caches between test cases so stale pointer-keyed
@@ -234,10 +240,16 @@ protected:
                     }
                     mp.num_threads = std::max(1, gemv_nt);
                 }
-                // Force algo 11 (native_brgemm) to ensure the BKC-GEMV kernel
-                // is tested consistently across all 3 packing paths. Algo 0
-                // may route different paths to different kernels (DLP vs BKC)
-                // based on is_weights_const, causing false cross-check failures.
+                // Algo 10 (native_brgemm) for the three paths.  A constant
+                // weight (paths 2 and 3) runs on a GEMV kernel, which caches
+                // its pack, only where decide_native_gemv takes the call, and
+                // elsewhere on the native tiles from the cached layout; a
+                // weight that is not constant (path 1) runs on the tiles from
+                // a per-call pack, unless the narrow BF16 GEMV kernel takes
+                // the call, which then serves all three paths.  So the
+                // cross-check compares the GEMV kernel with the tiles where
+                // decide_native_gemv takes the constant weight, and the
+                // tiles' per-call pack with the cached layout elsewhere.
                 mp.lowoha_algo = matmul_algo_t::native_brgemm;
 
                 for (size_t i = 0; i < params.post_op_config.post_ops.size();
@@ -269,15 +281,7 @@ protected:
                 // reference-compared run (Path 3 → output) we use unit scales and
                 // zero_point = 0 (s8 src) or 0 (u8 treated as signed by adding 0).
                 // This makes the quantized formula reduce to C = A*B + bias, matching
-                // the reference.
-                //
-                // Non-unit scales and per-channel are tested via the cross-path
-                // consistency check (all 3 paths must agree), which catches kernel
-                // bugs even without reference comparison.
-                //
-                // Flow: Paths 1-3 use unit scale/zp=0 for reference correctness.
-                //       Then Path 4 (extra) uses non-unit per-channel to verify
-                //       the dequant pipeline via cross-check against Path 3.
+                // the reference.  The three paths run at these scales too.
                 float q_src_scale = 1.0f;
                 [[maybe_unused]] int32_t q_src_zp = 0;
                 std::vector<float> q_wei_scales = {1.0f};
@@ -325,7 +329,7 @@ protected:
                                 c_init.get_raw_handle_const(), out_bytes);
                 };
 
-                // Path 1: thread_local repack (is_wt_const=false)
+                // Path 1: a weight that is not constant (is_wt_const=false)
                 auto tl_out = AITensorFactory::create_zero_tensor(
                         {params.m, params.n}, out_dt, "gemv_tl");
                 seed_output(tl_out);

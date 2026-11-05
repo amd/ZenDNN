@@ -77,11 +77,13 @@ struct native_image_check_t {
 ///   0: packed for this call (owned);
 ///   1: the process cache, keyed by the weight pointer and the whole layout
 ///      request; packed for this call when ZENDNNL_LRU_CACHE_CAPACITY
-///      entries are already cached (entries are never evicted: the caller
+///      layouts are already held (entries are never evicted: the caller
 ///      may hold a layout of any of them).  An entry keeps digests of the
 ///      two ends of the bytes its pack read (native_weight_ends.hpp); a hit
 ///      whose buffer no longer matches them drops the entry and packs again
-///      from the bytes the buffer holds now.  New bytes equal to the old
+///      from the bytes the buffer holds now.  The dropped entry's layout
+///      stays allocated, and held, until clear_native_weight_caches: a call
+///      on another thread may still read it.  New bytes equal to the old
 ///      ones at both ends are served the old layout until
 ///      clear_native_weight_caches drops it;
 ///   2: as 1, except that a bf16 weight whose layout fits its buffer

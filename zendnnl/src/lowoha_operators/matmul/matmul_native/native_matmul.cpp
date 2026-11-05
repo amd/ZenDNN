@@ -17,7 +17,6 @@
 #include "lowoha_operators/matmul/matmul_native/native_matmul.hpp"
 
 #include <algorithm>
-#include <cmath>
 #include <exception>
 #include <new>
 #include <sstream>
@@ -31,14 +30,11 @@
 #include "lowoha_operators/matmul/lowoha_quant_layout.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_brgemm_looper.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_gemv.hpp"
-#include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/gemm_descriptor.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_operator_bridge.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_utils.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_weight_cache.hpp"
-#include "lowoha_operators/matmul/matmul_native/gemm/looper/bf16_gemm_looper.hpp"
-#include "lowoha_operators/matmul/matmul_native/gemm/looper/fp32_gemm_looper.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -46,10 +42,9 @@ namespace matmul {
 namespace native {
 
 using zendnnl::common::dtype_info;
-using zendnnl::common::size_of;
 using namespace zendnnl::error_handling;
 
-// Common descriptor setup — shared by both ALGO 10 and ALGO 11.
+// The descriptor of a call.
 static GemmDescriptor make_desc(bool transA, bool transB, int M, int N, int K,
         float alpha, float beta, int lda, int ldb, int ldc,
         bool is_weights_const, int num_threads, const matmul_params &params) {
@@ -68,93 +63,10 @@ static GemmDescriptor make_desc(bool transA, bool transB, int M, int N, int K,
     desc.wei_dt = params.dtypes.wei;
     desc.dst_dt = params.dtypes.dst;
     desc.bias_dt = params.dtypes.bias;
-    desc.src_elem_size = size_of(desc.src_dt);
-    desc.wei_elem_size = size_of(desc.wei_dt);
-    desc.dst_elem_size = size_of(desc.dst_dt);
     desc.bias = nullptr;
     desc.is_weights_const = is_weights_const;
     desc.num_threads = num_threads;
     return desc;
-}
-
-bool native_gemm_has_kernel(
-        const matmul_params &params, const UarchParams &uarch) {
-    const data_type_t src = params.dtypes.src;
-    const data_type_t wei = params.dtypes.wei;
-    if (src == data_type_t::f32 && wei == data_type_t::f32) return true;
-    if (src == data_type_t::bf16 && wei == data_type_t::bf16)
-        return uarch.avx512bf16;
-    return false;
-}
-
-namespace {
-
-/// Native fused Swish implements SiLU (alpha == 1) only; a parameterized
-/// Swish goes to DLP, which consumes the post-op alpha.
-bool has_non_unit_swish(const matmul_params &params) {
-    for (const auto &po : params.postop_)
-        if (po.po_type == post_op_type_t::swish && po.alpha != 1.0f)
-            return true;
-    return false;
-}
-
-} // namespace
-
-bool native_gemm_execute(char layout, bool transA, bool transB, int M, int N,
-        int K, float alpha, const void *src, int lda, const void *weight,
-        int ldb, const void *bias, float beta, void *dst, int ldc,
-        bool is_weights_const, int num_threads, matmul_params &params) {
-
-    (void)layout;
-    if (M <= 0 || N <= 0 || K <= 0) return true;
-
-    if (has_non_unit_swish(params)) {
-        log_info(
-                "Native matmul: non-unit Swish alpha is not supported, "
-                "falling back to aocl_dlp");
-        return false;
-    }
-
-    // The GEMM loopers pass beta / alpha to their kernels when alpha is not
-    // 1 and scale the sum by alpha after the K loop, which needs a finite
-    // quotient (not alpha 0).
-    if (alpha != 1.0f && beta != 0.0f && !std::isfinite(beta / alpha)) {
-        log_info(
-                "Native matmul: beta / alpha is not finite, falling back to "
-                "aocl_dlp");
-        return false;
-    }
-
-    const bool is_bf16 = (params.dtypes.src == data_type_t::bf16
-            && params.dtypes.wei == data_type_t::bf16);
-    const UarchParams &uarch = detect_uarch();
-    // The loopers below read the source and the weight as the types they
-    // compute in; any other type goes to another backend.
-    if (!native_gemm_has_kernel(params, uarch)) {
-        log_info(
-                "Native matmul: no kernel for these data types on this CPU, "
-                "falling back to aocl_dlp");
-        return false;
-    }
-
-    // ════════════════════════════════════════════════════════════════════
-    // ALGO 10 (Native GEMM): GEMM-based paths only, no INT8 kernel.
-    //   All shapes → bf16_gemm_execute (Planner → Looper → GEMM kernel)
-    //   No BRGEMM microkernel, no GEMV special path.
-    //   Uses inner-product style, adaptive NR, simpler looper.
-    // ════════════════════════════════════════════════════════════════════
-
-    GemmDescriptor desc = make_desc(transA, transB, M, N, K, alpha, beta, lda,
-            ldb, ldc, is_weights_const, num_threads, params);
-    desc.bias = bias;
-
-    if (is_bf16) {
-        bf16_gemm_execute(desc, uarch, src, weight, dst, bias, params);
-    } else {
-        // FP32 GEMM (avx512f or scalar fallback — gemm_execute handles both)
-        gemm_execute(desc, uarch, src, weight, dst, bias, params);
-    }
-    return true;
 }
 
 native_layout_query_t native_layout_query_for(
@@ -275,12 +187,12 @@ ZENDNNL_ALWAYS_INLINE inline native_source_t classify_source(
     bool aocl = false;
     if (params.mem_format_b == 'r') {
         if (!process_native)
-            return refuse("a reordered weight without ZENDNNL_MATMUL_ALGO=11",
+            return refuse("a reordered weight without ZENDNNL_MATMUL_ALGO=10",
                     status_t::unimplemented);
         if (!aocl_prepacked_weight(params))
             return refuse(
                     "a reordered weight other than an AOCL-DLP blocked one "
-                    "under ZENDNNL_MATMUL_ALGO=11",
+                    "under ZENDNNL_MATMUL_ALGO=10",
                     status_t::unimplemented);
         aocl = true;
     } else if (!requested) {
@@ -390,7 +302,7 @@ ZENDNNL_ALWAYS_INLINE inline bool take_call(char layout, bool transA,
             ? effective_weight_cache_type(params.weight_cache_type)
             : 0;
     // A buffer rewritten in place must have no other reader, which only the
-    // process-wide ALGO 11 guarantees (every call then reaches the image
+    // process-wide ALGO 10 guarantees (every call then reaches the image
     // check of classify_source); a call that selects the native BRGEMM by
     // itself caches the layout out of place instead.
     if (ref.weight_cache_mode == 2 && !process_native)
@@ -400,7 +312,7 @@ ZENDNNL_ALWAYS_INLINE inline bool take_call(char layout, bool transA,
     // A concurrent first call may have rewritten the buffer since it was
     // classified; then no other route may read it either.  A call that does
     // not ask for the native BRGEMM (an AOCL prepack under
-    // ZENDNNL_MATMUL_ALGO=11 that names its backend) keeps its own route
+    // ZENDNNL_MATMUL_ALGO=10 that names its backend) keeps its own route
     // when the native BRGEMM does not serve it.
     const auto image_now = [&]() {
         return in_place || native_weight_packed_in_place(weight, owned);

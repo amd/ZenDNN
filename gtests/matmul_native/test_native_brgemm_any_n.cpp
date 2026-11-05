@@ -140,8 +140,8 @@ enum class q_t {
 
 /// How the call reaches the native BRGEMM: native_brgemm_execute on the
 /// weight reference matmul_direct builds; matmul_direct under
-/// ZENDNNL_MATMUL_ALGO=11; or matmul_direct with lowoha_algo = native_brgemm.
-enum class route_t { execute, algo11, per_call };
+/// ZENDNNL_MATMUL_ALGO=10; or matmul_direct with lowoha_algo = native_brgemm.
+enum class route_t { execute, algo10, per_call };
 
 /// The group size of per-group weight or source scales.
 constexpr int kGroup = 32;
@@ -193,7 +193,7 @@ const char *dt_name(data_type_t dt) {
 std::string describe(const ncase_t &c) {
     static const char *const kQ[] = {"bf16", "f32", "sts8", "stu8", "dyns8",
             "dynu8", "grps8", "grpu8", "after"};
-    static const char *const kRoute[] = {"exec", "a11", "percall"};
+    static const char *const kRoute[] = {"exec", "a10", "percall"};
     std::string s = std::string(kRoute[static_cast<int>(c.route)]) + "_"
             + kQ[static_cast<int>(c.q)] + "_m" + std::to_string(c.M) + "_n"
             + std::to_string(c.N) + "_k" + std::to_string(c.K) + "_"
@@ -396,9 +396,6 @@ status_t run_execute(const nt::call_t &c) {
     d.wei_dt = c.params.dtypes.wei;
     d.dst_dt = c.params.dtypes.dst;
     d.bias_dt = c.params.dtypes.bias;
-    d.src_elem_size = nt::dt_bytes(d.src_dt);
-    d.wei_elem_size = nt::dt_bytes(d.wei_dt);
-    d.dst_elem_size = nt::dt_bytes(d.dst_dt);
     d.bias = c.bias;
     d.is_weights_const = c.is_weights_const;
     d.num_threads = zendnnl::lowoha::resolve_num_threads(
@@ -593,7 +590,7 @@ TEST_P(NativeBrgemmAnyN, MatchesTheReferenceAndStaysInItsBuffers) {
     if (c.route == route_t::per_call)
         call.params.lowoha_algo = matmul_algo_t::native_brgemm;
     std::unique_ptr<nt::algo_pin_t> pin;
-    if (c.route == route_t::algo11)
+    if (c.route == route_t::algo10)
         pin.reset(new nt::algo_pin_t(matmul_algo_t::native_brgemm));
     const bool on_gemv = c.route != route_t::execute
             && nt::gemv_kernel(call) != nat::native_gemv_t::none;
@@ -949,8 +946,8 @@ std::vector<ncase_t> every_fifth_n(std::vector<ncase_t> v) {
     return v;
 }
 
-INSTANTIATE_TEST_SUITE_P(EveryNAlgo11, NativeBrgemmAnyN,
-        ::testing::ValuesIn(every_n_cases(route_t::algo11, 5)),
+INSTANTIATE_TEST_SUITE_P(EveryNAlgo10, NativeBrgemmAnyN,
+        ::testing::ValuesIn(every_n_cases(route_t::algo10, 5)),
         [](const ::testing::TestParamInfo<ncase_t> &info) {
             return info.param.name;
         });
@@ -962,20 +959,20 @@ INSTANTIATE_TEST_SUITE_P(EveryFifthNPerCall, NativeBrgemmAnyN,
             return info.param.name;
         });
 
-INSTANTIATE_TEST_SUITE_P(LargeNAlgo11, NativeBrgemmAnyN,
-        ::testing::ValuesIn(large_n_cases(route_t::algo11)),
+INSTANTIATE_TEST_SUITE_P(LargeNAlgo10, NativeBrgemmAnyN,
+        ::testing::ValuesIn(large_n_cases(route_t::algo10)),
         [](const ::testing::TestParamInfo<ncase_t> &info) {
             return info.param.name;
         });
 
-INSTANTIATE_TEST_SUITE_P(GatedAlgo11, NativeBrgemmAnyN,
-        ::testing::ValuesIn(gated_cases(route_t::algo11)),
+INSTANTIATE_TEST_SUITE_P(GatedAlgo10, NativeBrgemmAnyN,
+        ::testing::ValuesIn(gated_cases(route_t::algo10)),
         [](const ::testing::TestParamInfo<ncase_t> &info) {
             return info.param.name;
         });
 
-INSTANTIATE_TEST_SUITE_P(RepeatAlgo11, NativeBrgemmAnyN,
-        ::testing::ValuesIn(repeat_cases(route_t::algo11)),
+INSTANTIATE_TEST_SUITE_P(RepeatAlgo10, NativeBrgemmAnyN,
+        ::testing::ValuesIn(repeat_cases(route_t::algo10)),
         [](const ::testing::TestParamInfo<ncase_t> &info) {
             return info.param.name;
         });

@@ -270,9 +270,6 @@ status_t execute(const problem_t &pb, const run_t &r,
     desc.wei_dt = data_type_t::bf16;
     desc.dst_dt = r.dst_dt;
     desc.bias_dt = r.bias_dt;
-    desc.src_elem_size = sizeof(bfloat16_t);
-    desc.wei_elem_size = sizeof(bfloat16_t);
-    desc.dst_elem_size = r.dst_dt == data_type_t::f32 ? 4 : 2;
     desc.bias = io.bias.get();
     desc.is_weights_const = true;
     desc.num_threads = r.threads;
@@ -1030,14 +1027,6 @@ size_t layout_bytes(const problem_t &pb, int pack_nr) {
             * static_cast<size_t>(pb.N / pack_nr);
 }
 
-struct LruCapacityGuard {
-    zendnnl::common::matmul_config_t &cfg
-            = zendnnl::common::matmul_config_t::instance();
-    const uint32_t old = cfg.get_lru_cache_capacity();
-    explicit LruCapacityGuard(uint32_t cap) { cfg.set_lru_cache_capacity(cap); }
-    ~LruCapacityGuard() { cfg.set_lru_cache_capacity(old); }
-};
-
 TEST_F(NativeBrgemmLayoutTest, CacheKeepsOneLayoutPerRequest) {
     problem_t pb = make_problem(1, 128, 64, false, true, 0, 0, 0, 31);
     std::vector<bfloat16_t> w = pb.w;
@@ -1071,7 +1060,7 @@ TEST_F(NativeBrgemmLayoutTest, CacheKeepsOneLayoutPerRequest) {
 }
 
 TEST_F(NativeBrgemmLayoutTest, CacheCapacityPacksBeyondItForTheCall) {
-    LruCapacityGuard cap(2);
+    const native_brgemm_test::lru_capacity_pin_t cap(2);
     // A padded ldb keeps weight cache 2 out of place, so both modes cache.
     problem_t pb = make_problem(1, 64, 64, false, true, 0, 3, 0, 41);
     buffer_t want = prepack_bf16(pb, 32, false);
@@ -1361,9 +1350,6 @@ void run_int8_and_expect(const int8_problem_t &pb, const run_t &r,
     desc.wei_dt = data_type_t::s8;
     desc.dst_dt = r.dst_dt;
     desc.bias_dt = r.bias_dt;
-    desc.src_elem_size = 1;
-    desc.wei_elem_size = 1;
-    desc.dst_elem_size = f32 ? 4 : 2;
     desc.bias = bias.get();
     desc.is_weights_const = true;
     desc.num_threads = r.threads;
@@ -1509,9 +1495,6 @@ void schedule_call(bool int8, int M, int N, int K, int threads,
     desc.src_dt = int8 ? data_type_t::u8 : data_type_t::bf16;
     desc.wei_dt = int8 ? data_type_t::s8 : data_type_t::bf16;
     desc.dst_dt = int8 ? data_type_t::bf16 : data_type_t::f32;
-    desc.src_elem_size = int8 ? 1 : 2;
-    desc.wei_elem_size = int8 ? 1 : 2;
-    desc.dst_elem_size = int8 ? 2 : 4;
     desc.is_weights_const = true;
     desc.num_threads = threads;
     params.dtypes.src = desc.src_dt;

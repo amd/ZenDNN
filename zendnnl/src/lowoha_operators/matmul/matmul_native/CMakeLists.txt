@@ -39,5 +39,4 @@ endif()
 
 # Subdirectories
 add_subdirectory(common)
-add_subdirectory(gemm)
 add_subdirectory(brgemm)

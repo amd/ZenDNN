@@ -20,6 +20,7 @@
 ///   - selection/group_matmul_dispatch.cpp — parallel expert dispatch (OMP).
 ///   - epilogue/group_matmul_moe_postop.cpp — optional MoE weighted-reduce post-op.
 
+#include <algorithm>
 #include <cstring>
 #include <sstream>
 #include <vector>
@@ -31,6 +32,7 @@
 #include "group_matmul_direct.hpp"
 #include "lowoha_operators/common/omp_thread_control.hpp"
 #include "lowoha_operators/common/operator_instrumentation.hpp"
+#include "lowoha_operators/matmul/auto_tuner/auto_tuner.hpp"
 #include "lowoha_operators/matmul/ggml_weight_unpack.hpp"
 #include "lowoha_operators/matmul/quantization/reorder_quantization.hpp"
 #include "multi_expert/ntile_flat_parallel/ntile_flat_parallel.hpp"
@@ -849,6 +851,27 @@ status_t validate_group_matmul_direct_inputs(const std::vector<char> &layout,
     return status_t::success;
 }
 
+// The operation has a post-op the AOCL-DLP chain does not take
+// (aocl_dlp_maps_post_op) and runs on AOCL-DLP: the group kernels pass every
+// algorithm but oneDNN there (the reference among them), and the auto tuner
+// unless oneDNN is its only candidate.
+bool grp_operation_skips_post_op(const matmul_params &params) {
+    bool unmapped = false;
+    for (const auto &po : params.postop_)
+        unmapped |= !aocl_dlp_maps_post_op(po.po_type);
+    if (!unmapped) { return false; }
+    const auto on_onednn = [](matmul_algo_t a) {
+        return ZENDNNL_DEPENDS_ONEDNN
+                && (a == matmul_algo_t::onednn
+                        || a == matmul_algo_t::onednn_blocked);
+    };
+    matmul_algo_t algo = grp_matmul_lowoha_algo(params);
+    if (algo == matmul_algo_t::none) { algo = resolve_matmul_backend(); }
+    if (algo != matmul_algo_t::auto_tuner) { return !on_onednn(algo); }
+    const std::vector<matmul_algo_t> &candidates = get_algo_candidates();
+    return !std::all_of(candidates.begin(), candidates.end(), on_onednn);
+}
+
 // ───────────────────────────────────────────────────────────────────────
 // L1 APILOG helpers
 //
@@ -1169,6 +1192,17 @@ status_t group_matmul_direct(const std::vector<char> &layout,
         }
         if (src.size() != 1 && inline_size_bad(src.size())) {
             return status_t::failure;
+        }
+        // An operation on AOCL-DLP takes only post-ops its chain applies
+        // (aocl_dlp_maps_post_op).
+        for (size_t e = 0; e < no; ++e) {
+            if (ZENDNNL_DEPENDS_AOCLDLP
+                    && grp_operation_skips_post_op(params[e])) {
+                log_error("group_matmul_direct: operation ", e,
+                        " runs on AOCL-DLP, whose chain does not apply elu, "
+                        "square, abs, sqrt, exp, log, softmax or pooling");
+                return status_t::unimplemented;
+            }
         }
 
         // Prepack-extras contract: when the framework opts in with

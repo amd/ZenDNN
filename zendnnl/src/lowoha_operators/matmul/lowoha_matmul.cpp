@@ -72,38 +72,6 @@ void matmul_kernel_wrapper(char layout, char transA, char transB, int M, int N,
         return;
     }
 #endif
-    if (kernel == matmul_algo_t::native_gemm) {
-        // Native kernels support FP32 and BF16 (src=BF16,wei=BF16,dst=BF16|FP32), no transA
-        const bool is_fp32 = (lowoha_param.dtypes.src == data_type_t::f32
-                && lowoha_param.dtypes.wei == data_type_t::f32
-                && lowoha_param.dtypes.dst == data_type_t::f32);
-        const bool is_bf16 = (lowoha_param.dtypes.src == data_type_t::bf16
-                && lowoha_param.dtypes.wei == data_type_t::bf16
-                && (lowoha_param.dtypes.dst == data_type_t::bf16
-                        || lowoha_param.dtypes.dst == data_type_t::f32));
-        if (!is_fp32 && !is_bf16) {
-            log_info(
-                    "Native kernel: unsupported data type, falling back to "
-                    "aocl_dlp");
-            kernel = matmul_algo_t::aocl_dlp;
-        } else if (transA == 't') {
-            log_info(
-                    "Native kernel: transA not supported, falling back to "
-                    "aocl_dlp");
-            kernel = matmul_algo_t::aocl_dlp;
-        } else {
-            apilog_info("Executing matmul LOWOHA kernel with ",
-                    kernel_to_string(kernel),
-                    ", algo: ", static_cast<int>(kernel));
-            bool executed = native::native_gemm_execute(layout, transA == 't',
-                    transB == 't', M, N, K, alpha, A, lda, B, ldb, bias, beta,
-                    C, ldc, is_weights_const, num_threads, lowoha_param);
-            if (executed) { return; }
-            log_info(
-                    "Native kernel execution failed, falling back to aocl_dlp");
-            kernel = matmul_algo_t::aocl_dlp;
-        }
-    }
 
 #if !ZENDNNL_DEPENDS_AOCLDLP
     log_info("Using reference kernel (AOCL-DLP fallback unavailable, was ",
@@ -191,59 +159,6 @@ void matmul_execute(const char layout, const bool transA, const bool transB,
 
 #endif
 
-    if (kernel == matmul_algo_t::native_gemm) {
-        // Native kernels support FP32, BF16, and INT8 (u8/s8 × s8 → f32/bf16/s8/u8)
-        const bool is_fp32 = (params.dtypes.src == data_type_t::f32
-                && params.dtypes.wei == data_type_t::f32
-                && params.dtypes.dst == data_type_t::f32);
-        const bool is_bf16 = (params.dtypes.src == data_type_t::bf16
-                && params.dtypes.wei == data_type_t::bf16
-                && (params.dtypes.dst == data_type_t::bf16
-                        || params.dtypes.dst == data_type_t::f32));
-        const bool is_int8 = ((params.dtypes.src == data_type_t::u8
-                                      || params.dtypes.src == data_type_t::s8)
-                && params.dtypes.wei == data_type_t::s8
-                && (params.dtypes.dst == data_type_t::f32
-                        || params.dtypes.dst == data_type_t::bf16
-                        || params.dtypes.dst == data_type_t::s8
-                        || params.dtypes.dst == data_type_t::u8));
-        // TODO: Remove this workaround once the native kernel supports mish
-        bool has_mish = false;
-        for (size_t i = 0; i < params.postop_.size(); ++i) {
-            if (params.postop_[i].po_type == post_op_type_t::mish) {
-                has_mish = true;
-                break;
-            }
-        }
-        if (!is_fp32 && !is_bf16 && !is_int8) {
-            log_info(
-                    "Native kernel: unsupported data type, falling back to "
-                    "aocl_dlp");
-            kernel = matmul_algo_t::aocl_dlp;
-        } else if (transA) {
-            log_info(
-                    "Native kernel: transA not supported, falling back to "
-                    "aocl_dlp");
-            kernel = matmul_algo_t::aocl_dlp;
-        } else if (has_mish) {
-            log_info(
-                    "Native kernel: mish post-op not implemented in the native "
-                    "dispatcher, falling back to aocl_dlp");
-            kernel = matmul_algo_t::aocl_dlp;
-        } else {
-            apilog_info("Executing matmul LOWOHA kernel with ",
-                    kernel_to_string(kernel),
-                    ", algo: ", static_cast<int>(kernel));
-            bool handled = native::native_gemm_execute(layout, transA, transB,
-                    M, N, K, alpha, src, lda, weight, ldb, bias, beta, dst, ldc,
-                    is_weights_const, num_threads, params);
-            if (handled) { return; }
-            // The native GEMM has no kernel for the call (e.g. INT8).
-            // Fall through to DLP.
-            kernel = matmul_algo_t::aocl_dlp;
-        }
-    }
-
     apilog_info(
             "Executing matmul LOWOHA kernel without zendnnl-partitioner, "
             "algo: ",
@@ -252,6 +167,159 @@ void matmul_execute(const char layout, const bool transA, const bool transB,
             src, lda, weight, ldb, beta, dst, ldc, params.dtypes, kernel,
             params.mem_format_a, params.mem_format_b, params, batch_params,
             bias, is_weights_const, num_threads);
+}
+
+// The kernel runs a call off AOCL-DLP: the reference kernel, or oneDNN in a
+// build that has it (every other kernel passes the calls it does not serve
+// to AOCL-DLP).
+static constexpr bool runs_off_aocl_dlp(matmul_algo_t kernel) noexcept {
+    return kernel == matmul_algo_t::reference
+            || (ZENDNNL_DEPENDS_ONEDNN
+                    && (kernel == matmul_algo_t::onednn
+                            || kernel == matmul_algo_t::onednn_blocked));
+}
+
+// What the reference kernel does not serve of a call it takes for a post-op
+// the AOCL-DLP chain does not take, or nullptr: it reads row-major operands
+// as given (not a weight AOCL-DLP prepacked, nor the GGML unpack it rewrites
+// in place), applies per-group weight scales of an integer weight per group
+// only with a source scale of the same groups, needs a source scale for a
+// bf16 / f32 source with s8 weights, and reads a binary operand as one value
+// per column ({1, N}) or as rows of N values.  caller is the call's params as
+// given, params the call's copy.
+static const char *reference_declines(char layout, int M, int N,
+        const matmul_params &params, const matmul_params &caller) {
+    if (layout != 'r' && layout != 'R') { return "a column-major call"; }
+    if (params.mem_format_b == 'r') { return "AOCL-prepacked weights"; }
+    if (caller.packing.pack_format_b == 1) { return "GGML packed weights"; }
+    const auto &qp = params.quant_params;
+    const data_type_t src = params.dtypes.src;
+    const data_type_t wei = params.dtypes.wei;
+    if (wei == data_type_t::s8
+            && (src == data_type_t::bf16 || src == data_type_t::f32)
+            && qp.src_scale.buff == nullptr) {
+        return "a bf16 / f32 source with s8 weights and no source scale";
+    }
+    const auto count = [](const std::vector<int64_t> &dims) {
+        int64_t n = 1;
+        for (const int64_t d : dims)
+            n *= d;
+        return n;
+    };
+    const bool int_weight = wei == data_type_t::s8
+            || (wei == data_type_t::s4 && src != data_type_t::bf16
+                    && !is_w4a8_config(params));
+    if (int_weight && qp.wei_scale.buff != nullptr) {
+        const int64_t wei_count = count(qp.wei_scale.dims);
+        const int64_t src_count
+                = qp.src_scale.buff != nullptr ? count(qp.src_scale.dims) : 0;
+        if (wei_count > N && wei_count % N == 0
+                && !(src_count > M && src_count % M == 0
+                        && src_count / M == wei_count / N)) {
+            return "per-group weight scales without a source scale of the "
+                   "same groups";
+        }
+    }
+    for (const auto &po : params.postop_) {
+        if ((po.po_type == post_op_type_t::binary_add
+                    || po.po_type == post_op_type_t::binary_mul)
+                && !(po.dims.size() == 2 && po.dims[0] == 1)
+                && po.leading_dim != N) {
+            return "a binary operand whose rows are not N values apart";
+        }
+    }
+    return nullptr;
+}
+
+// A gated activation with a post-op the AOCL-DLP chain does not take
+// (pooling among them), which has no defined place against the activation:
+// logged, the call fails before a kernel writes dst.
+static bool aocl_dlp_refuses_gated_post_ops(bool unmapped_post_op) {
+#if ZENDNNL_DEPENDS_AOCLDLP
+    if (!unmapped_post_op) { return false; }
+    log_error(
+            "matmul_direct: a gated activation takes only post-ops the "
+            "AOCL-DLP chain applies, not elu, square, abs, sqrt, exp, log, "
+            "softmax or pooling");
+    return true;
+#else
+    (void)unmapped_post_op;
+    return false;
+#endif
+}
+
+// A weight scale AOCL-DLP cannot apply (aocl_dlp_applies_wei_scale) on a call
+// that reaches it: logged when report, the call fails before a kernel writes
+// dst.
+static bool aocl_dlp_refuses_wei_scale(const matmul_params &params,
+        data_type_t src, int M, int N, int K, bool report = true) {
+#if ZENDNNL_DEPENDS_AOCLDLP
+    if (aocl_dlp_applies_wei_scale(params, src, M, N, K)) { return false; }
+    if (report)
+        log_error(
+                "matmul_direct: AOCL-DLP has no kernel for a weight scale of ",
+                get_num_elements(params.quant_params.wei_scale.dims),
+                " values with a ", dtype_info(src), " source and a ",
+                dtype_info(params.dtypes.dst), " destination");
+    return true;
+#else
+    (void)report;
+    return false;
+#endif
+}
+
+// A weight-scale type AOCL-DLP does not read (aocl_dlp_applies_wei_scale_type)
+// on a call that reaches it: logged when report, the call fails before a
+// kernel writes dst.
+static bool aocl_dlp_refuses_wei_scale_type(const matmul_params &params,
+        data_type_t src, int M, int N, bool report) {
+#if ZENDNNL_DEPENDS_AOCLDLP
+    if (aocl_dlp_applies_wei_scale_type(params, src, M, N)) { return false; }
+    if (report)
+        log_error(
+                "matmul_direct: AOCL-DLP's sym-quant kernel reads f32 weight "
+                "scales or ones of the source scale's type, not ",
+                dtype_info(params.quant_params.wei_scale.dt), " with ",
+                dtype_info(params.quant_params.src_scale.dt), " source scales");
+    return true;
+#else
+    (void)params;
+    (void)src;
+    (void)M;
+    (void)N;
+    (void)report;
+    return false;
+#endif
+}
+
+// An alpha or beta AOCL-DLP does not take (aocl_dlp_takes_alpha_beta) or,
+// with applied, does not apply (aocl_dlp_applies_alpha_beta) on a call that
+// reaches it: logged when report, the call fails before a kernel writes dst.
+static bool aocl_dlp_refuses_alpha_beta(const matmul_params &params,
+        data_type_t src, int M, int N, float alpha, float beta, bool applied,
+        bool report = true) {
+#if ZENDNNL_DEPENDS_AOCLDLP
+    if (applied ? aocl_dlp_applies_alpha_beta(params, src, M, N, alpha, beta)
+                : aocl_dlp_takes_alpha_beta(params, src, alpha, beta)) {
+        return false;
+    }
+    if (report)
+        log_error("matmul_direct: AOCL-DLP has no kernel for alpha=", alpha,
+                ", beta=", beta, " with a ", dtype_info(src), " source, a ",
+                dtype_info(params.dtypes.wei), " weight and a ",
+                dtype_info(params.dtypes.dst), " destination");
+    return true;
+#else
+    (void)params;
+    (void)src;
+    (void)M;
+    (void)N;
+    (void)alpha;
+    (void)beta;
+    (void)applied;
+    (void)report;
+    return false;
+#endif
 }
 
 static bool to_group_gated_act(
@@ -287,6 +355,9 @@ struct direct_call_t {
     bool has_gated_act = false; ///< a gated_act argument was given
     bool run_gated_act = false; ///< and it is an activation
     int batch_count = 1;
+    /// A post-op the AOCL-DLP chain does not take (aocl_dlp_maps_post_op).
+    bool aocl_unmapped_post_op = false;
+    bool pooling_post_op = false; ///< and one of them is pooling
 };
 
 /// matmul_direct's checks of a call and its normalization of call.params,
@@ -331,7 +402,12 @@ ZENDNNL_ALWAYS_INLINE inline status_t prepare_direct_call(const int M,
     // Defaults N for binary post-ops when leading_dim is -1. Mutates the
     // call's copy only. Must always execute regardless of
     // ZENDNNL_DIAGNOSTICS_ENABLE.
+    // Notes the post-ops the AOCL-DLP chain does not take.
     for (auto &po : call.params.postop_) {
+        if (!aocl_dlp_maps_post_op(po.po_type)) {
+            call.aocl_unmapped_post_op = true;
+            call.pooling_post_op |= po.po_type == post_op_type_t::pooling;
+        }
         // Materialize operation-specific defaults on the per-call copy.
         // In particular, an omitted Swish/ELU alpha becomes 1 while an
         // explicitly supplied zero remains zero.
@@ -526,6 +602,20 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
             || single_matmul_group_routable(layout, M, N, K, num_threads,
                     batch_count, transA, transB, alpha, beta, bias, ldb,
                     is_weights_const, exec_params)) {
+        // The group route runs per-group weight scales, alpha and beta on
+        // AOCL-DLP, over the source its pre-pass quantizes, and the post-ops
+        // of a gated activation there.
+        const data_type_t grp_src_dt = is_dynamic_quant_config(exec_params)
+                ? exec_params.dtypes.compute
+                : exec_params.dtypes.src;
+        if (aocl_dlp_refuses_wei_scale(exec_params, grp_src_dt, M, N, K)
+                || aocl_dlp_refuses_alpha_beta(
+                        exec_params, grp_src_dt, M, N, alpha, beta, false)
+                || (run_gated_act
+                        && aocl_dlp_refuses_gated_post_ops(
+                                call.aocl_unmapped_post_op))) {
+            return status_t::unimplemented;
+        }
         matmul_params grp_param = exec_params;
         grp_param.num_threads = num_threads;
         const bool aocl_prepacked = is_aocl_prepacked_weight(exec_params);
@@ -654,6 +744,59 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
     matmul_algo_t kernel = kernel_select(exec_params, exec_batch_params.Batch_A,
             exec_batch_params.Batch_B, batch_count, M, N, K, num_threads, bias,
             is_weights_const);
+    // The auto tuner runs each call on one of its candidates: with every
+    // candidate off AOCL-DLP the call is not AOCL-DLP's, and a call AOCL-DLP
+    // refuses runs on the first candidate off AOCL-DLP, or fails without one.
+    bool on_aocl_dlp = !runs_off_aocl_dlp(kernel);
+    matmul_algo_t off_aocl_dlp = matmul_algo_t::none;
+    if (kernel == matmul_algo_t::auto_tuner) {
+        const std::vector<matmul_algo_t> &candidates = get_algo_candidates();
+        const auto off = std::find_if(
+                candidates.begin(), candidates.end(), runs_off_aocl_dlp);
+        if (off != candidates.end()) { off_aocl_dlp = *off; }
+        on_aocl_dlp = !std::all_of(
+                candidates.begin(), candidates.end(), runs_off_aocl_dlp);
+    }
+    // A call with a post-op the AOCL-DLP chain does not take runs on the
+    // reference kernel, which applies it; pooling runs on no kernel.
+    if (ZENDNNL_DEPENDS_AOCLDLP && on_aocl_dlp && call.aocl_unmapped_post_op) {
+        if (call.pooling_post_op) {
+            log_error("matmul_direct: no kernel applies a pooling post-op");
+            return status_t::unimplemented;
+        }
+        const char *declined
+                = reference_declines(layout, M, N, exec_params, params);
+        if (declined != nullptr) {
+            log_error(
+                    "matmul_direct: the AOCL-DLP chain does not apply elu, "
+                    "square, abs, sqrt, exp, log or softmax, and the "
+                    "reference kernel does not serve ",
+                    declined);
+            return status_t::unimplemented;
+        }
+        log_info(
+                "matmul_direct: the AOCL-DLP chain does not apply elu, "
+                "square, abs, sqrt, exp, log or softmax; the call runs on the "
+                "reference kernel");
+        kernel = matmul_algo_t::reference;
+        on_aocl_dlp = false;
+    }
+    const bool report = off_aocl_dlp == matmul_algo_t::none;
+    if (on_aocl_dlp
+            && (aocl_dlp_refuses_wei_scale(
+                        exec_params, exec_params.dtypes.src, M, N, K, report)
+                    || aocl_dlp_refuses_wei_scale_type(
+                            exec_params, exec_params.dtypes.src, M, N, report)
+                    || aocl_dlp_refuses_alpha_beta(exec_params,
+                            exec_params.dtypes.src, M, N, alpha, beta, true,
+                            report))) {
+        if (report) { return status_t::unimplemented; }
+        log_info(
+                "matmul_direct: the auto tuner runs a call AOCL-DLP does not "
+                "serve on ",
+                kernel_to_string(off_aocl_dlp));
+        kernel = off_aocl_dlp;
+    }
     matmul_algo_t api_log_kernel = kernel;
     static unsigned int auto_version = get_auto_tuner_ver();
 

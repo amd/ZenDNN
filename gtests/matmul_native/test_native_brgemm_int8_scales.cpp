@@ -129,7 +129,7 @@ operands_t make_operands(const scales_case_t &c) {
     return o;
 }
 
-/// One call under ALGO 11 with weight scales of wei_dt and source scales of
+/// One call under ALGO 10 with weight scales of wei_dt and source scales of
 /// src_dt, in scale (given) or allocated by the quantization (scale empty).
 nt::buffer_t run(const scales_case_t &c, const operands_t &o,
         data_type_t wei_dt, data_type_t src_dt, const nt::buffer_t &scale) {

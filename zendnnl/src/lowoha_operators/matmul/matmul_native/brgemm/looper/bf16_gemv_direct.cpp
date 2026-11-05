@@ -27,6 +27,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 
 namespace zendnnl {
 namespace lowoha {
@@ -57,18 +58,20 @@ bool bkc_resolve_bias_f(const GemmDescriptor &desc, int N, const void *bias,
     }
     if (!bias_is_bf16) return false;
 
-    static thread_local float *s_bias_fp32 = nullptr;
+    static thread_local std::unique_ptr<float, native_aligned_free_t>
+            s_bias_fp32;
     static thread_local size_t s_bias_cap = 0;
 
     if (s_bias_cap < static_cast<size_t>(N)) {
-        zendnnl_aligned_free(s_bias_fp32);
-        s_bias_fp32 = static_cast<float *>(zendnnl_aligned_alloc(64,
-                ((static_cast<size_t>(N) * sizeof(float) + 63) & ~size_t(63))));
+        s_bias_fp32.reset(static_cast<float *>(zendnnl_aligned_alloc(64,
+                ((static_cast<size_t>(N) * sizeof(float) + 63)
+                        & ~size_t(63)))));
         s_bias_cap = s_bias_fp32 ? static_cast<size_t>(N) : 0;
         if (!s_bias_fp32) return false;
     }
-    bf16_bias_to_f32_span(static_cast<const uint16_t *>(bias), N, s_bias_fp32);
-    *bias_f_out = s_bias_fp32;
+    float *bias_f = s_bias_fp32.get();
+    bf16_bias_to_f32_span(static_cast<const uint16_t *>(bias), N, bias_f);
+    *bias_f_out = bias_f;
     return true;
 }
 
@@ -90,18 +93,18 @@ status_t bkc_resolve_packed_B_st(const GemmDescriptor &desc, int K, int N,
     const int ldb = desc.ldb;
     const size_t need = static_cast<size_t>(K_padded) * N_padded;
 
-    static thread_local uint16_t *tl_buf = nullptr;
-    static thread_local size_t tl_cap = 0;
     const auto pack_for_call = [&]() {
+        static thread_local std::unique_ptr<uint16_t, native_aligned_free_t>
+                tl_buf;
+        static thread_local size_t tl_cap = 0;
         if (tl_cap < need) {
-            zendnnl_aligned_free(tl_buf);
-            tl_buf = static_cast<uint16_t *>(zendnnl_aligned_alloc(
-                    64, ((need * sizeof(uint16_t) + 63) & ~size_t(63))));
+            tl_buf.reset(static_cast<uint16_t *>(zendnnl_aligned_alloc(
+                    64, ((need * sizeof(uint16_t) + 63) & ~size_t(63)))));
             tl_cap = tl_buf ? need : 0;
         }
         if (!tl_buf) return status_t::failure;
-        pack_b_bkc_ext(B_raw, ldb, K, N, desc.transB, tl_buf);
-        *B_bkc_out = tl_buf;
+        pack_b_bkc_ext(B_raw, ldb, K, N, desc.transB, tl_buf.get());
+        *B_bkc_out = tl_buf.get();
         *pack_source_out = "thread_local";
         return status_t::success;
     };

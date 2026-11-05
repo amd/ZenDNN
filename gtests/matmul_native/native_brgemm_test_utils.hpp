@@ -131,6 +131,18 @@ status_t run_group_one_op(
 void gated_act_ref(
         const float *pre, int M, int N, mm::matmul_gated_act_t act, float *out);
 
+/// Scoped process-wide LRU cache capacity (ZENDNNL_LRU_CACHE_CAPACITY).
+class lru_capacity_pin_t {
+public:
+    explicit lru_capacity_pin_t(uint32_t capacity);
+    ~lru_capacity_pin_t();
+    lru_capacity_pin_t(const lru_capacity_pin_t &) = delete;
+    lru_capacity_pin_t &operator=(const lru_capacity_pin_t &) = delete;
+
+private:
+    uint32_t prev_;
+};
+
 /// Scoped process-wide matmul algo (ZENDNNL_MATMUL_ALGO); none = unset.
 class algo_pin_t {
 public:
@@ -171,7 +183,7 @@ bool default_route_reachable();
 size_t native_layouts(const void *weight);
 
 /// Whether matmul_direct takes a call with params p to the native BRGEMM at
-/// all: ZENDNNL_MATMUL_ALGO=11, or lowoha_algo == native_brgemm.
+/// all: ZENDNNL_MATMUL_ALGO=10, or lowoha_algo == native_brgemm.
 bool native_selected(const mm::matmul_params &p);
 
 /// Records whether the dense calls made while it lives went through the

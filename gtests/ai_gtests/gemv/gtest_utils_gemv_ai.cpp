@@ -17,10 +17,10 @@
 #include "gtest_utils_gemv_ai.hpp"
 #include <algorithm>
 #include <atomic>
-#include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <random>
+#include "gtest_utils.hpp"
 
 namespace ai_gtests {
 
@@ -53,12 +53,16 @@ struct GemvNightlyInitializer {
 static GemvNightlyInitializer s_gemv_nightly_init;
 } // anonymous namespace
 
-static std::mt19937 gemv_rng(
-        std::chrono::steady_clock::now().time_since_epoch().count());
+// The random cases follow --seed: the generator starts on its first use,
+// when the cases are made, after the command line is read.
+static std::mt19937 &gemv_rng() {
+    static std::mt19937 rng(static_cast<std::mt19937::result_type>(seed));
+    return rng;
+}
 
 static uint64_t gemv_random_dim(uint64_t min_d, uint64_t max_d) {
     std::uniform_int_distribution<uint64_t> dist(min_d, max_d);
-    return dist(gemv_rng);
+    return dist(gemv_rng());
 }
 
 // BF16 GEMV data type combinations (input/weight always bf16 to trigger BRGEMM)

@@ -221,6 +221,28 @@ auto infer_scale_dim
     return vec_dim;
 };
 
+// The source dequant scale of the s8 x s8 sym-quant kernel, which reads one
+// value per row (or per row and group).  A one-value scale over several rows
+// (src_scale_is_broadcast_per_token) is repeated into a per-thread buffer:
+// the holders pointing at it are per-thread, and every call repoints them
+// before its GEMM.
+void set_sym_quant_src_scale(dlp_qparam_t &q,
+        const matmul_quantization_params_t::matmul_quant_t &src_scale,
+        size_t src_scale_nelems, int M) {
+    if (src_scale_nelems == 1 && M > 1) {
+        thread_local std::vector<float> rows;
+        rows.assign(static_cast<size_t>(M),
+                read_and_cast<float>(src_scale.buff, src_scale.dt, 0));
+        q.data = rows.data();
+        q.len = M;
+        q.stor_type = DLP_F32;
+        return;
+    }
+    q.data = const_cast<void *>(src_scale.buff);
+    q.len = src_scale_nelems;
+    q.stor_type = to_dlp_type(src_scale.dt);
+}
+
 } // namespace
 
 // Per-call teardown for create_dlp_post_op()'s return value.
@@ -292,6 +314,9 @@ get_postop_metadata_cache() {
 //     and per-group scales produce different quant-op topology that
 //     patch_mutable_fields does not rebuild. WOQ B scale/zp outer_dim and
 //     group_size are the exception: they are rewritten from the live shape.
+//   - for a one-element source scale, whether it takes the sym-quant
+//     wiring (src_scale_selects_sym_quant): that depends on M and on the
+//     weight scale's dims, which the count categories do not tell apart.
 //
 // Intentionally NOT in the signature:
 //   - po.alpha/po.beta (parameterized eltwise values): patched per-call via holder-owned
@@ -344,14 +369,29 @@ std::size_t compute_postop_signature(const matmul_params &lowoha_param,
     // same applies to per-channel {1,N} vs per-group {G,N} weight scales.
     // Hash the category rather than the exact element count so dynamic M and
     // group-size changes can still hit and use the mutable-field refresh path.
-    sig = sig * 31u
-            + static_cast<std::size_t>(quant_count_granularity(
-                    get_num_elements(lowoha_param.quant_params.src_scale.dims),
-                    M));
+    const size_t src_scale_nelems
+            = get_num_elements(lowoha_param.quant_params.src_scale.dims);
+    const quant_count_granularity_t src_granularity
+            = quant_count_granularity(src_scale_nelems, M);
+    sig = sig * 31u + static_cast<std::size_t>(src_granularity);
     sig = sig * 31u
             + static_cast<std::size_t>(quant_count_granularity(
                     get_num_elements(lowoha_param.quant_params.wei_scale.dims),
                     N));
+    // One source scale value of an s8 source without a zero point into f32 or
+    // bf16 (create_dlp_post_op's is_sym_quant) takes the sym-quant wiring or
+    // the SCALE post-ops by M and the weight scale's dims ({1, N} at M 1 or
+    // over more rows, {G, N} or {G, 1}) under the same count categories; the
+    // two holders must not be shared.
+    if (src_granularity == quant_count_granularity_t::per_tensor
+            && dtypes.src == data_type_t::s8
+            && lowoha_param.quant_params.src_zp.buff == nullptr
+            && (dtypes.dst == data_type_t::f32
+                    || dtypes.dst == data_type_t::bf16)
+            && src_scale_selects_sym_quant(
+                    lowoha_param.quant_params, src_scale_nelems, M, N)) {
+        sig = sig * 31u + 1u;
+    }
     // Include W4A8 algo in post-op cache key (S4 vs S8 wiring differs).
     sig = sig * 31u
             + static_cast<std::size_t>(static_cast<uint32_t>(w4a8_algo));
@@ -918,11 +958,8 @@ static void patch_mutable_fields(dlp_metadata_t *md,
         md->a_quant_op->group_size = static_cast<int>(group_size);
 
         if (md->a_quant_op->dequant_scale_factors) {
-            md->a_quant_op->dequant_scale_factors->data = const_cast<void *>(
-                    lowoha_param.quant_params.src_scale.buff);
-            md->a_quant_op->dequant_scale_factors->len = src_scale_nelems;
-            md->a_quant_op->dequant_scale_factors->stor_type
-                    = to_dlp_type(lowoha_param.quant_params.src_scale.dt);
+            set_sym_quant_src_scale(*md->a_quant_op->dequant_scale_factors,
+                    lowoha_param.quant_params.src_scale, src_scale_nelems, M);
         }
 
         if (md->b_quant_op && md->b_quant_op->dequant_scale_factors) {
@@ -1437,8 +1474,9 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
         // goes into a_quant_op.dequant_scale_factors, the weight (B) dequant
         // scale into b_quant_op.dequant_scale_factors. Both are dequant-only
         // (A and B are already s8, no forward-quant or zero-point). Replaces
-        // the old post_op_grp.
-        const bool a_per_token = quant_count_is_per_axis(src_scale_nelems, M);
+        // the old post_op_grp.  One source value is read per row.
+        const bool a_per_token = src_scale_nelems == 1
+                || quant_count_is_per_axis(src_scale_nelems, M);
 
         dlp_metadata->a_quant_op = &new_holder->a_quant_op;
         // QUANTIZE: operands are already s8; the scales only dequantize/correct
@@ -1452,11 +1490,9 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
         dlp_metadata->a_quant_op->zero_point = nullptr;
         dlp_metadata->a_quant_op->dequant_scale_factors
                 = &new_holder->a_dequant_scl;
-        dlp_metadata->a_quant_op->dequant_scale_factors->data
-                = const_cast<void *>(lowoha_param.quant_params.src_scale.buff);
-        dlp_metadata->a_quant_op->dequant_scale_factors->len = src_scale_nelems;
-        dlp_metadata->a_quant_op->dequant_scale_factors->stor_type
-                = to_dlp_type(lowoha_param.quant_params.src_scale.dt);
+        set_sym_quant_src_scale(
+                *dlp_metadata->a_quant_op->dequant_scale_factors,
+                lowoha_param.quant_params.src_scale, src_scale_nelems, M);
         dlp_metadata->a_quant_op->dequant_scale_factors->outer_dim = a_per_token
                 ? DLP_PARAM_DIM_PER_TOKEN
                 : DLP_PARAM_DIM_PER_GROUP;

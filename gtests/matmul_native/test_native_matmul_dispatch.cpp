@@ -14,8 +14,8 @@
  * limitations under the License.
  ******************************************************************************/
 
-// The routes of calls whose kernel is native_gemm or native_brgemm: the data
-// types each serves, and the entry and the kernels a call takes.
+// The routes of calls whose kernel is native_brgemm: the algorithm values
+// that select it, and the entry and the kernels a call takes.
 
 #include <cstdio>
 #include <cstring>
@@ -26,8 +26,8 @@
 #include <gtest/gtest.h>
 
 #include "gtest_utils.hpp"
-#include "lowoha_operators/common/omp_thread_control.hpp"
 #include "lowoha_operators/matmul/auto_tuner/auto_tuner.hpp"
+#include "lowoha_operators/matmul/group_matmul/common/grp_matmul_expert_slice.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/bf16_gemv_direct.hpp"
@@ -46,7 +46,6 @@ namespace nt = native_brgemm_test;
 using zendnnl::common::matmul_algo_t;
 using zendnnl::common::matmul_config_t;
 using zendnnl::common::post_op_type_t;
-using zendnnl::lowoha::thread_guard;
 using zendnnl::memory::data_type_t;
 using zendnnl::memory::status_t;
 
@@ -56,78 +55,6 @@ mm::matmul_params dtype_params(data_type_t src, data_type_t wei) {
     p.dtypes.wei = wei;
     p.dtypes.dst = data_type_t::f32;
     return p;
-}
-
-// A u8 / s8 source with an s8 weight under native_gemm, which has no INT8
-// kernel, gives the reference result: the call runs on another backend.
-TEST(NativeMatmulDispatch, Int8UnderNativeGemmRunsOnAnotherBackend) {
-    const int M = 7, N = 48, K = 64;
-    for (const data_type_t src_dt : {data_type_t::s8, data_type_t::u8}) {
-        SCOPED_TRACE(src_dt == data_type_t::s8 ? "s8 source" : "u8 source");
-        const nt::buffer_t src
-                = nt::random_buffer(src_dt, static_cast<size_t>(M) * K, 21,
-                        src_dt == data_type_t::s8 ? -8 : 0,
-                        src_dt == data_type_t::s8 ? 8 : 15);
-        const nt::buffer_t wei = nt::random_buffer(
-                data_type_t::s8, static_cast<size_t>(K) * N, 22, -8, 8);
-        const nt::buffer_t dst
-                = nt::make_buffer(static_cast<size_t>(M) * N * sizeof(float));
-        const nt::buffer_t ref
-                = nt::make_buffer(static_cast<size_t>(M) * N * sizeof(float));
-        const float src_scale = 0.5f, wei_scale = 0.25f;
-
-        nt::call_t c;
-        c.M = M;
-        c.N = N;
-        c.K = K;
-        c.src = src.get();
-        c.wei = wei.get();
-        c.dst = dst.get();
-        c.is_weights_const = false;
-        c.params = dtype_params(src_dt, data_type_t::s8);
-        c.params.quant_params.src_scale.buff = &src_scale;
-        c.params.quant_params.src_scale.dt = data_type_t::f32;
-        c.params.quant_params.src_scale.dims = {1, 1};
-        c.params.quant_params.wei_scale.buff = &wei_scale;
-        c.params.quant_params.wei_scale.dt = data_type_t::f32;
-        c.params.quant_params.wei_scale.dims = {1, 1};
-        c.params.lowoha_algo = matmul_algo_t::native_gemm;
-        ASSERT_EQ(nt::run_matmul(c), status_t::success);
-        ASSERT_EQ(
-                nt::run_reference(c, wei.get(), ref.get()), status_t::success);
-        EXPECT_TRUE(nt::within_band(dst.get(), N, ref.get(), N,
-                data_type_t::f32, M, N, 1e-5f, 1e-4f));
-    }
-}
-
-// The native GEMM's decision reads only the dtypes and the ISA of uarch: an
-// f32 call has a kernel always, a bf16 call with AVX512-BF16, an INT8 or a
-// mixed call none.
-TEST(NativeMatmulDispatch, KernelForDataTypesFollowsTheIsa) {
-    nat::UarchParams u = nat::detect_uarch();
-    const mm::matmul_params bf16
-            = dtype_params(data_type_t::bf16, data_type_t::bf16);
-    const mm::matmul_params f32
-            = dtype_params(data_type_t::f32, data_type_t::f32);
-    const mm::matmul_params s8 = dtype_params(data_type_t::s8, data_type_t::s8);
-    const mm::matmul_params u8 = dtype_params(data_type_t::u8, data_type_t::s8);
-    const mm::matmul_params mixed
-            = dtype_params(data_type_t::bf16, data_type_t::s8);
-    for (const bool isa : {false, true}) {
-        u.avx512f = isa;
-        u.avx512bf16 = isa;
-        u.avx512vnni = isa;
-        EXPECT_EQ(nat::native_gemm_has_kernel(bf16, u), isa);
-        EXPECT_TRUE(nat::native_gemm_has_kernel(f32, u));
-        EXPECT_FALSE(nat::native_gemm_has_kernel(s8, u));
-        EXPECT_FALSE(nat::native_gemm_has_kernel(u8, u));
-        EXPECT_FALSE(nat::native_gemm_has_kernel(mixed, u));
-    }
-    // AVX-512 F without BF16.
-    u.avx512f = true;
-    u.avx512bf16 = false;
-    EXPECT_FALSE(nat::native_gemm_has_kernel(bf16, u));
-    EXPECT_TRUE(nat::native_gemm_has_kernel(f32, u));
 }
 
 bool gemv_isa() {
@@ -205,9 +132,6 @@ struct route_call_t {
         d.wei_dt = c.params.dtypes.wei;
         d.dst_dt = c.params.dtypes.dst;
         d.bias_dt = c.params.dtypes.bias;
-        d.src_elem_size = nt::dt_bytes(d.src_dt);
-        d.wei_elem_size = nt::dt_bytes(d.wei_dt);
-        d.dst_elem_size = nt::dt_bytes(d.dst_dt);
         d.bias = c.bias;
         d.is_weights_const = c.is_weights_const;
         d.num_threads = c.params.num_threads;
@@ -492,7 +416,7 @@ TEST(NativeMatmulDispatch, GemvPlanChoiceOfRequestedCalls) {
 }
 
 // A call that asks for the native BRGEMM at M = 1 with N <= 4 on a [K, N]
-// weight runs on the narrow kernel, per call and under ZENDNNL_MATMUL_ALGO=11:
+// weight runs on the narrow kernel, per call and under ZENDNNL_MATMUL_ALGO=10:
 // the bits of the kernel run directly, and no native layout of the weight.
 TEST(NativeMatmulDispatch, RequestedNarrowCallsTakeTheNarrowKernel) {
     if (!gemv_isa()) GTEST_SKIP() << "needs AVX512-BF16 and AVX512-VNNI";
@@ -513,7 +437,7 @@ TEST(NativeMatmulDispatch, RequestedNarrowCallsTakeTheNarrowKernel) {
     for (const bool per_call : {true, false})
         for (const case_t &cs : cases) {
             SCOPED_TRACE(std::string(per_call ? "lowoha_algo native_brgemm"
-                                              : "ZENDNNL_MATMUL_ALGO=11")
+                                              : "ZENDNNL_MATMUL_ALGO=10")
                     + " N " + std::to_string(cs.N) + " K "
                     + std::to_string(cs.K));
             std::unique_ptr<nt::algo_pin_t> pin;
@@ -554,7 +478,7 @@ TEST(NativeMatmulDispatch, RequestedNarrowCallsTakeTheNarrowKernel) {
 }
 
 // A call that asks for the native BRGEMM at M = 1 whose GEMV plan choice is a
-// BKC kernel runs on it, per call and under ZENDNNL_MATMUL_ALGO=11: the bits
+// BKC kernel runs on it, per call and under ZENDNNL_MATMUL_ALGO=10: the bits
 // of the kernel run directly, within the band of the reference, and no
 // native layout of the weight.
 TEST(NativeMatmulDispatch, RequestedBkcCallsTakeTheBkcKernels) {
@@ -578,7 +502,7 @@ TEST(NativeMatmulDispatch, RequestedBkcCallsTakeTheBkcKernels) {
     for (const bool per_call : {true, false})
         for (const case_t &cs : cases) {
             SCOPED_TRACE(std::string(per_call ? "lowoha_algo native_brgemm"
-                                              : "ZENDNNL_MATMUL_ALGO=11")
+                                              : "ZENDNNL_MATMUL_ALGO=10")
                     + " " + nat::native_gemv_name(cs.kernel) + " N "
                     + std::to_string(cs.N) + " K " + std::to_string(cs.K)
                     + " threads " + std::to_string(cs.threads));
@@ -623,7 +547,7 @@ TEST(NativeMatmulDispatch, RequestedBkcCallsTakeTheBkcKernels) {
 // GEMV plan choice is int8_bkc with f32 weight scales, gets no GEMV choice
 // with bf16 or f16 weight scales (per tensor or of N elements), which the
 // INT8 GEMV kernel reads as f32 only, per call and under
-// ZENDNNL_MATMUL_ALGO=11: the native tiles serve it, with a layout cached
+// ZENDNNL_MATMUL_ALGO=10: the native tiles serve it, with a layout cached
 // for its weight, and give the reference's output within the INT8 band.
 TEST(NativeMatmulDispatch, RequestedInt8CallsWithF16OrBf16ScalesTakeTheTiles) {
     if (!gemv_isa()) GTEST_SKIP() << "needs AVX512-BF16 and AVX512-VNNI";
@@ -637,7 +561,7 @@ TEST(NativeMatmulDispatch, RequestedInt8CallsWithF16OrBf16ScalesTakeTheTiles) {
                 for (const int scales : {1, N}) {
                     SCOPED_TRACE(
                             std::string(per_call ? "lowoha_algo native_brgemm, "
-                                                 : "ZENDNNL_MATMUL_ALGO=11, ")
+                                                 : "ZENDNNL_MATMUL_ALGO=10, ")
                             + (src == s8 ? "s8" : "u8") + " x s8, "
                             + (scale_dt == data_type_t::bf16 ? "bf16" : "f16")
                             + " weight scales: " + std::to_string(scales));
@@ -676,7 +600,7 @@ TEST(NativeMatmulDispatch, RequestedInt8CallsWithF16OrBf16ScalesTakeTheTiles) {
 // weight, of a shape whose GEMV plan choice is int8_bkc at alpha 1 and beta
 // 0, gets no GEMV choice with alpha other than 1 or beta other than 0, which
 // the INT8 GEMV kernel applies around its dequantized value, not in the
-// reference order, per call and under ZENDNNL_MATMUL_ALGO=11: the native
+// reference order, per call and under ZENDNNL_MATMUL_ALGO=10: the native
 // tiles serve it, with a layout cached for its weight and the bits of the
 // same call on a weight that is not constant, and give the reference's
 // output within the INT8 band.  The calls carry a bias, source and weight
@@ -698,7 +622,7 @@ TEST(NativeMatmulDispatch, RequestedInt8CallsWithAlphaOrBetaTakeTheTiles) {
                 for (const auto &ab : scalars) {
                     SCOPED_TRACE(
                             std::string(per_call ? "lowoha_algo native_brgemm, "
-                                                 : "ZENDNNL_MATMUL_ALGO=11, ")
+                                                 : "ZENDNNL_MATMUL_ALGO=10, ")
                             + (src == s8 ? "s8" : "u8") + " x s8 to "
                             + (dst == f32 ? "f32" : "bf16") + ", alpha "
                             + std::to_string(ab.alpha) + ", beta "
@@ -782,25 +706,6 @@ struct config_restore_t {
     }
 };
 
-// native_gemm (ZENDNNL_MATMUL_ALGO=10) runs on the native GEMM loopers: the
-// bits of native_gemm_execute, and no native layout.
-TEST(NativeMatmulDispatch, NativeGemmRunsTheGemmLoopers) {
-    if (!gemv_isa()) GTEST_SKIP() << "needs AVX512-BF16 and AVX512-VNNI";
-    for (const data_type_t dt : {data_type_t::bf16, data_type_t::f32}) {
-        SCOPED_TRACE(dt == data_type_t::bf16 ? "bf16" : "f32");
-        route_call_t r(dt, dt, data_type_t::f32, 8, 96, 64, 4, 5900);
-        r.c.params.lowoha_algo = matmul_algo_t::native_gemm;
-        ASSERT_EQ(nt::run_matmul(r.c), status_t::success);
-        EXPECT_EQ(nt::native_layouts(r.c.wei), 0u);
-        mm::matmul_params p = r.c.params;
-        const thread_guard tg(4, thread_guard::max_threads());
-        ASSERT_TRUE(nat::native_gemm_execute('r', false, false, r.c.M, r.c.N,
-                r.c.K, 1.0f, r.c.src, r.c.K, r.c.wei, r.c.N, nullptr, 0.0f,
-                r.ref.get(), r.c.N, true, 4, p));
-        EXPECT_TRUE(r.same_bits());
-    }
-}
-
 // Dynamic dispatch never selects the native BRGEMM, which runs only the
 // calls that ask for it: BF16 calls at M 1 .. 8 and INT8 calls at M = 1 on
 // one thread take AOCL-DLP blocked, with the bits of the same call on
@@ -848,12 +753,13 @@ TEST(NativeMatmulDispatch, DynamicDispatchNeverSelectsTheNativeBrgemm) {
 }
 
 // The auto tuner never runs the native BRGEMM: its candidate list skips
-// native_brgemm, as it skips dynamic_dispatch and auto_tuner.
+// native_brgemm, as it skips dynamic_dispatch, auto_tuner and a value that is
+// not a matmul algorithm.
 TEST(NativeMatmulDispatch, AutoTunerCandidatesSkipTheNativeBrgemm) {
     nt::expect_in_child(
-            {{"ZENDNNL_MATMUL_AUTO_ALGO_CANDIDATES", "11,1,0,10"}}, [] {
-        const std::vector<matmul_algo_t> want
-                = {matmul_algo_t::aocl_dlp_blocked, matmul_algo_t::native_gemm};
+            {{"ZENDNNL_MATMUL_AUTO_ALGO_CANDIDATES", "10,1,0,12,2"}}, [] {
+        const std::vector<matmul_algo_t> want = {
+                matmul_algo_t::aocl_dlp_blocked, matmul_algo_t::onednn_blocked};
         const std::vector<matmul_algo_t> &got = mm::get_algo_candidates();
         if (got == want) return 0;
         std::fprintf(stderr, "candidates:");
@@ -862,6 +768,156 @@ TEST(NativeMatmulDispatch, AutoTunerCandidatesSkipTheNativeBrgemm) {
         std::fprintf(stderr, "\n");
         return 1;
     }, "ZENDNNL_MATMUL_AUTO_ALGO_CANDIDATES");
+}
+
+/// The kernel group matmul resolves when the process algorithm selects none
+/// of its kernels.
+matmul_algo_t group_unset_kernel() {
+#if ZENDNNL_DEPENDS_AOCLDLP
+    return matmul_algo_t::aocl_dlp_blocked;
+#else
+    return matmul_algo_t::reference;
+#endif
+}
+
+// ZENDNNL_MATMUL_ALGO and ZENDNNL_BMM_ALGO take 10 as the native BRGEMM, 11
+// as moe_custom_kernel, and 12, which names no algorithm, as any other
+// unknown value (13): the config holds algo_count, a call takes the kernel
+// and the bits of a call with an unknown per-call lowoha_algo, and the native
+// BRGEMM takes no call.  Under 11 a call takes the kernel and the bits of a
+// call with lowoha_algo moe_custom_kernel.  Group matmul resolves 10, 12 and
+// 13 as unset and 11 as moe_custom_kernel; the auto tuner skips 10, 12 and
+// 13 and keeps 11.
+TEST(NativeMatmulDispatch,
+        Algo10IsTheNativeBrgemm11TheMoeCustomKernelAnd12IsUnknown) {
+    EXPECT_EQ(static_cast<int32_t>(matmul_algo_t::native_brgemm), 10);
+    EXPECT_EQ(static_cast<int32_t>(matmul_algo_t::moe_custom_kernel), 11);
+    EXPECT_TRUE(zendnnl::common::is_valid_matmul_algo(10));
+    EXPECT_TRUE(zendnnl::common::is_valid_matmul_algo(11));
+    EXPECT_FALSE(zendnnl::common::is_valid_matmul_algo(12));
+    EXPECT_FALSE(zendnnl::common::is_valid_matmul_algo(13));
+    EXPECT_FALSE(zendnnl::common::is_valid_matmul_algo(-1));
+    const bool native_isa = gemv_isa() && nat::native_base_isa();
+    for (const char *unknown : {"12", "13"}) {
+        const std::string what = std::string("ZENDNNL_MATMUL_ALGO=") + unknown
+                + ", ZENDNNL_BMM_ALGO=" + unknown;
+        nt::expect_in_child({{"ZENDNNL_MATMUL_ALGO", unknown},
+                                    {"ZENDNNL_BMM_ALGO", unknown}},
+                [] {
+            matmul_config_t &cfg = matmul_config_t::instance();
+            const int32_t no_algo
+                    = static_cast<int32_t>(matmul_algo_t::algo_count);
+            if (cfg.get_algo() != no_algo || cfg.get_bmm_algo() != no_algo
+                    || matmul_config_t::is_native_brgemm_algo()) {
+                std::fprintf(stderr, "algo %d, bmm algo %d\n", cfg.get_algo(),
+                        cfg.get_bmm_algo());
+                return 1;
+            }
+            if (mm::resolve_matmul_backend() != group_unset_kernel()) return 2;
+            // A weight that is not constant keeps the call off the one-op
+            // group route, whose backend resolves the process algorithm as
+            // unset.
+            route_call_t r(data_type_t::bf16, data_type_t::bf16,
+                    data_type_t::f32, 8, 96, 64, 4, 6600);
+            r.c.is_weights_const = false;
+            nt::call_t per_call = r.c;
+            per_call.dst = r.ref.get();
+            per_call.params.lowoha_algo = static_cast<matmul_algo_t>(99);
+            for (const int batch : {1, 2}) {
+                mm::matmul_params p = r.c.params, q = per_call.params;
+                if (mm::kernel_select(p, batch, batch, batch, 8, 96, 64, 4,
+                            nullptr, false)
+                        != mm::kernel_select(q, batch, batch, batch, 8, 96, 64,
+                                4, nullptr, false))
+                    return 3;
+            }
+            if (nt::run_matmul(r.c) != status_t::success
+                    || nt::run_matmul(per_call) != status_t::success
+                    || !r.same_bits())
+                return 4;
+            route_call_t kept(data_type_t::bf16, data_type_t::bf16,
+                    data_type_t::f32, 8, 96, 64, 4, 6700);
+            kept.c.params.weight_cache_type = 1;
+            if (nt::run_matmul(kept.c) != status_t::success
+                    || nt::native_layouts(kept.c.wei) != 0)
+                return 5;
+            return 0;
+        }, what);
+    }
+    nt::expect_in_child(
+            {{"ZENDNNL_MATMUL_ALGO", "11"}, {"ZENDNNL_BMM_ALGO", "11"}}, [] {
+        matmul_config_t &cfg = matmul_config_t::instance();
+        const matmul_algo_t custom = matmul_algo_t::moe_custom_kernel;
+        if (cfg.get_algo() != static_cast<int32_t>(custom)
+                || cfg.get_bmm_algo() != static_cast<int32_t>(custom)
+                || matmul_config_t::is_native_brgemm_algo()) {
+            std::fprintf(stderr, "algo %d, bmm algo %d\n", cfg.get_algo(),
+                    cfg.get_bmm_algo());
+            return 1;
+        }
+        if (mm::resolve_matmul_backend() != custom) return 2;
+        route_call_t r(data_type_t::bf16, data_type_t::bf16, data_type_t::f32,
+                8, 96, 64, 4, 6900);
+        r.c.is_weights_const = false;
+        nt::call_t per_call = r.c;
+        per_call.dst = r.ref.get();
+        per_call.params.lowoha_algo = custom;
+        for (const int batch : {1, 2}) {
+            mm::matmul_params p = r.c.params, q = per_call.params;
+            if (mm::kernel_select(
+                        p, batch, batch, batch, 8, 96, 64, 4, nullptr, false)
+                            != custom
+                    || mm::kernel_select(q, batch, batch, batch, 8, 96, 64, 4,
+                               nullptr, false)
+                            != custom)
+                return 3;
+        }
+        if (nt::run_matmul(r.c) != status_t::success
+                || nt::run_matmul(per_call) != status_t::success
+                || !r.same_bits())
+            return 4;
+        route_call_t kept(data_type_t::bf16, data_type_t::bf16,
+                data_type_t::f32, 8, 96, 64, 4, 7000);
+        kept.c.params.weight_cache_type = 1;
+        if (nt::run_matmul(kept.c) != status_t::success
+                || nt::native_layouts(kept.c.wei) != 0)
+            return 5;
+        return 0;
+    }, "ZENDNNL_MATMUL_ALGO=11, ZENDNNL_BMM_ALGO=11");
+    nt::expect_in_child(
+            {{"ZENDNNL_MATMUL_ALGO", "10"}, {"ZENDNNL_BMM_ALGO", "10"}},
+            [native_isa] {
+        matmul_config_t &cfg = matmul_config_t::instance();
+        const int32_t native
+                = static_cast<int32_t>(matmul_algo_t::native_brgemm);
+        if (cfg.get_algo() != native || cfg.get_bmm_algo() != native
+                || !matmul_config_t::is_native_brgemm_algo()) {
+            std::fprintf(stderr, "algo %d, bmm algo %d\n", cfg.get_algo(),
+                    cfg.get_bmm_algo());
+            return 1;
+        }
+        if (mm::resolve_matmul_backend() != group_unset_kernel()) return 2;
+        if (!native_isa) return 0;
+        route_call_t r(data_type_t::bf16, data_type_t::bf16, data_type_t::f32,
+                8, 96, 64, 4, 6800);
+        r.c.params.weight_cache_type = 1;
+        nt::call_t asked = r.c;
+        asked.dst = r.ref.get();
+        asked.params.lowoha_algo = matmul_algo_t::native_brgemm;
+        if (nt::run_matmul(r.c) != status_t::success
+                || nt::native_layouts(r.c.wei) < 1
+                || nt::run_matmul(asked) != status_t::success || !r.same_bits())
+            return 3;
+        return 0;
+    }, "ZENDNNL_MATMUL_ALGO=10, ZENDNNL_BMM_ALGO=10");
+    nt::expect_in_child(
+            {{"ZENDNNL_MATMUL_AUTO_ALGO_CANDIDATES", "12,10,1,11,13,2"}}, [] {
+        const std::vector<matmul_algo_t> want
+                = {matmul_algo_t::aocl_dlp_blocked,
+                        matmul_algo_t::moe_custom_kernel,
+                        matmul_algo_t::onednn_blocked};
+        return mm::get_algo_candidates() == want ? 0 : 1;
+    }, "ZENDNNL_MATMUL_AUTO_ALGO_CANDIDATES=12,10,1,11,13,2");
 }
 
 } // namespace

@@ -300,7 +300,10 @@ TEST(QuantLayout, CollapsedPerTokenAndSymQuantSource) {
         EXPECT_TRUE(mm::src_scale_selects_sym_quant(qp, count(qp), 1, N));
         EXPECT_FALSE(mm::src_scale_is_collapsed_per_token(qp, 2, N))
                 << "M > 1: one element is per-tensor";
-        EXPECT_FALSE(mm::src_scale_selects_sym_quant(qp, count(qp), 2, N));
+        EXPECT_EQ(mm::src_scale_is_broadcast_per_token(qp, 2, N), w[0] > 1);
+        EXPECT_EQ(
+                mm::src_scale_selects_sym_quant(qp, count(qp), 2, N), w[0] > 1)
+                << "per-group weight scales take it once per row";
     }
     for (const dims_t &w : {dims_t {N}, dims_t {1, 1}, dims_t {N, 1}}) {
         const auto qp = scales({1}, w);

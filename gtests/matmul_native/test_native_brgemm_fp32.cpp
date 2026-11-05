@@ -14,7 +14,7 @@
  * limitations under the License.
  ******************************************************************************/
 
-// FP32 in the native BRGEMM (ALGO 11): the kernels of every row count and
+// FP32 in the native BRGEMM (ALGO 10): the kernels of every row count and
 // width over K tails against a scalar model, the f32 native layout, the
 // plans of FP32 problems, the outputs bit for bit as the products added in K
 // order, and the FP32 calls matmul_direct takes to the native BRGEMM and the
@@ -419,7 +419,6 @@ nat::GemmDescriptor desc_of(
     d.beta = 0.0f;
     d.src_dt = d.wei_dt = d.dst_dt = kF32;
     d.bias_dt = c.bias ? kF32 : data_type_t::none;
-    d.src_elem_size = d.wei_elem_size = d.dst_elem_size = 4;
     d.bias = c.bias ? o.bias.data() : nullptr;
     d.is_weights_const = is_weights_const;
     d.num_threads = c.threads;
@@ -509,7 +508,7 @@ TEST(NativeBrgemmFp32, OutputsAddProductsInKOrder) {
     }
 }
 
-// ── matmul_direct under ALGO 11 ──────────────────────────────────────────
+// ── matmul_direct under ALGO 10 ──────────────────────────────────────────
 
 /// An FP32 call of matmul_direct on a weight of its own.
 struct direct_t {
@@ -536,10 +535,10 @@ direct_t make_direct(
     return d;
 }
 
-// Under ALGO 11 an FP32 call runs on the native BRGEMM, within the FP32
+// Under ALGO 10 an FP32 call runs on the native BRGEMM, within the FP32
 // band of the reference algorithm, on the native layout's blocks and on a
 // layout padded past N.
-TEST(NativeBrgemmFp32Route, Algo11ServesFp32Calls) {
+TEST(NativeBrgemmFp32Route, Algo10ServesFp32Calls) {
     SKIP_WITHOUT_FP32_ISA();
     mm::clear_matmul_weight_caches();
     const nt::algo_pin_t pin(matmul_algo_t::native_brgemm);
@@ -584,7 +583,6 @@ TEST(NativeBrgemmFp32Route, Bf16DstRoundsTheF32Output) {
         const std::vector<float> f32_out = run_native(c, o);
         nat::GemmDescriptor d = desc_of(c, o, false);
         d.dst_dt = kBf16;
-        d.dst_elem_size = 2;
         mm::matmul_params p = params_of(c);
         p.dtypes.dst = kBf16;
         nat::native_weight_ref_t ref;
@@ -620,7 +618,6 @@ TEST(NativeBrgemmFp32Route, OtherDstTypesAreTurnedAway) {
                  data_type_t::u8, data_type_t::s32}) {
         nat::GemmDescriptor d = desc_of(c, o, false);
         d.dst_dt = dst;
-        d.dst_elem_size = static_cast<int>(nt::dt_bytes(dst));
         mm::matmul_params p = params_of(c);
         p.dtypes.dst = dst;
         nat::native_weight_ref_t ref;

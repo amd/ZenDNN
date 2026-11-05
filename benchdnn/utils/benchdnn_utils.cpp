@@ -232,7 +232,6 @@ matmul_algo_t strToAlgo(std::string str) {
         return matmul_algo_t::auto_tuner;
     }
     if (str == "reference") { return matmul_algo_t::reference; }
-    if (str == "native_gemm") { return matmul_algo_t::native_gemm; }
     if (str == "native_brgemm") { return matmul_algo_t::native_brgemm; }
     return matmul_algo_t::none;
 }
@@ -249,7 +248,6 @@ std::string algoToStr(matmul_algo_t algo) {
         case matmul_algo_t::batched_sgemm: return "batched_sgemm";
         case matmul_algo_t::auto_tuner: return "auto";
         case matmul_algo_t::reference: return "reference";
-        case matmul_algo_t::native_gemm: return "native_gemm";
         case matmul_algo_t::native_brgemm: return "native_brgemm";
         default: return "none";
     }

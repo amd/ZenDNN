@@ -15,7 +15,7 @@
  ******************************************************************************/
 
 // INT8 per-group weight scales ({G, N} along K) on the native BRGEMM
-// (ALGO 11): matmul_direct calls with a per-group {M, G}, per-token or
+// (ALGO 10): matmul_direct calls with a per-group {M, G}, per-token or
 // per-tensor source scale over a static s8 source or a bf16 / f32 source
 // quantized in the call, into an f32 / bf16 dst or a u8 / s8 / s32 dst (with
 // or without a dst scale and zero point).  Every case checks that the native
@@ -569,9 +569,6 @@ status_t run_direct(const nt::call_t &c) {
     desc.wei_dt = c.params.dtypes.wei;
     desc.dst_dt = c.params.dtypes.dst;
     desc.bias_dt = c.params.dtypes.bias;
-    desc.src_elem_size = nt::dt_bytes(desc.src_dt);
-    desc.wei_elem_size = 1;
-    desc.dst_elem_size = nt::dt_bytes(desc.dst_dt);
     desc.bias = c.bias;
     desc.is_weights_const = true;
     desc.num_threads = c.params.num_threads;
@@ -598,7 +595,7 @@ status_t run_reference_direct(const nt::call_t &c) {
             c.beta, c.dst, c.ldc_or_tight(), false, batch, p);
 }
 
-/// The call under ALGO 11 into a copy of the initial dst, calls times; the
+/// The call under ALGO 10 into a copy of the initial dst, calls times; the
 /// native BRGEMM must serve every call, each with the same result.
 buffer_t run_native(const gcase_t &c, const operands_t &o) {
     const nt::algo_pin_t pin(matmul_algo_t::native_brgemm);
@@ -1198,7 +1195,7 @@ TEST(NativeBrgemmInt8PerGroupGated, MatchesTheModel) {
     mm::clear_matmul_weight_caches();
 }
 
-// Gated per-group calls through matmul_direct under ALGO 11 with beta (over
+// Gated per-group calls through matmul_direct under ALGO 10 with beta (over
 // the dst's N pre-activation columns), post-ops of the pre-activation, a u8
 // source and requantized u8 / s8 destinations: the model of the reference
 // order up to the pre-activation, then the activation within its band (one
@@ -1904,7 +1901,7 @@ TEST(NativeBrgemmInt8SourceGroups, GatedMatchesTheModel) {
 }
 
 // Without matmul_direct's checks (ZENDNNL_DIAGNOSTICS_ENABLE=0) such a call
-// reaches the routes, and the native BRGEMM serves it under ALGO 11 with the
+// reaches the routes, and the native BRGEMM serves it under ALGO 10 with the
 // bits of the call on its own.
 TEST(NativeBrgemmInt8SourceGroups, ServedWithoutTheChecks) {
     if (!vnni()) GTEST_SKIP() << "no AVX-512 VNNI";
@@ -1971,7 +1968,7 @@ TEST(NativeBrgemmInt8SourceGroups, ServedWithoutTheChecks) {
 // The dims of a null source-scale buffer scale nothing: a static s8 call
 // with per-channel weight scales and no source scale, whose dims still read
 // {M, G} (dt none or f32), keeps the per-channel decision, and matmul_direct
-// serves it under ALGO 11 with the bits of the same call without those
+// serves it under ALGO 10 with the bits of the same call without those
 // dims.  A source the call quantizes takes its groups from the dims, its
 // quantizer making the scales.
 TEST(NativeBrgemmInt8SourceGroups, DimsWithoutAScaleKeepThePerChannelCall) {
