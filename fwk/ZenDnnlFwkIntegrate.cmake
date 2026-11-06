@@ -210,273 +210,278 @@ zendnnl_add_option(NAME ZENDNNL_FBGEMM_INJECT_DIR
   CACHE_STRING "zendnnl fbgemm injection path"
   COMMAND_LIST ZNL_CMAKE_ARGS)
 
-set(zendnnl_ROOT "${ZENDNNL_INSTALL_PREFIX}/zendnnl")
-set(zendnnl_DIR "${zendnnl_ROOT}/lib/cmake")
-find_package(zendnnl QUIET)
-if(zendnnl_FOUND)
-  message(STATUS "(ZENDNNL) ZENDNNL FOUND AT ${zendnnl_ROOT}")
-  message(STATUS "(ZENDNNL) if zendnnl options are changed from previous build,")
-  message(STATUS "(ZENDNNL) they will not be reflected")
-  message(STATUS "(ZENDNNL) If options are changed, please do a clean build.")
-  if(TARGET zendnnl::zendnnl_archive)
-    set_target_properties(zendnnl::zendnnl_archive
-      PROPERTIES IMPORTED_GLOBAL ON)
-  endif()
-  if(TARGET zendnnl::zendnnl)
-    set_target_properties(zendnnl::zendnnl
-      PROPERTIES IMPORTED_GLOBAL ON)
-  endif()
-else()
-  message(STATUS "(ZENDNNL) ZENDNNL NOT FOUND, will be built as an external project.")
+message(STATUS "(ZENDNNL) Building zendnnl as an external project.")
 
-  set(ZENDNNL_LIBRARY_INC_DIR "${ZENDNNL_INSTALL_PREFIX}/zendnnl/include")
-  set(ZENDNNL_LIBRARY_LIB_DIR "${ZENDNNL_INSTALL_PREFIX}/zendnnl/lib")
+set(ZENDNNL_LIBRARY_INC_DIR "${ZENDNNL_INSTALL_PREFIX}/zendnnl/include")
+set(ZENDNNL_LIBRARY_LIB_DIR "${ZENDNNL_INSTALL_PREFIX}/zendnnl/lib")
 
-  if(NOT EXISTS ${ZENDNNL_LIBRARY_INC_DIR})
-    file(MAKE_DIRECTORY ${ZENDNNL_LIBRARY_INC_DIR})
-  endif()
+if(NOT EXISTS ${ZENDNNL_LIBRARY_INC_DIR})
+  file(MAKE_DIRECTORY ${ZENDNNL_LIBRARY_INC_DIR})
+endif()
 
-  if(ZENDNNL_LIB_BUILD_ARCHIVE)
-    add_library(zendnnl_library STATIC IMPORTED GLOBAL)
-    set_target_properties(zendnnl_library
-      PROPERTIES
-      IMPORTED_LOCATION "${ZENDNNL_LIBRARY_LIB_DIR}/libzendnnl_archive.a"
-      INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR}"
-      INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR}")
-
-    # OpenMP::OpenMP_CXX lets the consumer pick the runtime. A bare -fopenmp
-    # link option would make clang add its default libomp next to it.
-    target_link_libraries(zendnnl_library
-      INTERFACE OpenMP::OpenMP_CXX
-      INTERFACE ${CMAKE_DL_LIBS})
-
-    add_library(zendnnl::zendnnl_archive ALIAS zendnnl_library)
-
-    list(APPEND ZNL_BYPRODUCTS "${ZENDNNL_LIBRARY_LIB_DIR}/libzendnnl_archive.a")
-  endif()
-
-  if(ZENDNNL_LIB_BUILD_SHARED)
-    add_library(zendnnl_shared_library SHARED IMPORTED GLOBAL)
-    set_target_properties(zendnnl_shared_library
-      PROPERTIES
-      IMPORTED_LOCATION "${ZENDNNL_LIBRARY_LIB_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}zendnnl${CMAKE_SHARED_LIBRARY_SUFFIX}"
-      INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR}")
-
-    target_link_libraries(zendnnl_shared_library
-      INTERFACE OpenMP::OpenMP_CXX
-      INTERFACE ${CMAKE_DL_LIBS})
-
-    add_library(zendnnl::zendnnl ALIAS zendnnl_shared_library)
-
-    list(APPEND ZNL_BYPRODUCTS "${ZENDNNL_LIBRARY_LIB_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}zendnnl${CMAKE_SHARED_LIBRARY_SUFFIX}")
-  endif()
-
-  if(NOT ZENDNNL_LIB_BUILD_ARCHIVE AND NOT ZENDNNL_LIB_BUILD_SHARED)
-    message(FATAL_ERROR "At least one of ZENDNNL_LIB_BUILD_ARCHIVE or ZENDNNL_LIB_BUILD_SHARED must be ON")
-  endif()
-
-  # declare all dependencies
-  # Static archive import (zendnnl_library): use WHOLE_ARCHIVE for .a deps when folding into consumers (e.g. shared extensions).
-  # Shared zendnnl import (zendnnl_shared_library): normal INTERFACE links only.
-
-  zendnnl_add_dependency(NAME json
-    PATH "${ZENDNNL_INSTALL_PREFIX}/deps/json"
-    ALIAS "zendnnl::json"
-    INCLUDE_ONLY)
-
-  if(ZENDNNL_LIB_BUILD_ARCHIVE)
-    target_link_libraries(zendnnl_library INTERFACE zendnnl::json)
-  endif()
-  if(ZENDNNL_LIB_BUILD_SHARED)
-    target_link_libraries(zendnnl_shared_library INTERFACE zendnnl::json)
-  endif()
-
-  # AOCL-Utils is built with CMAKE_INSTALL_LIBDIR=lib, so the archives are
-  # always under lib/ (including on RHEL and manylinux).
-  zendnnl_add_dependency(NAME aoclutils
-    PATH "${ZENDNNL_INSTALL_PREFIX}/deps/aoclutils"
-    ARCHIVE_FILE "libaoclutils.a"
-    ALIAS "au::aoclutils")
-
-  if(ZENDNNL_LIB_BUILD_ARCHIVE)
-    target_link_libraries(zendnnl_library INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::aoclutils>")
-  endif()
-  if(ZENDNNL_LIB_BUILD_SHARED)
-    target_link_libraries(zendnnl_shared_library INTERFACE au::aoclutils)
-  endif()
-
-  zendnnl_add_dependency(NAME aucpuid
-    PATH "${ZENDNNL_INSTALL_PREFIX}/deps/aoclutils"
-    ARCHIVE_FILE "libau_cpuid.a"
-    ALIAS "au::au_cpuid")
-
-  if(ZENDNNL_LIB_BUILD_ARCHIVE)
-    target_link_libraries(zendnnl_library INTERFACE au::au_cpuid)
-  endif()
-  if(ZENDNNL_LIB_BUILD_SHARED)
-    target_link_libraries(zendnnl_shared_library INTERFACE au::au_cpuid)
-  endif()
-
-  if(ZENDNNL_DEPENDS_AOCLDLP)
-    zendnnl_add_dependency(NAME aocldlp
-      PATH "${ZENDNNL_INSTALL_PREFIX}/deps/aocldlp"
-      ARCHIVE_FILE "libaocl-dlp.a"
-      ALIAS "aocldlp::aocl_dlp_static")
-
-    if(ZENDNNL_LIB_BUILD_ARCHIVE)
-      target_link_libraries(zendnnl_library INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,aocldlp::aocl_dlp_static>")
-    endif()
-    if(ZENDNNL_LIB_BUILD_SHARED)
-      target_link_libraries(zendnnl_shared_library INTERFACE aocldlp::aocl_dlp_static)
-    endif()
-  endif()
-
-  if(ZENDNNL_DEPENDS_ONEDNN)
-    if(DEFINED ENV{ZENDNNL_MANYLINUX_BUILD})
-      zendnnl_add_dependency(NAME onednn
-        PATH "${ZENDNNL_INSTALL_PREFIX}/deps/onednn"
-        LIB_SUFFIX lib64
-        ARCHIVE_FILE "libdnnl.a"
-        ALIAS "DNNL::dnnl")
-    else()
-      zendnnl_add_dependency(NAME onednn
-        PATH "${ZENDNNL_INSTALL_PREFIX}/deps/onednn"
-        ARCHIVE_FILE "libdnnl.a"
-        ALIAS "DNNL::dnnl")
-    endif()
-
-    if(ZENDNNL_LIB_BUILD_ARCHIVE)
-      target_link_libraries(zendnnl_library INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,DNNL::dnnl>")
-    endif()
-    if(ZENDNNL_LIB_BUILD_SHARED)
-      target_link_libraries(zendnnl_shared_library INTERFACE DNNL::dnnl)
-    endif()
-  endif()
-
-  if(ZENDNNL_DEPENDS_LIBXSMM)
-    zendnnl_add_dependency(NAME libxsmm
-      PATH "${ZENDNNL_INSTALL_PREFIX}/deps/libxsmm"
-      ARCHIVE_FILE "libxsmm.a"
-      ALIAS "libxsmm::libxsmm_archive")
-
-    if(ZENDNNL_LIB_BUILD_ARCHIVE)
-      target_link_libraries(zendnnl_library INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,libxsmm::libxsmm_archive>")
-    endif()
-    if(ZENDNNL_LIB_BUILD_SHARED)
-      target_link_libraries(zendnnl_shared_library INTERFACE libxsmm::libxsmm_archive)
-    endif()
-  endif()
-
-  if(ZENDNNL_DEPENDS_PARLOOPER)
-    zendnnl_add_dependency(NAME parlooper
-      PATH "${ZENDNNL_INSTALL_PREFIX}/deps/parlooper"
-      ARCHIVE_FILE "libparlooper.a"
-      ALIAS "parlooper::parlooper_archive")
-
-    if(ZENDNNL_LIB_BUILD_ARCHIVE)
-      target_link_libraries(zendnnl_library INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,parlooper::parlooper_archive>")
-    endif()
-    if(ZENDNNL_LIB_BUILD_SHARED)
-      target_link_libraries(zendnnl_shared_library INTERFACE parlooper::parlooper_archive)
-    endif()
-  endif()
-
-  if(ZENDNNL_DEPENDS_FBGEMM)
-    if(DEFINED ENV{ZENDNNL_MANYLINUX_BUILD})
-      zendnnl_add_dependency(NAME asmjit
-        PATH "${ZENDNNL_INSTALL_PREFIX}/deps/fbgemm"
-        LIB_SUFFIX lib64
-        ARCHIVE_FILE "libasmjit.a"
-        ALIAS "fbgemm::asmjit")
-      zendnnl_add_dependency(NAME cpuinfo
-        PATH "${ZENDNNL_INSTALL_PREFIX}/deps/fbgemm"
-        LIB_SUFFIX lib64
-        ARCHIVE_FILE "libcpuinfo.a"
-        ALIAS "fbgemm::cpuinfo")
-      zendnnl_add_dependency(NAME fbgemm
-        PATH "${ZENDNNL_INSTALL_PREFIX}/deps/fbgemm"
-        LIB_SUFFIX lib64
-        ARCHIVE_FILE "libfbgemm.a"
-        ALIAS "fbgemm::fbgemm_archive")
-    else()
-      zendnnl_add_dependency(NAME asmjit
-        PATH "${ZENDNNL_INSTALL_PREFIX}/deps/fbgemm"
-        ARCHIVE_FILE "libasmjit.a"
-        ALIAS "fbgemm::asmjit")
-      zendnnl_add_dependency(NAME cpuinfo
-        PATH "${ZENDNNL_INSTALL_PREFIX}/deps/fbgemm"
-        ARCHIVE_FILE "libcpuinfo.a"
-        ALIAS "fbgemm::cpuinfo")
-      zendnnl_add_dependency(NAME fbgemm
-        PATH "${ZENDNNL_INSTALL_PREFIX}/deps/fbgemm"
-        ARCHIVE_FILE "libfbgemm.a"
-        ALIAS "fbgemm::fbgemm_archive")
-    endif()
-
-    if(ZENDNNL_LIB_BUILD_ARCHIVE)
-      target_link_libraries(zendnnl_library INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,fbgemm::fbgemm_archive>")
-      target_link_libraries(zendnnl_library INTERFACE fbgemm::asmjit)
-      target_link_libraries(zendnnl_library INTERFACE fbgemm::cpuinfo)
-    endif()
-    if(ZENDNNL_LIB_BUILD_SHARED)
-      target_link_libraries(zendnnl_shared_library INTERFACE fbgemm::fbgemm_archive)
-      target_link_libraries(zendnnl_shared_library INTERFACE fbgemm::asmjit)
-      target_link_libraries(zendnnl_shared_library INTERFACE fbgemm::cpuinfo)
-    endif()
-  endif()
-
-  message(STATUS "(ZENDNNL) ZNL_BYPRODUCTS=${ZNL_BYPRODUCTS}")
-  message(STATUS "(ZENDNNL) ZNL_CMAKE_ARGS=${ZNL_CMAKE_ARGS}")
-
-  ExternalProject_ADD(fwk_zendnnl
-    SOURCE_DIR  "${ZENDNNL_SOURCE_DIR}"
-    BINARY_DIR  "${ZENDNNL_BINARY_DIR}"
-    CMAKE_ARGS  "${ZNL_CMAKE_ARGS}"
-    INSTALL_COMMAND ""
-    BUILD_BYPRODUCTS ${ZNL_BYPRODUCTS})
-
-  list(APPEND ZENDNNL_CLEAN_FILES "${ZENDNNL_BINARY_DIR}")
-  list(APPEND ZENDNNL_CLEAN_FILES "${ZENDNNL_INSTALL_PREFIX}")
-  set_target_properties(fwk_zendnnl
+if(ZENDNNL_LIB_BUILD_ARCHIVE)
+  add_library(zendnnl_library STATIC IMPORTED GLOBAL)
+  set_target_properties(zendnnl_library
     PROPERTIES
-    ADDITIONAL_CLEAN_FILES "${ZENDNNL_CLEAN_FILES}")
+    IMPORTED_LOCATION "${ZENDNNL_LIBRARY_LIB_DIR}/libzendnnl_archive.a"
+    INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR}"
+    INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR}")
 
-  # Reminder only: fwk_zendnnl cannot have dependencies yet at this point.
-  if(ZENDNNL_AOCLDLP_INJECT_DIR OR ZENDNNL_ONEDNN_INJECT_DIR OR ZENDNNL_LIBXSMM_INJECT_DIR
-     OR ZENDNNL_PARLOOPER_INJECT_DIR OR ZENDNNL_FBGEMM_INJECT_DIR)
-    message(AUTHOR_WARNING "(ZENDNNL) dependencies are injected; make fwk_zendnnl depend on the targets that build them.")
+  # OpenMP::OpenMP_CXX lets the consumer pick the runtime. A bare -fopenmp
+  # link option would make clang add its default libomp next to it.
+  target_link_libraries(zendnnl_library
+    INTERFACE OpenMP::OpenMP_CXX
+    INTERFACE ${CMAKE_DL_LIBS})
+
+  add_library(zendnnl::zendnnl_archive ALIAS zendnnl_library)
+
+  list(APPEND ZNL_BYPRODUCTS "${ZENDNNL_LIBRARY_LIB_DIR}/libzendnnl_archive.a")
+endif()
+
+if(ZENDNNL_LIB_BUILD_SHARED)
+  add_library(zendnnl_shared_library SHARED IMPORTED GLOBAL)
+  set_target_properties(zendnnl_shared_library
+    PROPERTIES
+    IMPORTED_LOCATION "${ZENDNNL_LIBRARY_LIB_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}zendnnl${CMAKE_SHARED_LIBRARY_SUFFIX}"
+    INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR}")
+
+  target_link_libraries(zendnnl_shared_library
+    INTERFACE OpenMP::OpenMP_CXX
+    INTERFACE ${CMAKE_DL_LIBS})
+
+  add_library(zendnnl::zendnnl ALIAS zendnnl_shared_library)
+
+  list(APPEND ZNL_BYPRODUCTS "${ZENDNNL_LIBRARY_LIB_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}zendnnl${CMAKE_SHARED_LIBRARY_SUFFIX}")
+endif()
+
+if(NOT ZENDNNL_LIB_BUILD_ARCHIVE AND NOT ZENDNNL_LIB_BUILD_SHARED)
+  message(FATAL_ERROR "At least one of ZENDNNL_LIB_BUILD_ARCHIVE or ZENDNNL_LIB_BUILD_SHARED must be ON")
+endif()
+
+# declare all dependencies
+# Static archive import (zendnnl_library): use WHOLE_ARCHIVE for .a deps when folding into consumers (e.g. shared extensions).
+# Shared zendnnl import (zendnnl_shared_library): normal INTERFACE links only.
+
+zendnnl_add_dependency(NAME json
+  PATH "${ZENDNNL_INSTALL_PREFIX}/deps/json"
+  ALIAS "zendnnl::json"
+  INCLUDE_ONLY)
+
+if(ZENDNNL_LIB_BUILD_ARCHIVE)
+  target_link_libraries(zendnnl_library INTERFACE zendnnl::json)
+endif()
+if(ZENDNNL_LIB_BUILD_SHARED)
+  target_link_libraries(zendnnl_shared_library INTERFACE zendnnl::json)
+endif()
+
+# AOCL-Utils is built with CMAKE_INSTALL_LIBDIR=lib, so the archives are
+# always under lib/ (including on RHEL and manylinux).
+zendnnl_add_dependency(NAME aoclutils
+  PATH "${ZENDNNL_INSTALL_PREFIX}/deps/aoclutils"
+  ARCHIVE_FILE "libaoclutils.a"
+  ALIAS "au::aoclutils")
+
+if(ZENDNNL_LIB_BUILD_ARCHIVE)
+  target_link_libraries(zendnnl_library INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::aoclutils>")
+endif()
+if(ZENDNNL_LIB_BUILD_SHARED)
+  target_link_libraries(zendnnl_shared_library INTERFACE au::aoclutils)
+endif()
+
+zendnnl_add_dependency(NAME aucpuid
+  PATH "${ZENDNNL_INSTALL_PREFIX}/deps/aoclutils"
+  ARCHIVE_FILE "libau_cpuid.a"
+  ALIAS "au::au_cpuid")
+
+if(ZENDNNL_LIB_BUILD_ARCHIVE)
+  target_link_libraries(zendnnl_library INTERFACE au::au_cpuid)
+endif()
+if(ZENDNNL_LIB_BUILD_SHARED)
+  target_link_libraries(zendnnl_shared_library INTERFACE au::au_cpuid)
+endif()
+
+if(ZENDNNL_DEPENDS_AOCLDLP)
+  zendnnl_add_dependency(NAME aocldlp
+    PATH "${ZENDNNL_INSTALL_PREFIX}/deps/aocldlp"
+    ARCHIVE_FILE "libaocl-dlp.a"
+    ALIAS "aocldlp::aocl_dlp_static")
+
+  if(ZENDNNL_LIB_BUILD_ARCHIVE)
+    target_link_libraries(zendnnl_library INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,aocldlp::aocl_dlp_static>")
+  endif()
+  if(ZENDNNL_LIB_BUILD_SHARED)
+    target_link_libraries(zendnnl_shared_library INTERFACE aocldlp::aocl_dlp_static)
+  endif()
+endif()
+
+if(ZENDNNL_DEPENDS_ONEDNN)
+  if(DEFINED ENV{ZENDNNL_MANYLINUX_BUILD})
+    zendnnl_add_dependency(NAME onednn
+      PATH "${ZENDNNL_INSTALL_PREFIX}/deps/onednn"
+      LIB_SUFFIX lib64
+      ARCHIVE_FILE "libdnnl.a"
+      ALIAS "DNNL::dnnl")
+  else()
+    zendnnl_add_dependency(NAME onednn
+      PATH "${ZENDNNL_INSTALL_PREFIX}/deps/onednn"
+      ARCHIVE_FILE "libdnnl.a"
+      ALIAS "DNNL::dnnl")
   endif()
 
   if(ZENDNNL_LIB_BUILD_ARCHIVE)
-    add_dependencies(zendnnl_library fwk_zendnnl)
+    target_link_libraries(zendnnl_library INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,DNNL::dnnl>")
   endif()
   if(ZENDNNL_LIB_BUILD_SHARED)
-    add_dependencies(zendnnl_shared_library fwk_zendnnl)
+    target_link_libraries(zendnnl_shared_library INTERFACE DNNL::dnnl)
   endif()
-  add_dependencies(zendnnl_json_deps fwk_zendnnl)
-  add_dependencies(zendnnl_aoclutils_deps fwk_zendnnl)
-  add_dependencies(zendnnl_aucpuid_deps fwk_zendnnl)
+endif()
 
-  if(ZENDNNL_DEPENDS_AOCLDLP)
-    add_dependencies(zendnnl_aocldlp_deps fwk_zendnnl)
+if(ZENDNNL_DEPENDS_LIBXSMM)
+  zendnnl_add_dependency(NAME libxsmm
+    PATH "${ZENDNNL_INSTALL_PREFIX}/deps/libxsmm"
+    ARCHIVE_FILE "libxsmm.a"
+    ALIAS "libxsmm::libxsmm_archive")
+
+  if(ZENDNNL_LIB_BUILD_ARCHIVE)
+    target_link_libraries(zendnnl_library INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,libxsmm::libxsmm_archive>")
+  endif()
+  if(ZENDNNL_LIB_BUILD_SHARED)
+    target_link_libraries(zendnnl_shared_library INTERFACE libxsmm::libxsmm_archive)
+  endif()
+endif()
+
+if(ZENDNNL_DEPENDS_PARLOOPER)
+  zendnnl_add_dependency(NAME parlooper
+    PATH "${ZENDNNL_INSTALL_PREFIX}/deps/parlooper"
+    ARCHIVE_FILE "libparlooper.a"
+    ALIAS "parlooper::parlooper_archive")
+
+  if(ZENDNNL_LIB_BUILD_ARCHIVE)
+    target_link_libraries(zendnnl_library INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,parlooper::parlooper_archive>")
+  endif()
+  if(ZENDNNL_LIB_BUILD_SHARED)
+    target_link_libraries(zendnnl_shared_library INTERFACE parlooper::parlooper_archive)
+  endif()
+endif()
+
+if(ZENDNNL_DEPENDS_FBGEMM)
+  if(DEFINED ENV{ZENDNNL_MANYLINUX_BUILD})
+    zendnnl_add_dependency(NAME asmjit
+      PATH "${ZENDNNL_INSTALL_PREFIX}/deps/fbgemm"
+      LIB_SUFFIX lib64
+      ARCHIVE_FILE "libasmjit.a"
+      ALIAS "fbgemm::asmjit")
+    zendnnl_add_dependency(NAME cpuinfo
+      PATH "${ZENDNNL_INSTALL_PREFIX}/deps/fbgemm"
+      LIB_SUFFIX lib64
+      ARCHIVE_FILE "libcpuinfo.a"
+      ALIAS "fbgemm::cpuinfo")
+    zendnnl_add_dependency(NAME fbgemm
+      PATH "${ZENDNNL_INSTALL_PREFIX}/deps/fbgemm"
+      LIB_SUFFIX lib64
+      ARCHIVE_FILE "libfbgemm.a"
+      ALIAS "fbgemm::fbgemm_archive")
+  else()
+    zendnnl_add_dependency(NAME asmjit
+      PATH "${ZENDNNL_INSTALL_PREFIX}/deps/fbgemm"
+      ARCHIVE_FILE "libasmjit.a"
+      ALIAS "fbgemm::asmjit")
+    zendnnl_add_dependency(NAME cpuinfo
+      PATH "${ZENDNNL_INSTALL_PREFIX}/deps/fbgemm"
+      ARCHIVE_FILE "libcpuinfo.a"
+      ALIAS "fbgemm::cpuinfo")
+    zendnnl_add_dependency(NAME fbgemm
+      PATH "${ZENDNNL_INSTALL_PREFIX}/deps/fbgemm"
+      ARCHIVE_FILE "libfbgemm.a"
+      ALIAS "fbgemm::fbgemm_archive")
   endif()
 
-  if(ZENDNNL_DEPENDS_ONEDNN)
-    add_dependencies(zendnnl_onednn_deps fwk_zendnnl)
+  if(ZENDNNL_LIB_BUILD_ARCHIVE)
+    target_link_libraries(zendnnl_library INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,fbgemm::fbgemm_archive>")
+    target_link_libraries(zendnnl_library INTERFACE fbgemm::asmjit)
+    target_link_libraries(zendnnl_library INTERFACE fbgemm::cpuinfo)
   endif()
-
-  if(ZENDNNL_DEPENDS_LIBXSMM)
-    add_dependencies(zendnnl_libxsmm_deps fwk_zendnnl)
+  if(ZENDNNL_LIB_BUILD_SHARED)
+    target_link_libraries(zendnnl_shared_library INTERFACE fbgemm::fbgemm_archive)
+    target_link_libraries(zendnnl_shared_library INTERFACE fbgemm::asmjit)
+    target_link_libraries(zendnnl_shared_library INTERFACE fbgemm::cpuinfo)
   endif()
+endif()
 
-  if(ZENDNNL_DEPENDS_PARLOOPER)
-    add_dependencies(zendnnl_parlooper_deps fwk_zendnnl)
+# Must match the PUBLIC compile definitions in zendnnl/src/CMakeLists.txt.
+# Public headers change class layout on ZENDNNL_DEPENDS_*, so a consumer
+# without them can disagree with the library on object sizes.
+set(ZNL_INTERFACE_DEFINITIONS ZENDNNL_DEPENDS_JSON=1 ZENDNNL_DEPENDS_AOCLUTILS=1)
+foreach(_dep AOCLDLP ONEDNN LIBXSMM PARLOOPER FBGEMM)
+  if(ZENDNNL_DEPENDS_${_dep})
+    list(APPEND ZNL_INTERFACE_DEFINITIONS ZENDNNL_DEPENDS_${_dep}=1)
+  else()
+    list(APPEND ZNL_INTERFACE_DEFINITIONS ZENDNNL_DEPENDS_${_dep}=0)
   endif()
+endforeach()
 
-  if(ZENDNNL_DEPENDS_FBGEMM)
-    add_dependencies(zendnnl_asmjit_deps fwk_zendnnl)
-    add_dependencies(zendnnl_cpuinfo_deps fwk_zendnnl)
-    add_dependencies(zendnnl_fbgemm_deps fwk_zendnnl)
-  endif()
+if(ZENDNNL_LIB_BUILD_ARCHIVE)
+  set_target_properties(zendnnl_library
+    PROPERTIES
+    INTERFACE_COMPILE_DEFINITIONS "${ZNL_INTERFACE_DEFINITIONS}")
+endif()
+if(ZENDNNL_LIB_BUILD_SHARED)
+  set_target_properties(zendnnl_shared_library
+    PROPERTIES
+    INTERFACE_COMPILE_DEFINITIONS "${ZNL_INTERFACE_DEFINITIONS}")
+endif()
 
+message(STATUS "(ZENDNNL) ZNL_BYPRODUCTS=${ZNL_BYPRODUCTS}")
+message(STATUS "(ZENDNNL) ZNL_CMAKE_ARGS=${ZNL_CMAKE_ARGS}")
+
+ExternalProject_ADD(fwk_zendnnl
+  SOURCE_DIR  "${ZENDNNL_SOURCE_DIR}"
+  BINARY_DIR  "${ZENDNNL_BINARY_DIR}"
+  CMAKE_ARGS  "${ZNL_CMAKE_ARGS}"
+  INSTALL_COMMAND ""
+  BUILD_ALWAYS TRUE
+  BUILD_BYPRODUCTS ${ZNL_BYPRODUCTS})
+
+list(APPEND ZENDNNL_CLEAN_FILES "${ZENDNNL_BINARY_DIR}")
+list(APPEND ZENDNNL_CLEAN_FILES "${ZENDNNL_INSTALL_PREFIX}")
+set_target_properties(fwk_zendnnl
+  PROPERTIES
+  ADDITIONAL_CLEAN_FILES "${ZENDNNL_CLEAN_FILES}")
+
+# Reminder only: fwk_zendnnl cannot have dependencies yet at this point.
+if(ZENDNNL_AOCLDLP_INJECT_DIR OR ZENDNNL_ONEDNN_INJECT_DIR OR ZENDNNL_LIBXSMM_INJECT_DIR
+   OR ZENDNNL_PARLOOPER_INJECT_DIR OR ZENDNNL_FBGEMM_INJECT_DIR)
+  message(AUTHOR_WARNING "(ZENDNNL) dependencies are injected; make fwk_zendnnl depend on the targets that build them.")
+endif()
+
+if(ZENDNNL_LIB_BUILD_ARCHIVE)
+  add_dependencies(zendnnl_library fwk_zendnnl)
+endif()
+if(ZENDNNL_LIB_BUILD_SHARED)
+  add_dependencies(zendnnl_shared_library fwk_zendnnl)
+endif()
+add_dependencies(zendnnl_json_deps fwk_zendnnl)
+add_dependencies(zendnnl_aoclutils_deps fwk_zendnnl)
+add_dependencies(zendnnl_aucpuid_deps fwk_zendnnl)
+
+if(ZENDNNL_DEPENDS_AOCLDLP)
+  add_dependencies(zendnnl_aocldlp_deps fwk_zendnnl)
+endif()
+
+if(ZENDNNL_DEPENDS_ONEDNN)
+  add_dependencies(zendnnl_onednn_deps fwk_zendnnl)
+endif()
+
+if(ZENDNNL_DEPENDS_LIBXSMM)
+  add_dependencies(zendnnl_libxsmm_deps fwk_zendnnl)
+endif()
+
+if(ZENDNNL_DEPENDS_PARLOOPER)
+  add_dependencies(zendnnl_parlooper_deps fwk_zendnnl)
+endif()
+
+if(ZENDNNL_DEPENDS_FBGEMM)
+  add_dependencies(zendnnl_asmjit_deps fwk_zendnnl)
+  add_dependencies(zendnnl_cpuinfo_deps fwk_zendnnl)
+  add_dependencies(zendnnl_fbgemm_deps fwk_zendnnl)
 endif()
