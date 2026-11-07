@@ -112,7 +112,9 @@ bool checked_extent(
 
 bool is_w4(const routed_moe_params &p) {
     return p.quant_scheme
-            == routed_moe_quant_t::sym_per_group_w4a8_dynamic_per_token;
+            == routed_moe_quant_t::sym_per_group_w4a8_dynamic_per_token
+            || p.quant_scheme
+            == routed_moe_quant_t::sym_per_group_w4a8_dynamic_per_group;
 }
 
 bool checked_s4_storage(int64_t num_experts, int64_t out_channels,
@@ -263,8 +265,8 @@ status_t checked_problem_sizes(
             = p.topk_weights_stride != 0 ? p.topk_weights_stride : p.topk;
     if (!checked_extent(
                 p.num_tokens, p.src_stride, p.hidden_size, sizeof(uint16_t))
-            || !checked_extent(
-                    p.num_tokens, p.dst_stride, p.hidden_size, sizeof(uint16_t))
+            || !checked_extent(p.num_tokens, p.dst_stride, p.hidden_size,
+                    size_of(p.dst_dt))
             || !checked_extent(p.num_tokens, id_stride, p.topk, sizeof(int32_t))
             || !checked_extent(
                     p.num_tokens, weight_stride, p.topk, sizeof(float))) {
@@ -427,9 +429,13 @@ status_t validate_static(const routed_moe_params &p) {
     }
 
     // ── dtypes ──────────────────────────────────────────────────────
-    if (p.src_dt != data_type_t::bf16 || p.dst_dt != data_type_t::bf16) {
+    if (p.src_dt != data_type_t::bf16
+            || (p.dst_dt != data_type_t::bf16
+                    && p.dst_dt != data_type_t::f32)) {
         return status_t::unimplemented;
     }
+    // TODO: Implement a float-typed W8 epilogue before enabling F32 output.
+    if (p.dst_dt == data_type_t::f32 && !w4) { return status_t::unimplemented; }
     if (p.scale_dt != data_type_t::f32 && p.scale_dt != data_type_t::bf16) {
         return status_t::unimplemented;
     }
@@ -557,7 +563,9 @@ status_t group_matmul_routed_moe_query(routed_moe_capability *cap) {
             = routed_moe::quant_bit(
                       routed_moe_quant_t::sym_per_oc_w8a8_dynamic_per_token)
             | routed_moe::quant_bit(
-                    routed_moe_quant_t::sym_per_group_w4a8_dynamic_per_token);
+                    routed_moe_quant_t::sym_per_group_w4a8_dynamic_per_token)
+            | routed_moe::quant_bit(
+                    routed_moe_quant_t::sym_per_group_w4a8_dynamic_per_group);
     cap->src_dtype_mask = routed_moe::dt_bit(data_type_t::bf16);
     cap->wei_dtype_mask = routed_moe::dt_bit(data_type_t::s8)
             | routed_moe::dt_bit(data_type_t::s4);

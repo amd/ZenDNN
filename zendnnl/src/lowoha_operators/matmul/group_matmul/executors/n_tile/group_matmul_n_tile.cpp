@@ -845,15 +845,10 @@ inline void GroupNTileContext::execute_tile(const GroupNTilePlan &plan, int e,
     }
     if (local_tid >= n_thr) return;
 
-    // W4A8 native keeps packed s4.  GGML Q4_0 (f32 dst, not the bf16 W4A8
-    // route) also stays packed s4, so column slices must be nibble-aligned.
-    const bool ggml_packed_s4 = params[e].dtypes.wei == data_type_t::s4
-            && params[e].dtypes.dst != data_type_t::bf16
-            && (params[e].dtypes.src == data_type_t::s8
-                    || params[e].dynamic_quant);
-    const bool native_s4_wei
-            = (w4a8_native && params[e].dtypes.wei == data_type_t::s4)
-            || ggml_packed_s4;
+    // Every S4 operation admitted here follows the normalized W4A8 contract.
+    // That includes GGML Q4_0 after its pre-route unpack. Native W4A8 keeps
+    // packed nibbles; the simulated backend substitutes a plain S8 weight.
+    const bool native_s4_wei = w4a8_native && is_w4a8_config(params[e]);
     const auto split = n_split_for_tile(N[e], n_thr, local_tid, plan.nr_align,
             /*even_boundaries=*/native_s4_wei,
             /*balance_remainder=*/
@@ -3280,14 +3275,8 @@ inline void execute_sequential(
         const void *wei_for_call = ctx.weight[e];
         int ldb_for_call = ctx.ldb[e];
         bool transB_for_call = ctx.transB[e];
-        const bool ggml_packed_s4 = local_params.dtypes.wei == data_type_t::s4
-                && local_params.dtypes.dst != data_type_t::bf16
-                && (local_params.dtypes.src == data_type_t::s8
-                        || local_params.dynamic_quant);
         const bool native_s4_wei
-                = (ctx.w4a8_native
-                          && local_params.dtypes.wei == data_type_t::s4)
-                || ggml_packed_s4;
+                = ctx.w4a8_native && is_w4a8_config(local_params);
         const bool w4a8_plain_s8 = native_s4_wei
                 ? false
                 : ctx.apply_w4a8_substitution(
@@ -4598,7 +4587,8 @@ void n_tile_execute(const std::vector<char> &layout,
     // non-s4 calls, which `prepare_for_call` reads as "not s4".
     int ck_s4_group_size = 0;
     int ck_s4_wei_scale_grp_stride = 0;
-    bool ck_s4_src_per_group = false;
+    int ck_s4_src_scale_groups = 1;
+    bool ck_s4_scale_group_mismatch = false;
     int ck_s8_group_size = 0;
     int ck_s8_wei_scale_grp_stride = 0;
     // One group mode is shared by the call. Use the Q8 pack only when
@@ -4623,21 +4613,43 @@ void n_tile_execute(const std::vector<char> &layout,
     }
     if (params[rep].dtypes.wei == data_type_t::s4) {
         const auto &ws = params[rep].quant_params.wei_scale;
+        int64_t weight_groups = 0;
+        int observed_src_groups = 0;
         if (ws.dims.size() == 2 && ws.dims[0] > 0 && K[rep] > 0) {
-            const int64_t groups = ws.dims[0];
-            if (K[rep] % groups == 0) {
-                ck_s4_group_size = static_cast<int>(K[rep] / groups);
+            weight_groups = ws.dims[0];
+            if (K[rep] % weight_groups == 0) {
+                ck_s4_group_size = static_cast<int>(K[rep] / weight_groups);
             }
             ck_s4_wei_scale_grp_stride = static_cast<int>(ws.dims[1]);
         }
+        // TODO: Carry a per-expert weight-scale group stride in CallContext.
+        // Until then every active expert must share the representative
+        // expert's N; otherwise the kernel walks `{G, N}` scale rows with the
+        // wrong stride.
         for (int i = 0; i < num_ops; ++i) {
             if (M[i] <= 0) continue;
             const auto &ss = params[i].quant_params.src_scale;
-            if (ss.dims.size() == 2 && ss.dims[1] > 1) {
-                ck_s4_src_per_group = true;
+            const auto &ews = params[i].quant_params.wei_scale;
+            if (ss.dims.size() != 2 || ss.dims[0] != M[i] || ss.dims[1] <= 0
+                    || ews.dims.size() != 2 || ews.dims[0] != weight_groups
+                    || ews.dims[1] != ck_s4_wei_scale_grp_stride) {
+                ck_s4_scale_group_mismatch = true;
+                break;
+            }
+            const int src_groups = static_cast<int>(ss.dims[1]);
+            if (observed_src_groups == 0) {
+                observed_src_groups = src_groups;
+            } else if (observed_src_groups != src_groups) {
+                ck_s4_scale_group_mismatch = true;
+                break;
+            }
+            if (src_groups > 1 && src_groups != weight_groups) {
+                ck_s4_scale_group_mismatch = true;
                 break;
             }
         }
+        if (!ck_s4_scale_group_mismatch && observed_src_groups > 0)
+            ck_s4_src_scale_groups = observed_src_groups;
     }
 
     custom_kernel::CallContext kctx;
@@ -4689,7 +4701,7 @@ void n_tile_execute(const std::vector<char> &layout,
             }
         }
     }
-    if (!ck_s4_src_per_group && !grouped_s8_not_q8
+    if (!ck_s4_scale_group_mismatch && !grouped_s8_not_q8
             && group_matmul_custom_kernel_candidate(params, M, N, custom_act)) {
         prepare_n_tile_custom_kernel(custom_act,
                 /*src_dtype=*/params[rep].dtypes.src,
@@ -4705,7 +4717,7 @@ void n_tile_execute(const std::vector<char> &layout,
                 /*allow_in_place=*/(!fused_epilogue || tight_fused_epilogue)
                         && (q8_ck_inplace || ck_inplace_licence
                                 || !is_grp_auto_mixed_inplace_active()),
-                ck_wei_caps);
+                ck_wei_caps, ck_s4_src_scale_groups);
     }
     custom_kernel::Bf16DecodeRoute qwen_bf16_route
             = custom_kernel::Bf16DecodeRoute::none;
@@ -4823,25 +4835,19 @@ void n_tile_execute(const std::vector<char> &layout,
     //
     // Tight layout is detected at the n_tile_execute entry point via
     // `tight_fused_epilogue = fused_epilogue && ldc[0] < N[0]`.
-    // Per-group source quant (`{M, G}`) MUST run on the AOCL execute_tile path:
-    // both int8 and s4 custom kernels read one source scale per row
-    // (per-token only), so engaging either would silently corrupt output.
-    // For int8, detect per-group quant from its `{G, N}` weight scale.  W4A8
-    // weights are always `{G, N}` and are supported by the s4 kernel, so for
-    // that family inspect the SOURCE scale and reject only when G > 1.
+    // Per-group INT8 stays on AOCL, except uniform Q8_0. W4A8 accepts
+    // matching `{M,G}` source scales; a group-count mismatch already
+    // skipped prepare above.
     const bool ck_s4_variant = custom_kernel::is_w4a8_variant(kctx.variant);
-    bool ck_per_group = ck_s4_src_per_group;
+    bool ck_per_group = false;
     for (size_t i = 0; i < params.size() && !ck_per_group; ++i) {
         // `i >= M.size()` is a prepack-extras tail slot that never fires; the
         // old form fell through for those, so one tail entry carrying a
         // `{G, N}` scale disqualified the custom kernel for the whole call.
         if (i >= M.size() || M[i] <= 0) continue;
-        if (q8_uniform) continue;
-        const auto &scale = ck_s4_variant ? params[i].quant_params.src_scale
-                                          : params[i].quant_params.wei_scale;
-        const bool per_group = ck_s4_variant
-                ? (scale.dims.size() == 2 && scale.dims[1] > 1)
-                : (scale.dims.size() == 2 && scale.dims[0] > 1);
+        if (q8_uniform || ck_s4_variant) continue;
+        const auto &scale = params[i].quant_params.wei_scale;
+        const bool per_group = scale.dims.size() == 2 && scale.dims[0] > 1;
         if (per_group) {
             ck_per_group = true;
             break;
@@ -4858,14 +4864,21 @@ void n_tile_execute(const std::vector<char> &layout,
     // standard line would leave debuggers guessing whether the env is
     // off, the dispatcher refused, or the wide-swiglu guard fired.
     if ((kctx.enabled
-                || (ck_s4_src_per_group && get_grp_matmul_custom_kernel()))
+                || (ck_s4_scale_group_mismatch
+                        && get_grp_matmul_custom_kernel()))
             && !use_custom) {
         static const bool s_skip_log = apilog_info_enabled();
         if (s_skip_log) {
             apilog_info("[GRP_MATMUL.PLAN.SKIP_CUSTOM] reason=",
-                    (ck_per_group ? "per_group_quant_excluded"
-                                  : "wide_swiglu_correctness_guard"),
-                    ck_per_group
+                    (ck_s4_scale_group_mismatch ? "s4_scale_layout_mismatch"
+                                    : ck_per_group
+                                    ? "per_group_quant_excluded"
+                                    : "wide_swiglu_correctness_guard"),
+                    ck_s4_scale_group_mismatch
+                            ? " (W4A8 source `{M,G}` and weight `{G,N}` "
+                              "group counts must match, and active experts "
+                              "must currently share N)."
+                            : ck_per_group
                             ? " (custom kernel consumes one source scale "
                               "per row, not one per K-group; CK is "
                               "disqualified for this call)."
@@ -5084,6 +5097,8 @@ void n_tile_execute(const std::vector<char> &layout,
                 && custom_kernel::is_int8_variant(kctx.variant)) {
             return M[e] * (K[e] / 32);
         }
+        if (custom_kernel::is_w4a8_variant(kctx.variant))
+            return M[e] * std::max(kctx.src_scale_groups, 1);
         return M[e];
     };
     const auto ck_wei_scale_groups = [&](int e) -> int {

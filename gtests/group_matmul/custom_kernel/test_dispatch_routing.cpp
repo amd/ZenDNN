@@ -509,9 +509,30 @@ TEST(CkDispatchRouting, ScalarRouteAcceptsInt8AndW4) {
     EXPECT_TRUE(zendnnl::lowoha::matmul::single_matmul_group_routable('r', M, N,
             K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
 
-    // W4A8 has exactly two supported source forms: dynamic BF16 and static,
-    // already-quantized S8. S8 with dynamic_quant=true is contradictory and
-    // must not be classified or routed as a W4A8 custom-kernel call.
+    // Per-group activation scales are supported only when their K-group count
+    // matches the weight scale `{G,N}`.
+    params.quant_params.src_scale.dims = {M, K / 32};
+    EXPECT_TRUE(zendnnl::lowoha::matmul::single_matmul_group_routable('r', M, N,
+            K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+    params.quant_params.src_scale.dims = {M, K / 64};
+    EXPECT_FALSE(zendnnl::lowoha::matmul::single_matmul_group_routable('r', M,
+            N, K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+    params.quant_params.src_scale.dims = {M, 1};
+
+    // llama.cpp Q4_0 entry: dynamic F32 source, S4 weight, F32 output.
+    params.dtypes.src = data_type_t::f32;
+    params.dtypes.dst = data_type_t::f32;
+    params.quant_params.src_scale.dims = {M, K / 32};
+    EXPECT_TRUE(zendnnl::lowoha::matmul::is_w4a8_config(params));
+    EXPECT_TRUE(zendnnl::lowoha::matmul::single_matmul_group_routable('r', M, N,
+            K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+    params.dtypes.src = data_type_t::bf16;
+    params.dtypes.dst = data_type_t::bf16;
+    params.quant_params.src_scale.dims = {M, 1};
+
+    // W4A8 supports dynamic BF16/F32 and static, already-quantized S8.
+    // S8 with dynamic_quant=true is contradictory and must not be classified
+    // or routed as a W4A8 custom-kernel call.
     params.dtypes.src = data_type_t::s8;
     params.dynamic_quant = false;
     params.quant_params.src_scale.buff = &src_scale;
@@ -1673,8 +1694,9 @@ TEST(CkDispatchRouting, GroupedStaticU8S8MixedScaleStorageAndPostopFallback) {
     config_guard.config.set_weight_cache(2);
     ::reset_grp_matmul_caches();
     ASSERT_EQ(run(0, params, ck_out), status_t::success);
-    EXPECT_EQ(config_guard.config.get_weight_cache(), 1)
-            << "post-op-ineligible CK must not license AUTO mixed in-place";
+    EXPECT_EQ(config_guard.config.get_weight_cache(), 2)
+            << "strict-stable AOCL DLP independently licenses WC=2";
+    EXPECT_TRUE(config_guard.config.get_grp_auto_mixed_inplace());
     ::reset_grp_matmul_caches();
 }
 

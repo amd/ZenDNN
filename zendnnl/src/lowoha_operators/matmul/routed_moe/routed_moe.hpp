@@ -160,7 +160,10 @@ enum class routed_moe_quant_t : int32_t {
     /// distinct value from the historical per-output-channel W4 spelling
     /// above: callers compiled against that documented meaning must never be
     /// silently reinterpreted as per-group quantization.
-    sym_per_group_w4a8_dynamic_per_token = 5
+    sym_per_group_w4a8_dynamic_per_token = 5,
+    /// The same signed-S4 per-group weight format, with activations dynamically
+    /// quantized independently over the matching K groups.
+    sym_per_group_w4a8_dynamic_per_group = 6
 };
 
 /**

@@ -80,8 +80,7 @@ status_t reorder_quantization_wrapper(const void *&src, const int lda,
     const data_type_t quant_dtype = params.dtypes.compute;
     const data_type_t orig_src_dtype = params.dtypes.src;
 
-    const bool is_w4a8 = is_w4a8_config(params) && is_dynamic
-            && orig_src_dtype == data_type_t::bf16;
+    const bool is_w4a8 = is_w4a8_config(params) && is_dynamic;
     // is_dynamic_quant_config likewise admits only a bf16/f32 source, so no
     // already-quantized source can reach the reorder below.
     const bool eligible = is_w4a8 || is_dynamic_quant_config(params);
@@ -501,8 +500,8 @@ status_t group_reorder_quantization_wrapper(
         if (M[i] == 0) { continue; }
         // s8 (Q8_0 / W8A8) or s4 (Q4_0 packed nibbles, or W4A8).  The grouped
         // kernel only ever touches the SOURCE, so the weight dtype only
-        // identifies a supported quant scheme.  `is_w4a8_config` covers the
-        // bf16-destination W4A8 contract; f32-destination Q4_0 is plain s4.
+        // identifies a supported quant scheme. `is_w4a8_config` covers the
+        // normalized bf16/f32 W4A8 contract, including unpacked Q4_0.
         const bool wei_dtype_ok = params[i].dtypes.wei == data_type_t::s8
                 || params[i].dtypes.wei == data_type_t::s4
                 || is_w4a8_config(params[i]);

@@ -214,12 +214,14 @@ enum class KernelVariant : uint8_t {
     kS8_S4_BF16_SYM
     = 9, ///< W4A8: src(s8, per-token) × wei(s4, per-group) → bf16.
     kU8_S8_U8_ASYM = 10, ///< Static per-tensor U8 × symmetric S8 → U8.
+    kS8_S4_F32_SYM
+    = 11, ///< W4A8: src(s8, per-token) × wei(s4, per-group) → f32.
 };
 
-/// Is this variant in the W4A8 (s4) family?  One member today:
-/// `is_w4a8_config` pins compute to s8 and dst to bf16.
+/// Is this variant in the W4A8 (s4) family? BF16 and F32 destinations.
 inline bool is_w4a8_variant(KernelVariant v) noexcept {
-    return v == KernelVariant::kS8_S4_BF16_SYM;
+    return v == KernelVariant::kS8_S4_BF16_SYM
+            || v == KernelVariant::kS8_S4_F32_SYM;
 }
 
 /// Predicate: is this variant in the INT8 family?
@@ -272,6 +274,7 @@ inline OutputType dst_dt_for_variant(KernelVariant v) noexcept {
         case KernelVariant::kF16_F16_F16: return OutputType::kF16;
         case KernelVariant::kF16_F16_F32: return OutputType::kF32;
         case KernelVariant::kS8_S4_BF16_SYM: return OutputType::kBf16;
+        case KernelVariant::kS8_S4_F32_SYM: return OutputType::kF32;
         default: return OutputType::kBf16; // unreachable on the success path
     }
 }
@@ -486,6 +489,10 @@ struct CallContext {
     /// expert's FULL N, not the tile width, because an N-tile slices
     /// columns out of that buffer without repacking it.
     int wei_scale_grp_stride = 0;
+    /// Number of activation scales per row. One preserves the existing
+    /// per-token `{M,1}` path; values greater than one select `{M,G}` and must
+    /// match `K / group_size`.
+    int src_scale_groups = 1;
 
     /// Maximum experts per call we cache packed pointers for.  Must
     /// match (or exceed) each caller's own expert-count cap.
@@ -756,7 +763,9 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
         // write).  The packs then stay out of place under WEIGHT_CACHE=2,
         // since the caller's fallback reads the raw weight.
         bool allow_in_place = true,
-        const std::vector<size_t> &wei_capacities = {});
+        const std::vector<size_t> &wei_capacities = {},
+        // W4A8 only: 1 for `{M,1}`, G for matching `{M,G}` / `{G,N}`.
+        int src_scale_groups = 1);
 
 // (`PackProbeStats` and `warm_pack_all_custom_kernel_experts` moved
 // to `group_matmul/prepack/prepack_custom_kernel.{hpp,cpp}` so the

@@ -1417,6 +1417,21 @@ TEST_F(RoutedMoEExecute, RejectsInvalidExpertMapIdsAndEntries) {
     EXPECT_EQ(execute(p), status_t::memory_bad_index);
 }
 
+TEST_F(RoutedMoEExecute, RejectsF32OutputForW8WithoutWritingDestination) {
+    moe_problem pb;
+    pb.build(8, 128, 64, 8, 2, 0xF32u);
+    std::vector<float> output(pb.dst.size(), -99.0f);
+    const auto untouched = output;
+
+    auto p = pb.params();
+    p.dst = output.data();
+    p.dst_dt = data_type_t::f32;
+
+    EXPECT_EQ(group_matmul_routed_moe_validate(p), status_t::unimplemented);
+    EXPECT_EQ(execute(p), status_t::unimplemented);
+    EXPECT_EQ(output, untouched);
+}
+
 TEST_F(RoutedMoEExecute, ForwardsValidationRejections) {
     moe_problem pb;
     pb.build(8, 120, 64, 8, 2, 0x12u);

@@ -167,12 +167,13 @@ bool n_tile_supported(const std::vector<int> &M, const std::vector<int> &N,
                 const bool w4a8_src_ok
                         = quant_param_is_per_token(qp.src_scale, M[i])
                         || is_per_group_src(qp.src_scale, M[i]);
-                const bool w4a8_wei_ok = is_per_group_wei(qp.wei_scale);
+                // W4A8 also admits `{1,N}`: G=1 means one group spanning K.
+                const bool w4a8_wei_ok = qp.wei_scale.buff != nullptr
+                        && qp.wei_scale.dims.size() == 2
+                        && qp.wei_scale.dims[0] >= 1
+                        && qp.wei_scale.dims[1] > 1;
                 if (!w4a8_src_ok || !w4a8_wei_ok) { return false; }
-                continue;
-            }
-
-            if (static_u8s8) {
+            } else if (static_u8s8) {
                 if (!static_u8s8_quant_supported(params[i], N[i])) return false;
             } else {
                 // Source side: accept either (a) dynamic BF16/F32 input that

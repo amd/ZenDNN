@@ -1708,7 +1708,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
             log_error("Unsupported data type for matmul");
         }
     }
-    // W4A8: reorder s4->s8, sym_quant GEMM (bf16 output only).
+    // W4A8: reorder s4->s8, sym_quant GEMM.
     else if (is_w4a8) {
         // Group size comes from wei scale {G,N}; src may be per-token.
         const int64_t wei_grp
@@ -1748,8 +1748,27 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
             return;
         }
 
-        if (dtypes.dst != data_type_t::bf16) {
-            log_error("Unsupported output data type for W4A8; expected bf16");
+        if (dtypes.dst == data_type_t::f32 && w4a8_uses_native_s4(w4a8_algo)) {
+            apilog_verbose("[W4A8.GEMM] native aocl_gemm_s8s4s32of32");
+            aocl_gemm_s8s4s32of32(layout, transA, transB, M, N, K, alpha,
+                    static_cast<const int8_t *>(A), lda, mem_format_a,
+                    static_cast<const int8_t *>(w4a8_reordered_mem), ldb, 'r',
+                    beta, static_cast<float *>(C), ldc, dlp_base_md);
+        } else if (dtypes.dst == data_type_t::f32) {
+            apilog_verbose(
+                    "[W4A8.GEMM] simulated aocl_gemm_s8s8s32of32_sym_quant");
+            apilog_info(
+                    "[AOCL.run_dlp.SYM_GEMM] calling "
+                    "aocl_gemm_s8s8s32of32_sym_quant (simulated W4A8) M=",
+                    M, " K=", K, " N=", N);
+            aocl_gemm_s8s8s32of32_sym_quant(layout, transA, transB, M, N, K,
+                    alpha, static_cast<const int8_t *>(A), lda, mem_format_a,
+                    static_cast<const int8_t *>(w4a8_reordered_mem), ldb, 'r',
+                    beta, static_cast<float *>(C), ldc, dlp_base_md);
+        } else if (dtypes.dst != data_type_t::bf16) {
+            log_error(
+                    "Unsupported output data type for W4A8; expected bf16 or "
+                    "f32");
         } else if (w4a8_uses_native_s4(w4a8_algo)) {
             apilog_verbose("[W4A8.GEMM] native aocl_gemm_s8s4s32obf16");
             aocl_gemm_s8s4s32obf16(layout, transA, transB, M, N, K, alpha,

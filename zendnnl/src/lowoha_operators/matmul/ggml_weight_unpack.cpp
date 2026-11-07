@@ -358,10 +358,10 @@ bool ggml_packed_gemm_supported(const matmul_params &params) {
             && params.dtypes.dst != data_type_t::bf16) {
         return false;
     }
-    if (params.dtypes.compute != data_type_t::s8
-            && params.dtypes.compute != data_type_t::u8) {
-        return false;
-    }
+    // GGML Q8_0/Q4_0 per-group quantization is symmetric-only. Keep the
+    // pre-unpack contract aligned with `unpack_ggml_raw_s8_and_cache`, which
+    // normalizes the materialized operation to s8 compute.
+    if (params.dtypes.compute != data_type_t::s8) { return false; }
     return quant_param_nelems(params.quant_params.src_scale.dims) > 1;
 }
 

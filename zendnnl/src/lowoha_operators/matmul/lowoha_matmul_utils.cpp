@@ -76,29 +76,20 @@ status_t validate_w4a8_inputs(
     // before the sym-quant reorder.
     if (params.packing.pack_format_b == 1) { return status_t::success; }
 
-    if (params.dtypes.wei == data_type_t::s4 && params.dynamic_quant
-            && (params.dtypes.src == data_type_t::f32
-                    || params.dtypes.dst == data_type_t::f32)) {
-        log_error(
-                "W4A8 does not support f32 source or destination; use bf16 "
-                "src with dynamic_quant=true or pre-quantized s8 src with "
-                "dynamic_quant=false");
-        return status_t::failure;
-    }
-
     if (params.dtypes.wei == data_type_t::s4
             && params.dtypes.src == data_type_t::u8
             && (params.quant_params.src_scale.buff || params.dynamic_quant)) {
         log_error(
-                "S4 weights do not support u8 source; W4A8 accepts bf16 src "
-                "with dynamic_quant=true or pre-quantized s8 src with "
+                "S4 weights do not support u8 source; W4A8 accepts bf16/f32 "
+                "src with dynamic_quant=true or pre-quantized s8 src with "
                 "dynamic_quant=false");
         return status_t::failure;
     }
 
     const bool w4a8_dynamic_entry = params.dynamic_quant
             && params.dtypes.wei == data_type_t::s4
-            && params.dtypes.src == data_type_t::bf16;
+            && (params.dtypes.src == data_type_t::bf16
+                    || params.dtypes.src == data_type_t::f32);
 
     const bool w4a8_static_entry = !params.dynamic_quant
             && params.dtypes.wei == data_type_t::s4
@@ -119,8 +110,9 @@ status_t validate_w4a8_inputs(
         return status_t::failure;
     }
 
-    if (params.dtypes.dst != data_type_t::bf16) {
-        log_error("W4A8 requires bf16 output");
+    if (params.dtypes.dst != data_type_t::bf16
+            && params.dtypes.dst != data_type_t::f32) {
+        log_error("W4A8 requires bf16 or f32 output");
         return status_t::failure;
     }
 

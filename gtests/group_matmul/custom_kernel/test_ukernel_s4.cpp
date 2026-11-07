@@ -64,6 +64,9 @@ int8_t a_at(int m, int k) {
 float sscale_at(int m) {
     return 0.01f + 0.003f * static_cast<float>(m % 7);
 }
+float sscale_at(int m, int g) {
+    return 0.01f + 0.002f * static_cast<float>((m * 5 + g * 3) % 9);
+}
 float wscale_at(int g, int n) {
     return 0.02f + 0.001f * static_cast<float>((g * 13 + n) % 11);
 }
@@ -110,7 +113,8 @@ std::vector<int8_t> build_packed(int K, int N, int ldb, bool transB) {
 // Exact per-(m, col) dequantised dot product, canonical column order.
 // `bf16_scales` must match what the caller handed the kernel, or the
 // comparison measures the test's rounding rather than the kernel's.
-double ref_dot(int m, int col, int K, int group_size, bool bf16_scales) {
+double ref_dot(int m, int col, int K, int group_size, bool bf16_scales,
+        bool src_per_group = false) {
     const auto rnd = [bf16_scales](float x) -> double {
         return bf16_scales
                 ? static_cast<double>(static_cast<float>(bfloat16_t(x)))
@@ -122,9 +126,10 @@ double ref_dot(int m, int col, int K, int group_size, bool bf16_scales) {
         long s32 = 0;
         for (int k = g * group_size; k < (g + 1) * group_size; ++k)
             s32 += static_cast<long>(a_at(m, k)) * s4_true(nib_at(k, col));
-        acc += static_cast<double>(s32) * rnd(wscale_at(g, col));
+        const double src_scale = src_per_group ? rnd(sscale_at(m, g)) : 1.0;
+        acc += static_cast<double>(s32) * rnd(wscale_at(g, col)) * src_scale;
     }
-    return acc * rnd(sscale_at(m));
+    return src_per_group ? acc : acc * rnd(sscale_at(m));
 }
 
 size_t oblock_bytes(int K, int pack_nr, int group_size) {
@@ -137,12 +142,13 @@ size_t oblock_bytes(int K, int pack_nr, int group_size) {
 
 // act = none: every MR x NV x group_size, both scale dtypes, bias on
 // and off, both caller layouts.
-class CkUkernelS4None
-    : public ::testing::TestWithParam<std::tuple<int, int, int, bool, bool>> {};
+class CkUkernelS4None : public ::testing::TestWithParam<
+                                std::tuple<int, int, int, bool, bool, bool>> {};
 
 TEST_P(CkUkernelS4None, MatchesScalarReference) {
     if (!ck::avx512vnni_available()) GTEST_SKIP() << "no AVX-512 VNNI";
-    const auto [K, group_size, pack_nr, scale_bf16, with_bias] = GetParam();
+    const auto [K, group_size, pack_nr, scale_bf16, with_bias, src_per_group]
+            = GetParam();
     const int NV = pack_nr / 16;
     const int N = pack_nr * 2; // two o-blocks
     const int ldb = K; // transB = true
@@ -157,7 +163,10 @@ TEST_P(CkUkernelS4None, MatchesScalarReference) {
 
     const int G = K / group_size;
     for (int MR = 1; MR <= max_mr; ++MR) {
-        auto fn = ck::select_w4a8_ukernel(MR, NV, ck::ActivationKind::none);
+        auto fn = ck::select_w4a8_ukernel(MR, NV, ck::ActivationKind::none,
+                ck::S4SourceKind::kS8, ck::S4OutputKind::kBf16,
+                src_per_group ? ck::S4SrcScaleGranularity::kPerGroup
+                              : ck::S4SrcScaleGranularity::kPerToken);
         ASSERT_NE(fn, nullptr) << "MR=" << MR << " NV=" << NV;
 
         std::vector<uint8_t> A(static_cast<size_t>(MR) * K);
@@ -166,13 +175,19 @@ TEST_P(CkUkernelS4None, MatchesScalarReference) {
                 A[static_cast<size_t>(m) * K + k]
                         = static_cast<uint8_t>(a_at(m, k));
 
-        std::vector<float> ss_f(MR), ws_f(static_cast<size_t>(G) * N),
-                bias_f(N);
-        std::vector<bfloat16_t> ss_b(MR), ws_b(static_cast<size_t>(G) * N);
-        for (int m = 0; m < MR; ++m) {
-            ss_f[m] = sscale_at(m);
-            ss_b[m] = bfloat16_t(ss_f[m]);
-        }
+        const int src_scale_groups = src_per_group ? G : 1;
+        std::vector<float> ss_f(static_cast<size_t>(MR) * src_scale_groups),
+                ws_f(static_cast<size_t>(G) * N), bias_f(N);
+        std::vector<bfloat16_t> ss_b(
+                static_cast<size_t>(MR) * src_scale_groups),
+                ws_b(static_cast<size_t>(G) * N);
+        for (int m = 0; m < MR; ++m)
+            for (int g = 0; g < src_scale_groups; ++g) {
+                const size_t idx
+                        = static_cast<size_t>(m) * src_scale_groups + g;
+                ss_f[idx] = src_per_group ? sscale_at(m, g) : sscale_at(m);
+                ss_b[idx] = bfloat16_t(ss_f[idx]);
+            }
         for (int g = 0; g < G; ++g)
             for (int n = 0; n < N; ++n) {
                 ws_f[static_cast<size_t>(g) * N + n] = wscale_at(g, n);
@@ -205,7 +220,8 @@ TEST_P(CkUkernelS4None, MatchesScalarReference) {
 
         for (int m = 0; m < MR; ++m)
             for (int n = 0; n < N; ++n) {
-                double ref = ref_dot(m, n, K, group_size, scale_bf16);
+                double ref = ref_dot(
+                        m, n, K, group_size, scale_bf16, src_per_group);
                 if (with_bias) ref += bias_at(n);
                 const double got
                         = static_cast<float>(C[static_cast<size_t>(m) * N + n]);
@@ -222,17 +238,148 @@ INSTANTIATE_TEST_SUITE_P(Shapes, CkUkernelS4None,
                 ::testing::Values(8, 32, 128), // group_size
                 ::testing::Values(32, 64), // pack_nr
                 ::testing::Bool(), // bf16 scales
-                ::testing::Bool())); // bias
+                ::testing::Bool(), // bias
+                ::testing::Bool())); // per-token / per-group source scale
+
+TEST(CkUkernelS4F32, StoresDequantizedF32) {
+    if (!ck::avx512vnni_available()) GTEST_SKIP() << "no AVX-512 VNNI";
+
+    constexpr int K = 128;
+    constexpr int group_size = 32;
+    constexpr int pack_nr = 32;
+    constexpr int N = pack_nr;
+    constexpr int MR = 3;
+    const int G = K / group_size;
+
+    const std::vector<int8_t> wsrc = build_packed(K, N, K, true);
+    Slab slab(ck::packed_weight_size_s4(K, N, pack_nr, group_size));
+    ASSERT_NE(slab.p, nullptr);
+    ASSERT_EQ(ck::prepack_weight_into_s4(wsrc.data(), K, N, K, pack_nr, true,
+                      false, group_size, slab.p),
+            status_t::success);
+
+    auto fn = ck::select_w4a8_ukernel(MR, N / 16, ck::ActivationKind::none,
+            ck::S4SourceKind::kS8, ck::S4OutputKind::kF32,
+            ck::S4SrcScaleGranularity::kPerGroup);
+    ASSERT_NE(fn, nullptr);
+
+    std::vector<uint8_t> A(static_cast<size_t>(MR) * K);
+    for (int m = 0; m < MR; ++m)
+        for (int k = 0; k < K; ++k)
+            A[static_cast<size_t>(m) * K + k]
+                    = static_cast<uint8_t>(a_at(m, k));
+
+    std::vector<float> src_scale(static_cast<size_t>(MR) * G);
+    std::vector<float> wei_scale(static_cast<size_t>(G) * N);
+    for (int m = 0; m < MR; ++m)
+        for (int g = 0; g < G; ++g)
+            src_scale[static_cast<size_t>(m) * G + g] = sscale_at(m, g);
+    for (int g = 0; g < G; ++g)
+        for (int n = 0; n < N; ++n)
+            wei_scale[static_cast<size_t>(g) * N + n] = wscale_at(g, n);
+
+    std::vector<float> C(static_cast<size_t>(MR) * N, 0.0f);
+    fn(A.data(), K, static_cast<const int8_t *>(slab.p), src_scale.data(),
+            wei_scale.data(), ck::ScaleKind::kF32, nullptr, ck::BiasKind::none,
+            C.data(), N, nullptr, 0, K, group_size, N);
+
+    for (int m = 0; m < MR; ++m)
+        for (int n = 0; n < N; ++n) {
+            const double ref = ref_dot(
+                    m, n, K, group_size, false, /*src_per_group=*/true);
+            const double got = C[static_cast<size_t>(m) * N + n];
+            const double rel
+                    = std::fabs(got - ref) / std::max(1.0, std::fabs(ref));
+            ASSERT_LT(rel, 1e-5) << "m=" << m << " n=" << n << " ref=" << ref
+                                 << " got=" << got;
+        }
+}
+
+TEST(CkUkernelS4, PerGroupDequantizationAvoidsIntermediateOverflow) {
+    if (!ck::avx512vnni_available()) GTEST_SKIP() << "no AVX-512 VNNI";
+
+    constexpr int K = 64;
+    constexpr int group_size = 32;
+    constexpr int N = 32;
+    constexpr int G = K / group_size;
+    constexpr int MR = 1;
+    constexpr int NV = N / 16;
+
+    // Every packed nibble is S4 +1 and every activation is quantized to 127.
+    // Keep the first output channel at zero to exercise a zero dot with an
+    // overflowing source-scale * weight-scale product.
+    std::vector<int8_t> wsrc(
+            static_cast<size_t>(N) * K / 2, static_cast<int8_t>(0x11));
+    std::fill_n(wsrc.begin(), K / 2, static_cast<int8_t>(0));
+    Slab slab(ck::packed_weight_size_s4(K, N, N, group_size));
+    ASSERT_NE(slab.p, nullptr);
+    ASSERT_EQ(ck::prepack_weight_into_s4(wsrc.data(), K, N, K, N, true,
+                      /*interleave_split_halves=*/false, group_size, slab.p),
+            status_t::success);
+
+    std::vector<uint8_t> src(K, 127);
+    const float activation = std::ldexp(1.0f, 125);
+    const float src_scale_value = activation / 127.0f;
+    const float weight_scale_value = std::ldexp(1.0f, -10);
+    std::vector<float> src_scale(G, src_scale_value);
+    std::vector<float> weight_scale(
+            static_cast<size_t>(G) * N, weight_scale_value);
+    for (int g = 0; g < G; ++g)
+        weight_scale[static_cast<size_t>(g) * N] = std::ldexp(1.0f, 11);
+
+    // Two groups each contribute (32 * 127) * (2^125 / 127) * 2^-10.
+    const float expected = static_cast<float>(static_cast<double>(G)
+            * group_size * 127.0 * static_cast<double>(src_scale_value)
+            * static_cast<double>(weight_scale_value));
+    ASSERT_TRUE(std::isfinite(expected));
+
+    std::vector<float> f32_out(N, 0.0f);
+    auto f32_fn = ck::select_w4a8_ukernel(MR, NV, ck::ActivationKind::none,
+            ck::S4SourceKind::kS8, ck::S4OutputKind::kF32,
+            ck::S4SrcScaleGranularity::kPerGroup);
+    ASSERT_NE(f32_fn, nullptr);
+    f32_fn(src.data(), K, static_cast<const int8_t *>(slab.p), src_scale.data(),
+            weight_scale.data(), ck::ScaleKind::kF32, nullptr,
+            ck::BiasKind::none, f32_out.data(), N, nullptr, 0, K, group_size,
+            N);
+
+    std::vector<bfloat16_t> bf16_out(N, bfloat16_t(0.0f));
+    auto bf16_fn = ck::select_w4a8_ukernel(MR, NV, ck::ActivationKind::none,
+            ck::S4SourceKind::kS8, ck::S4OutputKind::kBf16,
+            ck::S4SrcScaleGranularity::kPerGroup);
+    ASSERT_NE(bf16_fn, nullptr);
+    bf16_fn(src.data(), K, static_cast<const int8_t *>(slab.p),
+            src_scale.data(), weight_scale.data(), ck::ScaleKind::kF32, nullptr,
+            ck::BiasKind::none, bf16_out.data(), N, nullptr, 0, K, group_size,
+            N);
+
+    const auto check = [expected](const char *output_kind, float zero_dot,
+                               float nonzero_dot) {
+        EXPECT_EQ(zero_dot, 0.0f) << "output=" << output_kind
+                                  << " zero dot produced " << zero_dot;
+        EXPECT_TRUE(std::isfinite(nonzero_dot))
+                << "output=" << output_kind << " expected=" << expected
+                << " observed=" << nonzero_dot;
+        if (std::isfinite(nonzero_dot)) {
+            EXPECT_NEAR(nonzero_dot, expected, expected * 0.01f)
+                    << "output=" << output_kind << " expected=" << expected
+                    << " observed=" << nonzero_dot;
+        }
+    };
+    check("F32", f32_out[0], f32_out[1]);
+    check("BF16", static_cast<float>(bf16_out[0]),
+            static_cast<float>(bf16_out[1]));
+}
 
 // Gated acts against a CANONICAL-order reference: validates the
 // split-halves pack permute, the per-group scale permute the N-tile
 // hoist applies, and the pair-store epilogue as one contract.
 class CkUkernelS4Gated
-    : public ::testing::TestWithParam<std::tuple<int, int, int, int>> {};
+    : public ::testing::TestWithParam<std::tuple<int, int, int, int, bool>> {};
 
 TEST_P(CkUkernelS4Gated, MatchesCanonicalReference) {
     if (!ck::avx512vnni_available()) GTEST_SKIP() << "no AVX-512 VNNI";
-    const auto [K, group_size, pack_nr, act_sel] = GetParam();
+    const auto [K, group_size, pack_nr, act_sel, src_per_group] = GetParam();
     const int NV = pack_nr / 16;
     const int N = pack_nr * 2;
     const int half = N / 2, ldb = K, G = K / group_size;
@@ -250,7 +397,10 @@ TEST_P(CkUkernelS4Gated, MatchesCanonicalReference) {
 
     const int max_mr = ck::max_mr_for_nv_s4(NV);
     for (int MR = 1; MR <= max_mr; ++MR) {
-        auto fn = ck::select_w4a8_ukernel(MR, NV, act);
+        auto fn = ck::select_w4a8_ukernel(MR, NV, act, ck::S4SourceKind::kS8,
+                ck::S4OutputKind::kBf16,
+                src_per_group ? ck::S4SrcScaleGranularity::kPerGroup
+                              : ck::S4SrcScaleGranularity::kPerToken);
         ASSERT_NE(fn, nullptr);
 
         std::vector<uint8_t> A(static_cast<size_t>(MR) * K);
@@ -258,9 +408,12 @@ TEST_P(CkUkernelS4Gated, MatchesCanonicalReference) {
             for (int k = 0; k < K; ++k)
                 A[static_cast<size_t>(m) * K + k]
                         = static_cast<uint8_t>(a_at(m, k));
-        std::vector<float> ss(MR);
+        const int src_scale_groups = src_per_group ? G : 1;
+        std::vector<float> ss(static_cast<size_t>(MR) * src_scale_groups);
         for (int m = 0; m < MR; ++m)
-            ss[m] = sscale_at(m);
+            for (int g = 0; g < src_scale_groups; ++g)
+                ss[static_cast<size_t>(m) * src_scale_groups + g]
+                        = src_per_group ? sscale_at(m, g) : sscale_at(m);
 
         // Mirrors `materialise_f32_wei_scale(n_groups = G)`.
         std::vector<float> wperm(static_cast<size_t>(G) * N);
@@ -283,10 +436,10 @@ TEST_P(CkUkernelS4Gated, MatchesCanonicalReference) {
 
         for (int m = 0; m < MR; ++m)
             for (int i = 0; i < half; ++i) {
-                const double gate
-                        = ref_dot(m, i, K, group_size, /*bf16_scales=*/false);
-                const double up = ref_dot(
-                        m, half + i, K, group_size, /*bf16_scales=*/false);
+                const double gate = ref_dot(m, i, K, group_size,
+                        /*bf16_scales=*/false, src_per_group);
+                const double up = ref_dot(m, half + i, K, group_size,
+                        /*bf16_scales=*/false, src_per_group);
                 const double ref = (act == ck::ActivationKind::silu_and_mul)
                         ? silu(static_cast<float>(gate)) * up
                         : gelu_erf(static_cast<float>(gate)) * up;
@@ -304,7 +457,8 @@ INSTANTIATE_TEST_SUITE_P(Shapes, CkUkernelS4Gated,
         ::testing::Combine(::testing::Values(128, 256), // K
                 ::testing::Values(32, 128), // group_size
                 ::testing::Values(32, 64), // pack_nr
-                ::testing::Values(0, 1))); // silu / gelu
+                ::testing::Values(0, 1), // silu / gelu
+                ::testing::Bool())); // per-token / per-group source scale
 
 TEST(CkUkernelS4, RoutedU8ModeMatchesS8AndStoresF32) {
     if (!ck::avx512vnni_available()) GTEST_SKIP() << "no AVX-512 VNNI";
@@ -390,7 +544,18 @@ TEST(CkUkernelS4, SelectorRefusesOutOfRange) {
         const int max_mr = ck::max_mr_for_nv_s4(NV);
         EXPECT_LE(max_mr, ck::kMaxMR);
         for (int mr = 1; mr <= max_mr; ++mr) {
-            EXPECT_NE(ck::select_w4a8_ukernel(mr, NV, ck::ActivationKind::none),
+            const auto legacy
+                    = ck::select_w4a8_ukernel(mr, NV, ck::ActivationKind::none);
+            EXPECT_NE(legacy, nullptr) << "NV=" << NV << " MR=" << mr;
+            EXPECT_EQ(legacy,
+                    ck::select_w4a8_ukernel(mr, NV, ck::ActivationKind::none,
+                            ck::S4SourceKind::kS8, ck::S4OutputKind::kBf16,
+                            ck::S4SrcScaleGranularity::kPerToken))
+                    << "the default selector must preserve the existing "
+                       "per-token specialization";
+            EXPECT_NE(ck::select_w4a8_ukernel(mr, NV, ck::ActivationKind::none,
+                              ck::S4SourceKind::kS8, ck::S4OutputKind::kBf16,
+                              ck::S4SrcScaleGranularity::kPerGroup),
                     nullptr)
                     << "NV=" << NV << " MR=" << mr;
         }
@@ -404,4 +569,12 @@ TEST(CkUkernelS4, SelectorRefusesOutOfRange) {
     // NV outside {2, 4} has no instantiation.
     EXPECT_EQ(ck::select_w4a8_ukernel(1, 3, ck::ActivationKind::none), nullptr);
     EXPECT_EQ(ck::select_w4a8_ukernel(1, 1, ck::ActivationKind::none), nullptr);
+    EXPECT_NE(ck::select_w4a8_ukernel(1, 2, ck::ActivationKind::none,
+                      ck::S4SourceKind::kU8Zp128, ck::S4OutputKind::kBf16,
+                      ck::S4SrcScaleGranularity::kPerGroup),
+            nullptr);
+    EXPECT_NE(ck::select_w4a8_ukernel(1, 2, ck::ActivationKind::none,
+                      ck::S4SourceKind::kU8Zp128, ck::S4OutputKind::kF32,
+                      ck::S4SrcScaleGranularity::kPerGroup),
+            nullptr);
 }

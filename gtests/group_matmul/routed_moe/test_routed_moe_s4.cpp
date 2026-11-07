@@ -164,6 +164,7 @@ struct s4_problem {
     int64_t ids_stride = 0;
     int64_t weights_stride = 0;
     int32_t threads = 1;
+    bool activation_per_group = false;
     routed_moe_activation_t activation = routed_moe_activation_t::silu_and_mul;
 
     std::vector<uint16_t> src;
@@ -278,8 +279,9 @@ struct s4_problem {
         p.topk_weights = weights.data();
         p.topk_weights_stride = weights_stride;
         p.activation = activation;
-        p.quant_scheme
-                = routed_moe_quant_t::sym_per_group_w4a8_dynamic_per_token;
+        p.quant_scheme = activation_per_group
+                ? routed_moe_quant_t::sym_per_group_w4a8_dynamic_per_group
+                : routed_moe_quant_t::sym_per_group_w4a8_dynamic_per_token;
         p.gate_up_group_size = gate_group_size;
         p.down_group_size = down_group_size;
         p.num_threads = threads;
@@ -298,8 +300,14 @@ struct s4_call {
     std::vector<uint16_t> secondary_wei_scale_bf16;
 
     explicit s4_call(s4_problem &pb, bool bf16_scales = false)
-        : primary_src_scale(static_cast<size_t>(pb.M), 0.f)
-        , secondary_src_scale(static_cast<size_t>(pb.M), 0.f) {
+        : primary_src_scale(static_cast<size_t>(pb.M)
+                          * (pb.activation_per_group ? pb.K / pb.gate_group_size
+                                                     : 1),
+                  0.f)
+        , secondary_src_scale(static_cast<size_t>(pb.M)
+                          * (pb.activation_per_group ? pb.N / pb.down_group_size
+                                                     : 1),
+                  0.f) {
         if (bf16_scales) {
             primary_wei_scale_bf16 = f32_vector_to_bf16(pb.s13);
             secondary_wei_scale_bf16 = f32_vector_to_bf16(pb.s2);
@@ -308,7 +316,7 @@ struct s4_call {
                 = [&](group_matmul_projection_params &projection, int output,
                           int input, const void *weight, const void *scale,
                           data_type_t scale_dt, int64_t groups,
-                          std::vector<float> &src_scale) {
+                          int64_t src_groups, std::vector<float> &src_scale) {
             projection.output_size = output;
             projection.input_size = input;
             projection.trans_weight = true;
@@ -322,7 +330,7 @@ struct s4_call {
             projection.params.weight_cache_type = 1;
             projection.params.quant_params.src_scale.buff = src_scale.data();
             projection.params.quant_params.src_scale.dt = data_type_t::f32;
-            projection.params.quant_params.src_scale.dims = {pb.M, 1};
+            projection.params.quant_params.src_scale.dims = {pb.M, src_groups};
             projection.params.quant_params.wei_scale.buff = scale;
             projection.params.quant_params.wei_scale.dt = scale_dt;
             projection.params.quant_params.wei_scale.dims
@@ -336,13 +344,17 @@ struct s4_call {
                 bf16_scales ? static_cast<const void *>(
                                       primary_wei_scale_bf16.data())
                             : static_cast<const void *>(pb.s13.data()),
-                scale_dt, pb.K / pb.gate_group_size, primary_src_scale);
+                scale_dt, pb.K / pb.gate_group_size,
+                pb.activation_per_group ? pb.K / pb.gate_group_size : 1,
+                primary_src_scale);
         init(secondary, static_cast<int>(pb.K), static_cast<int>(pb.N),
                 pb.w2.data(),
                 bf16_scales ? static_cast<const void *>(
                                       secondary_wei_scale_bf16.data())
                             : static_cast<const void *>(pb.s2.data()),
-                scale_dt, pb.N / pb.down_group_size, secondary_src_scale);
+                scale_dt, pb.N / pb.down_group_size,
+                pb.activation_per_group ? pb.N / pb.down_group_size : 1,
+                secondary_src_scale);
         routing.topk_ids = pb.ids.data();
         routing.topk_ids_stride = static_cast<int>(pb.ids_stride);
         routing.topk_weights = pb.weights.data();
@@ -363,7 +375,12 @@ struct s4_call {
     }
 };
 
-enum class oracle_reduction_t { fused_f32, scatter_bf16, grouped_bf16 };
+enum class oracle_reduction_t {
+    fused_f32,
+    scatter_bf16,
+    scatter_f32,
+    grouped_bf16
+};
 
 struct oracle_options {
     oracle_reduction_t reduction = oracle_reduction_t::fused_f32;
@@ -374,7 +391,7 @@ struct oracle_options {
 
 struct scalar_quantized_row {
     std::vector<int32_t> values;
-    float scale = 0.f;
+    std::vector<float> scales;
 };
 
 template <typename Load>
@@ -386,13 +403,31 @@ scalar_quantized_row quantize_scalar(int64_t width, const Load &load) {
     amax = std::max(amax, 1e-7f);
     scalar_quantized_row result;
     result.values.resize(static_cast<size_t>(width));
-    result.scale = amax / 127.f;
+    result.scales = {amax / 127.f};
     const float inverse = 127.f / amax;
     for (int64_t i = 0; i < width; ++i) {
         const int32_t rounded
                 = static_cast<int32_t>(std::nearbyintf(load(i) * inverse));
         result.values[static_cast<size_t>(i)]
                 = std::max<int32_t>(-127, std::min<int32_t>(127, rounded));
+    }
+    return result;
+}
+
+template <typename Load>
+scalar_quantized_row quantize_scalar_grouped(
+        int64_t width, int64_t group_size, const Load &load) {
+    scalar_quantized_row result;
+    result.values.resize(static_cast<size_t>(width));
+    const int64_t groups = width / group_size;
+    result.scales.resize(static_cast<size_t>(groups));
+    for (int64_t g = 0; g < groups; ++g) {
+        const int64_t off = g * group_size;
+        const scalar_quantized_row group = quantize_scalar(
+                group_size, [&](int64_t k) { return load(off + k); });
+        std::copy(group.values.begin(), group.values.end(),
+                result.values.begin() + off);
+        result.scales[static_cast<size_t>(g)] = group.scales[0];
     }
     return result;
 }
@@ -404,8 +439,9 @@ float scalar_activation(routed_moe_activation_t activation, float value) {
     return value / (1.f + std::exp(-value));
 }
 
-std::vector<uint16_t> scalar_s4_moe(
-        const s4_problem &pb, const oracle_options &options = {}) {
+std::vector<uint16_t> scalar_s4_moe(const s4_problem &pb,
+        const oracle_options &options = {},
+        std::vector<float> *f32_output = nullptr) {
     const int64_t gate_groups = pb.K / pb.gate_group_size;
     const int64_t down_groups = pb.N / pb.down_group_size;
     const int64_t gate_group_stride = 2 * pb.N;
@@ -418,16 +454,21 @@ std::vector<uint16_t> scalar_s4_moe(
             = options.down_scale != nullptr ? options.down_scale : pb.s2.data();
 
     std::vector<uint16_t> output(static_cast<size_t>(pb.M * pb.K), 0);
+    if (f32_output != nullptr) {
+        f32_output->assign(static_cast<size_t>(pb.M * pb.K), 0.0f);
+    }
     std::vector<float> intermediate(static_cast<size_t>(pb.N));
     std::vector<float> down(static_cast<size_t>(pb.topk * pb.K), 0.f);
     std::vector<int32_t> local_experts(static_cast<size_t>(pb.topk), -1);
 
     for (int64_t m = 0; m < pb.M; ++m) {
-        const scalar_quantized_row source_quant
-                = quantize_scalar(pb.K, [&](int64_t k) {
+        const auto source_load = [&](int64_t k) {
             return bf16_to_f32(
                     pb.src[static_cast<size_t>(m * pb.src_stride + k)]);
-        });
+        };
+        const scalar_quantized_row source_quant = pb.activation_per_group
+                ? quantize_scalar_grouped(pb.K, pb.gate_group_size, source_load)
+                : quantize_scalar(pb.K, source_load);
         std::fill(down.begin(), down.end(), 0.f);
         std::fill(local_experts.begin(), local_experts.end(), -1);
 
@@ -461,19 +502,29 @@ std::vector<uint16_t> scalar_s4_moe(
                     const float *group_scale = gate_scale
                             + expert * gate_expert_stride
                             + group * gate_group_stride;
-                    gate += static_cast<float>(gate_dot) * group_scale[j];
-                    up += static_cast<float>(up_dot) * group_scale[pb.N + j];
+                    const float src_scale = pb.activation_per_group
+                            ? source_quant.scales[static_cast<size_t>(group)]
+                            : 1.f;
+                    gate += static_cast<float>(gate_dot) * group_scale[j]
+                            * src_scale;
+                    up += static_cast<float>(up_dot) * group_scale[pb.N + j]
+                            * src_scale;
                 }
-                gate *= source_quant.scale;
-                up *= source_quant.scale;
+                if (!pb.activation_per_group) {
+                    gate *= source_quant.scales[0];
+                    up *= source_quant.scales[0];
+                }
                 intermediate[static_cast<size_t>(j)] = bf16_to_f32(f32_to_bf16(
                         scalar_activation(pb.activation, gate) * up));
             }
 
-            const scalar_quantized_row inter_quant
-                    = quantize_scalar(pb.N, [&](int64_t j) {
+            const auto inter_load = [&](int64_t j) {
                 return intermediate[static_cast<size_t>(j)];
-            });
+            };
+            const scalar_quantized_row inter_quant = pb.activation_per_group
+                    ? quantize_scalar_grouped(
+                              pb.N, pb.down_group_size, inter_load)
+                    : quantize_scalar(pb.N, inter_load);
             float *down_row = down.data() + t * pb.K;
             for (int64_t k = 0; k < pb.K; ++k) {
                 float value = 0.f;
@@ -488,9 +539,14 @@ std::vector<uint16_t> scalar_s4_moe(
                     }
                     const float scale = down_scale[expert * down_expert_stride
                             + group * down_group_stride + k];
-                    value += static_cast<float>(dot) * scale;
+                    const float src_scale = pb.activation_per_group
+                            ? inter_quant.scales[static_cast<size_t>(group)]
+                            : 1.f;
+                    value += static_cast<float>(dot) * scale * src_scale;
                 }
-                down_row[k] = value * inter_quant.scale;
+                down_row[k] = pb.activation_per_group
+                        ? value
+                        : value * inter_quant.scales[0];
             }
         }
 
@@ -521,6 +577,9 @@ std::vector<uint16_t> scalar_s4_moe(
                     if (options.reduction == oracle_reduction_t::scatter_bf16) {
                         value = bf16_to_f32(f32_to_bf16(value * route_weight));
                         result += value;
+                    } else if (options.reduction
+                            == oracle_reduction_t::scatter_f32) {
+                        result += value * route_weight;
                     } else {
                         // The grouped fallback writes W2 to BF16, then its
                         // generic MoE post-op applies router weights in FP32.
@@ -529,7 +588,9 @@ std::vector<uint16_t> scalar_s4_moe(
                     }
                 }
             }
-            output[static_cast<size_t>(m * pb.K + k)] = f32_to_bf16(result);
+            const size_t output_index = static_cast<size_t>(m * pb.K + k);
+            output[output_index] = f32_to_bf16(result);
+            if (f32_output != nullptr) { (*f32_output)[output_index] = result; }
         }
     }
     return output;
@@ -759,7 +820,9 @@ TEST_F(RoutedMoES4Capability, ReportsPerGroupSignedW4Envelope) {
             (1u << static_cast<uint32_t>(
                      routed_moe_quant_t::sym_per_oc_w8a8_dynamic_per_token))
                     | (1u << static_cast<uint32_t>(routed_moe_quant_t::
-                                       sym_per_group_w4a8_dynamic_per_token)));
+                                       sym_per_group_w4a8_dynamic_per_token))
+                    | (1u << static_cast<uint32_t>(routed_moe_quant_t::
+                                       sym_per_group_w4a8_dynamic_per_group)));
     EXPECT_EQ(capability.wei_dtype_mask,
             (1u << static_cast<uint32_t>(data_type_t::s8))
                     | (1u << static_cast<uint32_t>(data_type_t::s4)));
@@ -859,6 +922,107 @@ TEST_F(RoutedMoES4Execute, NullGeneratedSourceScaleAcceptsF32AndBf16Metadata) {
         oracle.reduction = oracle_reduction_t::fused_f32;
         ASSERT_NO_FATAL_FAILURE(check_native_high_level(
                 pb, call, oracle, w4_reduction_path_t::fused_f32));
+    }
+}
+
+TEST_F(RoutedMoES4Execute, PerGroupActivationsUseNativePathAndMatchOracle) {
+    struct group_case {
+        int64_t K;
+        int64_t N;
+        int64_t gate_group;
+        int64_t down_group;
+    };
+    for (const auto test_case :
+            {group_case {128, 64, 32, 32}, group_case {64, 96, 8, 24}}) {
+        SCOPED_TRACE(::testing::Message()
+                << "K=" << test_case.K << " N=" << test_case.N
+                << " gate_group=" << test_case.gate_group
+                << " down_group=" << test_case.down_group);
+        group_matmul_routed_moe_flush_weight_cache();
+        reset_grouped_s4_caches();
+        s4_problem pb;
+        pb.K = test_case.K;
+        pb.N = test_case.N;
+        pb.gate_group_size = test_case.gate_group;
+        pb.down_group_size = test_case.down_group;
+        pb.activation_per_group = true;
+        pb.build(8, 0x4437u + static_cast<uint32_t>(test_case.K));
+        s4_call call(pb);
+        oracle_options oracle;
+        oracle.reduction = oracle_reduction_t::fused_f32;
+        ASSERT_NO_FATAL_FAILURE(check_native_high_level(
+                pb, call, oracle, w4_reduction_path_t::fused_f32));
+    }
+}
+
+TEST_F(RoutedMoES4Execute, F32OutputUsesNativeW4Reduction) {
+    s4_problem pb;
+    pb.M = 4;
+    pb.topk = 2;
+    pb.threads = 1;
+    pb.build(4, 0xF32u);
+
+    routed_moe_params params = pb.params();
+    std::vector<float> output(static_cast<size_t>(pb.M * pb.K), -99.0f);
+    params.dst = output.data();
+    params.dst_stride = pb.K;
+    params.dst_dt = data_type_t::f32;
+
+    native_w4_capture_guard capture;
+    ASSERT_EQ(execute(params), status_t::success);
+    EXPECT_EQ(capture.path.load(std::memory_order_relaxed),
+            w4_reduction_path_t::fused_f32);
+
+    const auto expected = scalar_s4_moe(pb);
+    ASSERT_EQ(output.size(), expected.size());
+    for (size_t i = 0; i < output.size(); ++i) {
+        const float reference = bf16_to_f32(expected[i]);
+        ASSERT_TRUE(std::isfinite(output[i])) << "element " << i;
+        EXPECT_NEAR(output[i], reference, 0.05f + 0.05f * std::fabs(reference))
+                << "element " << i;
+    }
+}
+
+TEST_F(RoutedMoES4Execute, F32FusedReductionHandlesInactiveExpertMapSlot) {
+    s4_problem pb;
+    pb.M = 4;
+    pb.topk = 2;
+    pb.threads = 1;
+    pb.build(4, 0xF32Au);
+
+    // Give every token one resident and one non-resident route. K=128 and one
+    // requested thread force fused reduction (K / block_n == 4 >= 1), where
+    // no per-slot F32 scatter buffer is allocated.
+    for (int64_t m = 0; m < pb.M; ++m) {
+        pb.ids[static_cast<size_t>(m * pb.ids_stride)] = 0;
+        pb.ids[static_cast<size_t>(m * pb.ids_stride + 1)] = 1;
+    }
+    std::vector<int32_t> map(static_cast<size_t>(pb.E));
+    std::iota(map.begin(), map.end(), 0);
+    map[1] = -1;
+
+    routed_moe_params params = pb.params();
+    std::vector<float> output(static_cast<size_t>(pb.M * pb.K), -99.0f);
+    params.dst = output.data();
+    params.dst_stride = pb.K;
+    params.dst_dt = data_type_t::f32;
+    params.expert_map = map.data();
+    params.expert_map_size = static_cast<int64_t>(map.size());
+
+    native_w4_capture_guard capture;
+    ASSERT_EQ(execute(params), status_t::success);
+    EXPECT_EQ(capture.path.load(std::memory_order_relaxed),
+            w4_reduction_path_t::fused_f32);
+
+    oracle_options oracle;
+    oracle.expert_map = map.data();
+    const auto expected = scalar_s4_moe(pb, oracle);
+    ASSERT_EQ(output.size(), expected.size());
+    for (size_t i = 0; i < output.size(); ++i) {
+        const float reference = bf16_to_f32(expected[i]);
+        ASSERT_TRUE(std::isfinite(output[i])) << "element " << i;
+        EXPECT_NEAR(output[i], reference, 0.05f + 0.05f * std::fabs(reference))
+                << "element " << i;
     }
 }
 
@@ -1145,6 +1309,52 @@ TEST_F(RoutedMoES4Reduction, CapturesScatterPathAndMatchesScatterOracle) {
         ASSERT_NO_FATAL_FAILURE(check_native_direct(pb, params, oracle,
                 w4_reduction_path_t::scatter_bf16, &output));
         EXPECT_EQ(output, reference);
+    }
+}
+
+TEST_F(RoutedMoES4Reduction, F32ScatterHandlesInactiveExpertMapSlot) {
+    constexpr int requested_threads = 3;
+    if (omp_get_max_threads() < requested_threads) {
+        GTEST_SKIP() << "scatter requires more than K/32 effective threads";
+    }
+
+    s4_problem pb;
+    pb.K = 64; // Two output-column blocks; three threads force scatter.
+    pb.N = 64;
+    pb.build(8, 0xF32Bu);
+    for (int64_t m = 0; m < pb.M; ++m) {
+        pb.ids[static_cast<size_t>(m * pb.ids_stride)] = 0;
+        pb.ids[static_cast<size_t>(m * pb.ids_stride + 1)] = 1;
+    }
+    std::vector<int32_t> map(static_cast<size_t>(pb.E));
+    std::iota(map.begin(), map.end(), 0);
+    map[1] = -1;
+
+    routed_moe_params params = pb.params();
+    std::vector<float> output(static_cast<size_t>(pb.M * pb.K), -99.0f);
+    params.dst = output.data();
+    params.dst_stride = pb.K;
+    params.dst_dt = data_type_t::f32;
+    params.expert_map = map.data();
+    params.expert_map_size = static_cast<int64_t>(map.size());
+    params.num_threads = requested_threads;
+
+    native_w4_capture_guard capture;
+    ASSERT_EQ(execute(params), status_t::success);
+    EXPECT_EQ(capture.path.load(std::memory_order_relaxed),
+            w4_reduction_path_t::scatter_f32);
+
+    oracle_options oracle;
+    oracle.reduction = oracle_reduction_t::scatter_f32;
+    oracle.expert_map = map.data();
+    std::vector<float> expected;
+    (void)scalar_s4_moe(pb, oracle, &expected);
+    ASSERT_EQ(output.size(), expected.size());
+    for (size_t i = 0; i < output.size(); ++i) {
+        ASSERT_TRUE(std::isfinite(output[i])) << "element " << i;
+        EXPECT_NEAR(
+                output[i], expected[i], 0.05f + 0.05f * std::fabs(expected[i]))
+                << "element " << i;
     }
 }
 

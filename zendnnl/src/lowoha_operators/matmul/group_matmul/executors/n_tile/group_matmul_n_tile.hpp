@@ -267,7 +267,9 @@ inline void prepare_n_tile_custom_kernel(grp_matmul_gated_act_t act,
         // Forwarded to `prepare_for_call`: false when the call will not
         // run the kernel even if the context prepares.
         bool allow_in_place = true,
-        const std::vector<size_t> &wei_capacities = {}) {
+        const std::vector<size_t> &wei_capacities = {},
+        // W4A8 source-scale groups per row; one keeps the per-token path.
+        int src_scale_groups = 1) {
     if (!get_grp_matmul_custom_kernel()) { return; }
     // Master CK env is ON; gate the DQ-INT8 sub-toggle separately so
     // operators can toggle int8 without disabling bf16.  The int8 CK path
@@ -296,7 +298,7 @@ inline void prepare_n_tile_custom_kernel(grp_matmul_gated_act_t act,
             weight, is_weights_const, kctx, dynamic_quant, compute_dtype,
             weights_prepacked, group_size, wei_scale_grp_stride,
             weights_aocl_prepacked, num_threads, weight_cache_mode,
-            allow_in_place, wei_capacities);
+            allow_in_place, wei_capacities, src_scale_groups);
 }
 
 /// Effective N-column alignment for the per-thread split:
@@ -309,8 +311,8 @@ inline void prepare_n_tile_custom_kernel(grp_matmul_gated_act_t act,
 ///
 /// `ck_will_run` is the resolved `use_custom`, NOT `kctx.enabled`.  The two
 /// differ whenever the context prepared successfully but the call was then
-/// disqualified -- a per-group `{G, N}` weight scale, or the wide fused
-/// swiglu guard.  Widening to `pack_nr` in those cases was wrong twice
+/// disqualified -- an unsupported INT8 per-group scale, or the wide fused
+/// swiglu guard. Widening to `pack_nr` in those cases was wrong twice
 /// over: the tiles are handed to AOCL DLP, which has no pack_nr contract,
 /// and the coarser split produced a per-tile cache key set that no warmer
 /// builds, so every tile missed on the first decode call.  Keying on

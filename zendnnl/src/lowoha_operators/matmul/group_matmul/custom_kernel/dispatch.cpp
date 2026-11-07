@@ -166,6 +166,7 @@ void CallContext::reset() {
     // kernel walk the wrong number of compensation rows.
     group_size = 0;
     wei_scale_grp_stride = 0;
+    src_scale_groups = 1;
     packed_ptrs.fill(nullptr);
     packed_ptrs_int8.fill(nullptr);
     packed_ptrs_f16.fill(nullptr);
@@ -263,14 +264,20 @@ KernelVariant resolve_variant(data_type_t src, data_type_t wei, data_type_t dst,
         if (dst == data_type_t::f16) return KernelVariant::kF16_F16_F16;
         if (dst == data_type_t::f32) return KernelVariant::kF16_F16_F32;
     }
-    // W4A8 — one variant only: `is_w4a8_config` pins compute to s8
-    // (symmetric) and dst to bf16.  Matching here does not engage the
-    // kernel; `prepare_for_call` still applies the shape gates.
-    const bool s4_src = (dynamic_quant && src == data_type_t::bf16)
+    // W4A8 — symmetric s8 compute over packed s4 weights.  F32 output is
+    // valid for act=none; the kernel-table gate below rejects F32 gated
+    // activation stores.
+    const bool s4_src
+            = (dynamic_quant
+                      && (src == data_type_t::bf16 || src == data_type_t::f32))
             || (src == data_type_t::s8);
     if (s4_src && wei == data_type_t::s4 && dst == data_type_t::bf16
             && compute_dtype == data_type_t::s8) {
         return KernelVariant::kS8_S4_BF16_SYM;
+    }
+    if (s4_src && wei == data_type_t::s4 && dst == data_type_t::f32
+            && compute_dtype == data_type_t::s8) {
+        return KernelVariant::kS8_S4_F32_SYM;
     }
     return KernelVariant::kUnsupported;
 }
@@ -450,10 +457,18 @@ status_t fill_kernel_table_f16_kblock(
 // tighter MR bound.  Slots above it stay null, so `dispatch_tile` must
 // clamp its MR chunking to `ctx.max_mr`.
 status_t fill_kernel_table_s4(int NV, ActivationKind act_kind,
+        int src_scale_groups, OutputType dst_dt,
         w4a8_ukernel_fn_t (&kernel_table)[kMaxMR + 1]) {
     const int max_mr = max_mr_for_nv_s4(NV);
+    const S4SrcScaleGranularity granularity = src_scale_groups > 1
+            ? S4SrcScaleGranularity::kPerGroup
+            : S4SrcScaleGranularity::kPerToken;
+    const S4OutputKind output = dst_dt == OutputType::kF32
+            ? S4OutputKind::kF32
+            : S4OutputKind::kBf16;
     for (int mr = 1; mr <= max_mr; ++mr) {
-        kernel_table[mr] = select_w4a8_ukernel(mr, NV, act_kind);
+        kernel_table[mr] = select_w4a8_ukernel(
+                mr, NV, act_kind, S4SourceKind::kS8, output, granularity);
         if (kernel_table[mr] == nullptr) return status_t::failure;
     }
     return status_t::success;
@@ -478,7 +493,7 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
         int wei_scale_grp_stride,
         const std::vector<bool> &weights_aocl_prepacked, int32_t num_threads,
         int32_t weight_cache_mode, bool allow_in_place,
-        const std::vector<size_t> &wei_capacities) {
+        const std::vector<size_t> &wei_capacities, int src_scale_groups) {
 
     // Reset the full CallContext to defaults on entry.  Callers may
     // reuse a single context across calls (e.g. an OMP region that
@@ -733,6 +748,11 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
                 "W4A8 custom kernel requires the caller's {G, N} weight "
                 "scale group stride (the expert's full N)");
     }
+    if (is_w4a8_variant(variant) && src_scale_groups <= 0) {
+        return refuse_w4a8("s4_missing_src_scale_groups",
+                "W4A8 custom kernel requires a positive source-scale group "
+                "count");
+    }
     // Split-halves gated acts: the pack re-permutes weight columns, so
     // the `{G, N}` scale must be permuted on all G rows to match —
     // see `materialise_f32_wei_scale_cached`'s `n_groups` in the N-tile
@@ -926,6 +946,12 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
             return refuse_w4a8("s4_K_not_multiple_of_group_size",
                     "W4A8 custom kernel requires K divisible by "
                     "group_size; falling back to AOCL DLP");
+        if (is_w4a8_variant(variant) && src_scale_groups > 1
+                && src_scale_groups != K[i] / group_size) {
+            return refuse_w4a8("s4_src_wei_group_count_mismatch",
+                    "W4A8 custom kernel requires activation and weight "
+                    "scales to use the same K-group count");
+        }
         if (alpha[i] != 1.0f || beta[i] != 0.0f)
             return refuse("alpha_beta_not_supported",
                     "custom kernel requires alpha=1, beta=0 per expert");
@@ -974,6 +1000,7 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
             || (is_int8_variant(variant) && group_size == 32)) {
         out.group_size = group_size;
         out.wei_scale_grp_stride = wei_scale_grp_stride;
+        out.src_scale_groups = src_scale_groups;
     }
     out.kblock_auto = se_kblock_auto(num_ops, m_max);
     out.single_expert = (num_ops == 1);
@@ -1027,7 +1054,8 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
                     "is intentionally rejected (BF16 dst only)");
         }
     } else if (is_w4a8_variant(out.variant)) {
-        if (fill_kernel_table_s4(out.NV, out.act_kind, out.kernel_table_s4)
+        if (fill_kernel_table_s4(out.NV, out.act_kind, out.src_scale_groups,
+                    dst_dt_for_variant(out.variant), out.kernel_table_s4)
                 != status_t::success) {
             return refuse_w4a8("kernel_table_s4_fill_failed",
                     "no W4A8 microkernel for this (NV, act_kind) tuple");
@@ -1391,6 +1419,8 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
                 : (out.variant == KernelVariant::kF16_F16_F32) ? "f16_f16_f32"
                 : (out.variant == KernelVariant::kS8_S4_BF16_SYM)
                 ? "s8_s4_bf16_sym"
+                : (out.variant == KernelVariant::kS8_S4_F32_SYM)
+                ? "s8_s4_f32_sym"
                 : "unsupported";
         apilog_verbose("[GRP_MATMUL.CK ENGAGED] variant=", variant_name,
                 " group_size=", out.group_size, // 0 for non-W4A8 families
@@ -1809,8 +1839,7 @@ inline void dispatch_tile_s4(const CallContext &ctx, int expert_idx, int M,
         const void *src_scale_full, const void *wei_scale_full) {
 
     assert(src_scale_full != nullptr
-         && "dispatch_tile_s4: N-tile hoist must populate the per-token "
-            "src scale");
+            && "dispatch_tile_s4: N-tile hoist must populate the source scale");
     assert(wei_scale_full != nullptr
             && "dispatch_tile_s4: caller must thread the {G, N} wei scale");
     assert(ctx.group_size > 0
@@ -1819,7 +1848,7 @@ inline void dispatch_tile_s4(const CallContext &ctx, int expert_idx, int M,
     const int8_t *Bpacked_full = ctx.packed_ptrs_s4[expert_idx];
     const auto *A_bytes = static_cast<const uint8_t *>(src);
     std::byte *Tight_bytes = static_cast<std::byte *>(tight_dst);
-    constexpr size_t dst_elem_bytes_s4 = sizeof(bfloat16_t);
+    const size_t dst_elem_bytes_s4 = dst_elem_bytes(ctx.variant);
 
     // Must stay in lockstep with `bytes_per_oblock` in
     // `pack_s4_vnni_impl`.  Both divisions are exact — `prepare_for_call`
@@ -1873,7 +1902,8 @@ inline void dispatch_tile_s4(const CallContext &ctx, int expert_idx, int M,
             const uint8_t *A_chunk = A_bytes + static_cast<size_t>(m_off) * lda;
             const void *src_scale_chunk
                     = static_cast<const char *>(src_scale_full)
-                    + static_cast<size_t>(m_off) * scale_elem_bytes;
+                    + static_cast<size_t>(m_off) * ctx.src_scale_groups
+                            * scale_elem_bytes;
 
             // Gated acts write the halved [M, N/2] tight arena, so the
             // column origin halves; act=none writes the wide [M, N].

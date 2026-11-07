@@ -175,6 +175,41 @@ TEST(CkDispatchRouting, ScalarRouteOnlyForceCkLiftsNGate) {
     }
 }
 
+TEST(CkDispatchRouting, SingleExpertW4A8F32OutputIsRoutable) {
+    CK_SKIP_IF_NO_INT8_ISA();
+
+    ScalarRouteConfigGuard guard;
+    mt::CustomKernelOverride group_ck_on(true);
+    mt::CustomKernelInt8Override int8_ck_on(true);
+    mt::SingleExpertCkPolicy force_w4a8(1, 1, 1);
+    guard.config.set_custom_kernel_route(true);
+    guard.config.set_algo(static_cast<int32_t>(
+            zendnnl::common::matmul_algo_t::aocl_dlp_blocked));
+    guard.config.set_weight_cache(2);
+
+    constexpr int M = 1;
+    constexpr int N = 1280;
+    constexpr int K = 1280;
+    constexpr int kThreads = 32;
+    float wei_scale = 1.0f;
+
+    matmul_params p;
+    p.dtypes.src = data_type_t::bf16;
+    p.dtypes.wei = data_type_t::s4;
+    p.dtypes.dst = data_type_t::f32;
+    p.dtypes.bias = data_type_t::none;
+    p.dtypes.compute = data_type_t::s8;
+    p.dynamic_quant = true;
+    p.quant_params.src_scale.dt = data_type_t::f32;
+    p.quant_params.src_scale.dims = {M, 1};
+    p.quant_params.wei_scale.buff = &wei_scale;
+    p.quant_params.wei_scale.dt = data_type_t::f32;
+    p.quant_params.wei_scale.dims = {K / 64, N};
+
+    EXPECT_TRUE(zendnnl::lowoha::matmul::single_matmul_group_routable('r', M, N,
+            K, kThreads, 1, false, true, 1.0f, 0.0f, nullptr, K, true, p));
+}
+
 // A Whisper-shaped narrow quantized linear (K 1280, N 1280 on 32 threads is
 // 40 NR32 tiles, below decode's 64) runs prompt -> decode -> prompt through
 // `matmul_direct` under each single-expert CK knob setting, the split ones

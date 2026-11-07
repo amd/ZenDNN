@@ -242,6 +242,7 @@ inline bool group_matmul_custom_kernel_candidate(const ParamsVec &params,
         const std::vector<int> &M, const std::vector<int> &N,
         grp_matmul_gated_act_t fused_act) {
     size_t rep = params.size();
+    int64_t s4_groups = 0;
     for (size_t i = 0; i < params.size(); ++i) {
         if (i < M.size() && M[i] <= 0) { continue; }
         rep = i;
@@ -263,11 +264,10 @@ inline bool group_matmul_custom_kernel_candidate(const ParamsVec &params,
     const bool is_f16_call = custom_kernel::is_f16_variant(variant);
     if (is_f16_call && !get_grp_matmul_custom_kernel_f16()) { return false; }
 
-    // A per-group `{G, N}` weight scale on ANY active expert disqualifies the
-    // int8 custom kernel for the whole call -- it consumes per-token source
-    // scales only.  W4A8 normally has `{G, N}` weights, so exempt that side,
-    // but still reject a per-group `{M, G}` SOURCE scale: the s4 microkernel
-    // also reads only one source scale per row.
+    // A per-group `{G, N}` weight scale on ANY active INT8 expert disqualifies
+    // that custom kernel for the whole call. W4A8 normally has `{G, N}`
+    // weights and accepts either `{M,1}` per-token or matching `{M,G}`
+    // per-group source scales.
     for (size_t i = 0; i < params.size(); ++i) {
         if (i >= M.size() || i >= N.size() || M[i] <= 0) { continue; }
         if (!params[i].postop_.empty()
@@ -293,7 +293,21 @@ inline bool group_matmul_custom_kernel_candidate(const ParamsVec &params,
         }
         if (is_w4a8_config(params[i])) {
             const auto &ss = params[i].quant_params.src_scale;
-            if (ss.dims.size() == 2 && ss.dims[1] > 1) { return false; }
+            const auto &ws = params[i].quant_params.wei_scale;
+            const bool src_per_token = ss.dims.size() == 2 && ss.dims[0] == M[i]
+                    && ss.dims[1] == 1;
+            const bool src_per_group = ss.dims.size() == 2 && ss.dims[0] == M[i]
+                    && ws.dims.size() == 2 && ss.dims[1] == ws.dims[0]
+                    && ss.dims[1] > 1;
+            if (!src_per_token && !src_per_group) { return false; }
+            if (ws.dims.size() != 2 || ws.dims[0] < 1 || ws.dims[1] != N[i]) {
+                return false;
+            }
+            if (s4_groups == 0) {
+                s4_groups = ws.dims[0];
+            } else if (s4_groups != ws.dims[0]) {
+                return false;
+            }
             continue;
         }
         const auto &ws = params[i].quant_params.wei_scale;

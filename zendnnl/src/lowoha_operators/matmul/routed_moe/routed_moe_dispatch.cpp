@@ -1300,7 +1300,8 @@ bool fast_w4_candidate(const char layout_src, const bool trans_src,
         const group_matmul_routing_params &routing,
         const group_matmul_projection_params *secondary,
         const grp_matmul_gated_act_params *gated_act, int64_t &gate_group_size,
-        int64_t &down_group_size) {
+        int64_t &down_group_size, bool &per_group_activation) {
+    per_group_activation = false;
     if (!fast_common_candidate(layout_src, trans_src, num_experts, primary,
                 routing, secondary, gated_act)
             || primary.wei_buffer_capacity_bytes != 0
@@ -1313,34 +1314,49 @@ bool fast_w4_candidate(const char layout_src, const bool trans_src,
     }
     const auto &p1 = primary.params;
     const auto &p2 = secondary->params;
-    const auto per_token_scale
-            = [num_tokens](
-                      const matmul_quantization_params_t::matmul_quant_t &q) {
+    const auto source_scale_matches =
+            [num_tokens](const matmul_quantization_params_t::matmul_quant_t &q,
+                    const int64_t groups) {
         return (q.dt == data_type_t::f32 || q.dt == data_type_t::bf16)
                 && q.dims.size() == 2 && q.dims[0] == num_tokens
-                && q.dims[1] == 1;
+                && q.dims[1] == groups;
     };
-    return p1.dtypes.src == data_type_t::bf16
-            && p1.dtypes.wei == data_type_t::s4
-            && p1.dtypes.dst == data_type_t::bf16
-            && p1.dtypes.compute == data_type_t::s8
-            && p2.dtypes.src == data_type_t::bf16
-            && p2.dtypes.wei == data_type_t::s4
-            && p2.dtypes.dst == data_type_t::bf16
-            && p2.dtypes.compute == data_type_t::s8 && p1.dynamic_quant
-            && p2.dynamic_quant && per_token_scale(p1.quant_params.src_scale)
-            && tight_expert_group_scale(p1.quant_params.wei_scale, num_experts,
+    if (p1.dtypes.src != data_type_t::bf16 || p1.dtypes.wei != data_type_t::s4
+            || p1.dtypes.dst != data_type_t::bf16
+            || p1.dtypes.compute != data_type_t::s8
+            || p2.dtypes.src != data_type_t::bf16
+            || p2.dtypes.wei != data_type_t::s4
+            || p2.dtypes.dst != data_type_t::bf16
+            || p2.dtypes.compute != data_type_t::s8 || !p1.dynamic_quant
+            || !p2.dynamic_quant
+            || !tight_expert_group_scale(p1.quant_params.wei_scale, num_experts,
                     primary.input_size, primary.output_size, gate_group_size)
-            && tight_expert_group_scale(p2.quant_params.wei_scale, num_experts,
+            || !tight_expert_group_scale(p2.quant_params.wei_scale, num_experts,
                     secondary->input_size, secondary->output_size,
                     down_group_size)
-            && p1.quant_params.wei_scale.dt == p2.quant_params.wei_scale.dt
-            && no_quant_buffer(p1.quant_params.wei_zp)
-            && no_quant_buffer(p2.quant_params.wei_zp)
-            && no_quant_buffer(p1.quant_params.src_zp)
-            && no_quant_buffer(p2.quant_params.src_zp)
-            && effective_weight_cache_type(p1.weight_cache_type) != 0
-            && effective_weight_cache_type(p2.weight_cache_type) != 0;
+            || p1.quant_params.wei_scale.dt != p2.quant_params.wei_scale.dt
+            || !no_quant_buffer(p1.quant_params.wei_zp)
+            || !no_quant_buffer(p2.quant_params.wei_zp)
+            || !no_quant_buffer(p1.quant_params.src_zp)
+            || !no_quant_buffer(p2.quant_params.src_zp)
+            || effective_weight_cache_type(p1.weight_cache_type) == 0
+            || effective_weight_cache_type(p2.weight_cache_type) == 0) {
+        return false;
+    }
+
+    const int64_t gate_groups = primary.input_size / gate_group_size;
+    const int64_t down_groups = secondary->input_size / down_group_size;
+    const bool both_per_token
+            = source_scale_matches(p1.quant_params.src_scale, 1)
+            && source_scale_matches(p2.quant_params.src_scale, 1);
+    const bool both_per_group
+            = source_scale_matches(p1.quant_params.src_scale, gate_groups)
+            && source_scale_matches(p2.quant_params.src_scale, down_groups);
+    if (!both_per_token && !both_per_group) { return false; }
+
+    // Preserve the per-token scheme for the ambiguous G=1 case.
+    per_group_activation = !both_per_token && both_per_group;
+    return true;
 }
 
 routed_moe_params make_fast_params(const void *token_src,
@@ -1350,7 +1366,8 @@ routed_moe_params make_fast_params(const void *token_src,
         const group_matmul_routing_params &routing,
         const group_matmul_projection_params &secondary,
         const grp_matmul_gated_act_t act, const bool w4,
-        const int64_t gate_group_size = 0, const int64_t down_group_size = 0) {
+        const bool w4_per_group_activation, const int64_t gate_group_size = 0,
+        const int64_t down_group_size = 0) {
     routed_moe_params p;
     p.num_tokens = num_tokens;
     p.hidden_size = primary.input_size;
@@ -1400,9 +1417,13 @@ routed_moe_params make_fast_params(const void *token_src,
     p.activation = act == grp_matmul_gated_act_t::gelu_and_mul
             ? routed_moe_activation_t::gelu_and_mul
             : routed_moe_activation_t::silu_and_mul;
-    p.quant_scheme = w4
-            ? routed_moe_quant_t::sym_per_group_w4a8_dynamic_per_token
-            : routed_moe_quant_t::sym_per_oc_w8a8_dynamic_per_token;
+    if (w4) {
+        p.quant_scheme = w4_per_group_activation
+                ? routed_moe_quant_t::sym_per_group_w4a8_dynamic_per_group
+                : routed_moe_quant_t::sym_per_group_w4a8_dynamic_per_token;
+    } else {
+        p.quant_scheme = routed_moe_quant_t::sym_per_oc_w8a8_dynamic_per_token;
+    }
     p.num_threads = primary.params.num_threads;
     return p;
 }
@@ -1666,17 +1687,19 @@ status_t routed_fused_moe_direct(const char layout_src, const bool trans_src,
         generic_reason = "format";
         int64_t gate_group_size = 0;
         int64_t down_group_size = 0;
+        bool w4_per_group_activation = false;
         const bool w8 = fast_w8_candidate(layout_src, trans_src, num_experts,
                 primary, routing, secondary, gated_act);
         const bool w4 = !w8
                 && fast_w4_candidate(layout_src, trans_src, num_tokens,
                         num_experts, primary, routing, secondary, gated_act,
-                        gate_group_size, down_group_size);
+                        gate_group_size, down_group_size,
+                        w4_per_group_activation);
         if (w8 || w4) {
             const auto fast_params = make_fast_params(token_src, token_src_ld,
                     num_tokens, num_experts, topk, moe_output, moe_output_ld,
                     primary, routing, *secondary, gated_act->act, w4,
-                    gate_group_size, down_group_size);
+                    w4_per_group_activation, gate_group_size, down_group_size);
             status = routed_moe::execute(fast_params);
             if (status == status_t::success) {
                 if (s_route_log) {

@@ -22,6 +22,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <sstream>
@@ -33,6 +34,7 @@
 #include "lowoha_operators/common/omp_thread_control.hpp"
 #include "lowoha_operators/matmul/group_matmul/common/group_matmul_parallel_common.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/ukernel/int8_microkernel.hpp"
+#include "lowoha_operators/matmul/group_matmul/executors/n_tile/n_tile_admission.hpp"
 #include "lowoha_operators/matmul/group_matmul/prepack/prepack.hpp"
 #include "moe_test_utils.hpp"
 
@@ -46,7 +48,8 @@ namespace {
 void run_w4a8_per_group_scenario(const std::string &label,
         const std::vector<int> &rows, uint64_t K, uint64_t N,
         uint64_t group_size, float src_range = 2.0f,
-        matmul_algo_t algo = matmul_algo_t::aocl_dlp_blocked) {
+        matmul_algo_t algo = matmul_algo_t::aocl_dlp_blocked,
+        data_type_t out_dt = data_type_t::bf16) {
     ASSERT_EQ(K % group_size, 0u)
             << label << ": K must be a multiple of group_size";
     const uint64_t G = K / group_size;
@@ -57,7 +60,6 @@ void run_w4a8_per_group_scenario(const std::string &label,
 
     reset_grp_matmul_caches();
 
-    const data_type_t out_dt = data_type_t::bf16;
     const data_type_t scale_dt = data_type_t::bf16;
 
     tensor_factory_t tf;
@@ -109,9 +111,11 @@ void run_w4a8_per_group_scenario(const std::string &label,
         bool expert_ok = true;
         // W4A8 tolerance: the s4→s8 conversion + bf16 dynamic quant introduces
         // more noise than pure INT8 per-group, so use a generous 128x epsilon.
+        const bool bf16_output = out_dt == data_type_t::bf16;
         compare_tensor_2D_matrix(out[e], out_ref[e],
-                static_cast<uint64_t>(rows[e]), N, K, rtol_bf16,
-                128.0f * epsilon_bf16, expert_ok,
+                static_cast<uint64_t>(rows[e]), N, K,
+                bf16_output ? rtol_bf16 : rtol_woq,
+                128.0f * (bf16_output ? epsilon_bf16 : epsilon_woq), expert_ok,
                 /*enable_f32_relaxation=*/false, 1.0f, true);
         EXPECT_TRUE(expert_ok) << label << ": output mismatch on expert " << e
                                << " (rows=" << rows[e] << ")";
@@ -330,6 +334,53 @@ TEST(GroupMatmulW4A8PerGroup, FifteenExpertsSixActiveInterleavedBF16) {
             /*N=*/64, /*group_size=*/32);
 }
 
+TEST(GroupMatmulW4A8PerGroup, F32OutputMatchesReference) {
+    std::vector<int> rows(2, 8);
+    run_w4a8_per_group_scenario("f32 output", rows, /*K=*/128, /*N=*/64,
+            /*group_size=*/32, /*src_range=*/2.0f,
+            matmul_algo_t::aocl_dlp_blocked, data_type_t::f32);
+}
+
+TEST(GroupMatmulW4A8PerGroup, F32OutputWarmsCustomKernelPack) {
+    namespace mm = zendnnl::lowoha::matmul;
+    namespace prepack = mm::group_matmul_prepack;
+    if (!mm::custom_kernel::avx512vnni_available()) {
+        GTEST_SKIP() << "the W4A8 custom kernel needs AVX-512 VNNI";
+    }
+    moe_test_utils::LastInvocationCaptureGuard prepack_capture;
+    moe_test_utils::AlgoEnvGuard algo3(3);
+    moe_test_utils::CustomKernelOverride ck_on(true);
+    moe_test_utils::ExecutionPathCaptureGuard mode_capture;
+    WeightCacheGuard wc(1);
+    prepack::clear_fingerprint_cache_for_test();
+    prepack::test_api::clear_last_invocation_stats();
+
+    std::vector<int> rows(2, 8);
+    run_w4a8_per_group_scenario("f32 output CK warm", rows, /*K=*/128,
+            /*N=*/64, /*group_size=*/32, /*src_range=*/2.0f,
+            matmul_algo_t::aocl_dlp_blocked, data_type_t::f32);
+
+    const auto stats = prepack::test_api::get_last_invocation_stats();
+    ASSERT_TRUE(stats.valid);
+    EXPECT_EQ(stats.group_schedule, 3);
+    EXPECT_GE(stats.ck.total_attempted, 2);
+    EXPECT_EQ(stats.ck.skipped_invalid, 0);
+
+    const char *mode
+            = mm::test_api::s_last_group_matmul_direct_execution_path.load(
+                    std::memory_order_relaxed);
+    ASSERT_NE(mode, nullptr);
+    EXPECT_NE(std::strstr(mode, "custom"), nullptr) << mode;
+}
+
+TEST(GroupMatmulW4A8PerGroup, F32OutputMatchesAoclDlpReference) {
+    if (!moe_test_utils::k_grp_matmul_aocl_dlp_compiled) GTEST_SKIP();
+    std::vector<int> rows(2, 8);
+    run_w4a8_per_group_scenario("f32 output aocl dlp", rows, /*K=*/128,
+            /*N=*/64, /*group_size=*/32, /*src_range=*/2.0f,
+            matmul_algo_t::aocl_dlp, data_type_t::f32);
+}
+
 // First 6 experts routed.
 TEST(GroupMatmulW4A8PerGroup, FifteenExpertsSixActiveContiguousFirstBF16) {
     std::vector<int> rows(15, 0);
@@ -404,9 +455,66 @@ TEST(GroupMatmulW4A8PerGroup, GroupSize64BF16) {
 
 // group_size=K => single weight group; M=1 decode boundary.
 TEST(GroupMatmulW4A8PerGroup, GroupSizeEqualsKDecodeM1BF16) {
+    if (!zendnnl::lowoha::matmul::custom_kernel::avx512vnni_available()) {
+        GTEST_SKIP() << "AVX-512 VNNI not available on this host";
+    }
+    moe_test_utils::AlgoEnvGuard algo3(3);
+    moe_test_utils::CustomKernelOverride ck_on(true);
+    moe_test_utils::ExecutionPathCaptureGuard capture;
+
     std::vector<int> rows(8, 1);
     run_w4a8_per_group_scenario("gs_eq_k decode M1 bf16", rows, /*K=*/128,
             /*N=*/64, /*group_size=*/128);
+
+    const char *mode = zendnnl::lowoha::matmul::test_api::
+                               s_last_group_matmul_direct_execution_path.load(
+                                       std::memory_order_relaxed);
+    ASSERT_NE(mode, nullptr);
+    ASSERT_NE(std::strstr(mode, "custom"), nullptr)
+            << "G=1 W4A8 decode did not engage the custom kernel; mode="
+            << mode;
+
+    // The same G=1 shape remains admissible without a buffer post-op, but an
+    // unsliced binary operand must use a full-N executor.
+    {
+        constexpr int postop_M = 1;
+        constexpr int postop_N = 64;
+        std::vector<float> wei_scale(postop_N, 1.0f);
+        std::vector<float> binary_add(
+                static_cast<size_t>(postop_M) * postop_N, 1.0f);
+
+        matmul_params p;
+        p.dtypes.src = data_type_t::bf16;
+        p.dtypes.wei = data_type_t::s4;
+        p.dtypes.dst = data_type_t::bf16;
+        p.dtypes.bias = data_type_t::none;
+        p.dtypes.compute = data_type_t::s8;
+        p.dynamic_quant = true;
+        p.mem_format_b = 'n';
+        p.quant_params.src_scale.dt = data_type_t::f32;
+        p.quant_params.src_scale.dims = {postop_M, 1};
+        p.quant_params.wei_scale.buff = wei_scale.data();
+        p.quant_params.wei_scale.dt = data_type_t::f32;
+        p.quant_params.wei_scale.dims = {1, postop_N};
+
+        const std::vector<int> postop_rows {postop_M};
+        const std::vector<int> widths {postop_N};
+        const auto admitted = [&]() {
+            return zendnnl::lowoha::matmul::detail::n_tile_supported(
+                    postop_rows, widths, std::vector<matmul_params> {p}, 1,
+                    grp_matmul_gated_act_t::none);
+        };
+        ASSERT_TRUE(admitted());
+
+        matmul_post_op add;
+        add.po_type = post_op_type_t::binary_add;
+        add.buff = binary_add.data();
+        add.dtype = data_type_t::f32;
+        add.dims = {postop_M, postop_N};
+        add.leading_dim = postop_N;
+        p.postop_ = {add};
+        EXPECT_FALSE(admitted());
+    }
 }
 
 TEST(GroupMatmulW4A8PerGroup, AoclDlpSixActiveInterleavedBF16) {
@@ -532,26 +640,33 @@ TEST(GroupMatmulW4A8PerGroup, Algo3PromptTileMatchesRoundsBF16) {
     const int E = static_cast<int>(rows.size());
     const data_type_t scale_dt = data_type_t::bf16;
     for (const uint64_t group_size : {uint64_t(32), uint64_t(128)}) {
-        SCOPED_TRACE("group_size=" + std::to_string(group_size));
         const uint64_t G = K / group_size;
-        tensor_factory_t tf;
-        std::vector<tensor_t> inp(E), wt(E), bias(E), out(E);
-        const int64_t saved_seed = seed;
-        for (int e = 0; e < E; ++e) {
-            seed = saved_seed + 1 + static_cast<int64_t>(e);
-            const uint64_t Mbuf = static_cast<uint64_t>(std::max(rows[e], 1));
-            auto ws = tf.uniform_dist_tensor({G, N}, scale_dt, 2.0);
-            wt[e] = tf.uniform_dist_tensor(
-                    {K, N}, data_type_t::s4, 7.0, false, ws);
-            auto ss = tf.zero_tensor({Mbuf, 1u}, scale_dt);
-            inp[e] = tf.uniform_dist_tensor(
-                    {Mbuf, K}, data_type_t::bf16, 2.0, false, ss, tensor_t());
-            bias[e] = tf.uniform_dist_tensor({1u, N}, data_type_t::bf16, 2.0);
-            out[e] = tf.zero_tensor({Mbuf, N}, data_type_t::bf16);
+        for (const bool src_per_group : {false, true}) {
+            SCOPED_TRACE("group_size=" + std::to_string(group_size)
+                    + " src_scale="
+                    + (src_per_group ? "per_group" : "per_token"));
+            tensor_factory_t tf;
+            std::vector<tensor_t> inp(E), wt(E), bias(E), out(E);
+            const int64_t saved_seed = seed;
+            for (int e = 0; e < E; ++e) {
+                seed = saved_seed + 1 + static_cast<int64_t>(e);
+                const uint64_t Mbuf
+                        = static_cast<uint64_t>(std::max(rows[e], 1));
+                auto ws = tf.uniform_dist_tensor({G, N}, scale_dt, 2.0);
+                wt[e] = tf.uniform_dist_tensor(
+                        {K, N}, data_type_t::s4, 7.0, false, ws);
+                auto ss = tf.zero_tensor(
+                        {Mbuf, src_per_group ? G : uint64_t {1}}, scale_dt);
+                inp[e] = tf.uniform_dist_tensor({Mbuf, K}, data_type_t::bf16,
+                        2.0, false, ss, tensor_t());
+                bias[e] = tf.uniform_dist_tensor(
+                        {1u, N}, data_type_t::bf16, 2.0);
+                out[e] = tf.zero_tensor({Mbuf, N}, data_type_t::bf16);
+            }
+            seed = saved_seed;
+            expect_prompt_tile_matches_rounds(/*mask=*/4, /*mb=*/16, /*ns=*/64,
+                    inp, wt, bias, out, /*gated_act=*/nullptr, rows);
         }
-        seed = saved_seed;
-        expect_prompt_tile_matches_rounds(/*mask=*/4, /*mb=*/16, /*ns=*/64, inp,
-                wt, bias, out, /*gated_act=*/nullptr, rows);
     }
 }
 
@@ -584,10 +699,12 @@ TEST(GroupMatmulW4A8PerGroup, Algo3SingleExpertPromptTileMatchesRounds) {
     }
 }
 
-// The s4 microkernel applies one source scale per row.  A caller that supplies
-// per-group source scales `{M, G}` must therefore stay on ALGO 3's AOCL path;
-// only the production `{M, 1}` source + `{G, N}` weight combination may use CK.
-TEST(GroupMatmulW4A8PerGroup, Algo3PerGroupSourceScaleFallsBackToDlp) {
+// Matching activation `{M,G}` and weight `{G,N}` scales run through the S4
+// custom kernel and remain numerically equivalent to the ALGO 1 reference.
+TEST(GroupMatmulW4A8PerGroup, Algo3PerGroupSourceScaleUsesCk) {
+    if (!zendnnl::lowoha::matmul::custom_kernel::avx512vnni_available()) {
+        GTEST_SKIP() << "AVX-512 VNNI not available on this host";
+    }
     const int E = 2;
     const uint64_t M = 4, K = 128, N = 64, group_size = 32;
     const uint64_t G = K / group_size;
@@ -625,14 +742,14 @@ TEST(GroupMatmulW4A8PerGroup, Algo3PerGroupSourceScaleFallsBackToDlp) {
         reset_grp_matmul_caches();
         st = group_matmul_kernel_test(inp, wt, bias, out_a3, inner, 1.0f, 0.0f,
                 nullptr, nullptr, {}, active);
-        mode = zendnnl::lowoha::matmul::test_api ::
+        mode = zendnnl::lowoha::matmul::test_api::
                        s_last_group_matmul_direct_execution_path.load(
                                std::memory_order_relaxed);
     }
-    ASSERT_EQ(st, status_t::success) << "ALGO 3 fallback failed";
+    ASSERT_EQ(st, status_t::success) << "ALGO 3 custom-kernel call failed";
     ASSERT_NE(mode, nullptr);
-    EXPECT_EQ(std::strstr(mode, "custom"), nullptr)
-            << "per-group source scales must not reach the s4 custom kernel; "
+    EXPECT_NE(std::strstr(mode, "custom"), nullptr)
+            << "per-group source scales did not reach the s4 custom kernel; "
                "mode="
             << mode;
 
@@ -641,7 +758,73 @@ TEST(GroupMatmulW4A8PerGroup, Algo3PerGroupSourceScaleFallsBackToDlp) {
         bool ok = true;
         compare_tensor_2D_matrix(out_a3[e], out_a1[e], M, N, K, rtol_bf16,
                 abs_tol, ok, false, 1.0f, true);
-        EXPECT_TRUE(ok) << "ALGO 3 AOCL fallback mismatch on expert " << e;
+        EXPECT_TRUE(ok) << "ALGO 3 S4 custom-kernel mismatch on expert " << e;
+    }
+}
+
+// CallContext currently carries one `{G, N}` weight-scale row stride for the
+// whole grouped call. Experts with different N must stay on the standard path
+// until that stride becomes per-expert.
+TEST(GroupMatmulW4A8PerGroup, Algo3DifferentExpertNUsesFallback) {
+    if (!zendnnl::lowoha::matmul::custom_kernel::avx512vnni_available()) {
+        GTEST_SKIP() << "AVX-512 VNNI not available on this host";
+    }
+    const int E = 2;
+    const uint64_t M = 4, K = 128, group_size = 32;
+    const uint64_t G = K / group_size;
+    const std::array<uint64_t, E> N {{64, 96}};
+    const data_type_t scale_dt = data_type_t::bf16;
+
+    tensor_factory_t tf;
+    std::vector<tensor_t> inp(E), wt(E), bias(E), out_a1(E), out_a3(E);
+    std::vector<int> active(E, static_cast<int>(M));
+    for (int e = 0; e < E; ++e) {
+        auto ws = tf.uniform_dist_tensor({G, N[e]}, scale_dt, 2.0);
+        wt[e] = tf.uniform_dist_tensor(
+                {K, N[e]}, data_type_t::s4, 7.0, false, ws);
+        auto ss = tf.zero_tensor({M, 1u}, scale_dt);
+        inp[e] = tf.uniform_dist_tensor(
+                {M, K}, data_type_t::bf16, 2.0, false, ss, tensor_t());
+        bias[e] = tf.zero_tensor({1u, N[e]}, data_type_t::bf16);
+        out_a1[e] = tf.zero_tensor({M, N[e]}, data_type_t::bf16);
+        out_a3[e] = tf.zero_tensor({M, N[e]}, data_type_t::bf16);
+    }
+
+    const matmul_algo_t inner = matmul_algo_t::aocl_dlp_blocked;
+    status_t st;
+    {
+        moe_test_utils::AlgoEnvGuard algo1(1);
+        reset_grp_matmul_caches();
+        st = group_matmul_kernel_test(inp, wt, bias, out_a1, inner, 1.0f, 0.0f,
+                nullptr, nullptr, {}, active);
+    }
+    ASSERT_EQ(st, status_t::success) << "ALGO 1 reference failed";
+
+    const char *mode = nullptr;
+    {
+        moe_test_utils::AlgoEnvGuard algo3(3);
+        moe_test_utils::CustomKernelOverride ck_on(true);
+        moe_test_utils::ExecutionPathCaptureGuard capture;
+        reset_grp_matmul_caches();
+        st = group_matmul_kernel_test(inp, wt, bias, out_a3, inner, 1.0f, 0.0f,
+                nullptr, nullptr, {}, active);
+        mode = zendnnl::lowoha::matmul::test_api::
+                       s_last_group_matmul_direct_execution_path.load(
+                               std::memory_order_relaxed);
+    }
+    ASSERT_EQ(st, status_t::success);
+    ASSERT_NE(mode, nullptr);
+    EXPECT_EQ(std::strstr(mode, "custom"), nullptr)
+            << "different expert N values must not share one CK scale stride; "
+               "mode="
+            << mode;
+
+    const float abs_tol = 128.0f * epsilon_bf16;
+    for (int e = 0; e < E; ++e) {
+        bool ok = true;
+        compare_tensor_2D_matrix(out_a3[e], out_a1[e], M, N[e], K, rtol_bf16,
+                abs_tol, ok, false, 1.0f, true);
+        EXPECT_TRUE(ok) << "fallback mismatch on expert " << e;
     }
 }
 
@@ -652,6 +835,9 @@ TEST(GroupMatmulW4A8PerGroup, Algo3PerGroupSourceScaleFallsBackToDlp) {
 // scale such a call passes both scales through raw; an FP32 source scale
 // always widens the weight scale, so that run reaches the memo itself.
 TEST(GroupMatmulW4A8PerGroup, Algo3PerCallCacheOffRereadsRewrittenScale) {
+    if (!zendnnl::lowoha::matmul::custom_kernel::avx512vnni_available()) {
+        GTEST_SKIP() << "AVX-512 VNNI not available on this host";
+    }
     for (const data_type_t src_scale_dt :
             {data_type_t::bf16, data_type_t::f32}) {
         SCOPED_TRACE(src_scale_dt == data_type_t::bf16 ? "bf16 source scale"

@@ -174,6 +174,7 @@ enum class w4_reduction_path_t : uint8_t {
     none = 0,
     fused_f32,
     scatter_bf16,
+    scatter_f32,
     all_inactive
 };
 

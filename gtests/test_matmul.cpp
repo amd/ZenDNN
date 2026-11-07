@@ -368,6 +368,146 @@ TEST_P(TestMatmul, W4A8_BF16) {
     EXPECT_TRUE(ok);
 }
 
+TEST_P(TestMatmul, W4A8_F32) {
+    if (!use_LOWOHA) {
+        GTEST_SKIP() << "W4A8 lives in run_dlp(), reachable only via "
+                        "the LOWOHA path.";
+    }
+    if (algo == matmul_algo_t::onednn
+            || algo == matmul_algo_t::onednn_blocked) {
+        GTEST_SKIP();
+    }
+
+    uint64_t sym_k = (k / 4) * 4;
+    if (sym_k == 0) { sym_k = 4; }
+
+    std::mt19937 local_rng(m ^ k ^ n ^ 0xDA8C);
+    std::vector<uint64_t> valid_gs;
+    for (uint64_t gs = 4; gs <= sym_k; gs *= 2) {
+        if (sym_k % gs == 0) { valid_gs.push_back(gs); }
+    }
+    if (valid_gs.empty()) {
+        GTEST_SKIP() << "No valid W4A8 group_size for K=" << sym_k;
+    }
+    uint64_t group_size = valid_gs[local_rng() % valid_gs.size()];
+    uint64_t num_groups = sym_k / group_size;
+
+    std::vector<uint64_t> src_scale_size;
+    std::vector<uint64_t> wei_scale_size = {num_groups, n};
+    std::string src_granularity_label;
+    if (local_rng() % 2 == 0) {
+        src_scale_size = {m, 1};
+        src_granularity_label = "per-token";
+    } else {
+        src_scale_size = {m, num_groups};
+        src_granularity_label = "per-group";
+    }
+    std::string granularity_label
+            = "A=" + src_granularity_label + " + W=per-group";
+
+    neutralize_mish_quant_int8(po_types);
+
+    data_type_t ref_dt = data_type_t::bf16;
+    data_type_t scale_dt
+            = (local_rng() % 2 == 0) ? data_type_t::f32 : data_type_t::bf16;
+
+    auto wei_scale
+            = tensor_factory.uniform_dist_tensor(wei_scale_size, scale_dt, 2.0);
+    auto weight_tensor = tensor_factory.uniform_dist_tensor(
+            {sym_k, n}, data_type_t::s4, 7.0, transB, wei_scale);
+
+    auto src_scale = tensor_factory.zero_tensor(src_scale_size, scale_dt);
+    auto input_tensor = tensor_factory.uniform_dist_tensor(
+            {m, sym_k}, ref_dt, 2.0, transA, src_scale, tensor_t());
+    auto src_ref = input_tensor;
+
+    auto bias_tensor = tensor_factory.uniform_dist_tensor({1, n},
+            rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
+    auto binary_tensor_shape_2d = {m, n};
+    auto binary_tensor_shape_broadcast = {uint64_t {1}, n};
+    auto binary_tensor_shape = (rand() % 2 == 0) ? binary_tensor_shape_broadcast
+                                                 : binary_tensor_shape_2d;
+    auto binary_tensors = make_binary_postop_tensors(
+            tensor_factory, po_types, binary_tensor_shape);
+
+    constexpr data_type_t out_dt = data_type_t::f32;
+    auto output_tensor
+            = tensor_factory.uniform_dist_tensor({m, n}, out_dt, 2.0);
+    auto output_tensor_ref
+            = tensor_factory.uniform_dist_tensor({m, n}, out_dt, 2.0);
+
+    log_info("W4A8: m=", m, " sym_k=", sym_k, " n=", n,
+            " granularity=", granularity_label, " group_size=", group_size,
+            " num_groups=", num_groups, " out_dt=f32",
+            " scale_dt=", scale_dt == data_type_t::f32 ? "f32" : "bf16");
+
+    status_t ref_status = matmul_kernel_test(src_ref, weight_tensor,
+            bias_tensor, output_tensor_ref, po_types, binary_tensors,
+            use_LOWOHA, algo, 1.0f, 0.0f, true);
+    status_t status = matmul_kernel_test(input_tensor, weight_tensor,
+            bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
+            algo, 1.0f, 0.0f);
+    if (native_refusal_verified()) return;
+
+    EXPECT_EQ(status, status_t::success)
+            << "W4A8 F32: kernel path returned failure";
+    EXPECT_EQ(ref_status, status_t::success)
+            << "W4A8 F32: reference path returned failure";
+
+    bool ok = (status == status_t::success && ref_status == status_t::success);
+    if (ok) {
+        compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, sym_k,
+                rtol_woq, 128 * epsilon_woq, ok,
+                /*enable_f32_relaxation=*/false, /*alpha=*/1.0f,
+                /*is_quant=*/true);
+    }
+    EXPECT_TRUE(ok);
+}
+
+TEST(W4A8Direct, DynamicF32SourcePassesValidationAndExecutes) {
+    constexpr int M = 2;
+    constexpr int N = 32;
+    constexpr int K = 32;
+
+    std::vector<float> src(static_cast<size_t>(M) * K, 1.0f);
+    // transB=true: packed signed-S4 [N,K], two +1 nibbles per byte.
+    std::vector<int8_t> weight(
+            static_cast<size_t>(N) * K / 2, static_cast<int8_t>(0x11));
+    std::vector<float> wei_scale(N, 1.0f);
+    std::vector<float> dst(static_cast<size_t>(M) * N, -1.0f);
+
+    matmul_params params;
+    params.dtypes.src = data_type_t::f32;
+    params.dtypes.wei = data_type_t::s4;
+    params.dtypes.dst = data_type_t::f32;
+    params.dtypes.bias = data_type_t::none;
+    params.dtypes.compute = data_type_t::s8;
+    params.dynamic_quant = true;
+    params.weight_cache_type = 1;
+    params.num_threads = 4;
+    params.lowoha_algo = matmul_algo_t::aocl_dlp_blocked;
+    params.quant_params.src_scale.dt = data_type_t::f32;
+    params.quant_params.src_scale.dims = {M, 1};
+    params.quant_params.wei_scale.buff = wei_scale.data();
+    params.quant_params.wei_scale.dt = data_type_t::f32;
+    params.quant_params.wei_scale.dims = {1, N};
+
+    ASSERT_EQ(validate_matmul_direct_inputs(src.data(), weight.data(),
+                      dst.data(), M, N, K, /*Batch_A=*/1, /*Batch_B=*/1, params,
+                      /*is_weights_const=*/true),
+            status_t::success);
+
+    matmul_batch_params_t batch;
+    const status_t status = run_matmul_direct('r', /*transA=*/false,
+            /*transB=*/true, M, N, K, 1.0f, src.data(), K, weight.data(), K,
+            nullptr, 0.0f, dst.data(), N, true, batch, params);
+    if (native_refusal_verified()) return;
+    ASSERT_EQ(status, status_t::success);
+    for (float value : dst) {
+        EXPECT_NEAR(value, static_cast<float>(K), 0.1f);
+    }
+}
+
 /** @brief W4A8 static: pre-quantized s8 src + s4 wei vs WOQ bf16 reference.
  *
  *  quant_params_compute writes per-group src scales in physical {G,M} order
@@ -2076,6 +2216,23 @@ TEST(GgmlPackedLlamaEntry, F32DynamicQuantUnpacksThenMatmul) {
     run("Q4_0_superblock", data_type_t::s4, true,
             repack_weights_q4_0_superblock,
             static_cast<size_t>(N / 8) * ng * 144);
+}
+
+TEST(GgmlPackedValidation, RejectsAsymmetricU8Compute) {
+    matmul_params params;
+    params.dtypes.src = data_type_t::f32;
+    params.dtypes.wei = data_type_t::s4;
+    params.dtypes.dst = data_type_t::f32;
+    params.dynamic_quant = true;
+    params.quant_params.src_scale.dt = data_type_t::bf16;
+    params.quant_params.src_scale.dims = {4, 2};
+
+    params.dtypes.compute = data_type_t::s8;
+    EXPECT_TRUE(zendnnl::lowoha::matmul::ggml_packed_gemm_supported(params));
+
+    params.dtypes.compute = data_type_t::u8;
+    EXPECT_FALSE(zendnnl::lowoha::matmul::ggml_packed_gemm_supported(params))
+            << "GGML per-group quantization is symmetric-only";
 }
 
 /** @brief Superblock is Q4_0-only and needs 8-row groups. */

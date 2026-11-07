@@ -356,10 +356,14 @@ TEST(CkResolveVariantInt8, AcceptsGroupedPreQuantS8SrcSym) {
             ck::KernelVariant::kS8_S8_BF16_SYM);
 }
 
-// [Positive] W4A8 — per-group s4 weight x per-token s8 source.
-TEST(CkResolveVariantS4, AcceptsW4A8BothSrcForms) {
-    // Runtime hoist form: bf16 src + dynamic_quant.
+// [Positive] W4A8 — per-group s4 weight x dynamic or pre-quantized source.
+TEST(CkResolveVariantS4, AcceptsW4A8SourceForms) {
+    // Runtime hoist forms: bf16/f32 src + dynamic_quant.
     EXPECT_EQ(ck::resolve_variant(data_type_t::bf16, data_type_t::s4,
+                      data_type_t::bf16, /*dynamic_quant=*/true,
+                      /*compute_dtype=*/data_type_t::s8),
+            ck::KernelVariant::kS8_S4_BF16_SYM);
+    EXPECT_EQ(ck::resolve_variant(data_type_t::f32, data_type_t::s4,
                       data_type_t::bf16, /*dynamic_quant=*/true,
                       /*compute_dtype=*/data_type_t::s8),
             ck::KernelVariant::kS8_S4_BF16_SYM);
@@ -368,14 +372,21 @@ TEST(CkResolveVariantS4, AcceptsW4A8BothSrcForms) {
                       data_type_t::bf16, /*dynamic_quant=*/false,
                       /*compute_dtype=*/data_type_t::s8),
             ck::KernelVariant::kS8_S4_BF16_SYM);
+    EXPECT_EQ(ck::resolve_variant(data_type_t::bf16, data_type_t::s4,
+                      data_type_t::f32, /*dynamic_quant=*/true,
+                      /*compute_dtype=*/data_type_t::s8),
+            ck::KernelVariant::kS8_S4_F32_SYM);
+    EXPECT_EQ(ck::resolve_variant(data_type_t::f32, data_type_t::s4,
+                      data_type_t::f32, /*dynamic_quant=*/true,
+                      /*compute_dtype=*/data_type_t::s8),
+            ck::KernelVariant::kS8_S4_F32_SYM);
+    EXPECT_EQ(ck::resolve_variant(data_type_t::s8, data_type_t::s4,
+                      data_type_t::f32, /*dynamic_quant=*/false,
+                      /*compute_dtype=*/data_type_t::s8),
+            ck::KernelVariant::kS8_S4_F32_SYM);
 }
 
 TEST(CkResolveVariantS4, RejectsTuplesOutsideW4A8) {
-    // One variant only; anything else must reach kUnsupported and
-    // route to AOCL DLP.  f32 dst has no s4 kernel.
-    EXPECT_EQ(ck::resolve_variant(data_type_t::bf16, data_type_t::s4,
-                      data_type_t::f32, true, data_type_t::s8),
-            ck::KernelVariant::kUnsupported);
     // u8 compute — W4A8 is symmetric; there is no asym s4 counterpart.
     EXPECT_EQ(ck::resolve_variant(data_type_t::bf16, data_type_t::s4,
                       data_type_t::bf16, true, data_type_t::u8),
@@ -501,8 +512,11 @@ TEST(CkResolveVariantProperties, NoExceptOnEverything) {
 //   * (bf16, s8, bf16, dynamic_quant=true, compute=u8) → kU8_S8_BF16_ASYM
 //   * (bf16, s8, f32 , dynamic_quant=true, compute=s8) → kS8_S8_F32_SYM
 //   * (bf16, s8, f32 , dynamic_quant=true, compute=u8) → kU8_S8_F32_ASYM
-// plus the W4A8 row:
-//   * (bf16, s4, bf16, dynamic_quant=true, compute=s8) → kS8_S4_BF16_SYM
+// plus the W4A8 rows:
+//   * ({bf16,f32}, s4, bf16, dynamic_quant=true, compute=s8)
+//       → kS8_S4_BF16_SYM
+//   * ({bf16,f32}, s4, f32, dynamic_quant=true, compute=s8)
+//       → kS8_S4_F32_SYM
 // Everything else in the (data_type_t)^3 × {true,false} ×
 // (data_type_t) space must resolve to kUnsupported.  Sweeping
 // the full Cartesian product locks the truth table so any future
@@ -533,9 +547,10 @@ TEST(CkResolveVariantInt8, ExhaustiveNegativeSweep) {
                                           && (src == data_type_t::bf16
                                                   || src == data_type_t::f32))
                                 || (src == data_type_t::s8);
-                        // W4A8 does not accept an f32 source. Keep that predicate
-                        // separate from the INT8 runtime-hoist predicate.
-                        const bool s4_src = (src == data_type_t::bf16 && dq)
+                        const bool s4_src
+                                = (dq
+                                          && (src == data_type_t::bf16
+                                                  || src == data_type_t::f32))
                                 || (src == data_type_t::s8);
                         const bool dq_int8_family = dq_int8_src
                                 && (wei == data_type_t::s8)
@@ -551,11 +566,12 @@ TEST(CkResolveVariantInt8, ExhaustiveNegativeSweep) {
                                         || dst == data_type_t::u8)
                                 && (cmp == data_type_t::none
                                         || cmp == data_type_t::u8);
-                        // W4A8 shares both src forms but serves a single
-                        // (wei=s4, dst=bf16, compute=s8) combination.
+                        // W4A8 shares both src forms and supports BF16/F32
+                        // output for the non-gated matmul.
                         const bool s4_family = s4_src
                                 && (wei == data_type_t::s4)
-                                && (dst == data_type_t::bf16)
+                                && (dst == data_type_t::bf16
+                                        || dst == data_type_t::f32)
                                 && (cmp == data_type_t::s8);
                         if (dq_int8_family) {
                             const auto expected = (dst == data_type_t::bf16)
@@ -589,7 +605,10 @@ TEST(CkResolveVariantInt8, ExhaustiveNegativeSweep) {
                                     << " cmp=" << ck_test::dt_name(cmp);
                             ++n_int8_accepted;
                         } else if (s4_family) {
-                            EXPECT_EQ(v, ck::KernelVariant::kS8_S4_BF16_SYM)
+                            EXPECT_EQ(v,
+                                    dst == data_type_t::bf16
+                                            ? ck::KernelVariant::kS8_S4_BF16_SYM
+                                            : ck::KernelVariant::kS8_S4_F32_SYM)
                                     << "W4A8 family must accept src="
                                     << ck_test::dt_name(src) << " dq=" << dq;
                             ++n_s4_accepted;
@@ -640,9 +659,9 @@ TEST(CkResolveVariantInt8, ExhaustiveNegativeSweep) {
     EXPECT_EQ(n_int8_accepted, 22)
             << "Truth table should accept 16 dynamic INT8 rows plus 6 "
                "static U8xS8 rows";
-    // One W4A8 shape reached by the same 3 (src,dq) forms.
-    EXPECT_EQ(n_s4_accepted, 3)
-            << "Truth table should accept the W4A8 shape via the 3 "
+    // Two W4A8 destinations reached by the same 4 (src,dq) forms.
+    EXPECT_EQ(n_s4_accepted, 8)
+            << "Truth table should accept both W4A8 destinations via the 4 "
                "(src,dynamic_quant) forms";
     EXPECT_GT(n_rejected, 0);
 }

@@ -576,7 +576,8 @@ bool group_matmul_execute(const std::vector<char> &layout,
                 || ck_static_u8s8_shape;
         const bool ck_hint_s4 = (use_algo == 3) && log_custom_kernel
                 && (params[rep].dtypes.wei == data_type_t::s4)
-                && (params[rep].dtypes.dst == data_type_t::bf16)
+                && (params[rep].dtypes.dst == data_type_t::bf16
+                        || params[rep].dtypes.dst == data_type_t::f32)
                 && (params[rep].dtypes.compute == data_type_t::s8)
                 && ((params[rep].dynamic_quant
                             && params[rep].dtypes.src == data_type_t::bf16)

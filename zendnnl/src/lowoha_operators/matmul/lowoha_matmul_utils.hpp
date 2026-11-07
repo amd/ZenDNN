@@ -321,9 +321,9 @@ inline bool is_dynamic_quant_config(const matmul_params &params) {
     // GGML Q4_0 is s4 both before unpack (pack_format_b == 1) and after
     // (packed nibbles, pack_format_b cleared).  The source is still f32/bf16
     // and must be quantized to s8 before the s8×s4 GEMM.  Demanding an s8
-    // weight here would skip that quant.  W4A8 (bf16 destination) is also s4;
-    // reorder_quantization_wrapper prefers is_w4a8_config for that shape, and
-    // admitting it here as well does not change that branch.
+    // weight here would skip that quant. W4A8 (bf16/f32 destination) is also
+    // s4; reorder_quantization_wrapper prefers is_w4a8_config for that shape,
+    // and admitting it here as well does not change that branch.
     if (params.dtypes.wei != data_type_t::s8
             && params.dtypes.wei != data_type_t::s4
             && params.packing.pack_format_b != 1) {
@@ -344,13 +344,17 @@ inline bool has_quant_scale_metadata(
 }
 
 /**
- * @brief W4A8: s4 weights, bf16 output, s8 compute, symmetric.
- *        Dynamic entry: bf16 src + dynamic_quant. Static entry: pre-quantized
- *        s8 src with populated src/wei scale buffers (dynamic_quant=false).
+ * @brief W4A8: s4 weights, bf16/f32 output, s8 compute, symmetric.
+ *        Dynamic entry: bf16/f32 src + dynamic_quant. Static entry:
+ *        pre-quantized s8 src with populated src/wei scale buffers
+ *        (dynamic_quant=false).
  */
 inline bool is_w4a8_config(const matmul_params &params) {
     if (params.dtypes.wei != data_type_t::s4) { return false; }
-    if (params.dtypes.dst != data_type_t::bf16) { return false; }
+    if (params.dtypes.dst != data_type_t::bf16
+            && params.dtypes.dst != data_type_t::f32) {
+        return false;
+    }
     if (params.dtypes.compute != data_type_t::s8) { return false; }
     if (params.quant_params.wei_zp.buff || params.quant_params.src_zp.buff) {
         return false;
@@ -361,9 +365,10 @@ inline bool is_w4a8_config(const matmul_params &params) {
                 && has_quant_scale_metadata(params.quant_params.src_scale)
                 && has_quant_scale_metadata(params.quant_params.wei_scale);
     }
-    // Entry path: bf16 source with dynamic quant enabled.
+    // Entry path: floating-point source with dynamic quant enabled.
     if (!params.dynamic_quant) { return false; }
-    if (params.dtypes.src == data_type_t::bf16) {
+    if (params.dtypes.src == data_type_t::bf16
+            || params.dtypes.src == data_type_t::f32) {
         return !params.quant_params.src_scale.dims.empty()
                 && params.quant_params.src_scale.dt != data_type_t::none
                 && !params.quant_params.wei_scale.dims.empty()

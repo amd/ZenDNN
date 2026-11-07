@@ -49,6 +49,7 @@
 #include <immintrin.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <type_traits>
@@ -259,6 +260,44 @@ inline void quantize_row_u8(uint8_t *ZENDNNL_ROUTED_RESTRICT Aq, float &As,
                 reinterpret_cast<__m256i *>(Aq + k), _mm256_set_m128i(i1, i0));
     }
     As = scale;
+}
+
+/// Per-group sibling used by routed W4A8. Each contiguous K group is
+/// quantized independently and writes one scale to the row-major `{M,G}`
+/// surface. The common 32-aligned groups retain the vectorized path.
+inline void quantize_row_u8_per_group(uint8_t *ZENDNNL_ROUTED_RESTRICT Aq,
+        float *ZENDNNL_ROUTED_RESTRICT As,
+        const uint16_t *ZENDNNL_ROUTED_RESTRICT A, int64_t K,
+        int64_t group_size) {
+    const int64_t groups = K / group_size;
+    for (int64_t g = 0; g < groups; ++g) {
+        const int64_t off = g * group_size;
+        if (group_size % 32 == 0) {
+            quantize_row_u8(Aq + off, As[g], A + off, group_size);
+            continue;
+        }
+
+        float amax = 0.f;
+        for (int64_t k = 0; k < group_size; ++k) {
+            const uint32_t bits = static_cast<uint32_t>(A[off + k]) << 16;
+            float value;
+            std::memcpy(&value, &bits, sizeof(value));
+            amax = std::max(amax, std::fabs(value));
+        }
+        amax = std::max(amax, 1e-7f);
+        As[g] = amax / 127.f;
+        const float inverse = 127.f / amax;
+        for (int64_t k = 0; k < group_size; ++k) {
+            const uint32_t bits = static_cast<uint32_t>(A[off + k]) << 16;
+            float value;
+            std::memcpy(&value, &bits, sizeof(value));
+            const int32_t q = std::max<int32_t>(-127,
+                    std::min<int32_t>(127,
+                            static_cast<int32_t>(
+                                    std::nearbyintf(value * inverse))));
+            Aq[off + k] = static_cast<uint8_t>(q + 128);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

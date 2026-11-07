@@ -941,10 +941,11 @@ inline bool s8_without_aocl_warmer(const PrepackRequest &p) {
 
 inline bool w4a8_aocl_warm_candidate(const PrepackRequest &p) {
     // Key on wei/compute, not dynamic_quant (group DQ clears it before prepack).
-    // Destination must be bf16: an f32 s4 weight is GGML Q4_0 and belongs on
-    // the sym-quant warmer (int8_sym_quant_warm_candidate), not the W4A8 LRU.
+    // Both BF16 and F32 are native W4A8 destinations.  GGML Q4_0 remains
+    // outside this predicate because it does not carry the W4A8 metadata.
     return p.wei_dtype == data_type_t::s4 && p.compute_dtype == data_type_t::s8
-            && p.dst_dtype == data_type_t::bf16;
+            && (p.dst_dtype == data_type_t::bf16
+                    || p.dst_dtype == data_type_t::f32);
 }
 
 // Compute max(N[i]) over `[0, num_ops_total)`.  Mirrors what the
@@ -1717,9 +1718,11 @@ inline bool ck_eligible_f16(const PrepackRequest &p) {
 // Unlike `ck_eligible_int8`, per-group is the NORMAL case here.
 inline bool ck_eligible_s4(const PrepackRequest &p) {
     if (!p.custom_kernel_on) return false;
-    // One variant: `is_w4a8_config` pins compute to s8 and dst to bf16.
+    // W4A8 pins compute to s8 and supports BF16 or F32 destinations.
     if (p.wei_dtype != data_type_t::s4) return false;
-    if (p.dst_dtype != data_type_t::bf16) return false;
+    if (p.dst_dtype != data_type_t::bf16 && p.dst_dtype != data_type_t::f32) {
+        return false;
+    }
     if (p.compute_dtype != data_type_t::s8) return false;
     // Src arrives as a bf16 hoist or already-s8, as in `resolve_variant`.
     const bool s4_src_form
@@ -1745,9 +1748,10 @@ inline bool ck_eligible_s4(const PrepackRequest &p) {
             && !split_halves_no_bias) {
         return false;
     }
-    // Fused activation must be bf16, and dst is already pinned to it.
+    // F32 S4 kernels serve plain matmul only; fused activation uses BF16.
     if (p.act != grp_matmul_gated_act_t::none
-            && p.act_dtype != data_type_t::bf16) {
+            && (p.act_dtype != data_type_t::bf16
+                    || p.dst_dtype != data_type_t::bf16)) {
         return false;
     }
     if (p.bias_dtype != data_type_t::none && p.bias_dtype != data_type_t::bf16

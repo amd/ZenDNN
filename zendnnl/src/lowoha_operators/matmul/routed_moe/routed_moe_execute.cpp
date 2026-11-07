@@ -814,9 +814,11 @@ struct scratch_t {
     std::vector<float> as;
     std::vector<float> weights;
     std::vector<uint8_t> a_tile;
+    std::vector<float> as_tile;
     std::vector<float> c_tile;
     std::vector<uint16_t> gate_up_out;
     std::vector<uint16_t> down_out;
+    std::vector<float> down_out_f32;
     std::vector<int64_t> tile_cost_prefix;
     std::vector<float> reduce_acc;
 
@@ -1086,10 +1088,14 @@ status_t execute_w4(
     const bool fused_reduction = K / block_n >= nth;
 
     const auto *src = static_cast<const uint16_t *>(p.src);
-    auto *dst = static_cast<uint16_t *>(p.dst);
+    const bool output_f32 = p.dst_dt == data_type_t::f32;
 
     const int64_t gate_groups = K / p.gate_up_group_size;
     const int64_t down_groups = N / p.down_group_size;
+    const bool per_group_activation = p.quant_scheme
+            == routed_moe_quant_t::sym_per_group_w4a8_dynamic_per_group;
+    const int64_t gate_src_groups = per_group_activation ? gate_groups : 1;
+    const int64_t down_src_groups = per_group_activation ? down_groups : 1;
 
     const void *gate_up_key = p.gate_up_cache_key != nullptr
             ? p.gate_up_cache_key
@@ -1152,16 +1158,20 @@ status_t execute_w4(
             : custom_kernel::ActivationKind::silu_and_mul;
     std::array<custom_kernel::w4a8_ukernel_fn_t, s4_max_mr + 1> gate_kfn {};
     std::array<custom_kernel::w4a8_ukernel_fn_t, s4_max_mr + 1> down_kfn {};
+    const custom_kernel::S4SrcScaleGranularity src_scale_granularity
+            = per_group_activation
+            ? custom_kernel::S4SrcScaleGranularity::kPerGroup
+            : custom_kernel::S4SrcScaleGranularity::kPerToken;
     for (int mr = 1; mr <= s4_max_mr; ++mr) {
         gate_kfn[static_cast<size_t>(mr)] = custom_kernel::select_w4a8_ukernel(
                 mr,
                 /*NV=*/2, gate_act, custom_kernel::S4SourceKind::kU8Zp128,
-                custom_kernel::S4OutputKind::kBf16);
-        down_kfn[static_cast<size_t>(mr)]
-                = custom_kernel::select_w4a8_ukernel(mr,
-                        /*NV=*/2, custom_kernel::ActivationKind::none,
-                        custom_kernel::S4SourceKind::kU8Zp128,
-                        custom_kernel::S4OutputKind::kF32);
+                custom_kernel::S4OutputKind::kBf16, src_scale_granularity);
+        down_kfn[static_cast<size_t>(mr)] = custom_kernel::select_w4a8_ukernel(
+                mr,
+                /*NV=*/2, custom_kernel::ActivationKind::none,
+                custom_kernel::S4SourceKind::kU8Zp128,
+                custom_kernel::S4OutputKind::kF32, src_scale_granularity);
         if (gate_kfn[static_cast<size_t>(mr)] == nullptr
                 || down_kfn[static_cast<size_t>(mr)] == nullptr) {
             return status_t::unimplemented;
@@ -1174,8 +1184,10 @@ status_t execute_w4(
     const int64_t MB = r.num_blocks;
     if (MB == 0) {
         for (int64_t m = 0; m < M; ++m) {
-            std::memset(dst + m * p.dst_stride, 0,
-                    static_cast<size_t>(K) * sizeof(uint16_t));
+            std::memset(static_cast<char *>(p.dst)
+                            + static_cast<size_t>(m * p.dst_stride)
+                                    * size_of(p.dst_dt),
+                    0, static_cast<size_t>(K) * size_of(p.dst_dt));
         }
         if (test_api::s_capture_native_w4.load(std::memory_order_relaxed)) {
             test_api::s_last_w4_reduction_path.store(
@@ -1187,16 +1199,28 @@ status_t execute_w4(
 
     scratch_t &sc = scratch();
     size_t a_tile_elements = 0;
+    size_t as_tile_elements = 0;
     size_t c_tile_elements = 0;
+    size_t gate_scale_elements = 0;
+    size_t down_scale_elements = 0;
     if (!checked_scratch_elements(nth, block_m, K, a_tile_elements)
             || !checked_scratch_elements(
-                    nth, block_m, block_n, c_tile_elements)) {
+                    nth, block_m, gate_src_groups, as_tile_elements)
+            || !checked_scratch_elements(nth, block_m, block_n, c_tile_elements)
+            || !checked_scratch_elements(
+                    M, gate_src_groups, 1, gate_scale_elements)
+            || !checked_scratch_elements(
+                    numel, down_src_groups, 1, down_scale_elements)) {
         return status_t::memory_bad_size;
     }
     uint8_t *Aq = scratch_t::reserve(
             sc.aq, std::max(sizes.src_elements, sizes.intermediate_elements));
-    float *As = scratch_t::reserve(sc.as, static_cast<size_t>(numel));
+    float *As = scratch_t::reserve(
+            sc.as, std::max(gate_scale_elements, down_scale_elements));
     uint8_t *A_tile = scratch_t::reserve(sc.a_tile, a_tile_elements);
+    float *As_tile_grouped = per_group_activation
+            ? scratch_t::reserve(sc.as_tile, as_tile_elements)
+            : nullptr;
     float *C_tile = scratch_t::reserve(sc.c_tile, c_tile_elements);
     uint16_t *gate_up_out
             = scratch_t::reserve(sc.gate_up_out, sizes.intermediate_elements);
@@ -1204,10 +1228,16 @@ status_t execute_w4(
     // per-slot output, reduced over topk afterwards.
     float *reduce_acc = nullptr;
     uint16_t *down_out = nullptr;
+    float *down_out_f32 = nullptr;
     if (fused_reduction) {
         reduce_acc = scratch_t::reserve(sc.reduce_acc, sizes.src_elements);
     } else {
-        down_out = scratch_t::reserve(sc.down_out, sizes.down_elements);
+        if (output_f32) {
+            down_out_f32
+                    = scratch_t::reserve(sc.down_out_f32, sizes.down_elements);
+        } else {
+            down_out = scratch_t::reserve(sc.down_out, sizes.down_elements);
+        }
     }
 
     const int64_t weight_stride
@@ -1224,16 +1254,26 @@ status_t execute_w4(
     }
     // Inactive slots are absent from the sorted order, so the fused reduction
     // never adds them; the per-slot buffer needs them zeroed.
-    for (int64_t i = 0; down_out != nullptr && i < r.num_inactive; ++i) {
-        std::memset(down_out + static_cast<int64_t>(r.inactive[i]) * K, 0,
-                static_cast<size_t>(K) * sizeof(uint16_t));
+    for (int64_t i = 0; i < r.num_inactive; ++i) {
+        if (down_out_f32 != nullptr) {
+            std::memset(down_out_f32 + static_cast<int64_t>(r.inactive[i]) * K,
+                    0, static_cast<size_t>(K) * sizeof(float));
+        } else if (down_out != nullptr) {
+            std::memset(down_out + static_cast<int64_t>(r.inactive[i]) * K, 0,
+                    static_cast<size_t>(K) * sizeof(uint16_t));
+        }
     }
 
     // Stage 0: each original token is quantized once. Routed copies below are
     // already U8+zp128, so the S4 kernel skips its grouped-path XOR.
 #pragma omp parallel for num_threads(nth) schedule(static)
     for (int64_t m = 0; m < M; ++m) {
-        quantize_row_u8(Aq + m * K, As[m], src + m * p.src_stride, K);
+        if (per_group_activation) {
+            quantize_row_u8_per_group(Aq + m * K, As + m * gate_groups,
+                    src + m * p.src_stride, K, p.gate_up_group_size);
+        } else {
+            quantize_row_u8(Aq + m * K, As[m], src + m * p.src_stride, K);
+        }
     }
 
     // Stage 1: W13. A 32-column packed block contains 16 interleaved
@@ -1260,7 +1300,10 @@ status_t execute_w4(
 
             if (mb0 < mb1 && nb0 < nb1) {
                 uint8_t *ZENDNNL_ROUTED_RESTRICT A = A_tile + tid * block_m * K;
-                alignas(64) float As_tile[block_m];
+                alignas(64) float As_tile_token[block_m];
+                float *As_tile = per_group_activation
+                        ? As_tile_grouped + tid * block_m * gate_groups
+                        : As_tile_token;
                 loop_2d(mb0, mb1, nb0, nb1, chunk_bytes,
                         [&](int64_t mb, int64_t nb, int64_t nb_offset) {
                     const int64_t m_size = r.offsets[mb + 1] - r.offsets[mb];
@@ -1271,7 +1314,14 @@ status_t execute_w4(
                             const int64_t token = A_ids[m] / topk;
                             std::memcpy(A + m * K, Aq + token * K,
                                     static_cast<size_t>(K));
-                            As_tile[m] = As[token];
+                            if (per_group_activation) {
+                                std::memcpy(As_tile + m * gate_groups,
+                                        As + token * gate_groups,
+                                        static_cast<size_t>(gate_groups)
+                                                * sizeof(float));
+                            } else {
+                                As_tile[m] = As[token];
+                            }
                         }
                     }
 
@@ -1293,15 +1343,17 @@ status_t execute_w4(
                     for (int64_t tile = 0, mo = 0; tile < tiles; ++tile) {
                         const int mr = balanced_tile_rows(m_size, tiles, tile);
                         const auto fn = gate_kfn[static_cast<size_t>(mr)];
-                        fn(A + mo * K, static_cast<int>(K), B0, As_tile + mo,
-                                Bs0, custom_kernel::ScaleKind::kF32, nullptr,
+                        fn(A + mo * K, static_cast<int>(K), B0,
+                                As_tile + mo * gate_src_groups, Bs0,
+                                custom_kernel::ScaleKind::kF32, nullptr,
                                 custom_kernel::BiasKind::none, nullptr, 0,
                                 C + mo * N, static_cast<int>(N),
                                 static_cast<int>(K),
                                 static_cast<int>(p.gate_up_group_size),
                                 static_cast<int>(gate_up_oc));
-                        fn(A + mo * K, static_cast<int>(K), B1, As_tile + mo,
-                                Bs1, custom_kernel::ScaleKind::kF32, nullptr,
+                        fn(A + mo * K, static_cast<int>(K), B1,
+                                As_tile + mo * gate_src_groups, Bs1,
+                                custom_kernel::ScaleKind::kF32, nullptr,
                                 custom_kernel::BiasKind::none, nullptr, 0,
                                 C + mo * N + compact_cols_per_gate_block,
                                 static_cast<int>(N), static_cast<int>(K),
@@ -1318,7 +1370,12 @@ status_t execute_w4(
     const int64_t live = r.offsets[MB];
 #pragma omp parallel for num_threads(nth) schedule(static)
     for (int64_t m = 0; m < live; ++m) {
-        quantize_row_u8(Aq + m * N, As[m], gate_up_out + m * N, N);
+        if (per_group_activation) {
+            quantize_row_u8_per_group(Aq + m * N, As + m * down_groups,
+                    gate_up_out + m * N, N, p.down_group_size);
+        } else {
+            quantize_row_u8(Aq + m * N, As[m], gate_up_out + m * N, N);
+        }
     }
 
     // Stage 2: W2 of one (block, 32-column block) tile into F32 tile scratch.
@@ -1328,7 +1385,7 @@ status_t execute_w4(
         const int64_t m_size = r.offsets[mb + 1] - r.offsets[mb];
         const int32_t expert = r.expert_ids[mb];
         const uint8_t *A = Aq + r.offsets[mb] * N;
-        const float *As_block = As + r.offsets[mb];
+        const float *As_block = As + r.offsets[mb] * down_src_groups;
         const int8_t *B = pw_down->data
                 + static_cast<size_t>(expert) * down_bytes_per_expert
                 + static_cast<size_t>(nb) * down_oblock_bytes;
@@ -1338,8 +1395,9 @@ status_t execute_w4(
         for (int64_t tile = 0, mo = 0; tile < tiles; ++tile) {
             const int mr = balanced_tile_rows(m_size, tiles, tile);
             down_kfn[static_cast<size_t>(mr)](A + mo * N, static_cast<int>(N),
-                    B, As_block + mo, Bs, custom_kernel::ScaleKind::kF32,
-                    nullptr, custom_kernel::BiasKind::none, C + mo * block_n,
+                    B, As_block + mo * down_src_groups, Bs,
+                    custom_kernel::ScaleKind::kF32, nullptr,
+                    custom_kernel::BiasKind::none, C + mo * block_n,
                     static_cast<int>(block_n), nullptr, 0, static_cast<int>(N),
                     static_cast<int>(p.down_group_size), static_cast<int>(K));
             mo += mr;
@@ -1381,8 +1439,16 @@ status_t execute_w4(
                     }
                 }
                 for (int64_t m = 0; m < M; ++m) {
-                    f32_to_bf16_row(dst + m * p.dst_stride + c0,
-                            reduce_acc + m * K + c0, width);
+                    if (output_f32) {
+                        std::memcpy(static_cast<float *>(p.dst)
+                                        + m * p.dst_stride + c0,
+                                reduce_acc + m * K + c0,
+                                static_cast<size_t>(width) * sizeof(float));
+                    } else {
+                        f32_to_bf16_row(static_cast<uint16_t *>(p.dst)
+                                        + m * p.dst_stride + c0,
+                                reduce_acc + m * K + c0, width);
+                    }
                 }
             }
         }
@@ -1421,9 +1487,20 @@ status_t execute_w4(
                     const int32_t *A_ids = r.sorted_ids + mb * block_m;
                     for (int64_t m = 0; m < m_size; ++m) {
                         const int32_t slot = A_ids[m];
-                        copy_mul_bf16(down_out + static_cast<int64_t>(slot) * K
-                                        + nb * block_n,
-                                C + m * block_n, router_weights[slot], block_n);
+                        if (output_f32) {
+                            float *out = down_out_f32
+                                    + static_cast<int64_t>(slot) * K
+                                    + nb * block_n;
+                            const float weight = router_weights[slot];
+                            for (int c = 0; c < block_n; ++c)
+                                out[c] = C[m * block_n + c] * weight;
+                        } else {
+                            copy_mul_bf16(down_out
+                                            + static_cast<int64_t>(slot) * K
+                                            + nb * block_n,
+                                    C + m * block_n, router_weights[slot],
+                                    block_n);
+                        }
                     }
                 });
             }
@@ -1431,12 +1508,24 @@ status_t execute_w4(
 
 #pragma omp parallel for num_threads(nth) schedule(static)
         for (int64_t m = 0; m < M; ++m) {
-            sum_rows_bf16(
-                    dst + m * p.dst_stride, down_out + m * topk * K, topk, K);
+            if (output_f32) {
+                float *out = static_cast<float *>(p.dst) + m * p.dst_stride;
+                const float *rows = down_out_f32 + m * topk * K;
+                for (int64_t c = 0; c < K; ++c) {
+                    float sum = 0.0f;
+                    for (int64_t t = 0; t < topk; ++t)
+                        sum += rows[t * K + c];
+                    out[c] = sum;
+                }
+            } else {
+                sum_rows_bf16(static_cast<uint16_t *>(p.dst) + m * p.dst_stride,
+                        down_out + m * topk * K, topk, K);
+            }
         }
         if (test_api::s_capture_native_w4.load(std::memory_order_relaxed)) {
-            test_api::s_last_w4_reduction_path.store(
-                    test_api::w4_reduction_path_t::scatter_bf16,
+            test_api::s_last_w4_reduction_path.store(output_f32
+                            ? test_api::w4_reduction_path_t::scatter_f32
+                            : test_api::w4_reduction_path_t::scatter_bf16,
                     std::memory_order_relaxed);
         }
     }
@@ -1540,7 +1629,11 @@ status_t execute(const routed_moe_params &p) {
         const status_t size_status = checked_problem_sizes(p, sizes);
         if (size_status != status_t::success) { return size_status; }
         if (p.quant_scheme
-                == routed_moe_quant_t::sym_per_group_w4a8_dynamic_per_token) {
+                        == routed_moe_quant_t::
+                                sym_per_group_w4a8_dynamic_per_token
+                || p.quant_scheme
+                        == routed_moe_quant_t::
+                                sym_per_group_w4a8_dynamic_per_group) {
             return execute_w4(p, sizes);
         }
 

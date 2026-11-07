@@ -725,18 +725,16 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
     int reordered_lda = lda;
     reorder_quant_buffers_t quant_buffers;
     const bool scalar_dynamic_w4a8 = exec_params.packing.pack_format_b == 0
-            && exec_params.dynamic_quant
-            && exec_params.dtypes.src == data_type_t::bf16
-            && is_w4a8_config(exec_params);
+            && exec_params.dynamic_quant && is_w4a8_config(exec_params);
     if (reorder_quantization_wrapper(exec_src, lda, reordered_lda,
                 src_type_size, exec_params, exec_batch_params, transA, M, K,
                 num_threads, quant_buffers)
             != status_t::success) {
         return status_t::failure;
     }
-    // The scalar reorder has materialized the dynamic BF16 source as S8. From
-    // this point onward it is the same representation as caller-prequantized
-    // W4A8 and must not retain the entry-state dynamic flag.
+    // The scalar reorder has materialized the dynamic BF16/F32 source as S8.
+    // From this point onward it is the same representation as
+    // caller-prequantized W4A8 and must not retain the entry-state dynamic flag.
     const bool w4a8_source_reordered = scalar_dynamic_w4a8 && exec_src != src
             && exec_params.dtypes.src == data_type_t::s8;
     if (w4a8_source_reordered) { exec_params.dynamic_quant = false; }

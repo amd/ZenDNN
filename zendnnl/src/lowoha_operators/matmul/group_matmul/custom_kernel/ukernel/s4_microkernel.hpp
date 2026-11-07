@@ -18,13 +18,17 @@
 /// Sibling of `bf16_microkernel` / `int8_microkernel`, engaged from
 /// `n_tile_execute` for the `kS8_S4_BF16_SYM` variant.
 ///
-/// Dequant math:
+/// Per-token dequant math:
 ///
 ///   comp[g][v] = −128 · Σ_{k∈g} W_s4[k,v]
 ///   facc[m][v] = Σ_g ( comp[g][v]
 ///                      + Σ_{k∈g} A_u8[m,k]·W_s4[k,v] )
 ///                    · wei_scale[g][v]
 ///   C[m][v]    = facc[m][v] · src_scale[m] + bias[v]
+///
+/// Per-group source scales move the source factor inside the group sum:
+///
+///   C[m][v] = Σ_g dot[m,g,v] · src_scale[m,g] · wei_scale[g,v] + bias[v]
 ///
 /// The pre-scaled `comp[g][v]` term removes the +128 activation zero point.
 /// Grouped MatMul supplies signed bytes and the kernel applies
@@ -59,6 +63,10 @@ enum class S4SourceKind : uint8_t {
     kU8Zp128 = 1
 };
 
+/// Activation-scale layout. The existing per-token specialization remains the
+/// default; per-group uses the same G as the weight scale `{G, N}`.
+enum class S4SrcScaleGranularity : uint8_t { kPerToken = 0, kPerGroup = 1 };
+
 /// Storage selected for the non-gated epilogue.
 enum class S4OutputKind : uint8_t { kBf16 = 0, kF32 = 1 };
 
@@ -90,7 +98,9 @@ inline int max_mr_for_nv_s4(int NV) {
 /// Gated activations intentionally support BF16 output only.
 w4a8_ukernel_fn_t select_w4a8_ukernel(int MR, int NV, ActivationKind act,
         S4SourceKind source = S4SourceKind::kS8,
-        S4OutputKind output = S4OutputKind::kBf16);
+        S4OutputKind output = S4OutputKind::kBf16,
+        S4SrcScaleGranularity src_scale_granularity
+        = S4SrcScaleGranularity::kPerToken);
 
 } // namespace custom_kernel
 } // namespace matmul
