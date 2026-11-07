@@ -40,7 +40,8 @@ option(AOCLDLP_GIT_PROGRESS ON)
 set(AOCLUTILS_ROOT_DIR "${ZENDNNL_DEPS_DIR}/aoclutils"
   CACHE PATH "AOCL UTILS root dir")
 set(AOCLUTILS_GIT_REPO "https://github.com/amd/aocl-utils")
-set(AOCLUTILS_GIT_TAG "AOCL-20260801")
+# aocl-utils tag AOCL-20260801
+set(AOCLUTILS_GIT_TAG "621b256db4524239016b5bcfb8eb236d03bd2901")
 
 # gtest repo information
 set(GTEST_ROOT_DIR "${ZENDNNL_DEPS_DIR}/gtest"
@@ -53,7 +54,8 @@ option(GTEST_GIT_PROGRESS ON)
 set(JSON_ROOT_DIR "${ZENDNNL_DEPS_DIR}/json"
   CACHE PATH "json root dir")
 set(JSON_GIT_REPO "https://github.com/nlohmann/json.git")
-set(JSON_GIT_TAG "v3.12.0")
+# json tag v3.12.0
+set(JSON_GIT_TAG "55f93686c01528224f448c19128836e7df245f72")
 option(JSON_GIT_PROGRESS ON)
 
 # oneDNN repo information
