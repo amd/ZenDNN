@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   notify_teams:
-    runs-on: amd-zenai-arc-xsmall-dind
+    runs-on: amd-zenai-arc-nano-dind
     timeout-minutes: 120
     if: github.actor != 'github-actions[bot]'
     

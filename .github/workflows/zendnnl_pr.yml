@@ -921,7 +921,7 @@ jobs:
 
   check-zenTorch-status:
     name: ZenTorch plugin CI
-    runs-on: amd-zenai-arc-xsmall-dind
+    runs-on: amd-zenai-arc-nano-dind
     if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
     steps:
     - name: Trigger and wait for ZenTorch plugin CI
@@ -1049,7 +1049,7 @@ jobs:
         
   check-zenTF-status:
     name: ZenTF plugin CI
-    runs-on: amd-zenai-arc-xsmall-dind
+    runs-on: amd-zenai-arc-nano-dind
     if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
     steps:
     - name: Trigger and wait for ZenTF plugin CI
@@ -1139,7 +1139,7 @@ jobs:
 
   check-onednn-status:
     name: oneDNN integration CI
-    runs-on: amd-zenai-arc-xsmall-dind
+    runs-on: amd-zenai-arc-nano-dind
     timeout-minutes: 200
     # The build itself runs on onednn_zendnn_presub_server inside oneDNN-Zen.
     # This job only dispatches that workflow and waits for the commit status.
