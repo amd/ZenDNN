@@ -157,10 +157,11 @@ enum field_t : unsigned {
     kPass = 2, ///< kc, int8_pass_quads
     kGroups = 4, ///< col_groups, unit_tiles, domain_threads
     kScratch = 8, ///< scratch_floats
+    kRowUnit = 16, ///< row_unit
 };
 
 /// The fields in which a and b differ, as a mask; other fields that differ
-/// set every bit above kScratch.
+/// set every bit above kRowUnit.
 unsigned plan_fields(const nat::native_plan_t &a, const nat::native_plan_t &b) {
     unsigned m = 0;
     if (a.nr != b.nr || a.mr != b.mr || a.mb != b.mb || a.m_blocks != b.m_blocks
@@ -171,8 +172,8 @@ unsigned plan_fields(const nat::native_plan_t &a, const nat::native_plan_t &b) {
             || a.domain_threads != b.domain_threads)
         m |= kGroups;
     if (a.scratch_floats != b.scratch_floats) m |= kScratch;
-    if (a.row_unit != b.row_unit || a.traversal != b.traversal
-            || a.int8_rows_nv1 != b.int8_rows_nv1
+    if (a.row_unit != b.row_unit) m |= kRowUnit;
+    if (a.traversal != b.traversal || a.int8_rows_nv1 != b.int8_rows_nv1
             || a.int8_rows_nv2 != b.int8_rows_nv2
             || a.int8_cw_mask != b.int8_cw_mask
             || a.int8_pass_budget != b.int8_pass_budget
@@ -180,7 +181,7 @@ unsigned plan_fields(const nat::native_plan_t &a, const nat::native_plan_t &b) {
             || a.int8_bias_in_dequant != b.int8_bias_in_dequant
             || a.copy_block != b.copy_block || a.copy_par_min != b.copy_par_min
             || a.sources != b.sources)
-        m |= ~0u << 4;
+        m |= ~0u << 5;
     return m;
 }
 
@@ -336,6 +337,7 @@ TEST(NativeTuningRules, EachRuleChangesOnlyItsFields) {
             {only("bf16_alias"), kGrid | kPass | kScratch},
             {only("bf16_narrow_n"), kGrid | kPass | kGroups | kScratch},
             {only("blocks"), kGroups},
+            {only("cost_model"), kGrid | kPass | kGroups | kScratch | kRowUnit},
     };
     // Every switch of the key table has its entry, and kNativeRulesOff sets
     // each of them, and nothing else, to 0.
@@ -377,11 +379,14 @@ TEST(NativeTuningRules, EachRuleChangesOnlyItsFields) {
                         }
                     }
     report.finish();
-    // The narrow-N rule's wide plan validates only where the registry offers
-    // BF16 kernels; the other rules change INT8 plans on any CPU.
+    // The narrow-N rule's wide plan and the cost model's variants validate
+    // only where the registry offers BF16 kernels; the other rules change
+    // INT8 plans on any CPU.
     const bool bf16_kernels = nat::detect_uarch().avx512bf16;
     for (size_t r = 0; r < std::size(rules); ++r)
-        if (bf16_kernels || rules[r].setting != only("bf16_narrow_n")) {
+        if (bf16_kernels
+                || (rules[r].setting != only("bf16_narrow_n")
+                        && rules[r].setting != only("cost_model"))) {
             EXPECT_GT(changed[r], 0u) << rules[r].setting << " changed no plan";
         }
 }
@@ -590,6 +595,11 @@ TEST(NativeTuningRules, WorkedExamples) {
     EXPECT_EQ(plan(domain8, rules, 1031, 4096, 14336, true).mr, 8);
     EXPECT_EQ(plan(domain8, rules, 4096, 4096, 6656, true).mr, 12);
     EXPECT_EQ(plan(domain8, rules, 128, 4096, 4096, true).mr, 12);
+    // The cost model takes 8 rows per call above decode_m at any K where it
+    // prices taller calls (32-thread L3 domains); cost_model=0 keeps 12.
+    EXPECT_EQ(plan(domain32, rules, 4096, 4096, 6656, true).mr, 8);
+    EXPECT_EQ(plan(domain32, params("cost_model=0"), 4096, 4096, 6656, true).mr,
+            12);
     EXPECT_EQ(plan(domain8, rules, 4096, 4096, 4096, false).mr,
             plan(domain8, none, 4096, 4096, 4096, false).mr);
     EXPECT_EQ(plan(domain8, params("bf16_alias=0"), 4096, 4096, 4096, true).mr,

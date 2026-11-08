@@ -132,9 +132,11 @@ struct native_plan_t {
 };
 
 /// The built-in planner.  With heuristic_params_t{} it returns the built-in
-/// tile plan plus the INT8 tile's choices; a set pin replaces its decision,
-/// and later rules read the pinned value.  Pure: no allocation, no global
-/// state other than the kernel bounds.
+/// tile plan plus the INT8 tile's choices: the plan of the rules and, with
+/// cost_model, the cost model's choice among the rules' variants of a BF16
+/// or per-channel INT8 plan (native_cost_model.hpp).  A set pin replaces its
+/// decision, and later rules read the pinned value.  Pure: no allocation,
+/// no global state other than the kernel bounds.
 native_plan_t heuristic_plan(const native_problem_t &p,
         const UarchParams &uarch, const heuristic_params_t &params);
 
@@ -207,7 +209,9 @@ public:
     native_planner_t &operator=(const native_planner_t &) = delete;
 
     /// The plan of p; never fails.  Without sources this is heuristic_plan
-    /// with the built-in parameters: no cache, no allocation, no lock.
+    /// with the built-in parameters.  Plans of M up to
+    /// kNativePlanCacheMaxM are cached: the first call of a problem plans
+    /// and allocates its entry, the later ones read it, without a lock.
     native_plan_t plan(const native_problem_t &p) const noexcept;
 
     bool has_sources() const noexcept;
@@ -215,8 +219,9 @@ public:
 private:
     struct cache_entry_t;
 
-    /// Merges the entries of the sources for p; a layer that makes the plan
-    /// illegal is dropped with one warning.
+    /// heuristic_plan without sources; else merges the entries of the
+    /// sources for p, and a layer that makes the plan illegal is dropped
+    /// with one warning.
     native_plan_t resolve(const native_problem_t &p) const noexcept;
     native_plan_t resolve_layers(const native_problem_t &p) const;
     /// Caches plan for p unless the probe window of p is full.
@@ -227,7 +232,7 @@ private:
     std::unique_ptr<const native_config_source_t> override_;
     std::unique_ptr<const native_config_source_t> table_;
     std::unique_ptr<const native_config_source_t> rules_;
-    /// kNativePlanCacheSlots slots with sources, else null.
+    /// kNativePlanCacheSlots slots.
     std::unique_ptr<std::atomic<const cache_entry_t *>[]> cache_;
     /// Entries dropped with a warning.
     mutable std::atomic<uint32_t> drop_warnings_ {0};

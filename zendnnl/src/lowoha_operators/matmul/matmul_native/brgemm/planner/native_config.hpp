@@ -78,7 +78,11 @@ struct heuristic_params_t {
     native_kc_split_t kc_split = native_kc_split_t::budget;
     int l3_pct = 100; ///< L3 share of the row-group test
     /// Threads of one L3 domain; 0: UarchParams::l3_domain_cores, or
-    /// family_l3_cores when that is 0.
+    /// family_l3_cores when that is 0.  Thread w of a team is taken to run
+    /// in L3 domain w / domain_threads, as a compact binding of the team to
+    /// cores gives (OMP_PROC_BIND=close with OMP_PLACES=cores, or a binding
+    /// of thread w to core w): the blocks schedule and the cost model's row
+    /// groups count on it.
     int domain_threads = 0;
     // INT8 tile.
     int int8_mr = 12; ///< rows per call, at most
@@ -147,6 +151,106 @@ struct heuristic_params_t {
     int blocks = 1;
     int bf16_blocks_min_m = 1024;
     int int8_blocks_min_m = 3072;
+    /// 1: a BF16 plan of tiles of 32 columns or more and at least as many
+    /// column tiles as threads gives way to the variant of the rules
+    /// (cm_short_rows rows per call, two row groups for a single row block)
+    /// or pair of variants that the cost model rates more than cm_gain_pct
+    /// percent faster, and to the model's rules for long weight streams
+    /// (cm_pass_kib, cm_block_kib); a per-channel INT8 plan likewise to two
+    /// row groups, and with cm_int8_l1_pct to its rule for blocks of three
+    /// calls.  The model places the team's threads in L3 domains in order,
+    /// domain_threads to a domain.
+    int cost_model = 1;
+    int cm_gain_pct = 5;
+    // Cost model (native_cost_model.hpp): the inputs of the modeled time of
+    // a BF16 or per-channel INT8 plan, in cycles of one core.
+    /// Rows per call of the shorter BF16 call the model weighs against
+    /// tall_rows; a BF16 or INT8 call of more rows takes cm_tall_pct percent
+    /// more cycles per row.
+    int cm_short_rows = 8;
+    /// FMA pipes of a core; 0: UarchParams::fma_ports.
+    int cm_fma_pipes = 0;
+    /// Cycles from one multiply-add into an accumulator to the next: a call
+    /// of few rows waits for it.
+    int cm_fma_lat = 6;
+    /// Cycles of one kernel call besides its multiply-adds.
+    int cm_call_cycles = 800;
+    /// Percent more cycles per row a call of more than cm_short_rows rows
+    /// takes; -1: 12.5 per doubling of the threads of an L3 domain
+    /// (domain_threads) past 8, at most 50.
+    int cm_tall_pct = -1;
+    /// Bytes a cycle a core reads from L2: a later call of a K pass that
+    /// does not fit the l1_pct share of L1 re-reads the pass's slab at most
+    /// this fast.
+    int cm_l2_bytes = 16;
+    /// Cycles per KiB read from the L3 domain: the source rows of a tile
+    /// whose rows and slab over all of K exceed the bf16_l2_pct share of
+    /// L2 (int8_l2_pct for an INT8 tile), and the second read of a weight
+    /// tile in one domain.
+    int cm_l3_cycles = 10;
+    /// Cycles per KiB one thread streams weights from memory while every
+    /// thread of its L3 domain streams; 0: 2400 over the square root of
+    /// the threads of an L3 domain (domain_threads).
+    int cm_mem_cycles = 0;
+    /// KiB a weight stream is fetched ahead: the calls after the first of a
+    /// K pass read no new weight, and the stream idles for the part of them
+    /// beyond the cm_mem_cycles this many KiB take.
+    int cm_prefetch_kib = 4;
+    /// Cycles per KiB one core streams weights at most: while cm_mem_cycles
+    /// is slower, the link of the L3 domain limits the streams, and the
+    /// other streams of the domain fill the link while one idles, past the
+    /// first cm_sync_tiles tiles of each worker (the workers start in step);
+    /// while it is faster, one core's stream limits, and the rules for long
+    /// weight streams (cm_drift_kib, cm_block_kib, cm_int8_l1_pct) apply.
+    /// At a tie neither holds: the derived cm_mem_cycles of 16 threads to a
+    /// domain is 600.
+    int cm_stream_cycles = 600;
+    int cm_sync_tiles = 5;
+    /// Percent of the smaller of the core and the memory time that adds to
+    /// the larger.
+    int cm_overlap_pct = 20;
+    /// Percent of the L3 domain's share that the weight tiles read between
+    /// the first and the second read of a tile by two row groups of one
+    /// domain fill, of the domain's weight bytes: the second read hits L3
+    /// while that fits.  The domain a thread reads in follows
+    /// domain_threads.
+    int cm_reuse_pct = 50;
+    /// Percent of L2 that the slab of a column tile over all of K may take
+    /// for two row groups to be weighed.
+    int cm_group_slab_pct = 75;
+    /// Percent of the L3 of the domains the team spans that the weights of
+    /// a call may take for two row groups to be weighed: each row group
+    /// reads every weight tile of its column group.
+    int cm_group_l3_pct = 75;
+    /// Percent of the mean column tiles per thread that the busiest worker
+    /// of the slice must take for two row groups to be weighed: they gain
+    /// by balancing a slice of whole tiles.
+    int cm_group_skew_pct = 110;
+    /// Percent of half the block's rows the larger of two row groups may
+    /// take: its workers take the row groups' common column tiles.
+    int cm_group_rows_pct = 115;
+    /// KiB of weights each worker streams in step with the others of its L3
+    /// domain.  Where one core streams slower than its share of the
+    /// domain's link, the busiest worker of a single row block of at least
+    /// cm_pass_calls calls of the rules' rows that computes longer than it
+    /// streams, over more than these KiB, has drifted out of step (its
+    /// stream runs ahead of its calls): the block takes a K pass of
+    /// cm_pass_kib KiB of B slab, whose later calls read the slab from L2,
+    /// at the rules' rows per call and row unit (tall_rows, row_unit); the
+    /// model's row groups take it only where that row unit splits the rows
+    /// within cm_group_rows_pct.  cm_pass_kib 0: no such pass.
+    int cm_drift_kib = 4096;
+    int cm_pass_kib = 128;
+    int cm_pass_calls = 4;
+    /// KiB of weights a worker of the slice streams past which, where one
+    /// core streams slower than its share of the domain's link and the
+    /// worker streams longer than it computes, a single row block of more
+    /// than two calls takes M blocks of tile_rows rows over all of K.
+    int cm_block_kib = 16384;
+    /// Percent of L1 the INT8 L1 pass of tile_rows rows per call takes
+    /// where the cost model gives a single INT8 row block of three calls
+    /// those rows; 0: no such rule.
+    int cm_int8_l1_pct = 0;
 };
 
 /// A partial heuristic_params_t: what one source sets.  Fields mirror
@@ -174,6 +278,14 @@ struct native_config_t {
     std::optional<int> bf16_alias, bf16_alias_mr;
     std::optional<int> bf16_narrow_n, bf16_narrow_n_min_m;
     std::optional<int> blocks, bf16_blocks_min_m, int8_blocks_min_m;
+    std::optional<int> cost_model, cm_gain_pct, cm_short_rows, cm_fma_pipes;
+    std::optional<int> cm_fma_lat, cm_call_cycles, cm_tall_pct;
+    std::optional<int> cm_l2_bytes, cm_l3_cycles, cm_mem_cycles;
+    std::optional<int> cm_prefetch_kib, cm_overlap_pct, cm_reuse_pct;
+    std::optional<int> cm_stream_cycles, cm_sync_tiles;
+    std::optional<int> cm_group_slab_pct, cm_group_l3_pct, cm_group_skew_pct;
+    std::optional<int> cm_group_rows_pct, cm_drift_kib, cm_pass_kib;
+    std::optional<int> cm_pass_calls, cm_block_kib, cm_int8_l1_pct;
 
     bool empty() const;
     bool operator==(const native_config_t &o) const;

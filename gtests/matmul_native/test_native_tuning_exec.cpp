@@ -210,7 +210,16 @@ const char *const kSameBitsSettings[] = {"nr=16", "nr=32", "mr=1", "mr=4",
         "bf16_alias_mr=1", "bf16_narrow_n=0",
         "bf16_narrow_n_min_m=1,domain_threads=1",
         "makespan=0,l1_pass=0,traffic_groups=0,bf16_alias=0,blocks=0,"
-        "bf16_narrow_n=1,bf16_narrow_n_min_m=1,domain_threads=1"};
+        "bf16_narrow_n=1,bf16_narrow_n_min_m=1,domain_threads=1",
+        "cost_model=0", "cm_short_rows=4", "cm_gain_pct=0",
+        "cm_tall_pct=100,cm_call_cycles=0", "cm_fma_pipes=1,cm_fma_lat=64",
+        "cm_prefetch_kib=0,cm_reuse_pct=1000,domain_threads=64",
+        "cm_mem_cycles=1,cm_l2_bytes=1,cm_l3_cycles=1048576,cm_overlap_pct=0",
+        "cm_stream_cycles=0,cm_sync_tiles=0",
+        "cm_group_slab_pct=100000,cm_group_l3_pct=100000,cm_block_kib=0",
+        "cm_group_skew_pct=100,cm_group_rows_pct=200",
+        "cm_drift_kib=0,cm_pass_kib=1048576,cm_pass_calls=1",
+        "cm_int8_l1_pct=1"};
 
 uint32_t seed_of(const std::string &s) {
     uint32_t h = 2166136261u;
@@ -844,6 +853,14 @@ bool takes_wide_tiles(
     return on.nr > off.nr;
 }
 
+/// Whether the cost model's plan (on) differs from the rules' (off) in the
+/// rows per call, the K pass or the row groups.
+bool takes_model_plan(
+        const nat::native_plan_t &on, const nat::native_plan_t &off) {
+    return on.mr != off.mr || on.kc != off.kc
+            || on.col_groups != off.col_groups;
+}
+
 /// A planner of setting over one cache hierarchy (48 KiB L1, 1 MiB L2,
 /// 32 MiB of L3 per 8 cores), so that the rules it runs take the same calls
 /// on any host.
@@ -929,6 +946,120 @@ TEST_F(NativeTuningExec, Bf16RulesKeepTheBits) {
                         [&] { return child_same_bits(f); }, setting);
     }
     if (compared == 0) GTEST_SKIP() << "the detected caches take no case";
+}
+
+// The cost model keeps the bits on the calls it takes: 8 rows per call with
+// the L1 pass at M = 16 (12 + 4 under the rules), 8-row calls above
+// decode_m at the price of taller calls of a 32-thread domain, and two row
+// groups of 4 threads at M = 55 (an 8-thread team in one 8-thread domain,
+// 4.5 column tiles a thread).
+// A planner over 8-core domains takes every case, and a child with the model
+// and one without it both give the outputs of the built-in plan, where the
+// detected caches let the model take a case.
+TEST_F(NativeTuningExec, CostModelKeepsTheBits) {
+    nt::child_buffers_t shared;
+    const fixture_t f = make_fixture(
+            {{"bf16_model_rows", src_t::bf16, 16, 1024, 4096, kBf16, 8},
+                    {"bf16_model_prefill", src_t::bf16, 300, 512, 2560, kBf16,
+                            8},
+                    {"bf16_model_groups", src_t::bf16, 55, 1152, 4096, kBf16, 8,
+                            false, kF32, post_op_type_t::gelu_erf}},
+            shared);
+    if (f.cases.empty()) GTEST_SKIP() << "needs AVX512-BF16";
+    const char *const on = "cost_model=1,cm_tall_pct=25";
+    const char *const off = "cost_model=0";
+    if (!nt::in_child()) {
+        const std::unique_ptr<nat::native_planner_t> with = fixed_planner(on);
+        const std::unique_ptr<nat::native_planner_t> without
+                = fixed_planner(off);
+        for (size_t i = 0; i < f.cases.size(); ++i) {
+            const nat::native_problem_t p
+                    = problem_of(f.cases[i], f.operands[i]);
+            EXPECT_TRUE(takes_model_plan(with->plan(p), without->plan(p)))
+                    << f.cases[i].name << ": the model does not take the call";
+        }
+    }
+    if (taken_on_this_host(f, on, off, takes_model_plan) == 0)
+        GTEST_SKIP() << "the detected caches take no case";
+    for (const char *setting : {on, off})
+        nt::expect_in_child({{kConfig, setting}, {kTuningFile, nullptr}},
+                [&] { return child_same_bits(f); }, setting);
+}
+
+/// Whether the cost model's plan (on) differs from the rules' (off) in the
+/// M block or the INT8 rows per call or K pass, or as takes_model_plan.
+bool takes_model_tile(
+        const nat::native_plan_t &on, const nat::native_plan_t &off) {
+    return takes_model_plan(on, off) || on.mb != off.mb
+            || on.int8_rows_nv2 != off.int8_rows_nv2
+            || on.int8_pass_quads != off.int8_pass_quads;
+}
+
+// The cost model's rules for domains where one core streams slower than its
+// share of the link keep the bits on the calls they take: with that
+// limit lifted (cm_stream_cycles above the domain's rate), a BF16 block of
+// five calls that computes longer than it streams takes the long K pass, one
+// of three calls that streams longer takes M blocks of 6 rows over all of K,
+// and an INT8 block takes 6 rows per call with the shorter L1 pass
+// (cm_int8_l1_pct) or two row groups.  A planner over 8-core domains takes
+// each setting's cases, and a child with each setting and one with
+// cost_model=0 give the outputs of the built-in plan, where the detected
+// caches let a setting take a case.
+TEST_F(NativeTuningExec, CostModelChoicesKeepTheBits) {
+    nt::child_buffers_t shared;
+    const fixture_t f = make_fixture(
+            {{"bf16_long_pass", src_t::bf16, 55, 2048, 4096, kBf16, 8},
+                    {"bf16_short_blocks", src_t::bf16, 32, 2048, 2048, kBf16,
+                            8},
+                    {"int8_three_calls", src_t::dyn_s8, 32, 1024, 4096, kBf16,
+                            8},
+                    {"int8_groups", src_t::dyn_s8, 55, 512, 2048, kBf16, 8}},
+            shared);
+    if (f.cases.size() != 4)
+        GTEST_SKIP() << "needs AVX512-BF16 and AVX512-VNNI";
+    const char *const off = "cost_model=0";
+    const struct {
+        const char *on;
+        std::vector<std::string> cases;
+    } settings[] = {{"cm_stream_cycles=1048576,cm_mem_cycles=50,cm_drift_kib=0,"
+                     "cm_int8_l1_pct=40",
+                            {"bf16_long_pass", "int8_three_calls"}},
+            {"cm_stream_cycles=1048576,cm_block_kib=0", {"bf16_short_blocks"}},
+            {"cm_stream_cycles=1048576,cm_mem_cycles=424,cm_group_skew_pct=100",
+                    {"int8_groups"}}};
+    int compared = 0;
+    for (const auto &s : settings) {
+        if (!nt::in_child()) {
+            const std::unique_ptr<nat::native_planner_t> on
+                    = fixed_planner(s.on);
+            const std::unique_ptr<nat::native_planner_t> without
+                    = fixed_planner(off);
+            for (size_t i = 0; i < f.cases.size(); ++i) {
+                if (std::find(s.cases.begin(), s.cases.end(), f.cases[i].name)
+                        == s.cases.end())
+                    continue;
+                const nat::native_problem_t p
+                        = problem_of(f.cases[i], f.operands[i]);
+                EXPECT_TRUE(takes_model_tile(on->plan(p), without->plan(p)))
+                        << f.cases[i].name << ": '" << s.on
+                        << "' does not take the call";
+            }
+        }
+        if (taken_on_this_host(f, s.on, off, takes_model_tile) == 0) {
+            if (!nt::in_child())
+                std::printf(
+                        "'%s' takes no case over the detected caches: its "
+                        "child is skipped\n",
+                        s.on);
+            continue;
+        }
+        ++compared;
+        nt::expect_in_child({{kConfig, s.on}, {kTuningFile, nullptr}},
+                [&] { return child_same_bits(f); }, s.on);
+    }
+    if (compared == 0) GTEST_SKIP() << "the detected caches take no case";
+    nt::expect_in_child({{kConfig, off}, {kTuningFile, nullptr}},
+            [&] { return child_same_bits(f); }, off);
 }
 
 bool takes_blocks(const nat::native_plan_t &on, const nat::native_plan_t &off) {

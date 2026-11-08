@@ -1,11 +1,13 @@
 # BRGEMM planner: the native BRGEMM plan
 set(sources
   native_config.cpp
+  native_cost_model.cpp
   native_planner.cpp
   native_tuning_file.cpp)
 
 set(headers
   native_config.hpp
+  native_cost_model.hpp
   native_planner.hpp
   native_tuning_file.hpp
   native_tuning_keys.hpp)

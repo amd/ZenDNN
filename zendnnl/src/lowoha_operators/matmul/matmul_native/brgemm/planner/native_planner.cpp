@@ -31,6 +31,7 @@
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/native_int8_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/native_kernel_registry.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_int8_tile.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_cost_model.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_tuning_file.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_hw.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_pack.hpp"
@@ -489,8 +490,10 @@ native_problem_t make_native_problem(const GemmDescriptor &desc,
     return p;
 }
 
-native_plan_t heuristic_plan(const native_problem_t &p,
-        const UarchParams &uarch, const heuristic_params_t &hp) {
+namespace {
+
+native_plan_t rules_plan(const native_problem_t &p, const UarchParams &uarch,
+        const heuristic_params_t &hp) {
     const int M = p.M, N = p.N, K = p.K;
     // FP32 takes the rules of BF16 with its own element size, but not the
     // BF16 tiles of several slabs.
@@ -588,9 +591,7 @@ native_plan_t heuristic_plan(const native_problem_t &p,
     // row block.  There the threads of each domain take the same rows
     // instead: col_groups equal column ranges times threads / col_groups row
     // ranges.
-    const int dt = hp.domain_threads > 0 ? hp.domain_threads
-            : uarch.l3_domain_cores > 0  ? uarch.l3_domain_cores
-                                         : uarch.family_l3_cores;
+    const int dt = native_plan_domain_threads(uarch, hp);
     q.row_unit = hp.row_unit;
     const auto take_blocks = [&]() {
         q.col_groups = 0;
@@ -743,7 +744,7 @@ native_plan_t heuristic_plan(const native_problem_t &p,
                     || !bf16_wide_width(nr, p.pack_nr))
                 continue;
             wide.nr = nr;
-            const native_plan_t w = heuristic_plan(p, uarch, wide);
+            const native_plan_t w = rules_plan(p, uarch, wide);
             if (busiest_work(w, M, bytes) <= most
                     && validate_native_plan(w, p) == nullptr)
                 return w;
@@ -754,6 +755,211 @@ native_plan_t heuristic_plan(const native_problem_t &p,
         q.scratch_floats = native_plan_scratch_floats(q, p);
     }
     return q;
+}
+
+/// Whether two row groups of whole units of unit rows, the first of
+/// ceil(M / unit) / 2 units, each take more than cm_short_rows rows and the
+/// larger at most cm_group_rows_pct percent of half of M.
+bool row_groups_split(int M, int unit, const heuristic_params_t &hp) {
+    unit = std::max(1, unit);
+    const int first = std::min(M, ceil_div(M, unit) / 2 * unit);
+    return std::min(first, M - first) > hp.cm_short_rows
+            && static_cast<int64_t>(std::max(first, M - first)) * 200
+            <= static_cast<int64_t>(M) * hp.cm_group_rows_pct;
+}
+
+/// The cost model's plan for the rules' BF16 plan q of tiles of 32 columns
+/// or more and at least as many column tiles as threads: q, unless a
+/// variant of the rules or a pair of variants is modeled more than
+/// cm_gain_pct percent faster; then the fastest, the earlier on a tie.  The
+/// variants vary only what hp leaves to the rules: cm_short_rows rows per
+/// call, and two row groups of half the team each for a single row block
+/// whose slice leaves its busiest worker cm_group_skew_pct percent of the
+/// mean column tiles or more, whose column tile's slab over all of K fits
+/// cm_group_slab_pct percent of L2 and whose weights fit cm_group_l3_pct
+/// percent of the L3 of the domains the team spans; row groups of
+/// cm_short_rows rows per call split the rows by those calls unless
+/// row_unit pins another unit.  Where one
+/// core streams slower than its share of the domain's link, a single row
+/// block of a long weight stream then takes the long K pass or M blocks of
+/// tile_rows rows (below) at the rules' rows per call and row unit; the
+/// chosen row groups take it only where that unit splits the rows within
+/// the bounds above.  Fewer column tiles than threads are left to the
+/// narrowing, the narrow-N and the blocks rules.
+native_plan_t model_plan(const native_problem_t &p, const UarchParams &uarch,
+        const heuristic_params_t &hp, const native_plan_t &q) {
+    if (!p.bf16() || q.nr < kMaxTileCols || q.mr < 1 || q.n_tiles < q.threads)
+        return q;
+    // Shorter calls change only blocks taller than them, and past one row
+    // block they gain only through the price of taller calls.  Two row
+    // groups take whole row units each (units of cm_short_rows rows for
+    // groups of such calls unless row_unit pins another), and each must
+    // have more than cm_short_rows rows: a shorter group streams the weights
+    // both groups read at the rate of one core.
+    const bool short_rows = hp.mr == 0 && hp.cm_short_rows < hp.tall_rows
+            && q.mr > hp.cm_short_rows && q.mb > hp.cm_short_rows
+            && (q.m_blocks == 1 || native_plan_tall_pct(uarch, hp) > 0);
+    const int g = q.threads / 2;
+    const bool split_rows = row_groups_split(p.M, q.row_unit, hp);
+    // row_unit has no auto value: a unit other than the built-in one is the
+    // pin.
+    const int short_unit = hp.row_unit != heuristic_params_t {}.row_unit
+            ? hp.row_unit
+            : hp.cm_short_rows;
+    const bool split_short
+            = short_rows && row_groups_split(p.M, short_unit, hp);
+    const bool row_groups = hp.col_groups < 0
+            && hp.schedule == native_schedule_t::automatic && q.col_groups == 0
+            && q.unit_tiles == 0 && q.m_blocks == 1 && g >= 1
+            && q.threads % 2 == 0 && q.n_tiles % g == 0
+            && (split_rows || split_short) && native_plan_slice_skewed(q, hp)
+            && static_cast<int64_t>(q.nr) * p.K * 2 * 100
+                    <= static_cast<int64_t>(uarch.l2_bytes)
+                            * hp.cm_group_slab_pct
+            && native_plan_groups_fit_l3(p, q, uarch, hp);
+    // A single row block of cm_pass_calls calls or more at the rules' rows
+    // per call may take a K pass of cm_pass_kib KiB of slab.
+    const int64_t pass_k = (static_cast<int64_t>(hp.cm_pass_kib) * 1024
+                                   / (static_cast<int64_t>(q.nr) * 2))
+            & ~int64_t {1};
+    const bool long_pass = hp.kc == 0 && q.m_blocks == 1
+            && ceil_div(q.mb, q.mr) >= hp.cm_pass_calls && pass_k >= 2
+            && pass_k > q.kc && pass_k < p.K;
+    // A single row block of more than two calls whose source rows and slab
+    // over all of K fit the bf16_l2_pct share of L2 may take M blocks of
+    // tile_rows rows.
+    const bool short_blocks = hp.mb == 0 && hp.kc == 0 && q.m_blocks == 1
+            && p.M > 2 * q.mr && hp.tile_rows < q.mr
+            && (static_cast<int64_t>(p.M) + q.nr) * p.K * 2 * 100
+                    <= static_cast<int64_t>(uarch.l2_bytes) * hp.bf16_l2_pct;
+    if (!short_rows && !row_groups && !long_pass && !short_blocks) return q;
+    const double base = native_plan_cost(q, p, uarch, hp).cycles;
+    if (!(base > 0)) return q;
+    native_plan_t best = q;
+    double bound = base * (100 - std::clamp(hp.cm_gain_pct, 0, 100)) / 100.0;
+    const auto consider = [&](const native_plan_t &c) {
+        if (validate_native_plan(c, p) != nullptr) return false;
+        const double cycles = native_plan_cost(c, p, uarch, hp).cycles;
+        if (!(cycles < bound)) return false;
+        best = c;
+        bound = cycles;
+        return true;
+    };
+    heuristic_params_t rows = hp;
+    rows.tall_rows = hp.cm_short_rows;
+    if (short_rows) consider(rules_plan(p, uarch, rows));
+    bool took_groups = false;
+    if (row_groups) {
+        heuristic_params_t groups = hp;
+        groups.col_groups = g;
+        if (split_rows) took_groups = consider(rules_plan(p, uarch, groups));
+        if (split_short) {
+            groups.tall_rows = hp.cm_short_rows;
+            groups.row_unit = short_unit;
+            if (consider(rules_plan(p, uarch, groups))) took_groups = true;
+        }
+    }
+    // Where one core streams slower than its share of the domain's link,
+    // the busiest worker of a long weight stream decides how the block
+    // takes K.  One that computes longer than it streams, over more than
+    // cm_drift_kib KiB of weights, runs out of step with the others (its
+    // stream runs ahead of its calls) and takes the long pass, which saves
+    // calls.  One of the slice that streams longer than it computes, over
+    // more than cm_block_kib KiB, takes M blocks of tile_rows rows: each
+    // tile streams its slab once over all of K, and the later blocks
+    // re-read it from L2.  The block keeps best's schedule (its column
+    // groups, or the blocks schedule and its unit tiles) at the rules' rows
+    // per call and row unit; row groups whose rows that unit does not split
+    // within the bounds above keep best.
+    if ((long_pass || short_blocks) && native_plan_core_streams(uarch, hp)
+            && (!took_groups || split_rows)) {
+        const native_plan_cost_t c = native_plan_cost(best, p, uarch, hp);
+        heuristic_params_t r = hp;
+        if (best.unit_tiles > 0) {
+            r.schedule = native_schedule_t::blocks;
+            r.unit_tiles = best.unit_tiles;
+        } else {
+            r.col_groups = best.col_groups;
+        }
+        if (long_pass && c.core > c.stream && c.stream_kib > hp.cm_drift_kib)
+            r.kc = static_cast<int>(pass_k);
+        else if (short_blocks && best.col_groups == 0 && best.unit_tiles == 0
+                && c.core <= c.stream && c.stream_kib > hp.cm_block_kib)
+            r.mb = hp.tile_rows;
+        else
+            return best;
+        const native_plan_t s = rules_plan(p, uarch, r);
+        if (validate_native_plan(s, p) == nullptr) return s;
+    }
+    return best;
+}
+
+/// The cost model's plan for the rules' INT8 plan q that the model prices
+/// (native_plan_cost_int8), of a single row block of tiles of 32 columns or
+/// more and at least as many column tiles as threads: q, unless two row
+/// groups of half the team, under the BF16 bounds on the split, the slice's
+/// balance, the slab and the weights, are modeled more than cm_gain_pct
+/// percent faster.  Where one core streams slower than its share of the
+/// domain's link and cm_int8_l1_pct is set, the slice of a block of three
+/// calls then takes tile_rows rows per call and the INT8 L1 pass at
+/// cm_int8_l1_pct percent of L1 while the slab and those rows over all of K
+/// fit the int8_l2_pct share of L2.  An int8_mr below 12, int8_kc, mb and
+/// the schedule pin what they set.
+native_plan_t int8_model_plan(const native_problem_t &p,
+        const UarchParams &uarch, const heuristic_params_t &hp,
+        const native_plan_t &q) {
+    if (!native_plan_cost_int8(p) || q.nr < kMaxTileCols
+            || q.n_tiles < q.threads)
+        return q;
+    const int cw = native_int8_col_width(q, q.nr);
+    const int rows = native_int8_call_rows(q, cw / 16);
+    if (rows < 1 || hp.int8_mr < kMaxCallRows || q.m_blocks != 1) return q;
+    const int g = q.threads / 2;
+    const bool row_groups = hp.col_groups < 0
+            && hp.schedule == native_schedule_t::automatic && q.col_groups == 0
+            && q.unit_tiles == 0 && g >= 1 && q.threads % 2 == 0
+            && q.n_tiles % g == 0 && row_groups_split(p.M, q.row_unit, hp)
+            && native_plan_slice_skewed(q, hp)
+            && static_cast<int64_t>(q.nr) * p.K * 100
+                    <= static_cast<int64_t>(uarch.l2_bytes)
+                            * hp.cm_group_slab_pct
+            && native_plan_groups_fit_l3(p, q, uarch, hp);
+    if (row_groups) {
+        const double base = native_plan_cost(q, p, uarch, hp).cycles;
+        heuristic_params_t v = hp;
+        v.col_groups = g;
+        const native_plan_t c = rules_plan(p, uarch, v);
+        if (base > 0 && validate_native_plan(c, p) == nullptr
+                && native_plan_cost(c, p, uarch, hp).cycles < base
+                                * (100 - std::clamp(hp.cm_gain_pct, 0, 100))
+                                / 100.0)
+            return c;
+    }
+    const int call_rows = std::min(hp.tile_rows, kMaxCallRows);
+    if (hp.cm_int8_l1_pct > 0 && q.col_groups == 0 && q.unit_tiles == 0
+            && hp.int8_kc == 0 && hp.mb == 0 && ceil_div(q.mb, rows) == 3
+            && call_rows < rows && native_plan_core_streams(uarch, hp)
+            && (static_cast<int64_t>(q.nr) + call_rows) * p.K * 100
+                    <= static_cast<int64_t>(uarch.l2_bytes) * hp.int8_l2_pct) {
+        heuristic_params_t v = hp;
+        v.int8_mr = call_rows;
+        v.l1_pct = hp.cm_int8_l1_pct;
+        v.col_groups = 0;
+        const native_plan_t r = rules_plan(p, uarch, v);
+        if (r.int8_pass_quads > 0 && validate_native_plan(r, p) == nullptr)
+            return r;
+    }
+    return q;
+}
+
+} // namespace
+
+native_plan_t heuristic_plan(const native_problem_t &p,
+        const UarchParams &uarch, const heuristic_params_t &hp) {
+    const native_plan_t q = rules_plan(p, uarch, hp);
+    if (hp.cost_model == 0) return q;
+    return p.int8() ? int8_model_plan(p, uarch, hp, q)
+                    : model_plan(p, uarch, hp, q);
 }
 
 const char *validate_native_plan(
@@ -846,7 +1052,6 @@ native_planner_t::native_planner_t(const UarchParams &uarch,
     , override_(std::move(override_source))
     , table_(std::move(table_source))
     , rules_(std::move(rules_source)) {
-    if (!has_sources()) return;
     cache_ = std::make_unique<std::atomic<const cache_entry_t *>[]>(
             kNativePlanCacheSlots);
     for (size_t i = 0; i < kNativePlanCacheSlots; ++i)
@@ -860,7 +1065,6 @@ native_planner_t::~native_planner_t() {
 }
 
 native_plan_t native_planner_t::plan(const native_problem_t &p) const noexcept {
-    if (!has_sources()) return heuristic_plan(p, uarch_, kBuiltInParams);
     if (p.M > kNativePlanCacheMaxM) return resolve(p);
     // Slots only ever go from empty to an immutable entry, and an insert takes
     // the first empty slot of the window: p is before any empty slot.
@@ -908,6 +1112,7 @@ bool native_planner_t::has_sources() const noexcept {
 
 native_plan_t native_planner_t::resolve(
         const native_problem_t &p) const noexcept {
+    if (!has_sources()) return heuristic_plan(p, uarch_, kBuiltInParams);
     // The checks and the warnings of the layers allocate; a call that finds
     // no memory for them gets the built-in plan.
     try {

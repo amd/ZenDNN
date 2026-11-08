@@ -326,6 +326,31 @@ TEST(NativeTuningPlan, DefaultParamsAreTheBuiltInConstants) {
     EXPECT_EQ(hp.bf16_alias, 1);
     EXPECT_EQ(hp.bf16_narrow_n, 1);
     EXPECT_EQ(hp.blocks, 1);
+    EXPECT_EQ(hp.cost_model, 1);
+    // The cost model's inputs.
+    EXPECT_EQ(hp.cm_gain_pct, 5);
+    EXPECT_EQ(hp.cm_short_rows, 8);
+    EXPECT_EQ(hp.cm_fma_pipes, 0);
+    EXPECT_EQ(hp.cm_fma_lat, 6);
+    EXPECT_EQ(hp.cm_call_cycles, 800);
+    EXPECT_EQ(hp.cm_tall_pct, -1);
+    EXPECT_EQ(hp.cm_l2_bytes, 16);
+    EXPECT_EQ(hp.cm_l3_cycles, 10);
+    EXPECT_EQ(hp.cm_mem_cycles, 0);
+    EXPECT_EQ(hp.cm_prefetch_kib, 4);
+    EXPECT_EQ(hp.cm_overlap_pct, 20);
+    EXPECT_EQ(hp.cm_reuse_pct, 50);
+    EXPECT_EQ(hp.cm_stream_cycles, 600);
+    EXPECT_EQ(hp.cm_sync_tiles, 5);
+    EXPECT_EQ(hp.cm_group_slab_pct, 75);
+    EXPECT_EQ(hp.cm_group_l3_pct, 75);
+    EXPECT_EQ(hp.cm_group_skew_pct, 110);
+    EXPECT_EQ(hp.cm_group_rows_pct, 115);
+    EXPECT_EQ(hp.cm_drift_kib, 4096);
+    EXPECT_EQ(hp.cm_pass_kib, 128);
+    EXPECT_EQ(hp.cm_pass_calls, 4);
+    EXPECT_EQ(hp.cm_block_kib, 16384);
+    EXPECT_EQ(hp.cm_int8_l1_pct, 0);
 }
 
 /// Quads per K pass of an INT8 tile cw columns wide and rows tall, max_mr

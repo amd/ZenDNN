@@ -225,10 +225,10 @@ zendnnl::lowoha::matmul::native::native_plan_source_t top_source(
 /// L3 row-group test, which traffic_groups=0 runs in place of the traffic
 /// rule (row groups when the source and one domain's B slabs exceed the
 /// l3_pct share of its L3 and the column tiles do not divide over the
-/// threads).
+/// threads), without the cost model's choice.
 inline constexpr const char *kNativeRulesOff
         = "makespan=0,l1_pass=0,traffic_groups=0,bf16_alias=0,"
-          "bf16_narrow_n=0,blocks=0";
+          "bf16_narrow_n=0,blocks=0,cost_model=0";
 
 /// The rule switches of the native planner's config: its int32 keys of range
 /// 0 .. 1, in key order.

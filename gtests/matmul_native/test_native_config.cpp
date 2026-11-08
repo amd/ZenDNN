@@ -307,6 +307,54 @@ const key_doc_t kKeyDocs[] = {
                 &field_value<int, &hp_t::bf16_blocks_min_m>},
         {"int8_blocks_min_m", "int8", true, false, "3072",
                 &field_value<int, &hp_t::int8_blocks_min_m>},
+        {"cost_model", "both", true, false, "1",
+                &field_value<int, &hp_t::cost_model>},
+        {"cm_gain_pct", "both", true, false, "5",
+                &field_value<int, &hp_t::cm_gain_pct>},
+        {"cm_short_rows", "both", true, false, "8",
+                &field_value<int, &hp_t::cm_short_rows>},
+        {"cm_fma_pipes", "both", true, false, "fma_ports",
+                &field_value<int, &hp_t::cm_fma_pipes>},
+        {"cm_fma_lat", "both", true, false, "6",
+                &field_value<int, &hp_t::cm_fma_lat>},
+        {"cm_call_cycles", "both", true, false, "800",
+                &field_value<int, &hp_t::cm_call_cycles>},
+        {"cm_tall_pct", "both", true, false, "domain_threads",
+                &field_value<int, &hp_t::cm_tall_pct>},
+        {"cm_l2_bytes", "both", true, false, "16",
+                &field_value<int, &hp_t::cm_l2_bytes>},
+        {"cm_l3_cycles", "both", true, false, "10",
+                &field_value<int, &hp_t::cm_l3_cycles>},
+        {"cm_mem_cycles", "both", true, false, "domain_threads",
+                &field_value<int, &hp_t::cm_mem_cycles>},
+        {"cm_prefetch_kib", "both", true, false, "4",
+                &field_value<int, &hp_t::cm_prefetch_kib>},
+        {"cm_overlap_pct", "both", true, false, "20",
+                &field_value<int, &hp_t::cm_overlap_pct>},
+        {"cm_reuse_pct", "both", true, false, "50",
+                &field_value<int, &hp_t::cm_reuse_pct>},
+        {"cm_stream_cycles", "both", true, false, "600",
+                &field_value<int, &hp_t::cm_stream_cycles>},
+        {"cm_sync_tiles", "both", true, false, "5",
+                &field_value<int, &hp_t::cm_sync_tiles>},
+        {"cm_group_slab_pct", "both", true, false, "75",
+                &field_value<int, &hp_t::cm_group_slab_pct>},
+        {"cm_group_l3_pct", "both", true, false, "75",
+                &field_value<int, &hp_t::cm_group_l3_pct>},
+        {"cm_group_skew_pct", "both", true, false, "110",
+                &field_value<int, &hp_t::cm_group_skew_pct>},
+        {"cm_group_rows_pct", "both", true, false, "115",
+                &field_value<int, &hp_t::cm_group_rows_pct>},
+        {"cm_drift_kib", "bf16", true, false, "4096",
+                &field_value<int, &hp_t::cm_drift_kib>},
+        {"cm_pass_kib", "bf16", true, false, "128",
+                &field_value<int, &hp_t::cm_pass_kib>},
+        {"cm_pass_calls", "bf16", true, false, "4",
+                &field_value<int, &hp_t::cm_pass_calls>},
+        {"cm_block_kib", "bf16", true, false, "16384",
+                &field_value<int, &hp_t::cm_block_kib>},
+        {"cm_int8_l1_pct", "int8", true, false, "0",
+                &field_value<int, &hp_t::cm_int8_l1_pct>},
 };
 
 /// The doc of key, nullptr for a key it does not list.
@@ -382,8 +430,9 @@ TEST(NativeConfigText, KeyDocsMatchTheKeyTable) {
         const bool integer = k.type == native_key_type_t::int32
                 || k.type == native_key_type_t::int64;
         if (integer && !native_text_int64(d.builtin, text_value)) {
-            // -1: col_groups by the schedule.
-            const bool minus_one = std::string(k.name) == "col_groups";
+            // -1: col_groups by the schedule, cm_tall_pct by the L3 domain.
+            const bool minus_one = std::string(k.name) == "col_groups"
+                    || std::string(k.name) == "cm_tall_pct";
             EXPECT_EQ(v, minus_one ? -1 : 0) << k.name;
         } else {
             const native_config_t c
@@ -2279,7 +2328,7 @@ TEST(NativeConfigSchema, SchemaDump) {
             = native_brgemm_test::native_rule_switches();
     EXPECT_EQ(switches,
             (std::vector<std::string> {"makespan", "l1_pass", "traffic_groups",
-                    "bf16_alias", "bf16_narrow_n", "blocks"}));
+                    "bf16_alias", "bf16_narrow_n", "blocks", "cost_model"}));
     for (const std::string &name : switches) {
         EXPECT_EQ(key(name).value("default", json()), 1) << name;
         EXPECT_FALSE(key(name).contains("auto")) << name;
@@ -2291,19 +2340,60 @@ TEST(NativeConfigSchema, SchemaDump) {
                  {"min_gain_pct", 5}, {"idle_pct", 10}, {"decode_m", 128},
                  {"l1_pct", 100}, {"l1_pass_max_mb", 64}, {"bf16_alias_mr", 8},
                  {"bf16_narrow_n_min_m", 1024}, {"bf16_blocks_min_m", 1024},
-                 {"int8_blocks_min_m", 3072}}) {
+                 {"int8_blocks_min_m", 3072}, {"cm_gain_pct", 5},
+                 {"cm_short_rows", 8}, {"cm_fma_lat", 6},
+                 {"cm_call_cycles", 800}, {"cm_l2_bytes", 16},
+                 {"cm_l3_cycles", 10}, {"cm_prefetch_kib", 4},
+                 {"cm_overlap_pct", 20}, {"cm_reuse_pct", 50},
+                 {"cm_stream_cycles", 600}, {"cm_sync_tiles", 5},
+                 {"cm_group_slab_pct", 75}, {"cm_group_l3_pct", 75},
+                 {"cm_group_skew_pct", 110}, {"cm_group_rows_pct", 115},
+                 {"cm_drift_kib", 4096}, {"cm_pass_kib", 128},
+                 {"cm_pass_calls", 4}, {"cm_block_kib", 16384},
+                 {"cm_int8_l1_pct", 0}}) {
         EXPECT_EQ(key(name).value("default", json()), value) << name;
         EXPECT_EQ(key(name).value("bits", json()), "same") << name;
     }
+    // The cost model's inputs and its row-group bounds apply to BF16 and
+    // per-channel INT8 plans, its stream rules to BF16 and its INT8 rule to
+    // INT8; the FMA pipes default to the detected ports and the memory rate
+    // to the L3 domain.
+    EXPECT_EQ(key("cm_fma_pipes").value("default", json()), "fma_ports");
+    EXPECT_EQ(key("cm_fma_pipes").value("auto", json()), 0);
+    EXPECT_EQ(key("cm_mem_cycles").value("default", json()), "domain_threads");
+    EXPECT_EQ(key("cm_mem_cycles").value("auto", json()), 0);
+    EXPECT_EQ(key("cm_tall_pct").value("default", json()), "domain_threads");
+    EXPECT_EQ(key("cm_tall_pct").value("auto", json()), -1);
+    for (const char *name : {"cost_model", "cm_gain_pct", "cm_short_rows",
+                 "cm_fma_pipes", "cm_fma_lat", "cm_call_cycles", "cm_tall_pct",
+                 "cm_l2_bytes", "cm_l3_cycles", "cm_mem_cycles",
+                 "cm_prefetch_kib", "cm_overlap_pct", "cm_reuse_pct",
+                 "cm_stream_cycles", "cm_sync_tiles", "cm_group_slab_pct",
+                 "cm_group_l3_pct", "cm_group_skew_pct", "cm_group_rows_pct"}) {
+        EXPECT_EQ(key(name).value("applies", json()), "both") << name;
+        EXPECT_EQ(key(name).value("kind", json()), "param") << name;
+    }
+    for (const char *name :
+            {"cm_drift_kib", "cm_pass_kib", "cm_pass_calls", "cm_block_kib"}) {
+        EXPECT_EQ(key(name).value("applies", json()), "bf16") << name;
+        EXPECT_EQ(key(name).value("kind", json()), "param") << name;
+    }
+    for (const char *name : {"cm_int8_l1_pct"}) {
+        EXPECT_EQ(key(name).value("applies", json()), "int8") << name;
+        EXPECT_EQ(key(name).value("kind", json()), "param") << name;
+    }
     // The INT8 schemes a key applies to: the per-group tile reads neither
-    // the K pass nor the bias placement.
+    // the K pass nor the bias placement, and the cost model prices no
+    // per-group tile.
     const json both = json::array({"per_channel", "per_group"});
     for (const json &e : k) {
         const std::string name = e.at("name");
         const bool per_channel = name == "int8_kc" || name == "int8_l2_pct"
                 || name == "bias_in_dequant" || name == "min_pass_k"
                 || name == "l1_pass" || name == "l1_pct"
-                || name == "l1_pass_max_mb";
+                || name == "l1_pass_max_mb"
+                || (name.rfind("cm_", 0) == 0 && e.at("applies") != "bf16")
+                || name == "cost_model";
         const json want = e.at("applies") == "bf16"
                 ? json::array()
                 : (per_channel ? json::array({"per_channel"}) : both);
