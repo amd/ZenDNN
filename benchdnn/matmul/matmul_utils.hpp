@@ -149,6 +149,17 @@ struct MatmulConfig {
     } provided;
 };
 
+/// W4A8 with dynamic source quantization: s4 weights with a bf16 or f32 src
+/// and dst, as matmul_direct's W4A8 checks take them.
+inline bool is_w4a8_dynamic_dtype(zendnnl::common::data_type_t src,
+        zendnnl::common::data_type_t wei, zendnnl::common::data_type_t dst) {
+    using zendnnl::common::data_type_t;
+    const auto io = [](data_type_t dt) {
+        return dt == data_type_t::bf16 || dt == data_type_t::f32;
+    };
+    return wei == data_type_t::s4 && io(src) && io(dst);
+}
+
 /**
  * @brief Parses the input file and populates a vector of MatmulConfig structures.
  *

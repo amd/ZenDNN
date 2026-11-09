@@ -89,6 +89,11 @@ struct heuristic_params_t {
     uint8_t int8_cw_mask = kNativeInt8CwAll;
     int int8_l2_pct = 50; ///< L2 share of one pass's B slab and A rows
     int int8_kc = 0; ///< pin; 0: the L2 rule
+    /// Percent of L1 one batch of an s4 tile's groups (its B slab and one
+    /// call's source rows) takes in a plan of at most decode_m rows, where
+    /// the tile's later row calls read each batch again; 0: batches of the
+    /// int8_l2_pct share of L2.
+    int int4_l1_pct = 125;
     bool direct_store = true;
     bool bias_in_dequant = true;
     // Source preparation.
@@ -158,12 +163,12 @@ struct heuristic_params_t {
     /// percent faster, and to the model's rules for long weight streams
     /// (cm_pass_kib, cm_block_kib); a per-channel INT8 plan likewise to two
     /// row groups, and with cm_int8_l1_pct to its rule for blocks of three
-    /// calls.  The model places the team's threads in L3 domains in order,
-    /// domain_threads to a domain.
+    /// calls; an s4 plan to M blocks (cm_int4_min_m).  The model places the
+    /// team's threads in L3 domains in order, domain_threads to a domain.
     int cost_model = 1;
     int cm_gain_pct = 5;
     // Cost model (native_cost_model.hpp): the inputs of the modeled time of
-    // a BF16 or per-channel INT8 plan, in cycles of one core.
+    // a BF16, per-channel INT8 or s4 plan, in cycles of one core.
     /// Rows per call of the shorter BF16 call the model weighs against
     /// tall_rows; a BF16 or INT8 call of more rows takes cm_tall_pct percent
     /// more cycles per row.
@@ -251,6 +256,12 @@ struct heuristic_params_t {
     /// where the cost model gives a single INT8 row block of three calls
     /// those rows; 0: no such rule.
     int cm_int8_l1_pct = 0;
+    /// Rows from which a single s4 row block whose slice does not divide
+    /// its column tiles over the threads takes M blocks of ceil(M / b) rows,
+    /// b 2 to 4 (at least tile_rows each), where the cost model rates them
+    /// more than cm_gain_pct percent faster: the row blocks divide the
+    /// slice more evenly.  0: no such rule.
+    int cm_int4_min_m = 48;
 };
 
 /// A partial heuristic_params_t: what one source sets.  Fields mirror
@@ -268,7 +279,7 @@ struct native_config_t {
     std::optional<int> l3_pct, domain_threads;
     std::optional<int> int8_mr;
     std::optional<uint8_t> int8_cw_mask;
-    std::optional<int> int8_l2_pct, int8_kc;
+    std::optional<int> int8_l2_pct, int8_kc, int4_l1_pct;
     std::optional<bool> direct_store, bias_in_dequant;
     std::optional<int> copy_block;
     std::optional<int64_t> bf16_copy_par_min, int8_copy_par_min;
@@ -286,6 +297,7 @@ struct native_config_t {
     std::optional<int> cm_group_slab_pct, cm_group_l3_pct, cm_group_skew_pct;
     std::optional<int> cm_group_rows_pct, cm_drift_kib, cm_pass_kib;
     std::optional<int> cm_pass_calls, cm_block_kib, cm_int8_l1_pct;
+    std::optional<int> cm_int4_min_m;
 
     bool empty() const;
     bool operator==(const native_config_t &o) const;

@@ -42,6 +42,9 @@ enum class native_key_type_t : uint8_t {
 /// A key only a per-channel INT8 call applies.
 inline constexpr uint8_t kNativeKeyPerChannel
         = native_int8_scheme_bit(native_int8_scheme_t::per_channel);
+/// A key only a per-group INT8 call (every s4 call) applies.
+inline constexpr uint8_t kNativeKeyPerGroup
+        = native_int8_scheme_bit(native_int8_scheme_t::per_group);
 
 /// One key of native_config_t, named as in the text and JSON forms.
 struct native_config_key_t {

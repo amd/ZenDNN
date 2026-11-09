@@ -64,13 +64,17 @@ void copy_transposed(const T *src, int lda, int M, int K, T *dst, int side,
     const bool parallel = threads > 1 && static_cast<int64_t>(M) * K >= par_min;
 #pragma omp parallel for num_threads(threads) schedule(static) if (parallel)
     for (int mbk = 0; mbk < m_blocks; ++mbk) {
-        const int m_end = std::min(M, (mbk + 1) * side);
-        for (int k0 = 0; k0 < K; k0 += side) {
-            const int k_end = std::min(K, k0 + side);
-            for (int m = mbk * side; m < m_end; ++m)
+        // A block ends at its start plus what is left, at most side: the
+        // start plus side may pass the int bound.
+        const int m0 = mbk * side;
+        const int m_end = m0 + std::min(side, M - m0);
+        for (int k0 = 0; k0 < K;) {
+            const int k_end = k0 + std::min(side, K - k0);
+            for (int m = m0; m < m_end; ++m)
                 for (int k = k0; k < k_end; ++k)
                     dst[static_cast<size_t>(m) * K + k]
                             = src[static_cast<size_t>(k) * lda + m];
+            k0 = k_end;
         }
     }
 }
@@ -257,7 +261,8 @@ ZENDNNL_ALWAYS_INLINE inline execute_call_t make_call(
     const bool dynamic_src = params.dynamic_quant
             && (desc.src_dt == data_type_t::bf16
                     || desc.src_dt == data_type_t::f32);
-    const bool int8 = desc.wei_dt == data_type_t::s8
+    const bool int8
+            = (desc.wei_dt == data_type_t::s8 || desc.wei_dt == data_type_t::s4)
             && (desc.src_dt == data_type_t::u8 || desc.src_dt == data_type_t::s8
                     || dynamic_src);
     const bool f32 = desc.src_dt == data_type_t::f32
@@ -289,8 +294,8 @@ ZENDNNL_ALWAYS_INLINE inline status_t check_call(
     const GemmDescriptor &desc = c.desc;
     if (!c.bf16 && !c.int8 && !c.f32)
         return turned_away(status_t::unimplemented,
-                "data types other than bf16 x bf16, u8 / s8 x s8 and f32 x "
-                "f32",
+                "data types other than bf16 x bf16, u8 / s8 x s8, s8 x s4 and "
+                "f32 x f32",
                 why);
     const UarchParams &uarch = detect_uarch();
     const bool kernel_isa
@@ -456,8 +461,9 @@ status_t copy_pre_activation(const execute_call_t &c, const native_plan_t &p,
             && static_cast<int64_t>(desc.M) * desc.N >= p.copy_par_min;
 #pragma omp parallel for num_threads(threads) schedule(static) if (parallel)
     for (int b = 0; b < blocks; ++b) {
-        const int m_end = std::min(desc.M, (b + 1) * p.copy_block);
-        for (int m = b * p.copy_block; m < m_end; ++m)
+        const int m0 = b * p.copy_block;
+        const int m_end = m0 + std::min(p.copy_block, desc.M - m0);
+        for (int m = m0; m < m_end; ++m)
             std::memcpy(out + static_cast<size_t>(m) * row_bytes,
                     src + static_cast<size_t>(m) * ld_bytes, row_bytes);
     }
@@ -523,7 +529,8 @@ void log_plan_line(const execute_call_t &c, const native_plan_t &p,
     const GemmDescriptor &desc = c.desc;
     // A BF16 or FP32 call has a K pass; an INT8 call has call shapes and,
     // unless its weight scales are per group, a K pass, a direct store and a
-    // bias placement; a per-group call has its scheme and its direct store.
+    // bias placement; a per-group call has its scheme and its direct store,
+    // and over an s4 weight its group size and order.
     const std::string kc_field
             = c.bf16 || c.f32 ? " kc=" + std::to_string(p.kc) : "";
     // The blocks schedule names the two fields its deal reads: the unit
@@ -541,7 +548,15 @@ void log_plan_line(const execute_call_t &c, const native_plan_t &p,
             int8_fields += std::string(" int8_scheme=")
                     + native_int8_scheme_name(decision.scheme)
                     + " direct=" + std::to_string(direct ? 1 : 0);
-        else
+        if (desc.wei_dt == data_type_t::s4)
+            int8_fields += " wei=s4 gs="
+                    + std::to_string(desc.K / std::max(1, decision.groups))
+                    + " order="
+                    + (decision.order == native_int8_order_t::fused
+                                    ? "fused"
+                                    : "reference")
+                    + " pass_budget=" + std::to_string(p.int8_pass_budget);
+        else if (decision.scheme == native_int8_scheme_t::per_channel)
             int8_fields += " int8_pass="
                     + (p.int8_pass_quads > 0 ? std::to_string(p.int8_pass_quads)
                                              : std::string("rule"))

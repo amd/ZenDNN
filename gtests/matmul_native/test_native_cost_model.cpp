@@ -45,6 +45,7 @@
 
 #include <gtest/gtest.h>
 
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/native_int4_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_config.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_cost_model.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_planner.hpp"
@@ -88,7 +89,7 @@ const nat::UarchParams &domains16() {
 
 /// The model takes a variant only as a legal plan, and a plan is legal only
 /// with this CPU's kernels for it: the tests of BF16 choices need
-/// AVX512-BF16 and those of INT8 choices AVX512-VNNI.  The prices
+/// AVX512-BF16 and those of INT8 and s4 choices AVX512-VNNI.  The prices
 /// themselves need neither.
 bool bf16_kernels() {
     return nat::detect_uarch().avx512bf16;
@@ -112,6 +113,18 @@ nat::native_problem_t problem(int M, int N, int K, int threads, bool bf16) {
     p.wei_dt = bf16 ? data_type_t::bf16 : data_type_t::s8;
     p.dst_dt = data_type_t::bf16;
     p.dynamic_quant = !bf16;
+    return p;
+}
+
+/// The problem of an s4 weight in groups of gs with scales of scale_bytes
+/// over a bf16 source quantized in the call.
+nat::native_problem_t int4_problem(
+        int M, int N, int K, int threads, int gs, int scale_bytes = 2) {
+    nat::native_problem_t p = problem(M, N, K, threads, false);
+    p.wei_dt = data_type_t::s4;
+    p.int8_scheme = nat::native_int8_scheme_t::per_group;
+    p.wei_group_size = gs;
+    p.wei_scale_bytes = scale_bytes;
     return p;
 }
 
@@ -818,8 +831,138 @@ TEST(NativeCostModel, Int8BlocksOfThreeCallsTakeTileRows) {
             256);
 }
 
-// FP32 plans, per-group INT8 plans, INT8 plans of more than one row block or
-// of at most 8 rows, BF16 tiles of fewer than 32 columns and single-call
+// An s4 plan is priced on its per-group tile: weights of half a byte an
+// element plus the group's scale (bf16 scales at groups of 128: 0.515625
+// bytes), so, with the stream idle and the L3 reads priced out, its memory
+// term over the same grid is that of a BF16 weight times 0.515625 / 2; each
+// group adds one FMA per row and output vector to the core term; below
+// cm_int4_min_m rows the model leaves the s4 plan to the rules.
+TEST(NativeCostModel, PricesInt4Tiles) {
+    const nat::native_problem_t g128 = int4_problem(6, 4096, 4096, 32, 128);
+    EXPECT_DOUBLE_EQ(nat::native_int4_weight_bytes(g128), 0.515625);
+    EXPECT_DOUBLE_EQ(nat::native_int4_weight_bytes(
+                             int4_problem(6, 4096, 4096, 32, 128, 4)),
+            0.53125);
+    EXPECT_DOUBLE_EQ(nat::native_int4_weight_bytes(
+                             int4_problem(6, 4096, 4096, 32, 4096)),
+            0.5 + 2.0 / 4096);
+    const nat::heuristic_params_t hp
+            = params("cm_prefetch_kib=1048576,cm_l3_cycles=0,cm_call_cycles=0");
+    for (const nat::UarchParams *u : kBoth) {
+        SCOPED_TRACE("domain " + std::to_string(u->l3_domain_cores));
+        const nat::native_plan_t q = nat::heuristic_plan(g128, *u, hp);
+        ASSERT_EQ(q.nr, 32);
+        ASSERT_EQ(q.mb, 6);
+        ASSERT_EQ(q.col_groups, 0);
+        ASSERT_EQ(q.int8_rows_nv2, 6);
+        const nat::native_plan_cost_t c
+                = nat::native_plan_cost(q, g128, *u, hp);
+        const nat::native_plan_cost_t b = nat::native_plan_cost(
+                q, problem(6, 4096, 4096, 32, true), *u, hp);
+        ASSERT_GT(c.memory, 0.0);
+        EXPECT_NEAR(c.memory / b.memory, 0.515625 / 2, 1e-12);
+        // 4 tiles per worker, one call of 6 rows over 2 output vectors and 2
+        // pipes: 6 cycles more per group.
+        const nat::native_plan_cost_t c32 = nat::native_plan_cost(
+                q, int4_problem(6, 4096, 4096, 32, 32), *u, hp);
+        EXPECT_DOUBLE_EQ(c32.core - c.core, 4 * (128 - 32) * 6.0);
+        EXPECT_GT(nat::native_plan_cost(
+                          q, int4_problem(6, 4096, 4096, 32, 128, 4), *u, hp)
+                          .memory,
+                c.memory);
+        // A per-group s8 weight is not priced.
+        nat::native_problem_t g8 = problem(6, 4096, 4096, 32, false);
+        g8.int8_scheme = nat::native_int8_scheme_t::per_group;
+        EXPECT_EQ(nat::native_plan_cost(q, g8, *u, hp).cycles, 0.0);
+    }
+}
+
+// At the largest K an s4 weight takes, groups of 4 (536870910 of them) price
+// their epilogue as many groups: 6 cycles more per group for each of the
+// worker's 4 tiles of one 6-row call than groups of 8, whose count times
+// the rows fits an int.
+TEST(NativeCostModel, Int4GroupsOfTheLargestK) {
+    const int K = nat::kMaxNativeInt4K;
+    const nat::heuristic_params_t hp
+            = params("cm_prefetch_kib=1048576,cm_l3_cycles=0,cm_call_cycles=0");
+    for (const nat::UarchParams *u : kBoth) {
+        SCOPED_TRACE("domain " + std::to_string(u->l3_domain_cores));
+        const nat::native_plan_t q = nat::heuristic_plan(
+                int4_problem(6, 4096, 4096, 32, 128), *u, hp);
+        ASSERT_EQ(q.nr, 32);
+        ASSERT_EQ(q.mb, 6);
+        ASSERT_EQ(q.int8_rows_nv2, 6);
+        const nat::native_plan_cost_t g4 = nat::native_plan_cost(
+                q, int4_problem(6, 4096, K, 32, 4), *u, hp);
+        const nat::native_plan_cost_t g8 = nat::native_plan_cost(
+                q, int4_problem(6, 4096, K, 32, 8), *u, hp);
+        ASSERT_GT(g8.core, 0.0);
+        EXPECT_DOUBLE_EQ(g4.core - g8.core, 4 * (536870910.0 - 268435455) * 6);
+        EXPECT_GT(g4.cycles, g8.cycles);
+    }
+}
+
+// A single s4 row block of cm_int4_min_m rows or more whose slice does not
+// divide its column tiles over the threads takes the M blocks the model
+// rates fastest, on both hierarchies: at M 128 and 32 threads, N 6656 (208
+// tiles, 6.5 a thread) two blocks of 64 rows (13 tiles a thread), N 3840
+// (120 tiles) four blocks of 32 rows (15 a thread).  Slices that divide (N
+// 4096 and 5120), fewer rows than cm_int4_min_m, pins and the switches
+// keep the rules' plan; the row blocks keep the plan legal.
+TEST(NativeCostModel, Int4RowBlocks) {
+    const nat::heuristic_params_t built_in;
+    const nat::heuristic_params_t off = params("cost_model=0");
+    ASSERT_EQ(built_in.cm_int4_min_m, 48);
+    if (!int8_kernels()) GTEST_SKIP() << "needs AVX512-VNNI";
+    for (const nat::UarchParams *u : kBoth) {
+        SCOPED_TRACE("domain " + std::to_string(u->l3_domain_cores));
+        const struct {
+            int N, K, mb;
+        } taken[] = {{6656, 19968, 64}, {3840, 15360, 32}};
+        for (const auto &t : taken) {
+            const nat::native_problem_t p
+                    = int4_problem(128, t.N, t.K, 32, 128);
+            const nat::native_plan_t r = nat::heuristic_plan(p, *u, off);
+            ASSERT_EQ(r.m_blocks, 1) << t.N;
+            ASSERT_NE(r.n_tiles % r.threads, 0) << t.N;
+            const nat::native_plan_t q = nat::heuristic_plan(p, *u, built_in);
+            EXPECT_EQ(q.mb, t.mb) << t.N << " " << text(q);
+            EXPECT_EQ(q.nr, r.nr) << t.N;
+            EXPECT_EQ(q.threads, r.threads) << t.N;
+            EXPECT_EQ(q.col_groups, 0) << t.N;
+            EXPECT_EQ(nat::validate_native_plan(q, p), nullptr) << t.N;
+            EXPECT_LT(nat::native_plan_cost(q, p, *u, built_in).cycles,
+                    0.95 * nat::native_plan_cost(r, p, *u, built_in).cycles)
+                    << t.N;
+            for (const char *pin : {"mb=128", "col_groups=0", "schedule=slice",
+                         "cm_int4_min_m=0", "cm_int4_min_m=129",
+                         "cm_gain_pct=100"})
+                EXPECT_TRUE(same(nat::heuristic_plan(p, *u, params(pin)),
+                        nat::heuristic_plan(p, *u,
+                                params(std::string(pin) + ",cost_model=0"))))
+                        << t.N << " " << pin;
+        }
+        for (const int N : {4096, 5120}) {
+            const nat::native_problem_t p
+                    = int4_problem(128, N, 14336, 32, 128);
+            EXPECT_TRUE(same(nat::heuristic_plan(p, *u, built_in),
+                    nat::heuristic_plan(p, *u, off)))
+                    << N;
+        }
+        const nat::native_problem_t below = int4_problem(
+                built_in.cm_int4_min_m - 1, 6656, 19968, 32, 128);
+        EXPECT_TRUE(same(nat::heuristic_plan(below, *u, built_in),
+                nat::heuristic_plan(below, *u, off)));
+        EXPECT_GT(nat::heuristic_plan(below, *u,
+                          params("cm_int4_min_m=" + std::to_string(below.M)))
+                          .m_blocks,
+                1);
+    }
+}
+
+// FP32 plans, per-group INT8 plans, INT4 plans below cm_int4_min_m rows or
+// of more than one row block, INT8 plans of more than one row block or of
+// at most 8 rows, BF16 tiles of fewer than 32 columns and single-call
 // decode tiles keep the rules' plan.
 TEST(NativeCostModel, LeavesOtherPlansToTheRules) {
     const nat::heuristic_params_t built_in;
@@ -846,6 +989,11 @@ TEST(NativeCostModel, LeavesOtherPlansToTheRules) {
                                         nat::heuristic_plan(group, *u, off)))
                                 << "per-group s8 M " << M << " N " << N << " K "
                                 << K;
+                        const nat::native_problem_t s4
+                                = int4_problem(M, N, K, threads, 128);
+                        EXPECT_TRUE(same(nat::heuristic_plan(s4, *u, built_in),
+                                nat::heuristic_plan(s4, *u, off)))
+                                << "s4 M " << M << " N " << N << " K " << K;
                         nat::native_problem_t f32 = s8;
                         f32.src_dt = f32.wei_dt = f32.dst_dt = data_type_t::f32;
                         f32.dynamic_quant = false;
@@ -919,6 +1067,7 @@ TEST(NativeCostModel, PlansAreLegalOverTheInputs) {
             "cm_group_skew_pct=100", "cm_group_skew_pct=100000",
             "cm_group_rows_pct=100", "cm_group_rows_pct=200",
             "cm_int8_l1_pct=0", "cm_int8_l1_pct=1", "cm_int8_l1_pct=1000",
+            "cm_int4_min_m=0", "cm_int4_min_m=1", "cm_int4_min_m=1073741824",
             "tall_rows=8", "row_unit=1", "min_tiles_per_thread=4"};
     size_t checked = 0, failed = 0;
     for (const char *input : inputs) {
@@ -932,20 +1081,25 @@ TEST(NativeCostModel, PlansAreLegalOverTheInputs) {
                              129, 1024, 1031})
                     for (const int N : {32, 64, 96, 1536, 2560, 4096, 151936})
                         for (const int K : {2, 64, 1000, 4096, 14336})
-                            for (const bool bf16 : {true, false}) {
-                                const nat::native_problem_t p
-                                        = problem(M, N, K, threads, bf16);
+                            for (const int dt : {0, 1, 2}) {
+                                const bool bf16 = dt == 0;
+                                const nat::native_problem_t p = dt == 2
+                                        ? int4_problem(M, N, K, threads, K)
+                                        : problem(M, N, K, threads, bf16);
                                 const nat::native_plan_t q
                                         = nat::heuristic_plan(p, *u, hp);
                                 const char *why
                                         = nat::validate_native_plan(q, p);
                                 ++checked;
                                 if (why != nullptr && failed++ < 10)
-                                    ADD_FAILURE()
-                                            << input << (bf16 ? " bf16" : " s8")
-                                            << " M " << M << " N " << N << " K "
-                                            << K << " threads " << threads
-                                            << ": " << why;
+                                    ADD_FAILURE() << input
+                                                  << (bf16 ? " bf16"
+                                                                     : dt == 2
+                                                                     ? " s4"
+                                                                     : " s8")
+                                                  << " M " << M << " N " << N
+                                                  << " K " << K << " threads "
+                                                  << threads << ": " << why;
                                 if (!*input && !same(planner.plan(p), q)
                                         && failed++ < 10)
                                     ADD_FAILURE()

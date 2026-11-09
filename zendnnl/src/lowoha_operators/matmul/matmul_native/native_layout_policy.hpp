@@ -35,8 +35,8 @@ inline constexpr int kNativeLayoutPackNr = 32;
 struct native_layout_query_t {
     data_type_t wei_dt = data_type_t::none;
     /// Source type the kernel multiplies with: bf16 for BF16, u8 / s8 for
-    /// INT8, including a bf16 or f32 source the call quantizes dynamically,
-    /// f32 for FP32.
+    /// INT8 (s8 or s4 weights), including a bf16 or f32 source the call
+    /// quantizes dynamically, f32 for FP32.
     data_type_t src_dt = data_type_t::none;
     int K = 0;
     int N = 0;
@@ -58,12 +58,16 @@ struct native_layout_decision_t {
 /// columns per block, read only by the native BRGEMM.  Native when all hold:
 ///   * a CPU with AVX-512 F, BW, VL and DQ and FMA (native_base_isa);
 ///   * wei bf16 with src bf16 on a CPU with AVX512-BF16, wei s8 with src
-///     u8 / s8 on a CPU with AVX512-VNNI, or wei f32 with src f32;
+///     u8 / s8 or wei s4 with src s8 on a CPU with AVX512-VNNI, or wei f32
+///     with src f32;
 ///   * N >= 1 (a weight of N not a multiple of 32 is held padded with zero
 ///     columns to whole blocks), K >= 1, ldb >= (transB ? K : N);
 ///   * s8: K <= INT32_MAX / (255 * 128), the bound that keeps the int32
 ///     accumulation exact, and per-group weight scales only over groups of
-///     whole K quads (a group size that divides K and is a multiple of 4).
+///     whole K quads (a group size that divides K and is a multiple of 4);
+///   * s4: groups of whole K quads (one group over K without per-group
+///     weight scales) of at most kMaxSafeInt4GroupK values, and K at most
+///     kMaxNativeInt4K, whose whole octets an int holds.
 native_layout_decision_t decide_native_layout(const native_layout_query_t &q);
 
 /// AVX-512 F, BW, VL and DQ and FMA: what the native kernels and epilogue

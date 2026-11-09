@@ -539,8 +539,11 @@ status_t prepare_epilogue(const GemmDescriptor &desc,
     ep.ldc = desc.ldc;
     ep.beta_src = dst;
     ep.beta_ld = desc.ldc;
-    const bool is_int8 = desc.wei_dt == data_type_t::s8;
-    if (is_int8 && !has_per_group_wei_scale(params.quant_params, desc.N)
+    // An s4 weight is always per group: its alpha and beta apply here.
+    const bool is_int8
+            = desc.wei_dt == data_type_t::s8 || desc.wei_dt == data_type_t::s4;
+    if (desc.wei_dt == data_type_t::s8
+            && !has_per_group_wei_scale(params.quant_params, desc.N)
             && (desc.alpha != 1.0f || desc.beta != 0.0f))
         return turned_away(status_t::unimplemented,
                 "INT8 alpha / beta outside the INT8 tile", why);

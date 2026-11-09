@@ -108,6 +108,8 @@ status_t bkc_resolve_packed_B_st(const GemmDescriptor &desc, int K, int N,
         *pack_source_out = "thread_local";
         return status_t::success;
     };
+    const size_t extent = native_raw_weight_bytes(
+            data_type_t::bf16, K, N, ldb, desc.transB);
 
     if (weight_cache_mode != 0) {
         // The whole key of the cache: one buffer read as [K, N] and as
@@ -118,25 +120,34 @@ status_t bkc_resolve_packed_B_st(const GemmDescriptor &desc, int K, int N,
         static thread_local const BF16BKCWeight *tl_g_entry = nullptr;
         static thread_local uint64_t tl_g_gen = 0;
 
-        const size_t extent = native_raw_weight_bytes(
-                data_type_t::bf16, K, N, ldb, desc.transB);
         const uint64_t cur_gen
                 = weight_cache_generation().load(std::memory_order_relaxed);
-        if (tl_g_wt == weight && tl_g_K == K && tl_g_N == N && tl_g_ldb == ldb
-                && tl_g_tr == desc.transB && tl_g_entry && tl_g_gen == cur_gen
-                && weight_end_words_hold(
-                        tl_g_entry->source_ends, weight, extent)) {
-            *B_bkc_out = tl_g_entry->data;
+        const PrepackedWeightKey key {weight, K, N, ldb, desc.transB};
+        const bool tl_hit = tl_g_wt == weight && tl_g_K == K && tl_g_N == N
+                && tl_g_ldb == ldb && tl_g_tr == desc.transB && tl_g_entry
+                && tl_g_gen == cur_gen;
+        // Looked up before the check, which takes no lock.
+        const BF16BKCWeight *cached = tl_hit
+                ? tl_g_entry
+                : BF16BKCWeightCache::instance().find(key);
+        if (cached) {
+            // The end words of the raw weight are read without holding
+            // them: not while an in-place rewrite may write them.
+            const native_weight_check_t check;
+            if (!check.ok()
+                    || !weight_end_words_hold(
+                            cached->source_ends, weight, extent))
+                cached = nullptr;
+        }
+        if (cached && tl_hit) {
+            *B_bkc_out = cached->data;
             *pack_source_out = "tl_hit_global_ptr";
             return status_t::success;
         }
-        const PrepackedWeightKey key {weight, K, N, ldb, desc.transB};
-        const BF16BKCWeight *cached
-                = BF16BKCWeightCache::instance().find(key, extent);
         if (!cached) {
             // A first call of the tiles at weight cache mode 2 may be
             // rewriting this buffer in place: the pack reads the raw weight
-            // while the native weight cache holds the buffer, which it does
+            // while the native weight cache holds its bytes, which it does
             // only while the buffer holds no image.
             status_t packed = status_t::failure;
             switch (native_weight_read_raw(weight, extent, extent, [&] {
@@ -161,7 +172,16 @@ status_t bkc_resolve_packed_B_st(const GemmDescriptor &desc, int K, int N,
         *pack_source_out = "global_cache";
         return status_t::success;
     }
-    return pack_for_call();
+    // A first call of the tiles at weight cache mode 2 may rewrite the
+    // buffer in place meanwhile as well.
+    status_t packed = status_t::failure;
+    switch (native_weight_read_raw(
+            weight, extent, extent, [&] { packed = pack_for_call(); })) {
+        case native_raw_read_t::done: return packed;
+        case native_raw_read_t::image: return status_t::unimplemented;
+        case native_raw_read_t::failed: return status_t::failure;
+    }
+    return status_t::failure;
 }
 
 } // namespace
@@ -228,8 +248,30 @@ status_t bf16_gemv_run(const native_gemv_plan_t &plan,
         uint16_t *C_bf16_ptr
                 = dst_is_bf16 ? static_cast<uint16_t *>(dst) : nullptr;
         float *C_fp32_ptr = !dst_is_bf16 ? static_cast<float *>(dst) : nullptr;
-        bf16_gemv_narrow(A, K, B_raw, desc.ldb, C_bf16_ptr, C_fp32_ptr, bias_f,
-                kc_fused_op, alpha, beta, dst_is_bf16, N);
+        const auto run = [&] {
+            bf16_gemv_narrow(A, K, B_raw, desc.ldb, C_bf16_ptr, C_fp32_ptr,
+                    bias_f, kc_fused_op, alpha, beta, dst_is_bf16, N);
+        };
+        const size_t extent = native_raw_weight_bytes(
+                data_type_t::bf16, K, N, desc.ldb, desc.transB);
+        bool ran = false;
+        {
+            // The kernel reads the raw weight in place without holding it:
+            // not while an in-place rewrite may write it, nor once an image
+            // took its place.
+            const native_weight_check_t check(weight, extent);
+            if (check.ok()) {
+                run();
+                ran = true;
+            }
+        }
+        if (!ran) {
+            switch (native_weight_read_raw(weight, extent, extent, run)) {
+                case native_raw_read_t::done: break;
+                case native_raw_read_t::image: return status_t::unimplemented;
+                case native_raw_read_t::failed: return status_t::failure;
+            }
+        }
 
         static bool s_log_narrow = apilog_info_enabled();
         if (s_log_narrow) {

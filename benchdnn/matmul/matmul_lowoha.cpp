@@ -175,7 +175,7 @@ void set_dyn_quant_src_params(matmul_params &params,
 }
 
 // W8A8: src in {bf16,f32} + wei=s8
-// W4A8: bf16 src/dst + wei=s4
+// W4A8: is_w4a8_dynamic_dtype
 static bool is_dynamic_quant_dtype(const tensor_t &input_tensor,
         const tensor_t &weight_tensor, const tensor_t &output_tensor) {
     const auto src_dt = input_tensor.get_data_type();
@@ -183,8 +183,7 @@ static bool is_dynamic_quant_dtype(const tensor_t &input_tensor,
     const auto dst_dt = output_tensor.get_data_type();
     bool w8a8 = wei_dt == data_type_t::s8
             && (src_dt == data_type_t::bf16 || src_dt == data_type_t::f32);
-    bool w4a8 = wei_dt == data_type_t::s4 && src_dt == data_type_t::bf16
-            && dst_dt == data_type_t::bf16;
+    bool w4a8 = is_w4a8_dynamic_dtype(src_dt, wei_dt, dst_dt);
     return w8a8 || w4a8;
 }
 
@@ -308,6 +307,11 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
     for (auto &cfg : configs) {
         try {
             skip = false;
+            // The weights of the previous line are freed: what the native
+            // BRGEMM keeps about them goes too (an in-place image whose ends
+            // lie outside a new weight at its address cannot be told from
+            // the image and fails that weight's calls).
+            zendnnl::lowoha::matmul::clear_matmul_native_weight_caches();
 
             tensor_factory_t tensor_factory;
             tensor_t input_tensor;

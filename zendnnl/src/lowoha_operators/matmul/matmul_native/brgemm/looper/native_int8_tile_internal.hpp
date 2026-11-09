@@ -208,12 +208,22 @@ void compute_group_tile(const native_plan_t &plan,
         int mr, int n0, int nr, float *C, int ldc,
         const native_int8_out_t *out);
 
+/// compute_group_tile of an s4 weight, on the INT4 group kernels in the
+/// call's order (native_int8_call_t::order); an s8 source with its group
+/// shifts, and weight scales per group.
+template <bool Tail>
+void compute_int4_group_tile(const native_plan_t &plan,
+        const native_int8_call_t &call, const native_weight_view_t &w, int m0,
+        int mr, int n0, int nr, float *C, int ldc,
+        const native_int8_out_t *out);
+
 /// Groups per batch of a per-group tile over a plain pack, cw columns wide
-/// and rows tall, max_mr rows per call, groups of group_quads K quads: all
-/// groups while their slab is within twice the pass budget of the plan,
-/// else equal batches within the budget.
+/// and rows tall, max_mr rows per call, groups of group_quads K quads of
+/// quad_bytes bytes per column (4 for an s8 weight, 2 for s4): all groups
+/// while their slab is within twice the pass budget of the plan, else equal
+/// batches within the budget.
 int native_int8_group_span(const native_plan_t &plan, int groups,
-        int group_quads, int cw, int rows, int max_mr);
+        int group_quads, int cw, int rows, int max_mr, int quad_bytes = 4);
 
 /// The per-group weight scales of call (f32, bf16 or f16) at pack columns
 /// p0 .. p0 + cw (multiples of 16, and p0 + cw <= w.N: each group's gate and

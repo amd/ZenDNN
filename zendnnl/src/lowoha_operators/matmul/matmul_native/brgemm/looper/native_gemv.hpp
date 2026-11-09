@@ -77,8 +77,8 @@ native_gemv_plan_t decide_native_gemv(
 /// this call.
 /// Returns success; failure, with dst untouched, when a buffer cannot
 /// be allocated before the kernel starts; unimplemented, with dst untouched,
-/// when bf16_bkc finds the buffer rewritten in place since the call found
-/// its raw weight (the native tiles serve the call from the image).
+/// when a bf16 kernel finds the buffer rewritten in place since the call
+/// found its raw weight (the native tiles serve the call from the image).
 status_t run_native_gemv(const native_gemv_plan_t &plan,
         const GemmDescriptor &desc, const void *src, const void *weight,
         void *dst, const void *bias, const matmul_params &params,

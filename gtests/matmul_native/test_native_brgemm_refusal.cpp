@@ -45,7 +45,8 @@ using zendnnl::memory::status_t;
 
 const data_type_t bf16 = data_type_t::bf16, f32 = data_type_t::f32,
                   s8 = data_type_t::s8, u8 = data_type_t::u8,
-                  s32 = data_type_t::s32, s4 = data_type_t::s4;
+                  s32 = data_type_t::s32, s4 = data_type_t::s4,
+                  u4 = data_type_t::u4;
 
 bool native_isa() {
     const nat::UarchParams &u = nat::detect_uarch();
@@ -77,7 +78,7 @@ std::unique_ptr<refused_t> make_case(const char *name, const char *reason,
     r->src = nt::random_buffer(src_dt, static_cast<size_t>(M) * K, seed,
             int8 ? 0.0f : -1.0f, int8 ? 15.0f : 1.0f);
     const size_t wei_elems = static_cast<size_t>(K) * N;
-    r->wei = nt::kept_until_exit(wei_dt == s4
+    r->wei = nt::kept_until_exit(wei_dt == s4 || wei_dt == u4
                     ? nt::random_buffer(
                               u8, (wei_elems + 1) / 2, seed + 1, 0, 255)
                     : nt::random_buffer(wei_dt, wei_elems, seed + 1,
@@ -101,7 +102,7 @@ std::unique_ptr<refused_t> make_case(const char *name, const char *reason,
     c.params.dtypes.wei = wei_dt;
     c.params.dtypes.dst = dst_dt;
     c.params.weight_cache_type = 1;
-    if (int8 || wei_dt == s4) {
+    if (int8 || wei_dt == s4 || wei_dt == u4) {
         auto &q = c.params.quant_params;
         r->wei_scales.assign(N, 0.25f);
         q.wei_scale.buff = r->wei_scales.data();
@@ -147,8 +148,18 @@ std::vector<std::unique_ptr<refused_t>> refused_cases() {
         r.c.params.quant_params.wei_zp.dt = s32;
         r.c.params.quant_params.wei_zp.dims = {1};
     }
-    v.push_back(make_case("bf16 x s4", "weight type other than bf16 / s8 / f32",
-            bf16, s4, bf16, 4, 64, 64, seed += 4));
+    v.push_back(make_case("bf16 x s4 without dynamic quantization",
+            "s4 weight with a source other than s8", bf16, s4, bf16, 4, 64, 64,
+            seed += 4));
+    v.push_back(make_case("bf16 x u4",
+            "weight type other than bf16 / s8 / s4 / f32", bf16, u4, bf16, 4,
+            64, 64, seed += 4));
+    {
+        refused_t &r = *v.back();
+        r.c.params.quant_params.wei_zp.buff = &r.zp;
+        r.c.params.quant_params.wei_zp.dt = s8;
+        r.c.params.quant_params.wei_zp.dims = {1, 1};
+    }
     v.push_back(make_case("bf16 x s8 without dynamic quantization",
             "s8 weight with a source other than u8 / s8", bf16, s8, bf16, 4, 64,
             64, seed += 4));

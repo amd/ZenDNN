@@ -29,9 +29,15 @@ void compute_int8_tile(const native_plan_t &plan,
         const native_int8_call_t &call, const native_weight_view_t &w, int m0,
         int mr, int n0, int nr, float *C, int ldc,
         const native_int8_out_t *out) {
-    assert(nr % 16 == 0 && w.wei_dt == data_type_t::s8);
+    assert(nr % 16 == 0
+            && (w.wei_dt == data_type_t::s8 || w.wei_dt == data_type_t::s4));
     // A direct store writes pack column n as output column n: a plain pack.
     assert(out == nullptr || !w.interleaved);
+    if (w.wei_dt == data_type_t::s4) {
+        compute_int4_group_tile<false>(
+                plan, call, w, m0, mr, n0, nr, C, ldc, out);
+        return;
+    }
     if (call.scheme == native_int8_scheme_t::per_group) {
         assert(call.bias == nullptr);
         compute_group_tile<false>(plan, call, w, m0, mr, n0, nr, C, ldc, out);
@@ -43,8 +49,14 @@ void compute_int8_tile(const native_plan_t &plan,
 void compute_int8_tail_tile(const native_plan_t &plan,
         const native_int8_call_t &call, const native_weight_view_t &w, int m0,
         int mr, int n0, int cols, float *C, int ldc) {
-    assert(cols > 0 && n0 + cols == w.N && w.wei_dt == data_type_t::s8);
+    assert(cols > 0 && n0 + cols == w.N
+            && (w.wei_dt == data_type_t::s8 || w.wei_dt == data_type_t::s4));
     const int nr = (cols + 15) / 16 * 16;
+    if (w.wei_dt == data_type_t::s4) {
+        compute_int4_group_tile<true>(
+                plan, call, w, m0, mr, n0, nr, C, ldc, nullptr);
+        return;
+    }
     if (call.scheme == native_int8_scheme_t::per_group) {
         assert(call.bias == nullptr);
         compute_group_tile<true>(

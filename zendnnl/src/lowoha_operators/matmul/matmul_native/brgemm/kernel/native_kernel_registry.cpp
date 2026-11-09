@@ -16,6 +16,7 @@
 
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/native_kernel_registry.hpp"
 
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/native_int4_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/native_int8_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 
@@ -97,6 +98,31 @@ native_kernel_registry_t::native_kernel_registry_t(
         for (int mr = 1; mr <= kMaxRows; ++mr) {
             if (select_native_int8_group_ukernel(mr, nv, false) != nullptr
                     && select_native_int8_group_ukernel(mr, nv, true)
+                            != nullptr)
+                mask |= 1u << (mr - 1);
+        }
+        c.max_mr = full_rows(mask);
+        c.int8_schemes
+                = native_int8_scheme_bit(native_int8_scheme_t::per_group);
+        if (c.max_mr > 0) all_.push_back(c);
+    }
+    for (int w = 0; int8_isa && w < kWidths; ++w) {
+        native_kernel_caps_t c;
+        c.kind = native_kernel_kind_t::int4;
+        c.nr = 16 << w;
+        const int nv = c.nr / 16;
+        // A call takes the fused order (over a source scale per row or per
+        // group) or the reference order by its scales.
+        uint32_t mask = 0;
+        for (int mr = 1; mr <= kMaxRows; ++mr) {
+            if (select_native_int4_group_ukernel(
+                        mr, nv, native_int8_order_t::fused)
+                            != nullptr
+                    && select_native_int4_group_ukernel(
+                               mr, nv, native_int8_order_t::fused, true)
+                            != nullptr
+                    && select_native_int4_group_ukernel(
+                               mr, nv, native_int8_order_t::reference)
                             != nullptr)
                 mask |= 1u << (mr - 1);
         }

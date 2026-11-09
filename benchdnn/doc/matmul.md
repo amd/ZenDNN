@@ -145,7 +145,7 @@ Constraints:
 - LOWOHA path only (`--lowoha=true`, the default).
 - 2D only (`--ndims=2`); BMM and grp_matmul are not supported in this mode.
 - W8A8: `src` must be `bf16` or `f32`; `wei` must be `s8`.
-- W4A8: `src` and `dst` must be `bf16`; `wei` must be `s4`; weight scales must be per-group `{G, N}` with `K/G` divisible by 4.
+- W4A8: `src` and `dst` must be `bf16` or `f32`; `wei` must be `s4`; weight scales must be per-group `{G, N}` with `K/G` divisible by 4.
 - Compute target is fixed to `s8` (symmetric).
 - Source zero-points are not used.
 

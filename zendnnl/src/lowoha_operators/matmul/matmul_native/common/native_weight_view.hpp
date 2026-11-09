@@ -36,6 +36,10 @@ using zendnnl::error_handling::status_t;
 ///   bf16: [ceil(K / 2)][pack_nr][2] bf16, odd K padded with zero.
 ///   s8:   [ceil(K / 4)][pack_nr][4] s8, zero padded, then [pack_nr] int32
 ///         column sums over the real K.
+///   s4:   [ceil(K / 8)][pack_nr][4] bytes: byte (o, n, q) holds w + 8 of
+///         element (8o + q, n) in its low nibble and of (8o + 4 + q, n) in
+///         its high nibble, padded with w = 0 (nibble 8): the low nibbles of
+///         an octet are K quad 2o, the high nibbles K quad 2o + 1.
 ///   f32:  [K][pack_nr] f32.
 /// A gate / up weight packed with interleave_split_halves holds gate column i
 /// at pack column 2i and up column i at pack column 2i + 1.  The blocks hold
@@ -48,7 +52,8 @@ struct native_weight_view_t {
     int K = 0;
     int N = 0;
     int pack_nr = 0;
-    int k_groups = 0; ///< K pairs (bf16), K quads (s8) or K rows (f32)
+    /// K pairs (bf16), K quads (s8), K octets (s4) or K rows (f32)
+    int k_groups = 0;
     size_t block_bytes = 0; ///< one block, column sums included
     bool interleaved = false;
 
@@ -62,7 +67,8 @@ struct native_weight_view_t {
                 block(nb) + static_cast<size_t>(k_groups) * pack_nr * 4);
     }
 
-    /// Elements of wei_dt between consecutive K groups of one column.
+    /// Elements of wei_dt (bytes of an s4 weight) between consecutive K
+    /// groups of one column.
     int group_stride() const {
         if (wei_dt == data_type_t::f32) return pack_nr;
         return pack_nr * (wei_dt == data_type_t::bf16 ? 2 : 4);
@@ -84,8 +90,9 @@ struct native_weight_ref_t {
     bool interleave_split_halves = false;
     /// Effective weight cache mode (see get_native_layout): 0 packs for this
     /// call only, 1 uses the native layout cache, 2 rewrites the buffer in
-    /// place when the image fits it (a bf16 raw weight, or an AOCL prepack),
-    /// else as 1 (an s8 or f32 raw weight, or a weight of padded columns).
+    /// place when the image fits it (a bf16 or s4 raw weight, or an AOCL
+    /// prepack), else as 1 (an s8 or f32 raw weight, or a weight of padded
+    /// columns).
     int32_t weight_cache_mode = 1;
     /// Writable bytes at weight (0: the logical extent, or for an AOCL
     /// prepack its size).

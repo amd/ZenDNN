@@ -34,6 +34,7 @@
 
 #include "common/zendnnl_global.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/bf16/bf16_brgemm_ukernel.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/native_int4_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/native_int8_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/native_kernel_registry.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_config.hpp"
@@ -42,6 +43,7 @@
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_tuning_keys.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_hw.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_pack.hpp"
 #include "lowoha_operators/matmul/matmul_native/native_layout_policy.hpp"
 #include "matmul_native/native_brgemm_test_utils.hpp"
 #include "nlohmann/json.hpp"
@@ -72,6 +74,18 @@ native_problem_t problem(
     p.src_dt = bf16 ? data_type_t::bf16 : data_type_t::u8;
     p.wei_dt = bf16 ? data_type_t::bf16 : data_type_t::s8;
     p.dst_dt = data_type_t::bf16;
+    return p;
+}
+
+/// The problem of an s4 weight in groups of gs over a bf16 source the call
+/// quantizes.
+native_problem_t int4_problem(int M, int N, int K, int gs, int threads = 24) {
+    native_problem_t p = problem(M, N, K, false, threads);
+    p.src_dt = data_type_t::bf16;
+    p.wei_dt = data_type_t::s4;
+    p.dynamic_quant = true;
+    p.int8_scheme = native_int8_scheme_t::per_group;
+    p.wei_group_size = gs;
     return p;
 }
 
@@ -266,6 +280,8 @@ const key_doc_t kKeyDocs[] = {
                 &field_value<int, &hp_t::int8_l2_pct>},
         {"int8_kc", "int8", true, true, "auto",
                 &field_value<int, &hp_t::int8_kc>},
+        {"int4_l1_pct", "int8", true, false, "125",
+                &field_value<int, &hp_t::int4_l1_pct>},
         {"direct_store", "int8", true, false, "1",
                 &field_value<bool, &hp_t::direct_store>},
         // The bias then follows the dequantization instead of fusing with
@@ -355,6 +371,8 @@ const key_doc_t kKeyDocs[] = {
                 &field_value<int, &hp_t::cm_block_kib>},
         {"cm_int8_l1_pct", "int8", true, false, "0",
                 &field_value<int, &hp_t::cm_int8_l1_pct>},
+        {"cm_int4_min_m", "int8", true, false, "48",
+                &field_value<int, &hp_t::cm_int4_min_m>},
 };
 
 /// The doc of key, nullptr for a key it does not list.
@@ -829,6 +847,15 @@ TEST(NativeConfigOverride, EveryFilter) {
     EXPECT_FALSE(holds("dynamic=0", q));
     EXPECT_FALSE(holds("has_bias=0", q));
     EXPECT_TRUE(holds(" M = 1-16 , DTYPE = S8 , Epilogue = Gated ", q));
+    // The group size of an s4 weight; 0 for the others.
+    const native_problem_t g = int4_problem(5, 4096, 2048, 128);
+    EXPECT_TRUE(holds("dtype=s4,group=128,src=bf16,dynamic=1", g));
+    EXPECT_TRUE(holds("group=64-256", g));
+    EXPECT_FALSE(holds("group=32", g));
+    EXPECT_FALSE(holds("dtype=s8", g));
+    EXPECT_TRUE(holds("dtype=s8/s4", g));
+    EXPECT_TRUE(holds("group=0", p));
+    EXPECT_FALSE(holds("group=1-", q));
 }
 
 TEST(NativeConfigOverride, EmptySettingsExemptLaterClauses) {
@@ -1328,6 +1355,41 @@ TEST(NativeConfigTuningFile, MatchValues) {
     EXPECT_EQ(config_of(t, problem(64, 4096, 2048, false)), "<none>");
 }
 
+// An s4 weight's entries name its dtype and group size; those of one dtype
+// and an exact n and k are indexed apart from the s8 weight's.
+TEST(NativeConfigTuningFile, Int4Entries) {
+    const native_tuning_sources_t s = load(tuning(R"("entries": [
+        {"id": "a", "match": {"dtype": "s4", "group": 128, "n": 4096,
+                              "k": 4096},
+         "config": {"int8_mr": 4}},
+        {"id": "b", "match": {"dtype": "s8", "n": 4096, "k": 4096},
+         "config": {"int8_mr": 2}},
+        {"id": "c", "match": {"dtype": ["s4"], "group": {"max": 64}},
+         "config": {"int8_cw": [16]}},
+        {"id": "d", "match": {"group": 0, "m": {"max": 16}},
+         "config": {"nr": 16}}])"));
+    ASSERT_NE(s.table, nullptr);
+    const native_config_source_t *t = s.table.get();
+    EXPECT_EQ(config_of(t, int4_problem(8, 4096, 4096, 128)), "int8_mr=4");
+    EXPECT_EQ(config_of(t, int4_problem(8, 4096, 4096, 32)), "int8_cw=16");
+    EXPECT_EQ(config_of(t, int4_problem(8, 4096, 4096, 256)), "<none>");
+    EXPECT_EQ(config_of(t, int4_problem(8, 1024, 4096, 64)), "int8_cw=16");
+    EXPECT_EQ(config_of(t, problem(8, 4096, 4096, false)), "int8_mr=2");
+    EXPECT_EQ(config_of(t, problem(8, 1024, 4096, false)), "nr=16");
+    EXPECT_EQ(config_of(t, problem(8, 1024, 4096)), "nr=16");
+    // An entry of a dtype the planner does not name is dropped.
+    native_tuning_sources_t d;
+    EXPECT_EQ(warnings_of([&] {
+        d = load(tuning(R"("entries": [
+            {"match": {"dtype": "u4"}, "config": {"nr": 16}},
+            {"id": "good", "config": {"mb": 24}}])"));
+    }),
+            shown(1));
+    ASSERT_NE(d.table, nullptr);
+    EXPECT_EQ(config_of(d.table.get(), int4_problem(8, 4096, 4096, 128)),
+            "mb=24");
+}
+
 TEST(NativeConfigTuningFile, RuleKeys) {
     const native_tuning_sources_t s = load(tuning(R"("entries": [
         {"id": "small", "match": {"m": {"max": 64}},
@@ -1435,8 +1497,33 @@ TEST(NativeConfigTuningFile, EveryFeature) {
             {"n_per_thread", 256}, {"flops_per_thread", 25165824},
             {"l2", 1048576}, {"l3", 33554432}, {"l3_threads", 16}, {"smt", 2},
             {"cores", 128}, {"a_l3", 0.0029296875}, {"b_l3", 0.5},
-            {"slab_l2", 0.125}};
-    ASSERT_EQ(expected.size(), 26u);
+            {"slab_l2", 0.125}, {"group", 0}};
+    ASSERT_EQ(expected.size(), std::size(kNativeRuleFeatures));
+    // An s4 weight's: its elements are half a byte, its source's one.
+    const native_problem_t g = int4_problem(24, 4096, 2048, 128, 16);
+    const std::vector<std::pair<const char *, double>> int4
+            = {{"bf16", 0}, {"dynamic", 1}, {"esz", 0.5}, {"a_bytes", 49152},
+                    {"b_bytes", 4194304}, {"b_l3", 0.125}, {"slab_l2", 0.03125},
+                    {"group", 128}};
+    const auto holds = [](const char *feature, double value, const char *op,
+                               const native_problem_t &q) {
+        json rule;
+        rule["when"] = json::array({json::array({feature, op, value})});
+        rule["config"]["nr"] = 16;
+        json doc;
+        doc["format"] = "zendnnl-native-brgemm-tuning";
+        doc["version"] = 2;
+        doc["rules"]["kind"] = "ordered";
+        doc["rules"]["list"] = json::array({rule});
+        const native_tuning_sources_t r = load(doc.dump());
+        EXPECT_NE(r.rules, nullptr) << feature;
+        return r.rules != nullptr && r.rules->lookup(q) != nullptr;
+    };
+    for (const auto &[feature, value] : int4) {
+        EXPECT_TRUE(holds(feature, value, "==", g))
+                << feature << " != " << value;
+        EXPECT_FALSE(holds(feature, value, ">", g)) << feature;
+    }
     for (const auto &[feature, value] : expected) {
         const auto rules = [&, name = feature, v = value](const char *op) {
             json rule;
@@ -2017,6 +2104,28 @@ TEST(NativeConfigRegistry, MatchesTheSelectors) {
             EXPECT_FALSE(r.covers_int8(0, nr, s)) << nr;
         }
     }
+    // The s4 group kernels, both orders, serve per-group calls.
+    for (const int nr : {16, 32}) {
+        const native_kernel_caps_t *c = r.caps(native_kernel_kind_t::int4, nr);
+        if (!u.avx512vnni) {
+            EXPECT_EQ(c, nullptr);
+            continue;
+        }
+        ASSERT_NE(c, nullptr) << nr;
+        EXPECT_EQ(c->max_mr, native_int4_group_ukernel_max_mr(nr / 16));
+        for (int mr = 1; mr <= c->max_mr; ++mr)
+            for (const native_int8_order_t order : {native_int8_order_t::fused,
+                         native_int8_order_t::reference})
+                EXPECT_NE(select_native_int4_group_ukernel(mr, nr / 16, order),
+                        nullptr)
+                        << nr << " " << mr;
+        EXPECT_TRUE(c->serves(native_int8_scheme_t::per_group)) << nr;
+        EXPECT_FALSE(c->serves(native_int8_scheme_t::per_channel)) << nr;
+        EXPECT_TRUE(r.covers(native_kernel_kind_t::int4, c->max_mr, nr)) << nr;
+        EXPECT_FALSE(r.covers(native_kernel_kind_t::int4, c->max_mr + 1, nr))
+                << nr;
+        EXPECT_NE(r.int8_caps(nr, native_int8_scheme_t::per_group), c) << nr;
+    }
     // FP32 tiles are 16 or 32 columns wide, every row count 1 .. 12.
     for (const int nr : {16, 32}) {
         const native_kernel_caps_t *c = r.caps(native_kernel_kind_t::f32, nr);
@@ -2042,12 +2151,14 @@ TEST(NativeConfigRegistry, MatchesTheSelectors) {
     for (const int nr : {48, 96, 256}) {
         EXPECT_EQ(r.caps(native_kernel_kind_t::bf16, nr), nullptr) << nr;
         EXPECT_EQ(r.caps(native_kernel_kind_t::int8, nr), nullptr) << nr;
+        EXPECT_EQ(r.caps(native_kernel_kind_t::int4, nr), nullptr) << nr;
         EXPECT_EQ(r.caps(native_kernel_kind_t::f32, nr), nullptr) << nr;
         EXPECT_EQ(r.bf16_table(nr), nullptr) << nr;
         EXPECT_EQ(r.f32_table(nr), nullptr) << nr;
     }
     for (const int nr : {64, 128}) {
         EXPECT_EQ(r.caps(native_kernel_kind_t::int8, nr), nullptr) << nr;
+        EXPECT_EQ(r.caps(native_kernel_kind_t::int4, nr), nullptr) << nr;
         EXPECT_EQ(r.caps(native_kernel_kind_t::f32, nr), nullptr) << nr;
         EXPECT_EQ(r.f32_table(nr), nullptr) << nr;
     }
@@ -2255,6 +2366,22 @@ nlohmann::ordered_json schema_json() {
                 {"int8_schemes", scheme_names(c->int8_schemes)}});
     }
     for (const int nr : {16, 32}) {
+        const native_kernel_caps_t *c = r.caps(native_kernel_kind_t::int4, nr);
+        if (c == nullptr) continue;
+        uint32_t mask = 0;
+        for (int mr = 1; mr <= 12; ++mr)
+            if (select_native_int4_group_ukernel(
+                        mr, nr / 16, native_int8_order_t::fused)
+                            != nullptr
+                    && select_native_int4_group_ukernel(
+                               mr, nr / 16, native_int8_order_t::reference)
+                            != nullptr)
+                mask |= 1u << (mr - 1);
+        kernels.push_back({{"kind", "int4"}, {"nr", nr}, {"mr_mask", mask},
+                {"max_mr", c->max_mr}, {"k_unit", kNativeS4Octet},
+                {"int8_schemes", scheme_names(c->int8_schemes)}});
+    }
+    for (const int nr : {16, 32}) {
         const native_kernel_caps_t *c = r.caps(native_kernel_kind_t::f32, nr);
         if (c == nullptr) continue;
         kernels.push_back({{"kind", "f32"}, {"nr", nr},
@@ -2350,7 +2477,8 @@ TEST(NativeConfigSchema, SchemaDump) {
                  {"cm_group_skew_pct", 110}, {"cm_group_rows_pct", 115},
                  {"cm_drift_kib", 4096}, {"cm_pass_kib", 128},
                  {"cm_pass_calls", 4}, {"cm_block_kib", 16384},
-                 {"cm_int8_l1_pct", 0}}) {
+                 {"cm_int8_l1_pct", 0}, {"cm_int4_min_m", 48},
+                 {"int4_l1_pct", 125}}) {
         EXPECT_EQ(key(name).value("default", json()), value) << name;
         EXPECT_EQ(key(name).value("bits", json()), "same") << name;
     }
@@ -2378,30 +2506,43 @@ TEST(NativeConfigSchema, SchemaDump) {
         EXPECT_EQ(key(name).value("applies", json()), "bf16") << name;
         EXPECT_EQ(key(name).value("kind", json()), "param") << name;
     }
-    for (const char *name : {"cm_int8_l1_pct"}) {
+    for (const char *name : {"cm_int8_l1_pct", "cm_int4_min_m"}) {
         EXPECT_EQ(key(name).value("applies", json()), "int8") << name;
         EXPECT_EQ(key(name).value("kind", json()), "param") << name;
     }
     // The INT8 schemes a key applies to: the per-group tile reads neither
-    // the K pass nor the bias placement, and the cost model prices no
-    // per-group tile.
+    // the K pass nor the bias placement; the cost model's switch, margin and
+    // the inputs of its price apply to both (it prices the per-group tile of
+    // an s4 weight), its row-group bounds and INT8 rule to per-channel calls
+    // and its s4 row blocks to per-group calls.
     const json both = json::array({"per_channel", "per_group"});
     for (const json &e : k) {
         const std::string name = e.at("name");
         const bool per_channel = name == "int8_kc" || name == "int8_l2_pct"
                 || name == "bias_in_dequant" || name == "min_pass_k"
                 || name == "l1_pass" || name == "l1_pct"
-                || name == "l1_pass_max_mb"
-                || (name.rfind("cm_", 0) == 0 && e.at("applies") != "bf16")
-                || name == "cost_model";
-        const json want = e.at("applies") == "bf16"
-                ? json::array()
-                : (per_channel ? json::array({"per_channel"}) : both);
+                || name == "l1_pass_max_mb" || name == "cm_reuse_pct"
+                || name.rfind("cm_group_", 0) == 0 || name == "cm_int8_l1_pct";
+        const bool per_group = name == "cm_int4_min_m" || name == "int4_l1_pct";
+        const json want = e.at("applies") == "bf16" ? json::array()
+                : per_channel ? json::array({"per_channel"})
+                : per_group   ? json::array({"per_group"})
+                              : both;
         EXPECT_EQ(e.at("int8_schemes"), want) << name;
     }
-    // Each INT8 kernel family serves one scheme.
+    // Each INT8 kernel family serves one scheme; the s4 kernels per group,
+    // K in octets, every row count to their widest tile.
     size_t group_kernels = 0;
+    size_t int4_kernels = 0;
     for (const json &c : doc.at("kernels")) {
+        if (c.at("kind") == "int4") {
+            ++int4_kernels;
+            EXPECT_EQ(c.at("int8_schemes"), json::array({"per_group"}));
+            EXPECT_EQ(c.at("k_unit"), 8);
+            const int max_mr = c.at("max_mr");
+            EXPECT_EQ(c.at("mr_mask"), (1u << max_mr) - 1) << c.at("nr");
+            continue;
+        }
         if (c.at("kind") != "int8") {
             EXPECT_EQ(c.at("int8_schemes"), json::array());
             continue;
@@ -2412,6 +2553,7 @@ TEST(NativeConfigSchema, SchemaDump) {
                 group || c.at("int8_schemes") == json::array({"per_channel"}));
     }
     EXPECT_EQ(group_kernels, detect_uarch().avx512vnni ? 2u : 0u);
+    EXPECT_EQ(int4_kernels, detect_uarch().avx512vnni ? 2u : 0u);
     // The FP32 kernels: every row count 1 .. 12 at 16 and 32 columns, K in
     // steps of one.
     std::vector<json> f32_kernels;
@@ -2428,10 +2570,12 @@ TEST(NativeConfigSchema, SchemaDump) {
     } else {
         EXPECT_TRUE(f32_kernels.empty());
     }
-    EXPECT_EQ(doc.at("match_keys").size(), 12u);
+    EXPECT_EQ(doc.at("match_keys").size(), 13u);
+    EXPECT_EQ(doc.at("match_keys").at("group"), "range");
     EXPECT_EQ(doc.at("match_keys").at("dtype"),
-            json::array({"bf16", "s8", "f32"}));
-    EXPECT_EQ(doc.at("features").size(), 26u);
+            json::array({"bf16", "s8", "f32", "s4"}));
+    EXPECT_EQ(doc.at("features").size(), 27u);
+    EXPECT_EQ(doc.at("features").back(), "group");
     EXPECT_EQ(
             doc.at("tuning_file").at("format"), "zendnnl-native-brgemm-tuning");
     EXPECT_EQ(doc.at("tuning_file").at("version"), 2);

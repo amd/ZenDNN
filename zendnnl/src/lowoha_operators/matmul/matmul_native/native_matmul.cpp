@@ -77,7 +77,7 @@ native_layout_query_t native_layout_query_for(
     const data_type_t compute = params.dtypes.compute;
     if (params.dynamic_quant
             && (q.src_dt == data_type_t::bf16 || q.src_dt == data_type_t::f32)
-            && q.wei_dt == data_type_t::s8
+            && (q.wei_dt == data_type_t::s8 || q.wei_dt == data_type_t::s4)
             && (compute == data_type_t::s8 || compute == data_type_t::u8)) {
         q.src_dt = compute;
     }
@@ -129,7 +129,7 @@ enum class native_source_t : uint8_t {
 };
 
 /// The bytes at weight a call vouches for as its weight buffer: what it
-/// reads from a bf16 / s8 / f32 weight (an AOCL prepack this route
+/// reads from a bf16 / s8 / s4 / f32 weight (an AOCL prepack this route
 /// unreorders, or the span of a plain weight), or the capacity it states
 /// when larger; 0 when neither is known.
 ZENDNNL_ALWAYS_INLINE inline size_t weight_buffer_bytes(
@@ -137,7 +137,7 @@ ZENDNNL_ALWAYS_INLINE inline size_t weight_buffer_bytes(
     size_t reads = 0;
     const data_type_t wdt = params.dtypes.wei;
     if ((wdt == data_type_t::bf16 || wdt == data_type_t::s8
-                || wdt == data_type_t::f32)
+                || wdt == data_type_t::s4 || wdt == data_type_t::f32)
             && K > 0 && N > 0 && ldb > 0 && params.packing.pack_format_b == 0) {
         if (params.mem_format_b == 'r') {
             if (aocl_prepacked_weight(params)

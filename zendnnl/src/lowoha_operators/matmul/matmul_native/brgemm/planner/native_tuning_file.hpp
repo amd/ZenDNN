@@ -41,26 +41,30 @@ inline constexpr int64_t kNativeTuningVersion = 2;
 /// (ranges), the named ones (sets of names), then the flags.  The n of a
 /// call whose N is not a multiple of the native blocks is its padded width
 /// (make_native_problem), as are the rule features computed from it; the
-/// [MATMUL.NATIVE_BRGEMM] line shows it as padded_n.
+/// [MATMUL.NATIVE_BRGEMM] line shows it as padded_n.  group is the group
+/// size of an s4 weight (native_problem_t::wei_group_size), 0 for any other.
 inline constexpr const char *kNativeMatchKeys[]
-        = {"m", "n", "k", "threads", "pack_nr", "dtype", "src", "dst",
+        = {"m", "n", "k", "threads", "pack_nr", "group", "dtype", "src", "dst",
                 "epilogue", "trans_a", "dynamic", "has_bias"};
-inline constexpr int kNativeNumericMatchKeys = 5;
+inline constexpr int kNativeNumericMatchKeys = 6;
 inline constexpr int kNativeNamedMatchKeys = 4;
 /// The names the named match keys dtype, src, dst and epilogue take.
-inline constexpr const char *kNativeDtypeNames[] = {"bf16", "s8", "f32"};
+inline constexpr const char *kNativeDtypeNames[] = {"bf16", "s8", "f32", "s4"};
 inline constexpr const char *kNativeSrcNames[] = {"bf16", "f32", "u8", "s8"};
 inline constexpr const char *kNativeDstNames[]
         = {"f32", "bf16", "f16", "u8", "s8", "s32"};
 inline constexpr const char *kNativeEpilogueNames[]
         = {"store", "bias", "postops", "gated"};
 
-/// The problem features rules compare, and their comparisons.
+/// The problem features rules compare, and their comparisons.  esz is the
+/// bytes of a weight element (0.5 for s4); a_bytes counts the source's
+/// elements in their own bytes (1 for an s8 source), b_bytes and slab_l2 the
+/// weight's at esz; group is the match key's.
 inline constexpr const char *kNativeRuleFeatures[] = {"m", "n", "k", "threads",
         "pack_nr", "bf16", "dynamic", "trans_a", "has_bias", "epilogue",
         "dst_bytes", "esz", "a_bytes", "b_bytes", "col_tiles", "m_per_thread",
         "n_per_thread", "flops_per_thread", "l2", "l3", "l3_threads", "smt",
-        "cores", "a_l3", "b_l3", "slab_l2"};
+        "cores", "a_l3", "b_l3", "slab_l2", "group"};
 inline constexpr const char *kNativeRuleOps[]
         = {"<", "<=", ">", ">=", "==", "!="};
 

@@ -52,7 +52,7 @@ struct native_problem_t {
     int threads = 1;
     /// bf16, u8, s8, f32, or bf16 / f32 quantized in the call.
     data_type_t src_dt = data_type_t::none;
-    data_type_t wei_dt = data_type_t::none; ///< bf16, s8 or f32
+    data_type_t wei_dt = data_type_t::none; ///< bf16, s8, s4 or f32
     data_type_t dst_dt = data_type_t::none;
     bool trans_a = false;
     bool dynamic_quant = false; ///< the call quantizes a bf16 / f32 source
@@ -62,17 +62,29 @@ struct native_problem_t {
     /// key a scheme does not apply (native_config_key_t::int8_schemes) is not
     /// applied to it.
     native_int8_scheme_t int8_scheme = native_int8_scheme_t::per_channel;
+    /// An s4 weight: the K values of a group of its weight scales (K for
+    /// one group over K); 0 for any other weight.
+    int wei_group_size = 0;
+    /// An s4 weight: the bytes of one of its weight scales; 0 for any other
+    /// weight.
+    int wei_scale_bytes = 0;
 
     bool bf16() const { return wei_dt == data_type_t::bf16; }
     bool f32() const { return wei_dt == data_type_t::f32; }
-    bool int8() const { return wei_dt == data_type_t::s8; }
+    /// An s8 or s4 weight: the INT8 tile and its plan fields.
+    bool int8() const {
+        return wei_dt == data_type_t::s8 || wei_dt == data_type_t::s4;
+    }
+    /// An s4 weight: the INT4 group kernels, always per group.
+    bool int4() const { return wei_dt == data_type_t::s4; }
     bool operator==(const native_problem_t &o) const;
 };
 
 size_t hash_native_problem(const native_problem_t &p) noexcept;
 
 /// The problem of a call native_brgemm_execute serves.  decision is the
-/// call's decide_int8_call, read only for an s8 weight.  N is the width its
+/// call's decide_int8_call, read only for an s8 or s4 weight (an s4 weight's
+/// group size from its groups).  N is the width its
 /// tiles run on: native_padded_n(desc.N, pack_nr), the call's N when that is
 /// a multiple of the blocks.  Cheap; no allocation.
 native_problem_t make_native_problem(const GemmDescriptor &desc,

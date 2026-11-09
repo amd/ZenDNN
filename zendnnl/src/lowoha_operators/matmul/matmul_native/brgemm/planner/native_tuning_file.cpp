@@ -74,8 +74,8 @@ static_assert(std::size(kMatchKeys) == kNumericKeys + kNamedKeys + kFlagKeys,
         "every match key has a kind");
 
 constexpr auto &kDtypeNames = kNativeDtypeNames;
-const data_type_t kDtypeTypes[]
-        = {data_type_t::bf16, data_type_t::s8, data_type_t::f32};
+const data_type_t kDtypeTypes[] = {
+        data_type_t::bf16, data_type_t::s8, data_type_t::f32, data_type_t::s4};
 constexpr auto &kSrcNames = kNativeSrcNames;
 const data_type_t kSrcTypes[] = {
         data_type_t::bf16, data_type_t::f32, data_type_t::u8, data_type_t::s8};
@@ -119,6 +119,7 @@ enum feature_t : int {
     f_a_l3,
     f_b_l3,
     f_slab_l2,
+    f_group,
     kFeatureCount
 };
 constexpr auto &kFeatureNames = kNativeRuleFeatures;
@@ -260,7 +261,8 @@ int64_t numeric_value(const native_problem_t &p, int key) {
         case 1: return p.N;
         case 2: return p.K;
         case 3: return p.threads;
-        default: return p.pack_nr;
+        case 4: return p.pack_nr;
+        default: return p.wei_group_size;
     }
 }
 
@@ -880,7 +882,11 @@ public:
         int64_t k = 0;
         // The one dtype of a mask of a single name: its index.
         const uint8_t d = m.named[0];
-        const int dtype = d == 1 ? 0 : (d == 2 ? 1 : (d == 4 ? 2 : -1));
+        const int dtype = d == 1 ? 0
+                : d == 2         ? 1
+                : d == 4         ? 2
+                : d == 8         ? 3
+                                 : -1;
         if (dtype >= 0 && exact(m.numeric[1], n) && exact(m.numeric[2], k))
             indexed_[index_key(dtype, n, k)].push_back(at);
         else
@@ -949,7 +955,8 @@ struct feature_hw_t {
 
 void problem_features(
         const native_problem_t &p, const feature_hw_t &hw, double *f) {
-    const double esz = p.f32() ? 4.0 : (p.bf16() ? 2.0 : 1.0);
+    const double src_esz = p.f32() ? 4.0 : (p.bf16() ? 2.0 : 1.0);
+    const double esz = p.int4() ? 0.5 : src_esz;
     const double m = p.M, n = p.N, k = p.K;
     const double threads = p.threads, pack_nr = p.pack_nr;
     const int dst = type_index(kDstTypes, p.dst_dt);
@@ -965,7 +972,7 @@ void problem_features(
     f[f_epilogue] = static_cast<double>(p.epilogue);
     f[f_dst_bytes] = dst >= 0 ? kDstBytes[dst] : 0.0;
     f[f_esz] = esz;
-    f[f_a_bytes] = m * k * esz;
+    f[f_a_bytes] = m * k * src_esz;
     f[f_b_bytes] = n * k * esz;
     f[f_col_tiles] = pack_nr != 0.0 ? n / pack_nr : 0.0;
     f[f_m_per_thread] = threads != 0.0 ? m / threads : 0.0;
@@ -979,6 +986,7 @@ void problem_features(
     f[f_a_l3] = hw.l3 != 0.0 ? f[f_a_bytes] / hw.l3 : 0.0;
     f[f_b_l3] = hw.l3 != 0.0 ? f[f_b_bytes] / hw.l3 : 0.0;
     f[f_slab_l2] = hw.l2 != 0.0 ? pack_nr * k * esz / hw.l2 : 0.0;
+    f[f_group] = p.wei_group_size;
 }
 
 class rules_source_t final : public native_config_source_t {

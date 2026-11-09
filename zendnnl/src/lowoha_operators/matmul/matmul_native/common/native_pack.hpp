@@ -32,12 +32,18 @@ namespace native {
 
 using zendnnl::error_handling::status_t;
 
+/// K values of an s4 weight in one K group of the layout: an octet, whose
+/// 4 bytes per column hold two K quads.
+inline constexpr int kNativeS4Octet = 8;
+
 /// K groups of a weight in the layout: K pairs for bf16, K quads for s8, K
-/// rows for f32.
+/// octets for s4, K rows for f32.  No intermediate overflows, at any K.
 inline int native_k_groups(data_type_t wei_dt, int K) {
     if (wei_dt == data_type_t::f32) return K;
-    const int g = wei_dt == data_type_t::s8 ? INT8_VNNI_GRP : VNNI_PAIR;
-    return (K + g - 1) / g;
+    const int g = wei_dt == data_type_t::s8 ? INT8_VNNI_GRP
+            : wei_dt == data_type_t::s4     ? kNativeS4Octet
+                                            : VNNI_PAIR;
+    return K / g + (K % g != 0);
 }
 
 /// Bytes of one block of pack_nr columns: the K groups, then for s8 the
@@ -47,6 +53,7 @@ inline size_t native_block_bytes(data_type_t wei_dt, int K, int pack_nr) {
     if (wei_dt == data_type_t::s8)
         return (groups * INT8_VNNI_GRP + sizeof(int32_t)) * pack_nr;
     if (wei_dt == data_type_t::f32) return groups * sizeof(float) * pack_nr;
+    if (wei_dt == data_type_t::s4) return groups * INT8_VNNI_GRP * pack_nr;
     return groups * VNNI_PAIR * sizeof(uint16_t) * pack_nr;
 }
 
@@ -59,14 +66,14 @@ inline int native_padded_n(int N, int pack_nr) {
 }
 
 /// Whether the layout holds a K x N weight of wei_dt in blocks of pack_nr
-/// columns: bf16, s8 or f32, K >= 1, N >= 1 and pack_nr ==
+/// columns: bf16, s8, s4 or f32, K >= 1, N >= 1 and pack_nr ==
 /// kNativeLayoutPackNr.  A weight of N not a multiple of pack_nr is held in
 /// native_padded_n(N, pack_nr) columns, zero from N on.  The layout rule
 /// (decide_native_layout) admits no other weight; the functions of the
 /// layout, the weight view and the looper assume it.
 inline bool native_layout_fits(data_type_t wei_dt, int K, int N, int pack_nr) {
     return (wei_dt == data_type_t::bf16 || wei_dt == data_type_t::s8
-                   || wei_dt == data_type_t::f32)
+                   || wei_dt == data_type_t::s4 || wei_dt == data_type_t::f32)
             && K >= 1 && pack_nr == kNativeLayoutPackNr && N >= 1;
 }
 
@@ -80,8 +87,11 @@ size_t native_packed_bytes(data_type_t wei_dt, int K, int N, int pack_nr);
 /// to num_threads threads (one inside a parallel region).  With
 /// interleave_split_halves (N even), pack column 2i holds column i and pack
 /// column 2i + 1 holds column N / 2 + i.  Odd K pads a pair, K % 4 != 0 a
-/// quad, with zeros (an f32 weight has no padding); s8 column sums cover the
-/// real K.  The pack columns from N to native_padded_n(N, pack_nr) are zero,
+/// quad, K % 8 != 0 an s4 octet, with zeros (an f32 weight has no padding);
+/// s8 column sums cover the real K.  An s4 weight holds two's-complement
+/// nibbles at its linear element index (n * ldb + k with transB, else
+/// k * ldb + n, ldb in elements), the even index in the low nibble of its
+/// byte.  The pack columns from N to native_padded_n(N, pack_nr) are zero,
 /// s8 column sums included, and no byte of the weight past its N columns is
 /// read.  For a weight native_layout_fits takes, on a CPU with AVX-512 F, BW
 /// and VL (native_base_isa); failure for a null weight or dst, or an ldb

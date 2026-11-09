@@ -309,6 +309,7 @@ TEST(NativeTuningPlan, DefaultParamsAreTheBuiltInConstants) {
     EXPECT_EQ(hp.int8_cw_mask, nat::kNativeInt8CwAll);
     EXPECT_EQ(hp.int8_l2_pct, 50);
     EXPECT_EQ(hp.int8_kc, 0);
+    EXPECT_EQ(hp.int4_l1_pct, 125);
     EXPECT_TRUE(hp.direct_store);
     EXPECT_TRUE(hp.bias_in_dequant);
     EXPECT_EQ(hp.copy_block, 64);
@@ -351,6 +352,7 @@ TEST(NativeTuningPlan, DefaultParamsAreTheBuiltInConstants) {
     EXPECT_EQ(hp.cm_pass_calls, 4);
     EXPECT_EQ(hp.cm_block_kib, 16384);
     EXPECT_EQ(hp.cm_int8_l1_pct, 0);
+    EXPECT_EQ(hp.cm_int4_min_m, 48);
 }
 
 /// Quads per K pass of an INT8 tile cw columns wide and rows tall, max_mr

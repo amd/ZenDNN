@@ -20,13 +20,16 @@
 // pack read, an in-place rewrite keeps the layouts cached from the bytes it
 // overwrites, the native weight cache clear forgets the cached layouts and
 // the in-place images, lookups of other buffers go on while a buffer packs,
-// and no check of what is kept reads past the buffer of the call that makes
-// it.  A call's check for an image is handed to its layout lookup, and what
+// a rewrite in place waits for the packs and the GEMV kernels that read the
+// bytes it writes, and
+// no check of what is kept reads past the buffer of the call that makes it.
+// A call's check for an image is handed to its layout lookup, and what
 // a thread's calls were served stays right for its later calls across
 // concurrent first calls, images, stale layouts, clears and exited threads.
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -45,6 +48,7 @@
 
 #include "gtest_utils.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_gemv.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_hw.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_weight_cache.hpp"
@@ -62,6 +66,7 @@ using zendnnl::memory::data_type_t;
 
 constexpr data_type_t kBf16 = data_type_t::bf16;
 constexpr data_type_t kS8 = data_type_t::s8;
+constexpr data_type_t kS4 = data_type_t::s4;
 constexpr size_t kEndBytes = 64;
 
 /// A bf16 or s8 weight in a buffer of rows() x ldb elements: [K, N]
@@ -566,6 +571,665 @@ TEST_F(NativeWeightLifetime, OtherBuffersGoOnWhileABufferPacks) {
                 << "in " << kRaces << " races no call on another buffer "
                 << "completed during the pack";
     }
+}
+
+/// Calls of M rows on a contiguous constant [N, K] weight, which weight
+/// cache mode 2 rewrites in place: bf16 x bf16, or a bf16 source quantized
+/// per token times an s4 weight in groups of 128 with bf16 scales, into f32.
+struct nk_call_t {
+    data_type_t wei_dt;
+    int M, K, N;
+    nt::buffer_t src, wei_scale;
+
+    nk_call_t(data_type_t wdt, int m, int k, int n)
+        : wei_dt(wdt), M(m), K(k), N(n) {
+        src = nt::random_buffer(kBf16, static_cast<size_t>(m) * k, 21, -1, 1);
+        if (wdt == kS4)
+            wei_scale = nt::random_buffer(
+                    kBf16, static_cast<size_t>(k / 128) * n, 22, 0.002f, 0.01f);
+    }
+    nt::buffer_t make_weight(uint32_t seed) const {
+        if (wei_dt == kBf16)
+            return nt::random_buffer(
+                    kBf16, static_cast<size_t>(K) * N, seed, -1, 1);
+        return nt::random_buffer(data_type_t::u8,
+                nat::native_raw_weight_bytes(kS4, K, N, K, true), seed, 0, 255);
+    }
+    /// The call into dst, whose source scales (written by the quantization
+    /// of the call) go to scales.
+    nt::call_t call(const void *wei, int32_t wc, int threads, float *dst,
+            float *scales) const {
+        nt::call_t c;
+        c.M = M;
+        c.N = N;
+        c.K = K;
+        c.transB = true;
+        c.src = src.get();
+        c.wei = wei;
+        c.dst = dst;
+        c.params.dtypes.src = kBf16;
+        c.params.dtypes.wei = wei_dt;
+        c.params.dtypes.dst = data_type_t::f32;
+        c.params.num_threads = threads;
+        c.params.weight_cache_type = wc;
+        c.params.lowoha_algo = matmul_algo_t::native_brgemm;
+        if (wei_dt == kS4) {
+            c.params.dtypes.compute = kS8;
+            c.params.dynamic_quant = true;
+            auto &qp = c.params.quant_params;
+            qp.wei_scale.buff = wei_scale.get();
+            qp.wei_scale.dt = kBf16;
+            qp.wei_scale.dims = {K / 128, N};
+            qp.src_scale.buff = scales;
+            qp.src_scale.dt = data_type_t::f32;
+            qp.src_scale.dims = {M, 1};
+        }
+        return c;
+    }
+    /// The output of the call; status_t::failure in st and no output when it
+    /// is not served.
+    std::vector<float> run(
+            const void *wei, int32_t wc, int threads, status_t &st) const {
+        std::vector<float> dst(static_cast<size_t>(M) * N, -777.0f);
+        std::vector<float> scales(M);
+        st = nt::run_matmul(call(wei, wc, threads, dst.data(), scales.data()));
+        return dst;
+    }
+};
+
+bool same_bits(const std::vector<float> &a, const std::vector<float> &b) {
+    return a.size() == b.size()
+            && std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0;
+}
+
+nt::buffer_t copy_of(const nt::buffer_t &b) {
+    nt::buffer_t c = nt::make_buffer(b.bytes);
+    std::memcpy(c.get(), b.get(), b.bytes);
+    return c;
+}
+
+// A call at weight cache mode 0 packs the raw weight of a constant buffer
+// for itself while a first call on the buffer at mode 2 rewrites it in
+// place: the rewrite waits until the packs in flight have read the bytes it
+// writes, and a mode 0 call that comes after it reads the image.  So every
+// mode 0 call, on a bf16 or an s4 weight, through the tiles or through the
+// GEMV kernel of a one-row call (which the tiles replace once the buffer
+// holds an image), gives the bits of the same call on the raw weight or on
+// the image, never of a weight read in part from each; the mode 2 call
+// gives its bits on the raw weight.
+TEST_F(NativeWeightLifetime, ModeZeroPacksAndARewriteDoNotOverlap) {
+    pin_native();
+    // Weights of 32 MiB, which one thread packs for longer than the rewrite
+    // takes to start writing.
+    const struct {
+        data_type_t dt;
+        int M, K, N;
+        const char *name;
+    } readers[] = {{kBf16, 4, 4096, 4096, "bf16 tiles"},
+            {kBf16, 1, 4096, 4096, "bf16 GEMV"},
+            {kS4, 4, 8192, 8192, "s4 tiles"}};
+    using clock_t = std::chrono::steady_clock;
+    for (const auto &rd : readers) {
+        SCOPED_TRACE(rd.name);
+        const nk_call_t reader(rd.dt, rd.M, rd.K, rd.N),
+                writer(rd.dt, 4, rd.K, rd.N);
+        {
+            float dst[1], scale[4];
+            const nt::buffer_t probe = reader.make_weight(800);
+            EXPECT_EQ(
+                    nt::gemv_kernel(reader.call(probe.get(), 0, 1, dst, scale))
+                            != nat::native_gemv_t::none,
+                    rd.M == 1);
+        }
+        int overlapped = 0;
+        for (int race = 0; race < kRaces; ++race) {
+            SCOPED_TRACE("race " + std::to_string(race));
+            const nt::buffer_t w = reader.make_weight(801 + race);
+            status_t st = status_t::failure;
+            const nt::buffer_t raw = copy_of(w);
+            const std::vector<float> want_raw = reader.run(raw.get(), 0, 1, st);
+            ASSERT_EQ(st, status_t::success);
+            const nt::buffer_t image = copy_of(w);
+            const std::vector<float> want_written
+                    = writer.run(image.get(), 2, 16, st);
+            ASSERT_EQ(st, status_t::success);
+            ASSERT_TRUE(nat::native_weight_packed_in_place(
+                    image.get(), image.bytes));
+            const std::vector<float> want_image
+                    = reader.run(image.get(), 0, 1, st);
+            ASSERT_EQ(st, status_t::success);
+
+            // 1: the first mode 0 call starts; 2: the mode 2 call returned.
+            std::atomic<int> phase {0};
+            std::vector<std::vector<float>> got;
+            std::vector<status_t> got_status;
+            std::vector<std::pair<clock_t::time_point, clock_t::time_point>>
+                    spans;
+            std::vector<float> written;
+            status_t written_status = status_t::failure;
+            clock_t::time_point write_start, write_end;
+            {
+                joiner_t calls;
+                calls.threads.emplace_back([&] {
+                    for (bool last = false; !last;) {
+                        last = phase.load() == 2;
+                        const clock_t::time_point start = clock_t::now();
+                        if (phase.load() == 0) phase.store(1);
+                        status_t s = status_t::failure;
+                        got.push_back(reader.run(w.get(), 0, 1, s));
+                        got_status.push_back(s);
+                        spans.emplace_back(start, clock_t::now());
+                    }
+                });
+                while (phase.load() == 0)
+                    std::this_thread::yield();
+                write_start = clock_t::now();
+                written = writer.run(w.get(), 2, 16, written_status);
+                write_end = clock_t::now();
+                phase.store(2);
+            }
+            EXPECT_EQ(written_status, status_t::success);
+            EXPECT_TRUE(same_bits(written, want_written))
+                    << "the mode 2 call read part of its own image";
+            for (size_t i = 0; i < got.size(); ++i) {
+                EXPECT_EQ(got_status[i], status_t::success) << "call " << i;
+                EXPECT_TRUE(same_bits(got[i], want_raw)
+                        || same_bits(got[i], want_image))
+                        << "mode 0 call " << i << " of " << got.size()
+                        << " read a weight in part raw, in part rewritten";
+            }
+            EXPECT_TRUE(nat::native_weight_packed_in_place(w.get(), w.bytes));
+            for (const auto &s : spans)
+                if (s.first < write_end && write_start < s.second) {
+                    ++overlapped;
+                    break;
+                }
+            mm::clear_matmul_native_weight_caches();
+        }
+        EXPECT_GT(overlapped, 0) << "in " << kRaces
+                                 << " races no mode 0 call ran during the "
+                                    "mode 2 call";
+    }
+}
+
+// A layout of a view inside a buffer whose pack at weight cache mode 1 is
+// in flight when a first call at mode 2 starts to rewrite the whole buffer
+// in place is cached while the rewrite waits for the pack's read to end.
+// It stays cached across the rewrite as a layout cached before the rewrite
+// does: every lookup of the view, during the rewrite and after it, on the
+// thread that packed it and on another, is served that layout, and none
+// fails on the view now lying inside the image.
+TEST_F(NativeWeightLifetime, LayoutCachedWhileARewriteWaitsStays) {
+    // A view of 32 MiB, which one thread packs for longer than the rewrite
+    // of the buffer takes to reserve its record.
+    const int K = 4096, N = 8192;
+    using clock_t = std::chrono::steady_clock;
+    int overlapped = 0;
+    for (int race = 0; race < kRaces; ++race) {
+        SCOPED_TRACE("race " + std::to_string(race));
+        const weight_t w = make_weight(kBf16, K, N, N, false, 1301 + race);
+        // The last K / 2 rows of the buffer, as a weight of their own.
+        const nat::native_raw_weight_t view = raw_weight(
+                w.buf.as<uint16_t>() + static_cast<size_t>(K / 2) * N, K / 2,
+                N);
+        // 1: the view's first lookup starts; 2: the rewrite returned.
+        std::atomic<int> phase {0};
+        status_t first = status_t::failure, rewrite = status_t::failure;
+        const void *layout = nullptr;
+        int during = 0, failed = 0, other = 0;
+        clock_t::time_point first_end, rewrite_start;
+        {
+            joiner_t calls;
+            calls.threads.emplace_back([&] {
+                nat::native_layout_t out;
+                phase.store(1);
+                first = nat::get_native_layout(view, 1, 0, 1, out);
+                first_end = clock_t::now();
+                layout = out.data;
+                if (first != status_t::success) return;
+                for (bool last = false; !last;) {
+                    last = phase.load() == 2;
+                    nat::native_layout_t again;
+                    const status_t st
+                            = nat::get_native_layout(view, 1, 0, 1, again);
+                    if (st != status_t::success)
+                        ++failed;
+                    else if (again.data != layout)
+                        ++other;
+                    if (!last) ++during;
+                }
+            });
+            while (phase.load() == 0)
+                std::this_thread::yield();
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            rewrite_start = clock_t::now();
+            nat::native_layout_t out;
+            rewrite = nat::get_native_layout(
+                    raw_weight(w.ptr(), K, N), 2, 0, 16, out);
+            phase.store(2);
+        }
+        ASSERT_EQ(rewrite, status_t::success);
+        ASSERT_TRUE(in_place(w));
+        // A first lookup that came after the rewrite reserved its record
+        // points inside the image and is refused; it packed nothing.
+        if (first != status_t::success) {
+            EXPECT_EQ(nt::native_layouts(view.weight), 0u);
+            mm::clear_matmul_native_weight_caches();
+            continue;
+        }
+        if (first_end > rewrite_start) ++overlapped;
+        EXPECT_EQ(failed, 0) << "lookups of the view failed, of " << during
+                             << " during the rewrite and one after it";
+        EXPECT_EQ(other, 0) << "lookups of the view were served another "
+                               "layout";
+        nat::native_layout_t again;
+        EXPECT_EQ(nat::get_native_layout(view, 1, 0, 1, again),
+                status_t::success);
+        EXPECT_EQ(again.data, layout) << "the cached layout was packed again";
+        EXPECT_EQ(nt::native_layouts(view.weight), 1u);
+        mm::clear_matmul_native_weight_caches();
+    }
+    EXPECT_GT(overlapped, 0)
+            << "in " << kRaces << " races no view's pack ended after the "
+            << "rewrite started";
+}
+
+/// A contiguous [K, N] raw weight of dt at w, in the native layout.
+nat::native_raw_weight_t raw_weight(
+        data_type_t dt, const void *w, int K, int N) {
+    nat::native_raw_weight_t r = raw_weight(w, K, N);
+    r.wei_dt = dt;
+    return r;
+}
+
+/// A buffer holding a contiguous [K, N] weight of dt (bf16 or s4).
+nt::buffer_t contiguous_weight(data_type_t dt, int K, int N, uint32_t seed) {
+    if (dt == kBf16)
+        return nt::random_buffer(
+                kBf16, static_cast<size_t>(K) * N, seed, -1, 1);
+    return nt::random_buffer(data_type_t::u8,
+            nat::native_raw_weight_bytes(kS4, K, N, N, false), seed, 0, 255);
+}
+
+// A view of a buffer whose layout a thread cached at weight cache mode 1 and
+// is served from its memo, while a first call at mode 2 rewrites the whole
+// buffer in place: the view's lookups on that thread, during the rewrite and
+// after it, are served the cached layout, for bf16 and s4 weights and a view
+// of the first columns (at the buffer's start) or of the last rows (inside
+// it).  A memo check reads no byte of the buffer while the rewrite runs.
+TEST_F(NativeWeightLifetime, MemoLookupsOfAViewDuringTheFirstRewriteStay) {
+    // The first two rewrite in microseconds; the others take longer than
+    // the view's thread needs to look the view up several times.
+    const struct {
+        data_type_t dt;
+        int K, N;
+        bool columns;
+    } shapes[] = {{kS4, 128, 64, true}, {kBf16, 128, 64, true},
+            {kS4, 4096, 8192, false}, {kBf16, 2048, 4096, false}};
+    for (const auto &s : shapes) {
+        SCOPED_TRACE(std::string(s.dt == kS4 ? "s4" : "bf16")
+                + " K=" + std::to_string(s.K) + " N=" + std::to_string(s.N)
+                + (s.columns ? " first columns" : " last rows"));
+        int overlapped = 0;
+        for (int race = 0; race < kRaces; ++race) {
+            SCOPED_TRACE("race " + std::to_string(race));
+            const nt::buffer_t buf
+                    = contiguous_weight(s.dt, s.K, s.N, 1401 + race);
+            const nat::native_raw_weight_t whole
+                    = raw_weight(s.dt, buf.get(), s.K, s.N);
+            nat::native_raw_weight_t view = whole;
+            if (s.columns) {
+                view.N = s.N / 2;
+            } else {
+                view.weight = buf.as<uint8_t>() + buf.bytes / 2;
+                view.K = s.K / 2;
+            }
+            // 1: the view is in its thread's memo; 2: the rewrite returned.
+            std::atomic<int> phase {0};
+            std::atomic<bool> rewriting {false};
+            status_t first = status_t::failure, rewrite = status_t::failure;
+            const void *layout = nullptr, *rewritten = nullptr;
+            size_t memo_entries = 0;
+            int failed = 0, other = 0, during = 0;
+            {
+                joiner_t calls;
+                calls.threads.emplace_back([&] {
+                    nat::native_layout_t out;
+                    first = nat::get_native_layout(view, 1, 0, 1, out);
+                    layout = out.data;
+                    memo_entries = nat::native_weight_memo_entries(view.weight);
+                    phase.store(1);
+                    if (first != status_t::success) return;
+                    for (bool last = false; !last;) {
+                        last = phase.load() == 2;
+                        const bool in_rewrite = rewriting.load();
+                        nat::native_layout_t again;
+                        const status_t st
+                                = nat::get_native_layout(view, 1, 0, 1, again);
+                        if (st != status_t::success)
+                            ++failed;
+                        else if (again.data != layout)
+                            ++other;
+                        if (in_rewrite && !last) ++during;
+                    }
+                });
+                while (phase.load() == 0)
+                    std::this_thread::yield();
+                rewriting.store(true);
+                nat::native_layout_t out;
+                rewrite = nat::get_native_layout(whole, 2, 0, 1, out);
+                rewritten = out.data;
+                rewriting.store(false);
+                phase.store(2);
+            }
+            ASSERT_EQ(first, status_t::success);
+            EXPECT_EQ(memo_entries, 1u) << "the view's thread has no memo";
+            ASSERT_EQ(rewrite, status_t::success);
+            EXPECT_EQ(rewritten, buf.get()) << "not rewritten in place";
+            EXPECT_TRUE(
+                    nat::native_weight_packed_in_place(buf.get(), buf.bytes));
+            EXPECT_EQ(failed, 0) << "lookups of the view failed";
+            EXPECT_EQ(other, 0) << "lookups of the view were served another "
+                                   "layout";
+            nat::native_layout_t again;
+            EXPECT_EQ(nat::get_native_layout(view, 1, 0, 1, again),
+                    status_t::success);
+            EXPECT_EQ(again.data, layout)
+                    << "the cached layout was packed again";
+            EXPECT_EQ(nt::native_layouts(view.weight), s.columns ? 2u : 1u)
+                    << "the view's layout, and the image at its start";
+            mm::clear_matmul_native_weight_caches();
+            if (during > 0) ++overlapped;
+        }
+        if (!s.columns) {
+            EXPECT_GT(overlapped, 0) << "in " << kRaces << " races no lookup "
+                                     << "of the view ran during the rewrite";
+        }
+    }
+}
+
+// A layout cached from a view inside a buffer whose bytes then changed is
+// not marked by a first call at weight cache mode 2 that rewrites the whole
+// buffer in place: checking it reads bytes the rewrite writes, so a lookup
+// of the view waits until the rewrite ends, and is then refused, as the view
+// lies inside the image.  A raw read of the buffer's first bytes, held
+// through native_weight_read_raw, keeps the rewrite from writing meanwhile.
+TEST_F(NativeWeightLifetime, LookupOfAnUnmarkedLayoutWaitsForTheRewrite) {
+    const int K = 256, N = 128;
+    for (const data_type_t dt : {kBf16, kS4}) {
+        SCOPED_TRACE(dt == kS4 ? "s4" : "bf16");
+        const nt::buffer_t buf = contiguous_weight(dt, K, N, 1451);
+        const nat::native_raw_weight_t whole = raw_weight(dt, buf.get(), K, N);
+        nat::native_raw_weight_t view = whole;
+        view.weight = buf.as<uint8_t>() + buf.bytes / 2;
+        view.K = K / 2;
+        nat::native_layout_t out;
+        ASSERT_EQ(
+                nat::get_native_layout(view, 1, 0, 1, out), status_t::success);
+        buf.as<uint8_t>()[buf.bytes - 1] ^= 0x5a;
+        std::atomic<bool> held {false}, release {false}, looked {false};
+        status_t rewrite = status_t::failure, lookup = status_t::success;
+        nat::native_raw_read_t read = nat::native_raw_read_t::failed;
+        {
+            joiner_t calls;
+            calls.threads.emplace_back([&] {
+                read = nat::native_weight_read_raw(
+                        buf.get(), kEndBytes, buf.bytes, [&] {
+                    held.store(true);
+                    while (!release.load())
+                        std::this_thread::yield();
+                });
+            });
+            while (!held.load())
+                std::this_thread::yield();
+            calls.threads.emplace_back([&] {
+                nat::native_layout_t o;
+                rewrite = nat::get_native_layout(whole, 2, 0, 1, o);
+            });
+            // The rewrite reserved its record and waits for the read.
+            while (!nat::native_weight_packed_in_place(buf.get(), buf.bytes))
+                std::this_thread::yield();
+            calls.threads.emplace_back([&] {
+                nat::native_layout_t o;
+                lookup = nat::get_native_layout(view, 1, 0, 1, o);
+                looked.store(true);
+            });
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            EXPECT_FALSE(looked.load())
+                    << "the lookup did not wait for the rewrite";
+            release.store(true);
+        }
+        EXPECT_EQ(read, nat::native_raw_read_t::done);
+        EXPECT_EQ(rewrite, status_t::success);
+        EXPECT_TRUE(nat::native_weight_packed_in_place(buf.get(), buf.bytes));
+        EXPECT_EQ(lookup, status_t::failure)
+                << "a view inside the image is refused";
+        mm::clear_matmul_native_weight_caches();
+    }
+}
+
+/// The descriptor native_layout_matmul builds for c, a call of one thread.
+nat::GemmDescriptor gemv_descriptor(const nt::call_t &c) {
+    nat::GemmDescriptor d;
+    d.M = c.M;
+    d.N = c.N;
+    d.K = c.K;
+    d.lda = c.lda_or_tight();
+    d.ldb = c.ldb_or_tight();
+    d.ldc = c.ldc_or_tight();
+    d.alpha = c.alpha;
+    d.beta = c.beta;
+    d.src_dt = c.params.dtypes.src;
+    d.wei_dt = c.params.dtypes.wei;
+    d.dst_dt = c.params.dtypes.dst;
+    d.bias_dt = c.params.dtypes.bias;
+    d.is_weights_const = c.is_weights_const;
+    d.num_threads = 1;
+    return d;
+}
+
+// A one-row bf16 call on its GEMV kernel that found its weight raw before a
+// first call at weight cache mode 2 reserved the rewrite of the buffer in
+// place: the BKC kernel's thread-local hit check and the narrow kernel (the
+// first 4 columns, ldb N) read the raw weight without holding it, so they
+// wait until the rewrite ends, and the call is then left to the tiles,
+// which serve it from the image.  A raw read of the buffer's first bytes,
+// held through native_weight_read_raw, keeps the rewrite from writing
+// meanwhile.
+TEST_F(NativeWeightLifetime, GemvReadsOfAWeightWaitForItsRewrite) {
+    const int K = 256, N = 128;
+    for (const int n : {N, 4}) {
+        const nat::native_gemv_t kernel = n == N
+                ? nat::native_gemv_t::bf16_bkc
+                : nat::native_gemv_t::bf16_narrow;
+        SCOPED_TRACE(nat::native_gemv_name(kernel));
+        const nt::buffer_t buf = contiguous_weight(kBf16, K, N, 1461);
+        const nt::buffer_t src = nt::random_buffer(kBf16, K, 1462, -1, 1);
+        std::vector<float> warm(n, -777.0f), got(n, -777.0f);
+        nt::call_t c;
+        c.M = 1;
+        c.N = n;
+        c.K = K;
+        c.ldb = N;
+        c.src = src.get();
+        c.wei = buf.get();
+        c.dst = warm.data();
+        c.params.dtypes.src = kBf16;
+        c.params.dtypes.wei = kBf16;
+        c.params.dtypes.dst = data_type_t::f32;
+        c.params.num_threads = 1;
+        c.params.weight_cache_type = 1;
+        c.params.lowoha_algo = matmul_algo_t::native_brgemm;
+        ASSERT_EQ(nt::gemv_kernel(c), kernel);
+        const nat::GemmDescriptor desc = gemv_descriptor(c);
+        const nat::native_gemv_plan_t plan
+                = nat::decide_native_gemv(desc, c.params);
+        ASSERT_EQ(plan.kernel, kernel);
+        std::atomic<bool> found {false}, held {false}, release {false},
+                go {false}, returned {false};
+        status_t warmed = status_t::failure, again = status_t::failure,
+                 gemv = status_t::success, rewrite = status_t::failure;
+        nat::native_raw_read_t read = nat::native_raw_read_t::failed;
+        {
+            joiner_t calls;
+            calls.threads.emplace_back([&] {
+                warmed = nt::run_matmul(c);
+                again = nat::run_native_gemv(plan, desc, src.get(), buf.get(),
+                        got.data(), nullptr, c.params, 1);
+                found.store(true);
+                while (!go.load())
+                    std::this_thread::yield();
+                std::fill(got.begin(), got.end(), -777.0f);
+                gemv = nat::run_native_gemv(plan, desc, src.get(), buf.get(),
+                        got.data(), nullptr, c.params, 1);
+                returned.store(true);
+            });
+            // The GEMV's call found the weight raw before the rewrite starts.
+            while (!found.load())
+                std::this_thread::yield();
+            calls.threads.emplace_back([&] {
+                read = nat::native_weight_read_raw(
+                        buf.get(), kEndBytes, buf.bytes, [&] {
+                    held.store(true);
+                    while (!release.load())
+                        std::this_thread::yield();
+                });
+            });
+            while (!held.load())
+                std::this_thread::yield();
+            calls.threads.emplace_back([&] {
+                nat::native_layout_t o;
+                rewrite = nat::get_native_layout(
+                        raw_weight(kBf16, buf.get(), K, N), 2, 0, 1, o);
+            });
+            // The rewrite reserved its record and waits for the read.
+            while (!nat::native_weight_packed_in_place(buf.get(), buf.bytes))
+                std::this_thread::yield();
+            go.store(true);
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            EXPECT_FALSE(returned.load())
+                    << "the GEMV read the weight while its rewrite ran";
+            release.store(true);
+        }
+        ASSERT_EQ(warmed, status_t::success);
+        EXPECT_EQ(again, status_t::success);
+        EXPECT_EQ(read, nat::native_raw_read_t::done);
+        EXPECT_EQ(rewrite, status_t::success);
+        EXPECT_TRUE(nat::native_weight_packed_in_place(buf.get(), buf.bytes));
+        EXPECT_EQ(gemv, status_t::unimplemented)
+                << "the buffer holds the image, which the tiles serve";
+        EXPECT_TRUE(std::all_of(got.begin(), got.end(), [](float v) {
+            return v == -777.0f;
+        })) << "the GEMV wrote dst";
+        mm::clear_matmul_native_weight_caches();
+    }
+}
+
+// A rewrite in place waits for the checks under way before it writes, and
+// holds no lock while it waits: while the narrow GEMV of a long weight runs
+// inside its check, a first call at weight cache mode 2 rewriting another
+// buffer waits for it, and a new thread's first cached layout, which lists
+// the thread's reader under the cache lock, is cached meanwhile.  Were the
+// lock held, a check that waits for the cache lock (as its image test did)
+// would wait for itself through the two.  The GEMV reads its weight and its
+// source from untouched pages of a sparse mapping, so it runs for longer
+// than the other calls take.
+TEST_F(NativeWeightLifetime, FirstLayoutsGoOnWhileARewriteWaitsForAGemv) {
+#if defined(__linux__)
+    const int K = 1 << 27, n = 4;
+    const size_t wei_bytes = static_cast<size_t>(K) * n * sizeof(uint16_t);
+    const size_t src_bytes = static_cast<size_t>(K) * sizeof(uint16_t);
+    struct mapping_t {
+        void *at = MAP_FAILED;
+        size_t bytes = 0;
+        ~mapping_t() {
+            if (at != MAP_FAILED) munmap(at, bytes);
+        }
+    } map;
+    map.bytes = wei_bytes + src_bytes;
+    map.at = mmap(nullptr, map.bytes, PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (map.at == MAP_FAILED)
+        GTEST_SKIP() << "no address space for the sparse weight";
+    const void *wei = map.at;
+    const void *src = static_cast<const char *>(map.at) + wei_bytes;
+    nt::call_t c;
+    c.M = 1;
+    c.N = n;
+    c.K = K;
+    c.src = src;
+    c.wei = wei;
+    c.params.dtypes.src = kBf16;
+    c.params.dtypes.wei = kBf16;
+    c.params.dtypes.dst = data_type_t::f32;
+    c.params.num_threads = 1;
+    c.params.weight_cache_type = 1;
+    c.params.lowoha_algo = matmul_algo_t::native_brgemm;
+    const nat::GemmDescriptor desc = gemv_descriptor(c);
+    const nat::native_gemv_plan_t plan
+            = nat::decide_native_gemv(desc, c.params);
+    ASSERT_EQ(plan.kernel, nat::native_gemv_t::bf16_narrow);
+    const nt::buffer_t rewritten = contiguous_weight(kBf16, 256, 128, 1471);
+    const nt::buffer_t first = contiguous_weight(kBf16, 64, 64, 1472);
+    const auto deadline
+            = std::chrono::steady_clock::now() + std::chrono::seconds(120);
+    const auto waiting = [&] {
+        std::this_thread::yield();
+        return std::chrono::steady_clock::now() < deadline;
+    };
+    std::vector<float> got(n, -777.0f);
+    std::atomic<bool> gemv_returned {false}, rewrite_returned {false};
+    std::atomic<bool> cached_during_gemv {false}, cached_during_rewrite {false};
+    status_t gemv = status_t::failure, rewrite = status_t::failure,
+             cached = status_t::failure;
+    {
+        joiner_t calls;
+        calls.threads.emplace_back([&] {
+            gemv = nat::run_native_gemv(
+                    plan, desc, src, wei, got.data(), nullptr, c.params, 1);
+            gemv_returned.store(true);
+        });
+        // The GEMV's kernel read the weight's first page: its check began.
+        unsigned char resident = 0;
+        while (mincore(map.at, 1, &resident) == 0 && !(resident & 1)
+                && waiting()) {}
+        ASSERT_TRUE(resident & 1) << "the GEMV did not start";
+        calls.threads.emplace_back([&] {
+            nat::native_layout_t o;
+            rewrite = nat::get_native_layout(
+                    raw_weight(kBf16, rewritten.get(), 256, 128), 2, 0, 1, o);
+            rewrite_returned.store(true);
+        });
+        // The rewrite reserved its record, and then waits for the check.
+        while (!nat::native_weight_packed_in_place(
+                       rewritten.get(), rewritten.bytes)
+                && waiting()) {}
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        calls.threads.emplace_back([&] {
+            nat::native_layout_t o;
+            cached = nat::get_native_layout(
+                    raw_weight(first.get(), 64, 64), 1, 0, 1, o);
+            cached_during_gemv.store(!gemv_returned.load());
+            cached_during_rewrite.store(!rewrite_returned.load());
+        });
+    }
+    EXPECT_EQ(gemv, status_t::success);
+    EXPECT_EQ(rewrite, status_t::success);
+    EXPECT_EQ(cached, status_t::success);
+    EXPECT_TRUE(nat::native_weight_packed_in_place(
+            rewritten.get(), rewritten.bytes));
+    EXPECT_TRUE(cached_during_gemv.load())
+            << "the first layout was cached only once the GEMV's check had "
+               "ended: the rewrite waited for the check holding a lock";
+    EXPECT_TRUE(cached_during_rewrite.load())
+            << "the rewrite did not wait for the GEMV's check";
+    EXPECT_TRUE(std::all_of(got.begin(), got.end(), [](float v) {
+        return v == 0.0f;
+    })) << "the GEMV of a zero weight";
+    mm::clear_matmul_native_weight_caches();
+#else
+    GTEST_SKIP() << "needs a sparse anonymous mapping";
+#endif
 }
 
 // ── The per-thread layout memo ───────────────────────────────────────────

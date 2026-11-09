@@ -25,6 +25,7 @@
 #include <mutex>
 #include <new>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 #include <condition_variable>
@@ -106,6 +107,9 @@ struct native_image_t {
     size_t bytes = 0;
     weight_ends_t ends;
     bool reserved = false;
+    /// While reserved: the bytes of the rewriting call's buffer, within
+    /// which lie the layouts the rewrite marks.
+    size_t owned = 0;
 };
 
 using image_map_t = std::map<std::uintptr_t, native_image_t>;
@@ -125,6 +129,15 @@ struct native_cache_state_t {
     /// time and never twice for one layout, while other buffers go on.
     std::unordered_set<const void *> packing;
     std::condition_variable_any packed;
+    /// [start, end) of the bytes that packs and other readers read from
+    /// weight buffers now, outside the mutex, at every weight cache mode.  An
+    /// in-place rewrite reserves its record first, so a read that starts
+    /// after it sees the image, then waits until no read overlaps the bytes
+    /// it writes.
+    std::vector<std::pair<std::uintptr_t, std::uintptr_t>> reads;
+    /// Rewrites waiting for reads to end: the end of a read then notifies
+    /// packed.
+    size_t rewrites_waiting = 0;
     pack_map_t packs;
     /// The layouts of entries dropped because their buffer no longer held
     /// the bytes they were packed from.  Calls read a layout outside the
@@ -144,6 +157,11 @@ struct native_cache_state_t {
     /// an image record goes and whenever the images change: the memo entries
     /// (thread_memo) of an older generation do not serve.
     std::atomic<uint64_t> generation {1};
+    /// In-place rewrites from the reservation of their record to its end;
+    /// while one runs, the checks read no weight bytes
+    /// (native_weight_check_t).
+    /// Changed under the mutex held exclusively.
+    std::atomic<size_t> rewrites {0};
 };
 
 native_cache_state_t &cache_state() {
@@ -180,27 +198,61 @@ void publish_spans_locked() {
     state.image_count.store(state.images.size(), std::memory_order_release);
 }
 
-/// False only when no image overlaps [p, p + bytes); takes no lock while
-/// the images have not changed since the calling thread last looked.
-bool image_may_overlap(const void *p, size_t bytes) {
+/// The calling thread's copy of the spans of the images, as of spans_gen
+/// gen.
+struct thread_spans_t {
+    uint64_t gen = 0;
+    std::shared_ptr<const image_spans_t> spans;
+};
+
+thread_spans_t &thread_spans() {
+    thread_local thread_spans_t spans;
+    return spans;
+}
+
+/// The calling thread's copy of the spans, copied again under the mutex
+/// held shared when the images changed since it last looked; nullptr while
+/// no buffer holds an image.
+const thread_spans_t *current_thread_spans() {
     native_cache_state_t &state = cache_state();
-    if (state.image_count.load(std::memory_order_acquire) == 0) return false;
-    thread_local uint64_t tl_gen = 0;
-    thread_local std::shared_ptr<const image_spans_t> tl_spans;
-    if (state.spans_gen.load(std::memory_order_acquire) != tl_gen) {
+    if (state.image_count.load(std::memory_order_acquire) == 0) return nullptr;
+    thread_spans_t &tl = thread_spans();
+    if (state.spans_gen.load(std::memory_order_acquire) != tl.gen) {
         std::shared_lock<std::shared_mutex> lock(state.mutex);
-        tl_spans = state.spans;
-        tl_gen = state.spans_gen.load(std::memory_order_relaxed);
+        tl.spans = state.spans;
+        tl.gen = state.spans_gen.load(std::memory_order_relaxed);
     }
-    if (!tl_spans) return true;
+    return &tl;
+}
+
+/// False only when no span of tl overlaps [p, p + bytes).
+bool spans_overlap(const thread_spans_t &tl, const void *p, size_t bytes) {
+    if (!tl.spans) return true;
     // The first span that ends past p: it holds p or starts after it.
     const auto at = reinterpret_cast<std::uintptr_t>(p);
-    const auto it = std::upper_bound(tl_spans->begin(), tl_spans->end(), at,
+    const auto it = std::upper_bound(tl.spans->begin(), tl.spans->end(), at,
             [](std::uintptr_t a,
                     const std::pair<std::uintptr_t, std::uintptr_t> &s) {
         return a < s.second;
     });
-    return it != tl_spans->end() && (it->first <= at || it->first - at < bytes);
+    return it != tl.spans->end() && (it->first <= at || it->first - at < bytes);
+}
+
+/// False only when no image overlaps [p, p + bytes); takes no lock while
+/// the images have not changed since the calling thread last looked.
+bool image_may_overlap(const void *p, size_t bytes) {
+    const thread_spans_t *tl = current_thread_spans();
+    return tl != nullptr && spans_overlap(*tl, p, bytes);
+}
+
+/// image_may_overlap without a lock: also true when the images changed
+/// since the calling thread last looked.
+bool image_may_overlap_unlocked(const void *p, size_t bytes) {
+    native_cache_state_t &state = cache_state();
+    if (state.image_count.load(std::memory_order_acquire) == 0) return false;
+    const thread_spans_t &tl = thread_spans();
+    return state.spans_gen.load(std::memory_order_acquire) != tl.gen
+            || spans_overlap(tl, p, bytes);
 }
 
 /// Forgets the record at it, under the mutex held exclusively.
@@ -380,13 +432,13 @@ size_t aocl_capacity(const native_raw_weight_t &w, size_t capacity_bytes) {
             w.K, w.N, w.ldb, w.transB, w.wei_dt == data_type_t::s8);
 }
 
-/// Reserves the record of an in-place image of used bytes at w's buffer
-/// before the buffer is rewritten (a buffer is never rewritten without one),
-/// after dropping the records it overlaps; end() when no record can be
-/// allocated, and then the buffer must not be rewritten.  Under the mutex
-/// held exclusively.
+/// Reserves the record of an in-place image of used bytes at w's buffer of
+/// owned bytes before the buffer is rewritten (a buffer is never rewritten
+/// without one), after dropping the records it overlaps; end() when no
+/// record can be allocated, and then the buffer must not be rewritten.
+/// Under the mutex held exclusively.
 image_map_t::iterator reserve_image_locked(
-        const native_raw_weight_t &w, size_t used) {
+        const native_raw_weight_t &w, size_t used, size_t owned) {
     auto &images = cache_state().images;
     const auto at = reinterpret_cast<std::uintptr_t>(w.weight);
     for (auto it = images.lower_bound(at);
@@ -398,6 +450,7 @@ image_map_t::iterator reserve_image_locked(
         it->second.layout = w;
         it->second.bytes = used;
         it->second.reserved = true;
+        it->second.owned = owned;
     } catch (const std::bad_alloc &) { it = images.end(); }
     publish_spans_locked();
     return it;
@@ -418,6 +471,30 @@ void mark_rewritten_layouts_locked(
                 && within(at, e.source_bytes, lo, owned)
                 && ends_hold(at, e.source_bytes, e.source_ends, lo, owned))
             e.rewritten_by = weight;
+    }
+}
+
+/// A layout cached at k while an in-place rewrite of bytes it was packed
+/// from waits for its pack's read to end: marked as the rewrite marked the
+/// layouts cached before it reserved its record.  Under the mutex held
+/// exclusively since the read ended, so the rewrite has not written.
+void mark_published_layout_locked(
+        const native_key_t &k, native_cached_pack_t &e) {
+    const auto &images = cache_state().images;
+    const auto at = reinterpret_cast<std::uintptr_t>(k.weight);
+    // Records do not overlap: the one before at may hold it.
+    auto it = images.upper_bound(at);
+    if (it != images.begin()) --it;
+    for (; it != images.end() && it->first < at + e.source_bytes; ++it) {
+        const native_image_t &img = it->second;
+        const std::uintptr_t lo = it->first;
+        if (img.reserved && at < lo + img.bytes
+                && within(at, e.source_bytes, lo, img.owned)
+                && ends_hold(
+                        at, e.source_bytes, e.source_ends, lo, img.owned)) {
+            e.rewritten_by = img.layout.weight;
+            return;
+        }
     }
 }
 
@@ -479,24 +556,169 @@ struct packing_t {
     }
 };
 
+/// Holds bytes of a weight buffer in reads while a pack or another reader
+/// reads them outside the mutex.
+struct read_hold_t {
+    native_cache_state_t &state;
+    std::pair<std::uintptr_t, std::uintptr_t> span {0, 0};
+    bool held = false;
+
+    /// Under the mutex held exclusively; false when it cannot be allocated.
+    bool hold_locked(const void *p, size_t bytes) {
+        const auto at = reinterpret_cast<std::uintptr_t>(p);
+        try {
+            state.reads.emplace_back(at, at + bytes);
+        } catch (const std::bad_alloc &) { return false; }
+        span = state.reads.back();
+        held = true;
+        return true;
+    }
+    /// Under the mutex held exclusively: the bytes are no longer read.
+    void release_locked() {
+        if (!held) return;
+        auto &reads = state.reads;
+        const auto it = std::find(reads.begin(), reads.end(), span);
+        *it = reads.back();
+        reads.pop_back();
+        held = false;
+        if (state.rewrites_waiting != 0) state.packed.notify_all();
+    }
+    ~read_hold_t() {
+        if (!held) return;
+        exclusive_lock_t guard(state.mutex);
+        release_locked();
+    }
+};
+
+/// Under the mutex held exclusively: waits until no read holds bytes of the
+/// bytes at weight, which the caller writes next.
+void wait_for_reads_locked(
+        exclusive_lock_t &lock, const void *weight, size_t bytes) {
+    native_cache_state_t &state = cache_state();
+    const auto lo = reinterpret_cast<std::uintptr_t>(weight);
+    const auto overlapped = [&] {
+        for (const auto &s : state.reads)
+            if (s.first < lo + bytes && lo < s.second) return true;
+        return false;
+    };
+    if (!overlapped()) return;
+    ++state.rewrites_waiting;
+    state.packed.wait(lock, [&] { return !overlapped(); });
+    --state.rewrites_waiting;
+}
+
+/// What the checks of a thread (native_weight_check_t: its memo's, and
+/// those of reads outside this cache) tell in-place rewrites: reading is odd
+/// while one may read bytes of a weight buffer.  A line of its own: every
+/// check of its thread stores to it.
+struct alignas(64) memo_reader_t {
+    std::atomic<uint64_t> reading {0};
+    /// Its thread exited and a later thread may take it; under the mutex of
+    /// memo_readers.
+    bool free = false;
+};
+
+/// The readers of the threads that ran a check.  Never destroyed, and a
+/// reader is never freed: a rewrite reads one without the mutex, also after
+/// its thread exited, and a thread at its exit may come after the process
+/// began to exit.
+struct memo_readers_t {
+    std::mutex mutex;
+    std::vector<memo_reader_t *> list;
+};
+
+memo_readers_t &memo_readers() {
+    static memo_readers_t *readers = new memo_readers_t();
+    return *readers;
+}
+
+/// The reader of the calling thread, listed in memo_readers from its first
+/// check (one an exited thread left, else a new one) and left there when it
+/// exits; nullptr when it cannot be listed.
+memo_reader_t *thread_reader() {
+    struct owner_t {
+        memo_reader_t *reader = nullptr;
+        ~owner_t() {
+            if (reader == nullptr) return;
+            std::lock_guard<std::mutex> guard(memo_readers().mutex);
+            reader->free = true;
+        }
+    };
+    thread_local owner_t owner;
+    if (owner.reader == nullptr) {
+        memo_readers_t &readers = memo_readers();
+        std::lock_guard<std::mutex> guard(readers.mutex);
+        for (memo_reader_t *r : readers.list) {
+            if (!r->free) continue;
+            r->free = false;
+            owner.reader = r;
+            return r;
+        }
+        std::unique_ptr<memo_reader_t> r(new (std::nothrow) memo_reader_t());
+        if (r == nullptr) return nullptr;
+        try {
+            readers.list.push_back(r.get());
+        } catch (const std::bad_alloc &) { return nullptr; }
+        owner.reader = r.release();
+    }
+    return owner.reader;
+}
+
+/// Begins a check of reader's thread, which a release store of reading
+/// ends: true when it may read weight bytes, no in-place rewrite being
+/// counted.
+bool begin_check(memo_reader_t &reader) {
+    const uint64_t n = reader.reading.load(std::memory_order_relaxed);
+    // Before the load of rewrites, as a rewrite counts itself before it
+    // loads reading: one of the two sees the other (wait_for_memo_checks).
+    reader.reading.store(n + 1, std::memory_order_seq_cst);
+    return cache_state().rewrites.load(std::memory_order_seq_cst) == 0;
+}
+
+/// Waits until every check that began before the calling rewrite was
+/// counted in rewrites has ended; the checks that begin later see the count
+/// and read no weight bytes.  Without the mutex, before the rewrite writes;
+/// the mutex of memo_readers is held to read the list only, never while a
+/// check is waited for: a thread's first memo entry lists its reader under
+/// it while holding the cache lock.
+void wait_for_memo_checks() {
+    memo_readers_t &readers = memo_readers();
+    for (size_t i = 0;; ++i) {
+        const memo_reader_t *r = nullptr;
+        {
+            std::lock_guard<std::mutex> guard(readers.mutex);
+            if (i == readers.list.size()) return;
+            r = readers.list[i];
+        }
+        const uint64_t n = r->reading.load(std::memory_order_seq_cst);
+        if (n % 2 == 0) continue;
+        while (r->reading.load(std::memory_order_acquire) == n)
+            std::this_thread::yield();
+    }
+}
+
 /// Rewrites w's buffer in place into the used bytes of its layout, from its
-/// AOCL prepack (aocl) or from the raw bf16 weight.  Entered and left with
-/// the mutex held exclusively; the pack and the write-back run outside it,
-/// with the buffer in packing and its image record reserved, so calls on the
-/// buffer wait and the other calls go on.  unimplemented when nothing was
-/// written.
+/// AOCL prepack (aocl) or from the raw bf16 or s4 weight.  Entered and left
+/// with the mutex held exclusively; the pack and the write-back run outside
+/// it, with the buffer in packing and its image record reserved, so calls on
+/// the buffer wait and the other calls go on, and once no read of other
+/// calls holds bytes it writes and no check reads weight bytes.
+/// unimplemented when nothing was written.
 status_t rewrite_in_place(exclusive_lock_t &lock, const native_raw_weight_t &w,
         size_t used, size_t owned, size_t bytes, bool aocl, int num_threads) {
     native_cache_state_t &state = cache_state();
     packing_t packing {state};
     if (!packing.hold_locked(w.weight)) return status_t::unimplemented;
-    if (reserve_image_locked(w, used) == state.images.end()) {
+    if (reserve_image_locked(w, used, owned) == state.images.end()) {
         log_error("native weight: no record for an in-place image");
         packing.release_locked();
         return aocl ? status_t::failure : status_t::unimplemented;
     }
+    state.rewrites.fetch_add(1, std::memory_order_seq_cst);
     mark_rewritten_layouts_locked(w.weight, used, owned);
+    wait_for_reads_locked(lock, w.weight, used);
     lock.unlock();
+    wait_for_memo_checks();
     status_t st = status_t::success;
     if (aocl) {
         // Weight cache mode 2 is the caller's consent that the weight buffer
@@ -528,6 +750,7 @@ status_t rewrite_in_place(exclusive_lock_t &lock, const native_raw_weight_t &w,
             erase_image_locked(it);
         }
     }
+    state.rewrites.fetch_sub(1, std::memory_order_release);
     packing.release_locked();
     return st;
 }
@@ -564,16 +787,33 @@ struct memo_set_t {
 };
 
 struct layout_memo_t {
+    /// The thread's reader (thread_reader), for the checks of the memo.
+    memo_reader_t *reader = nullptr;
     memo_set_t sets[kMemoSets];
 };
 
 /// The memo of the calling thread, made when make is set (an entry is
 /// stored) and freed when the thread exits; nullptr before that, or when it
-/// cannot be allocated.
+/// cannot be allocated or its reader listed.
 layout_memo_t *thread_memo(bool make) {
     thread_local std::unique_ptr<layout_memo_t> memo;
-    if (!memo && make) memo.reset(new (std::nothrow) layout_memo_t());
+    if (!memo && make) {
+        memo_reader_t *reader = thread_reader();
+        if (reader == nullptr) return nullptr;
+        memo.reset(new (std::nothrow) layout_memo_t());
+        if (memo) memo->reader = reader;
+    }
     return memo.get();
+}
+
+/// The set of a memo that holds the layouts of weight.
+size_t memo_set_index(const void *weight) {
+    uint64_t h
+            = static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(weight));
+    h ^= h >> 33;
+    h *= 0xff51afd7ed558ccdull;
+    h ^= h >> 33;
+    return static_cast<size_t>(h & (kMemoSets - 1));
 }
 
 /// The set of the thread's memo that holds the layouts of weight; nullptr
@@ -581,24 +821,40 @@ layout_memo_t *thread_memo(bool make) {
 memo_set_t *memo_set(const void *weight, bool make) {
     layout_memo_t *memo = thread_memo(make);
     if (memo == nullptr) return nullptr;
-    uint64_t h
-            = static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(weight));
-    h ^= h >> 33;
-    h *= 0xff51afd7ed558ccdull;
-    h ^= h >> 33;
-    return &memo->sets[h & (kMemoSets - 1)];
+    return &memo->sets[memo_set_index(weight)];
 }
 
-/// The thread's entry for key, of any generation, else nullptr: a key has
+/// The entry of memo for key, of any generation, else nullptr: a key has
 /// one way in its set (memo_put_locked).
-const memo_entry_t *memo_find(const native_key_t &key) {
-    const memo_set_t *set = memo_set(key.weight, false);
-    if (set == nullptr) return nullptr;
+const memo_entry_t *memo_find(
+        const layout_memo_t &memo, const native_key_t &key) {
+    const memo_set_t &set = memo.sets[memo_set_index(key.weight)];
     for (size_t i = 0; i < kMemoWays; ++i)
-        if (set->weights[i] == key.weight && set->ways[i].key == key)
-            return &set->ways[i];
+        if (set.weights[i] == key.weight && set.ways[i].key == key)
+            return &set.ways[i];
     return nullptr;
 }
+
+/// A check of an entry of the calling thread's memo, on the reader the
+/// memo holds (native_weight_check_t).
+class memo_check_t {
+public:
+    explicit memo_check_t(memo_reader_t &reader)
+        : reader_(reader), ok_(begin_check(reader)) {}
+    ~memo_check_t() {
+        reader_.reading.store(
+                reader_.reading.load(std::memory_order_relaxed) + 1,
+                std::memory_order_release);
+    }
+    memo_check_t(const memo_check_t &) = delete;
+    memo_check_t &operator=(const memo_check_t &) = delete;
+
+    bool ok() const { return ok_; }
+
+private:
+    memo_reader_t &reader_;
+    bool ok_ = false;
+};
 
 /// Whether no cached layout or image record has gone, and no image changed,
 /// since an entry of generation gen was made, read after its digests: a
@@ -609,15 +865,15 @@ bool memo_still_current(uint64_t gen) {
     return cache_state().generation.load(std::memory_order_relaxed) == gen;
 }
 
-/// The thread's entry for an image that starts at weight, found in
+/// The entry of memo for an image that starts at weight, found in
 /// generation gen, else nullptr.
-const memo_entry_t *memo_find_image(const void *weight, uint64_t gen) {
-    const memo_set_t *set = memo_set(weight, false);
-    if (set == nullptr) return nullptr;
+const memo_entry_t *memo_find_image(
+        const layout_memo_t &memo, const void *weight, uint64_t gen) {
+    const memo_set_t &set = memo.sets[memo_set_index(weight)];
     for (size_t i = 0; i < kMemoWays; ++i)
-        if (set->weights[i] == weight && set->ways[i].generation == gen
-                && set->ways[i].image)
-            return &set->ways[i];
+        if (set.weights[i] == weight && set.ways[i].generation == gen
+                && set.ways[i].image)
+            return &set.ways[i];
     return nullptr;
 }
 
@@ -740,16 +996,51 @@ status_t pack_for_call(const layout_request_t &r, const native_image_t *image,
 
 /// The layout the thread's memo holds for r, when its bytes still keep the
 /// digests: what the cache lookup would find, without the lock or the
-/// lookup.  A cached layout does not serve weight cache mode 0.
+/// lookup.  A cached layout does not serve weight cache mode 0.  While an
+/// in-place rewrite runs, the bytes are not read and the call takes the
+/// lookup.
 bool find_layout_memo(const layout_request_t &r, native_layout_t &out) {
-    const memo_entry_t *e = memo_find(r.key);
+    layout_memo_t *memo = thread_memo(false);
+    if (memo == nullptr) return false;
+    const memo_entry_t *e = memo_find(*memo, r.key);
     if (e == nullptr || (!e->image && r.weight_cache_mode == 0)) return false;
+    const memo_check_t check(*memo->reader);
+    if (!check.ok()) return false;
     const auto at = reinterpret_cast<std::uintptr_t>(r.w.weight);
     if (!ends_hold(at, e->check_bytes, e->ends, at, r.owned)
             || !memo_still_current(e->generation))
         return false;
     out = e->layout;
     return true;
+}
+
+/// Whether a reserved image record overlaps [at, at + bytes): an in-place
+/// rewrite may be writing there.  Under the mutex.
+bool rewrite_overlaps_locked(std::uintptr_t at, size_t bytes) {
+    const auto &images = cache_state().images;
+    // Records do not overlap: the one before at may reach past it.
+    auto it = images.upper_bound(at);
+    if (it != images.begin()) --it;
+    for (; it != images.end() && it->first < at + bytes; ++it)
+        if (it->second.reserved && at < it->first + it->second.bytes)
+            return true;
+    return false;
+}
+
+/// Whether the check of r's cached layout (pack_holds) would read bytes an
+/// in-place rewrite may be writing: the rewrite did not mark the layout,
+/// and the bytes its check reads overlap the rewrite's record.  The lookup
+/// then waits for the rewrite to end.  Under the mutex.
+bool pack_check_waits_locked(const layout_request_t &r) {
+    native_cache_state_t &state = cache_state();
+    if (r.weight_cache_mode == 0
+            || state.rewrites.load(std::memory_order_relaxed) == 0)
+        return false;
+    const auto hit = state.packs.find(r.key);
+    if (hit == state.packs.end() || hit->second.rewritten_by != nullptr)
+        return false;
+    return rewrite_overlaps_locked(reinterpret_cast<std::uintptr_t>(r.w.weight),
+            std::min(hit->second.source_bytes, r.owned));
 }
 
 /// The cached layout (modes 1 / 2) or the in-place image (may_image) of r
@@ -759,8 +1050,10 @@ bool find_layout_shared(
         const layout_request_t &r, bool may_image, native_layout_t &out) {
     native_cache_state_t &state = cache_state();
     std::shared_lock<std::shared_mutex> lock(state.mutex);
-    state.packed.wait(
-            lock, [&] { return state.packing.count(r.w.weight) == 0; });
+    state.packed.wait(lock, [&] {
+        return state.packing.count(r.w.weight) == 0
+                && !pack_check_waits_locked(r);
+    });
     if (r.weight_cache_mode != 0) {
         const auto hit = state.packs.find(r.key);
         if (hit != state.packs.end()
@@ -846,11 +1139,11 @@ lookup_t find_layout_exclusive(const layout_request_t &r, native_image_t &image,
 }
 
 /// Weight cache mode 2 on a buffer with no image: rewrites it in place when
-/// its layout fits it (an AOCL prepack, or a contiguous bf16 weight).  done
-/// is set when the buffer is rewritten; a failed AOCL rewrite returns its
-/// status, a failed bf16 one leaves r to the out-of-place pack.  A layout of
-/// padded columns (N not a multiple of pack_nr) is never written in place.
-/// With the mutex held exclusively (rewrite_in_place).
+/// its layout fits it (an AOCL prepack, or a contiguous bf16 or s4 weight).
+/// done is set when the buffer is rewritten; a failed AOCL rewrite returns
+/// its status, a failed bf16 or s4 one leaves r to the out-of-place pack.  A
+/// layout of padded columns (N not a multiple of pack_nr) is never written in
+/// place.  With the mutex held exclusively (rewrite_in_place).
 status_t rewrite_if_fits(exclusive_lock_t &lock, const layout_request_t &r,
         bool &done, native_layout_t &out) {
     const native_raw_weight_t &w = r.w;
@@ -858,8 +1151,6 @@ status_t rewrite_if_fits(exclusive_lock_t &lock, const layout_request_t &r,
     if (w.N % w.pack_nr != 0) return status_t::success;
     const size_t used = native_block_bytes(w.wei_dt, w.K, w.pack_nr)
             * static_cast<size_t>(w.N / w.pack_nr);
-    const size_t plain = static_cast<size_t>(w.K) * w.N
-            * zendnnl::common::size_of(w.wei_dt);
     const bool contiguous = w.ldb == (w.transB ? w.K : w.N);
     if (w.aocl_blocked) {
         if (!contiguous || used > aocl_capacity(w, r.capacity_bytes))
@@ -868,8 +1159,12 @@ status_t rewrite_if_fits(exclusive_lock_t &lock, const layout_request_t &r,
                 lock, w, used, r.owned, r.bytes, true, r.num_threads);
         if (st != status_t::success) return st;
     } else {
-        if (w.wei_dt != data_type_t::bf16 || !contiguous
-                || !wei_inplace_fits(used, used, plain, r.capacity_bytes))
+        if ((w.wei_dt != data_type_t::bf16 && w.wei_dt != data_type_t::s4)
+                || !contiguous)
+            return status_t::success;
+        const size_t plain
+                = native_raw_weight_bytes(w.wei_dt, w.K, w.N, w.ldb, w.transB);
+        if (!wei_inplace_fits(used, used, plain, r.capacity_bytes))
             return status_t::success;
         if (rewrite_in_place(
                     lock, w, used, r.owned, r.bytes, false, r.num_threads)
@@ -887,19 +1182,27 @@ status_t rewrite_if_fits(exclusive_lock_t &lock, const layout_request_t &r,
 }
 
 /// Packs r out of place, from image when its buffer holds one, outside the
-/// mutex, which the call holds exclusively on entry.  Modes 1 / 2 hold the
-/// buffer in packing until the layout is cached (or, past the cache
-/// capacity, owned by the caller); mode 0 packs for this call only.
+/// mutex, which the call holds exclusively on entry, with the bytes it reads
+/// held in reads.  Modes 1 / 2 also hold the buffer in packing until the
+/// layout is cached (or, past the cache capacity, owned by the caller); mode
+/// 0 packs for this call only.
 status_t pack_out_of_place(exclusive_lock_t &lock, const layout_request_t &r,
         const native_image_t *image, native_layout_t &out) {
     native_cache_state_t &state = cache_state();
     const native_raw_weight_t &w = r.w;
+    const size_t source_bytes = image != nullptr ? image->bytes : r.extent;
+    read_hold_t read {state};
+    if (!read.hold_locked(w.weight, source_bytes)) {
+        log_error("native weight: no memory to pack weight=", w.weight);
+        return status_t::failure;
+    }
     if (r.weight_cache_mode == 0) {
         lock.unlock();
         return pack_for_call(r, image, out);
     }
     packing_t packing {state};
     if (!packing.hold_locked(w.weight)) {
+        read.release_locked();
         log_error("native weight: no memory to pack weight=", w.weight);
         return status_t::failure;
     }
@@ -910,7 +1213,6 @@ status_t pack_out_of_place(exclusive_lock_t &lock, const layout_request_t &r,
         log_error("native weight: no buffer for a ", r.bytes, "-byte layout");
         return status_t::unimplemented;
     }
-    const size_t source_bytes = image != nullptr ? image->bytes : r.extent;
     const weight_ends_t source_ends = image != nullptr
             ? image->ends
             : weight_ends_of(w.weight, r.extent);
@@ -918,6 +1220,7 @@ status_t pack_out_of_place(exclusive_lock_t &lock, const layout_request_t &r,
             = pack_from_source(w, image, r.owned, buf.get(), r.num_threads);
     if (st != status_t::success) return st;
     lock.lock();
+    read.release_locked();
     if (state.packs.size() + state.retired.size()
             < get_weight_cache_capacity()) {
         try {
@@ -927,6 +1230,7 @@ status_t pack_out_of_place(exclusive_lock_t &lock, const layout_request_t &r,
                 entry.buf.reset(static_cast<uint8_t *>(buf.release()));
                 entry.source_bytes = source_bytes;
                 entry.source_ends = source_ends;
+                mark_published_layout_locked(r.key, entry);
             }
             packing.release_locked();
             out.data = entry.buf.get();
@@ -952,8 +1256,10 @@ size_t native_raw_weight_bytes(
         data_type_t wei_dt, int K, int N, int ldb, bool transB) {
     const size_t rows = static_cast<size_t>(transB ? N : K);
     const size_t cols = static_cast<size_t>(transB ? K : N);
-    return ((rows - 1) * static_cast<size_t>(ldb) + cols)
-            * zendnnl::common::size_of(wei_dt);
+    const size_t elements = (rows - 1) * static_cast<size_t>(ldb) + cols;
+    // Two s4 elements per byte, the first in the low nibble of byte 0.
+    if (wei_dt == data_type_t::s4) return (elements + 1) / 2;
+    return elements * zendnnl::common::size_of(wei_dt);
 }
 
 status_t get_native_layout(const native_raw_weight_t &w,
@@ -980,14 +1286,19 @@ status_t get_native_layout(const native_raw_weight_t &w,
     }
     if (find_layout_memo(r, out)) return status_t::success;
     const bool may_image = image_may_overlap(w.weight, r.extent);
-    // Mode 0 with no image at the buffer: packed for this call only.
-    if (weight_cache_mode == 0 && !may_image)
-        return pack_for_call(r, nullptr, out);
-    if (find_layout_shared(r, may_image, out)) return status_t::success;
+    // Mode 0 with no image at the buffer has nothing to find but goes on to
+    // the exclusive lookup too, which holds the bytes its pack reads against
+    // an in-place rewrite.
+    if ((weight_cache_mode != 0 || may_image)
+            && find_layout_shared(r, may_image, out))
+        return status_t::success;
 
     native_cache_state_t &state = cache_state();
     exclusive_lock_t lock(state.mutex);
-    state.packed.wait(lock, [&] { return state.packing.count(w.weight) == 0; });
+    state.packed.wait(lock, [&] {
+        return state.packing.count(w.weight) == 0
+                && !pack_check_waits_locked(r);
+    });
     native_image_t image;
     bool has_image = false;
     switch (find_layout_exclusive(r, image, has_image, out)) {
@@ -1028,13 +1339,19 @@ bool native_weight_find_image(
     if (weight == nullptr || !image_may_overlap(weight, 1)) return false;
     native_cache_state_t &state = cache_state();
     const auto at = reinterpret_cast<std::uintptr_t>(weight);
-    const memo_entry_t *e = memo_find_image(
-            weight, state.generation.load(std::memory_order_acquire));
-    if (e != nullptr && ends_hold(at, e->check_bytes, e->ends, at, owned_bytes)
-            && memo_still_current(e->generation)) {
-        found.ready = true;
-        found.layout = raw_of(e->key);
-        return true;
+    if (layout_memo_t *memo = thread_memo(false)) {
+        const memo_entry_t *e = memo_find_image(*memo, weight,
+                state.generation.load(std::memory_order_acquire));
+        if (e != nullptr) {
+            const memo_check_t check(*memo->reader);
+            if (check.ok()
+                    && ends_hold(at, e->check_bytes, e->ends, at, owned_bytes)
+                    && memo_still_current(e->generation)) {
+                found.ready = true;
+                found.layout = raw_of(e->key);
+                return true;
+            }
+        }
     }
     {
         std::shared_lock<std::shared_mutex> lock(state.mutex);
@@ -1077,11 +1394,22 @@ native_raw_read_t native_weight_read_raw(const void *weight, size_t extent,
                 || after)
             return native_raw_read_t::image;
     }
-    packing_t packing {state};
-    if (!packing.hold_locked(weight)) return native_raw_read_t::failed;
+    read_hold_t hold {state};
+    if (!hold.hold_locked(weight, extent)) return native_raw_read_t::failed;
     lock.unlock();
     read();
     return native_raw_read_t::done;
+}
+
+native_weight_check_t::native_weight_check_t(const void *weight, size_t bytes) {
+    memo_reader_t *reader = thread_reader();
+    if (reader == nullptr) return;
+    // The copy of the spans is brought up to date before the check begins:
+    // once begun, a check takes no lock, as rewrites wait for it.
+    if (bytes != 0) current_thread_spans();
+    reading_ = &reader->reading;
+    ok_ = begin_check(*reader)
+            && (bytes == 0 || !image_may_overlap_unlocked(weight, bytes));
 }
 
 void clear_native_weight_caches() {

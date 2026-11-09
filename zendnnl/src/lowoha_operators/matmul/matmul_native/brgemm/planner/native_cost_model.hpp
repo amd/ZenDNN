@@ -76,6 +76,10 @@ bool native_plan_core_streams(
 /// its groups instead).
 bool native_plan_cost_int8(const native_problem_t &p);
 
+/// Bytes the INT4 tile streams per weight element of p: half a byte plus
+/// the group's scale (wei_scale_bytes over the group size).
+double native_int4_weight_bytes(const native_problem_t &p);
+
 /// True while the weights of p (N x K elements of the weight type) take at
 /// most cm_group_l3_pct percent of the L3 of the domains plan q's team
 /// spans (native_plan_domain_threads threads to a domain).
@@ -89,17 +93,20 @@ bool native_plan_groups_fit_l3(const native_problem_t &p,
 bool native_plan_slice_skewed(
         const native_plan_t &q, const heuristic_params_t &hp);
 
-/// The modeled time of plan q of a BF16 problem p, or of an INT8 one that
-/// native_plan_cost_int8 accepts, on uarch with the cost inputs of hp; zero
-/// for another.  An INT8 call takes K in quads at the plan's call width and
-/// rows per call, a weight element is one byte, and the K pass follows the
-/// tile's rows (native_int8_pass_quads).  Weight tiles a worker visits are
-/// streamed once; under row groups each tile is read once per row group,
-/// from memory once per L3 domain the threads of its column group span (the
-/// threads of the team taken in order, domain_threads to a domain), and from
-/// L3 for the other reads of the domain while the domain's weight bytes
-/// times cm_reuse_pct percent fit its l3_pct share.  A plan of the blocks
-/// schedule is weighed as the slice of its grid.  No allocation.
+/// The modeled time of plan q of a BF16 problem p, of an INT8 one that
+/// native_plan_cost_int8 accepts, or of an s4 one, on uarch with the cost
+/// inputs of hp; zero for another.  An INT8 call takes K in quads at the
+/// plan's call width and rows per call, a weight element is one byte, and
+/// the K pass follows the tile's rows (native_int8_pass_quads).  An s4 call
+/// is priced on its per-group tile: the INT8 call over all of K, weight
+/// elements of native_int4_weight_bytes, and per group one FMA per row and
+/// output vector.  Weight tiles a worker visits are streamed once; under row
+/// groups each tile is read once per row group, from memory once per L3
+/// domain the threads of its column group span (the threads of the team
+/// taken in order, domain_threads to a domain), and from L3 for the other
+/// reads of the domain while the domain's weight bytes times cm_reuse_pct
+/// percent fit its l3_pct share.  A plan of the blocks schedule is weighed
+/// as the slice of its grid.  No allocation.
 native_plan_cost_t native_plan_cost(const native_plan_t &q,
         const native_problem_t &p, const UarchParams &uarch,
         const heuristic_params_t &hp);

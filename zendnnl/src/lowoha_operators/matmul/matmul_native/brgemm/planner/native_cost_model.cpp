@@ -62,29 +62,45 @@ constexpr int kMaxDomains = 64;
 constexpr double kInt8Bytes = 1.0;
 constexpr int kInt8StepK = 4;
 
+/// Bytes of an s4 weight element, without its group's scale.
+constexpr double kInt4Bytes = 0.5;
+
 /// The kernel calls of a tile, priced per K step of the kernel: a BF16 pair
 /// of K over 32-column slabs, or an INT8 quad over the plan's call width.
+/// An s4 weight's per-group tile takes INT8 quads of half a byte a weight
+/// over all of K, and per group the fused order's epilogue of one FMA per
+/// row and output vector on the same pipes.
 class tile_model_t {
 public:
     tile_model_t(const native_plan_t &q, const native_problem_t &p,
             const UarchParams &uarch, const heuristic_params_t &hp)
-        : q_(q), p_(p), hp_(hp), int8_(p.int8()) {
+        : q_(q), p_(p), hp_(hp), int8_(p.int8()), int4_(p.int4()) {
         pipes_ = hp.cm_fma_pipes > 0 ? hp.cm_fma_pipes
                                      : std::max(1, uarch.fma_ports);
+        l1_bytes_ = static_cast<int64_t>(uarch.l1d_bytes) * hp.l1_pct;
         if (int8_) {
             slab_cols_ = native_int8_col_width(q, q.nr);
             mr_ = native_int8_call_rows(q, slab_cols_ / kVectorCols);
             k_steps_ = static_cast<double>(ceil_div(p.K, kInt8StepK));
-            step_bytes_ = kInt8StepK * kInt8Bytes;
+            wei_bytes_ = int4_ ? native_int4_weight_bytes(p) : kInt8Bytes;
+            step_bytes_ = kInt8StepK * (int4_ ? kInt4Bytes : kInt8Bytes);
             src_bytes_ = kInt8Bytes;
             l2_share_ = static_cast<double>(uarch.l2_bytes) * hp.int8_l2_pct
                     / 100.0;
+            if (int4_) {
+                const int gs = p.wei_group_size > 0 ? p.wei_group_size : p.K;
+                groups_ = ceil_div(p.K, std::max(1, gs));
+                l1_fit_ = (slab_cols_ * wei_bytes_ + mr_ * kInt8Bytes) * p.K
+                                * 100
+                        <= static_cast<double>(l1_bytes_);
+            }
         } else {
             slab_cols_ = native_bf16_slab_cols(q.nr);
             mr_ = q.mr;
             kc_ = std::min(std::max(1, q.kc), p.K);
             passes_ = ceil_div(p.K, kc_);
             k_steps_ = (p.K + 1) / 2;
+            wei_bytes_ = kBf16Bytes;
             step_bytes_ = 2 * kBf16Bytes;
             src_bytes_ = kBf16Bytes;
             l1_fit_ = static_cast<int64_t>(q.nr + q.mr) * kc_
@@ -95,13 +111,15 @@ public:
         }
         slabs_ = std::max(1, q.nr / std::max(1, slab_cols_));
         vectors_ = static_cast<double>(slab_cols_) / kVectorCols;
-        l1_bytes_ = static_cast<int64_t>(uarch.l1d_bytes) * hp.l1_pct;
         mem_cycles_ = native_plan_mem_cycles(uarch, hp);
         tall_ = 1.0 + native_plan_tall_pct(uarch, hp) / 100.0;
         link_bound_ = mem_cycles_ > hp.cm_stream_cycles;
     }
 
     double mem_cycles() const { return mem_cycles_; }
+
+    /// Bytes the tile streams per weight element.
+    double weight_bytes() const { return wei_bytes_; }
 
     /// Tiles of a worker's tiles whose stream idle counts: all of them while
     /// a core streams no faster than its share of the domain's link, else
@@ -123,7 +141,8 @@ public:
         if (from_l2)
             per = std::max(per,
                     slab_cols_ * step_bytes_ / std::max(1, hp_.cm_l2_bytes));
-        return per * k_steps_;
+        return per * k_steps_
+                + static_cast<double>(groups_) * rows * vectors_ / pipes_;
     }
 
     tile_cost_t tile(int rows) const {
@@ -132,7 +151,7 @@ public:
         // An INT8 tile's K pass follows its rows (native_int8_pass_quads).
         int passes = passes_;
         bool l1_fit = l1_fit_;
-        if (int8_) {
+        if (int8_ && !int4_) {
             const int k_quads = ceil_div(p_.K, kInt8StepK);
             const int pass = std::max(1,
                     native_int8_pass_quads(q_, k_quads, slab_cols_, rows, mr_));
@@ -155,7 +174,8 @@ public:
                                 * hp_.cm_call_cycles);
         // The tile's source rows come back from L2 only when they fit with
         // the tile's slab over all of K.
-        if ((rows + q_.nr) * static_cast<double>(p_.K) * src_bytes_ > l2_share_)
+        if ((rows * src_bytes_ + q_.nr * wei_bytes_) * static_cast<double>(p_.K)
+                > l2_share_)
             t.core += rows * static_cast<double>(p_.K) * src_bytes_ / 1024.0
                     * hp_.cm_l3_cycles;
         const double per_pass = slabs_ * later / passes;
@@ -177,6 +197,7 @@ private:
     const native_problem_t &p_;
     const heuristic_params_t &hp_;
     bool int8_ = false;
+    bool int4_ = false;
     int slab_cols_ = 32;
     int slabs_ = 1;
     int mr_ = 1;
@@ -184,7 +205,9 @@ private:
     int pipes_ = 2;
     int kc_ = 1;
     int passes_ = 1;
+    int groups_ = 0;
     double k_steps_ = 1;
+    double wei_bytes_ = 2;
     double step_bytes_ = 4;
     double src_bytes_ = 2;
     bool l1_fit_ = false;
@@ -196,6 +219,12 @@ private:
 };
 
 } // namespace
+
+double native_int4_weight_bytes(const native_problem_t &p) {
+    const int gs = p.wei_group_size > 0 ? p.wei_group_size : p.K;
+    return kInt4Bytes
+            + static_cast<double>(p.wei_scale_bytes) / std::max(1, gs);
+}
 
 int native_plan_domain_threads(
         const UarchParams &uarch, const heuristic_params_t &hp) {
@@ -251,7 +280,7 @@ native_plan_cost_t native_plan_cost(const native_plan_t &q,
         const native_problem_t &p, const UarchParams &uarch,
         const heuristic_params_t &hp) {
     native_plan_cost_t out;
-    const bool int8 = native_plan_cost_int8(p);
+    const bool int8 = native_plan_cost_int8(p) || p.int4();
     if ((!p.bf16() && !int8) || q.nr < 1 || q.mr < 1 || q.mb < 1
             || q.threads < 1 || q.n_tiles < 1 || q.m_blocks < 1)
         return out;
@@ -262,8 +291,8 @@ native_plan_cost_t native_plan_cost(const native_plan_t &q,
         return out;
     const tile_model_t model(q, p, uarch, hp);
     const int M = p.M;
-    const double tile_kib = static_cast<double>(q.nr) * p.K
-            * (int8 ? kInt8Bytes : kBf16Bytes) / 1024.0;
+    const double tile_kib
+            = static_cast<double>(q.nr) * p.K * model.weight_bytes() / 1024.0;
     const int workers = q.threads;
     const int g = q.col_groups;
     const int dt = native_plan_domain_threads(uarch, hp);

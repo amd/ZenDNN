@@ -239,17 +239,17 @@ int create_input_tensor(tensor_factory_t &tensor_factory, MatmulConfig &cfg,
         tensor_t src_zp;
 
         // Dynamic source quantization. W8A8 supports src in {bf16, f32} + s8
-        // weights; W4A8 supports bf16 src/dst + s4 weights. The source scale
-        // tensor is zero-initialized and filled by the runtime quantization pass.
-        // Compute target is fixed to s8 in set_lowoha_matmul_params.
+        // weights; W4A8 supports src and dst in {bf16, f32} + s4 weights
+        // (is_w4a8_dynamic_dtype). The source scale tensor is zero-initialized
+        // and filled by the runtime quantization pass. Compute target is fixed
+        // to s8 in set_lowoha_matmul_params.
         if (cfg.src_dynamic_quant) {
             const bool is_w8a8_dynamic
                     = (cfg.dt[0] == data_type_t::bf16
                               || cfg.dt[0] == data_type_t::f32)
                     && cfg.dt[1] == data_type_t::s8;
-            const bool is_w4a8_dynamic = cfg.dt[0] == data_type_t::bf16
-                    && cfg.dt[1] == data_type_t::s4
-                    && cfg.dt[2] == data_type_t::bf16;
+            const bool is_w4a8_dynamic
+                    = is_w4a8_dynamic_dtype(cfg.dt[0], cfg.dt[1], cfg.dt[2]);
             if (is_w8a8_dynamic || is_w4a8_dynamic) {
                 const uint64_t M = cfg.m;
                 const uint64_t K = cfg.k;
@@ -287,7 +287,7 @@ int create_input_tensor(tensor_factory_t &tensor_factory, MatmulConfig &cfg,
                 commonlog_warning(
                         "src_dynamic_quant=true requires W8A8 (src in {bf16, "
                         "f32}, wei=s8) "
-                        "or W4A8 (src=bf16, wei=s4, dst=bf16). "
+                        "or W4A8 (src and dst in {bf16, f32}, wei=s4). "
                         "Got src=",
                         datatypeToStr(cfg.dt[0]),
                         ", wei=", datatypeToStr(cfg.dt[1]),

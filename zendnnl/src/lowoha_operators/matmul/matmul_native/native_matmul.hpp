@@ -27,8 +27,8 @@ namespace matmul {
 namespace native {
 
 /// The layout-rule query of a matmul call: a bf16 or f32 source the call
-/// quantizes dynamically to u8 / s8 counts as that type, and a {G > 1, N}
-/// weight scale as per-group.
+/// quantizes dynamically to u8 / s8 (over an s8 or s4 weight) counts as that
+/// type, and a {G > 1, N} weight scale as per-group.
 native_layout_query_t native_layout_query_for(
         const matmul_params &params, int K, int N, int ldb, bool transB);
 

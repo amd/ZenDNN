@@ -44,15 +44,9 @@ BF16BKCWeightCache &BF16BKCWeightCache::instance() {
     return inst;
 }
 
-const BF16BKCWeight *BF16BKCWeightCache::find(
-        const PrepackedWeightKey &key, size_t bytes) {
+const BF16BKCWeight *BF16BKCWeightCache::find(const PrepackedWeightKey &key) {
     std::lock_guard<std::mutex> lock(mutex_);
-    const BF16BKCWeight *cached = cache_.find_and_touch(key);
-    return cached != nullptr
-                    && weight_end_words_hold(
-                            cached->source_ends, key.weight_ptr, bytes)
-            ? cached
-            : nullptr;
+    return cache_.find_and_touch(key);
 }
 
 const BF16BKCWeight *BF16BKCWeightCache::get_or_pack(

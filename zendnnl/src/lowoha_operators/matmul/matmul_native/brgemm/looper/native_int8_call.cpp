@@ -29,6 +29,7 @@
 #include "common/float16.hpp"
 #include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/lowoha_quant_layout.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/native_int4_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/native_int8_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_epilogue.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_operator_bridge.hpp"
@@ -100,32 +101,36 @@ void copy_rows(const void *src, int lds, bool trans, int M, int K, void *dst,
     T *d = static_cast<T *>(dst);
     const size_t ls = static_cast<size_t>(lds);
     const size_t ld = static_cast<size_t>(ldd);
-    const int m_blocks = (M + block - 1) / block;
+    const int m_blocks = ceil_div(M, block);
     const bool parallel = nt > 1 && static_cast<int64_t>(M) * K >= par_min;
 #pragma omp parallel for num_threads(nt) if (parallel) schedule(static)
     for (int mb = 0; mb < m_blocks; ++mb) {
-        const int m_end = std::min(M, (mb + 1) * block);
-        for (int m = mb * block; m < m_end; ++m)
+        // A block ends at its start plus what is left, at most block: the
+        // start plus block may pass the int bound.
+        const int m0 = mb * block;
+        const int m_end = m0 + std::min(block, M - m0);
+        for (int m = m0; m < m_end; ++m)
             std::fill(d + m * ld + K, d + (m + 1) * ld, T(0));
         if (!trans) {
-            for (int m = mb * block; m < m_end; ++m)
+            for (int m = m0; m < m_end; ++m)
                 std::memcpy(d + m * ld, s + m * ls, sizeof(T) * K);
             continue;
         }
-        for (int k0 = 0; k0 < K; k0 += block) {
-            const int k_end = std::min(K, k0 + block);
+        for (int k0 = 0; k0 < K;) {
+            const int k_end = k0 + std::min(block, K - k0);
             for (int k = k0; k < k_end; ++k)
-                for (int m = mb * block; m < m_end; ++m)
+                for (int m = m0; m < m_end; ++m)
                     d[m * ld + k] = s[k * ls + m];
+            k0 = k_end;
         }
     }
 }
 
-/// shift[g] = -128 times the sum of the s8 values of group g of one row:
-/// groups groups of group_bytes bytes (a multiple of 4) from row.
+/// shift[g] = -(1 << bits) times the sum of the s8 values of group g of one
+/// row: groups groups of group_bytes bytes (a multiple of 4) from row.
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vnni")
-void row_group_shifts(
-        const uint8_t *row, int groups, int group_bytes, int32_t *shift) {
+void row_group_shifts(const uint8_t *row, int groups, int group_bytes, int bits,
+        int32_t *shift) {
     const __m512i ones = _mm512_set1_epi8(1);
     const int quads = group_bytes / 4;
     if (group_bytes < 64 && 16 % quads == 0) {
@@ -148,8 +153,8 @@ void row_group_shifts(
                 s = _mm512_add_epi32(
                         s, _mm512_shuffle_i32x4(s, s, _MM_SHUFFLE(2, 3, 0, 1)));
             _mm512_store_si512(lanes,
-                    _mm512_sub_epi32(
-                            _mm512_setzero_si512(), _mm512_slli_epi32(s, 7)));
+                    _mm512_sub_epi32(_mm512_setzero_si512(),
+                            _mm512_sll_epi32(s, _mm_cvtsi32_si128(bits))));
             const int n = std::min(16 / quads, groups - g);
             for (int j = 0; j < n; ++j)
                 shift[g + j] = lanes[j * quads];
@@ -168,17 +173,19 @@ void row_group_shifts(
                     _mm512_maskz_loadu_epi8(
                             _cvtu64_mask64(~0ull >> (64 - (group_bytes - k))),
                             p + k));
-        shift[g] = _mm512_reduce_add_epi32(acc) * -128;
+        shift[g] = _mm512_reduce_add_epi32(acc) * -(1 << bits);
     }
 }
 
 /// Dynamic quantization of a bf16 / f32 source by matmul's per-call reorder
 /// quantization into call.src_buffers.  On success q describes the quantized
-/// source (reorder_quantize_source).
+/// source (reorder_quantize_source), and trans says whether its rows are
+/// still transposed.
 status_t quantize_source(const GemmDescriptor &desc,
         const matmul_params &params, const void *src, int nt, int copy_block,
         int64_t copy_par_min, int groups, native_int8_call_t &call,
-        const void *&a, int &lda, const matmul_params *&q, const char **why) {
+        const void *&a, int &lda, bool &trans, const matmul_params *&q,
+        const char **why) {
     const int M = desc.M;
     const int K = desc.K;
     const auto &qp = params.quant_params;
@@ -205,11 +212,14 @@ status_t quantize_source(const GemmDescriptor &desc,
                 why);
 
     // A transposed source is made row-major first, so it quantizes exactly
-    // as the same rows given row-major.
+    // as the same rows given row-major; with an s4 weight it is quantized as
+    // given, as matmul's other routes quantize it for W4A8, and its
+    // quantized rows stay transposed.
+    trans = desc.transA && desc.wei_dt == data_type_t::s4;
     const void *rows = src;
     int rows_ld = desc.lda;
     std::vector<uint8_t> transposed;
-    if (desc.transA) {
+    if (desc.transA && !trans) {
         const size_t es = size_of(params.dtypes.src);
         transposed.resize(static_cast<size_t>(M) * K * es);
         if (es == sizeof(uint16_t))
@@ -225,7 +235,7 @@ status_t quantize_source(const GemmDescriptor &desc,
     const void *quantized = rows;
     int quantized_lda = rows_ld;
     const status_t st = reorder_quantize_source(params, rows, rows_ld, M, K, nt,
-            call.src_buffers, quantized, quantized_lda, q);
+            call.src_buffers, quantized, quantized_lda, q, trans);
     if (st != status_t::success) return st;
     a = quantized;
     lda = quantized_lda;
@@ -351,8 +361,21 @@ status_t check_source_group_call(const GemmDescriptor &desc,
 native_int8_decision_t decide_int8_call(const GemmDescriptor &desc,
         const matmul_params &params, const void *bias) {
     native_int8_decision_t d;
-    d.groups = int8_scale_groups(params, desc.N);
     const data_type_t dst = desc.dst_dt;
+    if (desc.wei_dt == data_type_t::s4) {
+        d.scheme = native_int8_scheme_t::per_group;
+        d.groups = int4_scale_groups(params, desc.N);
+        d.direct_store = desc.alpha == 1.0f && desc.beta == 0.0f
+                && (dst == data_type_t::f32 || dst == data_type_t::bf16);
+        d.order = d.direct_store ? native_int8_order_t::fused
+                                 : native_int8_order_t::reference;
+        // The reference algorithm applies alpha and beta to the sum of one
+        // group over K before both scales.
+        d.scales_after_groups
+                = d.groups == 1 && (desc.alpha != 1.0f || desc.beta != 0.0f);
+        return d;
+    }
+    d.groups = int8_scale_groups(params, desc.N);
     if (d.groups > 0) {
         d.scheme = native_int8_scheme_t::per_group;
         d.order = native_int8_order_t::reference;
@@ -385,12 +408,16 @@ status_t check_int8_call(const GemmDescriptor &desc,
         const matmul_params &params, const native_int8_decision_t &decision,
         const char **why) {
     const int M = desc.M;
-    if (params.dtypes.wei != data_type_t::s8 || desc.K > kMaxSafeInt8AccumK)
+    const bool int4 = params.dtypes.wei == data_type_t::s4;
+    if ((!int4 && params.dtypes.wei != data_type_t::s8)
+            || (!int4 && desc.K > kMaxSafeInt8AccumK))
         return turned_away(status_t::unimplemented,
                 "K exceeds the int32 accumulation bound", why);
     const auto &qp = params.quant_params;
     if (qp.wei_zp.buff != nullptr)
-        return turned_away(status_t::unimplemented, "weight zero points", why);
+        return turned_away(status_t::unimplemented,
+                int4 ? "an s4 weight with zero points" : "weight zero points",
+                why);
     // The tile applies beta of a gated call over the dst's N pre-activation
     // columns.
     if (desc.gated_act != matmul_gated_act_t::none && desc.beta != 0.0f
@@ -399,6 +426,30 @@ status_t check_int8_call(const GemmDescriptor &desc,
                 "beta with a gated activation over a dst of fewer than N "
                 "columns",
                 why);
+    if (int4) {
+        if (desc.K > kMaxNativeInt4K)
+            return turned_away(status_t::unimplemented,
+                    "an s4 weight of K whose whole octets exceed int", why);
+        // The INT4 group kernels take an s8 source only.
+        if (params.dtypes.src == data_type_t::u8
+                || (dynamic_source(params)
+                        && params.dtypes.compute == data_type_t::u8))
+            return turned_away(status_t::unimplemented,
+                    "a u8 source with an s4 weight", why);
+        // Nor a source zero point, also on a source the call quantizes,
+        // whose symmetric quantization would drop it.
+        if (qp.src_zp.buff != nullptr)
+            return turned_away(status_t::unimplemented,
+                    "an s4 weight with a source zero point", why);
+        if (decision.groups == 0)
+            return turned_away(status_t::unimplemented,
+                    "an s4 weight with weight scales other than {G, N}", why);
+        if (desc.K / decision.groups > kMaxSafeInt4GroupK)
+            return turned_away(status_t::unimplemented,
+                    "an s4 weight group above the int32 accumulation bound",
+                    why);
+        return check_group_call(desc, params, decision.groups, why);
+    }
     if (decision.scheme == native_int8_scheme_t::per_group)
         return decision.scales_after_groups
                 ? check_source_group_call(desc, params, decision.groups, why)
@@ -478,6 +529,15 @@ int int8_scale_groups(const matmul_params &params, int N) {
                     std::numeric_limits<int>::max()));
 }
 
+int int4_scale_groups(const matmul_params &params, int N) {
+    const quant_t &ws = params.quant_params.wei_scale;
+    if (ws.buff == nullptr || ws.dims.size() != 2 || ws.dims[0] < 1
+            || ws.dims[1] != static_cast<int64_t>(N))
+        return 0;
+    return static_cast<int>(
+            std::min<int64_t>(ws.dims[0], std::numeric_limits<int>::max()));
+}
+
 int int8_source_groups(const matmul_params &params, int M, int N) {
     const auto &qp = params.quant_params;
     const auto &dims = qp.src_scale.dims;
@@ -489,6 +549,11 @@ int int8_source_groups(const matmul_params &params, int M, int N) {
         return 0;
     return static_cast<int>(
             std::min<int64_t>(dims[1], std::numeric_limits<int>::max()));
+}
+
+void copy_int8_source(const void *src, int lds, bool trans, int M, int K,
+        uint8_t *dst, int ldd, int nt, int block, int64_t par_min) {
+    copy_rows<uint8_t>(src, lds, trans, M, K, dst, ldd, nt, block, par_min);
 }
 
 status_t prepare_int8_call(const GemmDescriptor &desc,
@@ -520,6 +585,7 @@ status_t prepare_int8_call(const GemmDescriptor &desc,
     call.group_quads = 0;
     call.src_scale_group_stride = 0;
     call.group_shift = nullptr;
+    call.shift_bits = 7;
 
     const int nt = omp_in_parallel() ? 1 : std::max(1, desc.num_threads);
     const data_type_t src_dt = params.dtypes.src;
@@ -536,9 +602,8 @@ status_t prepare_int8_call(const GemmDescriptor &desc,
     const matmul_params *quantized = nullptr;
     if (src_dt == data_type_t::bf16 || src_dt == data_type_t::f32) {
         const status_t st = quantize_source(desc, params, src, nt, copy_block,
-                copy_par_min, groups, call, a, lda, quantized, why);
+                copy_par_min, groups, call, a, lda, trans, quantized, why);
         if (st != status_t::success) return st;
-        trans = false;
         a_dt = quantized->dtypes.src;
         src_scale = &quantized->quant_params.src_scale;
         if (src_zp != nullptr) src_zp = &quantized->quant_params.src_zp;
@@ -549,10 +614,13 @@ status_t prepare_int8_call(const GemmDescriptor &desc,
     }
 
     call.src_signed = a_dt == data_type_t::s8;
-    const int k_pad = (K + 3) & ~3;
+    // The INT4 group kernel reads the source by K octets, the others by
+    // quads; a zero source value adds nothing against any padded weight.
+    const int k_unit = desc.wei_dt == data_type_t::s4 ? 8 : 4;
+    const int k_pad = ceil_div(K, k_unit) * k_unit;
     if (trans || k_pad != K) {
         call.a_buf.resize(static_cast<size_t>(M) * k_pad);
-        copy_rows<uint8_t>(a, lda, trans, M, K, call.a_buf.data(), k_pad, nt,
+        copy_int8_source(a, lda, trans, M, K, call.a_buf.data(), k_pad, nt,
                 copy_block, copy_par_min);
         call.A = call.a_buf.data();
         call.lda = k_pad;
@@ -656,12 +724,13 @@ status_t prepare_int8_call(const GemmDescriptor &desc,
         // only after: the buffer needs no fill.
         call.shift_buf.reset(new int32_t[static_cast<size_t>(M) * groups]);
         call.group_shift = call.shift_buf.get();
+        call.shift_bits = desc.wei_dt == data_type_t::s4 ? 3 : 7;
         call.rows = M;
         // A claim covers about kShiftClaimBytes of source, so that the
         // claims, on one shared counter, stay few next to the work they hand
         // out.
         call.shift_chunk = std::max(1, kShiftClaimBytes / K);
-        const int chunks = (M + call.shift_chunk - 1) / call.shift_chunk;
+        const int chunks = ceil_div(M, call.shift_chunk);
         call.shift_rows.reset(new std::atomic<int>[chunks + 1]);
         for (int i = 0; i <= chunks; ++i)
             call.shift_rows[i].store(0, std::memory_order_relaxed);
@@ -673,19 +742,19 @@ void ready_group_shifts(const native_int8_call_t &call, int m0, int mr) {
     std::atomic<int> *const next = &call.shift_rows[0];
     std::atomic<int> *const ready = &call.shift_rows[1];
     const int chunk = call.shift_chunk;
-    const int chunks = (call.rows + chunk - 1) / chunk;
+    const int chunks = ceil_div(call.rows, chunk);
     const int first = m0 / chunk;
-    const int end = (m0 + mr + chunk - 1) / chunk;
+    const int end = ceil_div(m0 + mr, chunk);
     const int group_bytes = call.group_quads * 4;
     // Chunks are claimed in order: once next reaches end, every chunk of the
     // range is claimed.
     while (next->load(std::memory_order_relaxed) < end) {
         const int c = next->fetch_add(1, std::memory_order_relaxed);
         if (c >= chunks) break;
-        const int m_end = std::min(call.rows, (c + 1) * chunk);
+        const int m_end = c * chunk + std::min(chunk, call.rows - c * chunk);
         for (int m = c * chunk; m < m_end; ++m)
             row_group_shifts(call.A + static_cast<size_t>(m) * call.lda,
-                    call.groups, group_bytes,
+                    call.groups, group_bytes, call.shift_bits,
                     call.group_shift + static_cast<size_t>(m) * call.groups);
         ready[c].store(1, std::memory_order_release);
     }

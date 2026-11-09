@@ -170,10 +170,17 @@ TEST(NativeLayoutRule, F32WeightNeedsF32Source) {
 
 TEST(NativeLayoutRule, OtherWeightTypesStayOnAocl) {
     expect_aocl(query(data_type_t::f16, data_type_t::f16, 64, 64));
-    expect_aocl(query(data_type_t::s4, data_type_t::s8, 64, 64));
     expect_aocl(query(data_type_t::s4, data_type_t::bf16, 64, 64));
+    expect_aocl(query(data_type_t::s4, data_type_t::u8, 64, 64));
     expect_aocl(query(data_type_t::u4, data_type_t::bf16, 64, 64));
     expect_aocl(query(data_type_t::none, data_type_t::bf16, 64, 64));
+}
+
+// An s4 weight with an s8 source (or one the call quantizes to s8): one
+// group over K, or groups of whole K quads.
+TEST(NativeLayoutRule, S4WeightsWithAnS8SourceAreNative) {
+    expect_native(query(data_type_t::s4, data_type_t::s8, 64, 64));
+    expect_native(query(data_type_t::s4, data_type_t::s8, 4100, 33));
 }
 
 /// The source type the layout rule pairs with weight type wei.

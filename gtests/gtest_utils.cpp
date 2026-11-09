@@ -2858,9 +2858,11 @@ thread_local bool native_refusal_explained = false;
 /// Whether the call carries what reason, the native BRGEMM's refusal of it,
 /// names, for the refusals that the suites drawing calls it serves meet on
 /// purpose: weight types it has no kernel for, sources of another type than
-/// the weight's, GGML packs, batched calls that name it, column-major calls,
-/// reordered sources, weight zero points, an f32 call into another dst, and
-/// a softmax after a gated activation.  Judged from the call's arguments
+/// the weight's (a u8 source with an s4 weight), GGML packs, batched calls
+/// that name it, column-major calls, reordered sources, weight zero points,
+/// source zero points with s4 weights, AOCL-DLP prepacks of s4 weights, an
+/// f32 call into another dst, and a
+/// softmax after a gated activation.  Judged from the call's arguments
 /// alone, so a wrong refusal in the library is not explained by itself.
 bool refusal_explained(const std::string &reason, char layout,
         const matmul_batch_params_t &batch, const matmul_params &params,
@@ -2875,12 +2877,24 @@ bool refusal_explained(const std::string &reason, char layout,
                     && (compute == dt::u8 || compute == dt::s8)
             ? compute
             : src;
-    if (reason == "weight type other than bf16 / s8 / f32")
-        return wei != dt::bf16 && wei != dt::s8 && wei != dt::f32;
+    if (reason == "weight type other than bf16 / s8 / s4 / f32")
+        return wei != dt::bf16 && wei != dt::s8 && wei != dt::s4
+                && wei != dt::f32;
     if (reason == "bf16 weight with a non-bf16 source")
         return wei == dt::bf16 && src != dt::bf16;
     if (reason == "s8 weight with a source other than u8 / s8")
         return wei == dt::s8 && mul_src != dt::u8 && mul_src != dt::s8;
+    if (reason == "s4 weight with a source other than s8")
+        return wei == dt::s4 && mul_src != dt::u8 && mul_src != dt::s8;
+    if (reason == "a u8 source with an s4 weight")
+        return wei == dt::s4 && mul_src == dt::u8;
+    if (reason == "an s4 weight with zero points")
+        return wei == dt::s4 && params.quant_params.wei_zp.buff != nullptr;
+    if (reason == "an s4 weight with a source zero point")
+        return wei == dt::s4 && params.quant_params.src_zp.buff != nullptr;
+    // An AOCL-DLP prepack of an s4 weight has no inverse.
+    if (reason == "an AOCL-DLP blocked weight without an unreorder")
+        return wei == dt::s4 && params.mem_format_b == 'r';
     if (reason == "f32 weight with a non-f32 source")
         return wei == dt::f32 && src != dt::f32;
     if (reason == "an f32 call into a dst other than f32 or bf16")

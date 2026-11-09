@@ -152,10 +152,14 @@ void apply_bmm_postop_offsets(
 /**
 * @brief Validates the parameters of a call on s4 weights for the W4A8 path.
 *
+* @param native The call asks for the native BRGEMM (ZENDNNL_MATMUL_ALGO=10 or
+*        lowoha_algo native_brgemm, native_brgemm_requested), which also takes
+*        f16 weight scales.
 * @return status_t::failure for s4-weight parameters the W4A8 path does not
 *         take, status_t::success otherwise
 */
-status_t validate_w4a8_inputs(const matmul_params &params, int M, int N, int K);
+status_t validate_w4a8_inputs(
+        const matmul_params &params, int M, int N, int K, bool native = false);
 
 /**
 * @brief Validates input parameters for matrix multiplication direct operation.

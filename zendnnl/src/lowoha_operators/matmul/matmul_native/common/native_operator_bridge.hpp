@@ -82,18 +82,20 @@ struct native_quant_buffers_t {
     native_quant_buffers_t &operator=(native_quant_buffers_t &&o) noexcept;
 };
 
-/// Quantizes the M x K source rows (rows_ld elements apart) of a call with
-/// params by matmul's reorder quantization on num_threads threads (it sets
-/// the nthreads ICV for the quantizer's call), whose buffers then belong to
-/// buffers.  quantized and quantized_lda are the rows
-/// it yields (the source rows when it does not quantize them), and q the
-/// parameters that describe them: dtypes.src their type, quant_params.src_scale
-/// and src_zp their scales and zero points.  q is the calling thread's, valid
-/// until its next call.  Returns the quantization's status.
+/// Quantizes the M x K source rows (rows_ld elements apart; with transA the
+/// source stored transposed, K rows of M elements rows_ld apart) of a call
+/// with params by matmul's reorder quantization on num_threads threads (it
+/// sets the nthreads ICV for the quantizer's call), whose buffers then belong
+/// to buffers.  quantized and quantized_lda are the rows it yields, in the
+/// source's layout (the source rows when it does not quantize them), and q
+/// the parameters that describe them: dtypes.src their type,
+/// quant_params.src_scale and src_zp their scales and zero points, [M][G]
+/// either way.  q is the calling thread's, valid until its next call.
+/// Returns the quantization's status.
 status_t reorder_quantize_source(const matmul_params &params, const void *rows,
         int rows_ld, int M, int K, int num_threads,
         native_quant_buffers_t &buffers, const void *&quantized,
-        int &quantized_lda, const matmul_params *&q);
+        int &quantized_lda, const matmul_params *&q, bool transA = false);
 
 // ── Log text ────────────────────────────────────────────────────────────
 

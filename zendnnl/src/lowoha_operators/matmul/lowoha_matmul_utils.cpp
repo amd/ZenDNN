@@ -15,11 +15,13 @@
 # *******************************************************************************/
 
 #include "lowoha_matmul_utils.hpp"
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <sstream>
 #include <string>
 #include "common/zendnnl_global.hpp"
+#include "lowoha_operators/matmul/matmul_native/native_matmul.hpp"
 #if ZENDNNL_DEPENDS_AOCLDLP
 #include "aocl_dlp.h"
 #endif
@@ -67,7 +69,7 @@ void apply_bmm_postop_offsets(
 }
 
 status_t validate_w4a8_inputs(
-        const matmul_params &params, int M, int N, int K) {
+        const matmul_params &params, int M, int N, int K, bool native) {
     // GGML packed weights (pack_format_b == 1) are exempt from the native W4A8
     // contract: a GGML Q4_0 weight arrives as s4 with a pre-quantized s8 source
     // and carries its scales inside the packed blob, so the checks below (which
@@ -126,8 +128,12 @@ status_t validate_w4a8_inputs(
         log_error("W4A8 requires quant_params.wei_scale.buff");
         return status_t::failure;
     }
-    if (wei_scale.dt != data_type_t::f32 && wei_scale.dt != data_type_t::bf16) {
-        log_error("W4A8 weight scale supports only f32 or bf16 data type");
+    if (wei_scale.dt != data_type_t::f32 && wei_scale.dt != data_type_t::bf16
+            && !(native && wei_scale.dt == data_type_t::f16)) {
+        log_error(native ? "W4A8 weight scale supports only f32, bf16 or f16 "
+                           "data type"
+                         : "W4A8 weight scale supports only f32 or bf16 data "
+                           "type");
         return status_t::failure;
     }
     if (wei_scale.dims.size() != 2) {
@@ -221,7 +227,10 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
     const bool is_int8 = params.dtypes.wei == data_type_t::s8
             || params.packing.pack_format_b == 1;
 
-    if (validate_w4a8_inputs(params, M, N, K) != status_t::success) {
+    // The native BRGEMM also takes f16 weight scales for W4A8.
+    const bool native = native::native_brgemm_requested(
+            params, std::max(Batch_A, Batch_B));
+    if (validate_w4a8_inputs(params, M, N, K, native) != status_t::success) {
         return status_t::failure;
     }
 

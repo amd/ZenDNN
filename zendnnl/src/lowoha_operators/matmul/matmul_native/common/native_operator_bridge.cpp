@@ -160,7 +160,7 @@ native_quant_buffers_t &native_quant_buffers_t::operator=(
 status_t reorder_quantize_source(const matmul_params &params, const void *rows,
         int rows_ld, int M, int K, int num_threads,
         native_quant_buffers_t &buffers, const void *&quantized,
-        int &quantized_lda, const matmul_params *&q) {
+        int &quantized_lda, const matmul_params *&q, bool transA) {
     // The quantization kernels size their thread teams from the nthreads ICV.
     const thread_guard team(num_threads);
     // What the quantizer reads, and rewrites for the quantized source.  One
@@ -180,7 +180,7 @@ status_t reorder_quantize_source(const matmul_params &params, const void *rows,
     matmul_batch_params_t batch;
     reorder_quant_buffers_t held;
     const status_t st = reorder_quantization_wrapper(quantized, rows_ld,
-            quantized_lda, elem_size, quantizer, batch, false, M, K,
+            quantized_lda, elem_size, quantizer, batch, transA, M, K,
             num_threads, held);
     // They live as long as the call.
     native_quant_buffers_t made;

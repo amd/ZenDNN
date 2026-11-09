@@ -29,7 +29,8 @@ namespace lowoha {
 namespace matmul {
 namespace native {
 
-enum class native_kernel_kind_t : uint8_t { bf16, int8, f32 };
+/// int4: the group kernels of an s8 source and an s4 weight.
+enum class native_kernel_kind_t : uint8_t { bf16, int8, f32, int4 };
 
 /// Columns of a slab: one 2-vector BF16 kernel call of a wider tile.
 inline constexpr int kNativeBf16SlabCols = 32;
@@ -52,8 +53,9 @@ struct native_kernel_caps_t {
     int max_mr = 0; ///< every row count 1 .. max_mr has a kernel
     /// INT8: the weight-scale schemes the kernel serves, a mask of
     /// native_int8_scheme_bit: the per-channel kernels serve per_channel, the
-    /// group kernels per_group.  validate_native_plan checks the call's
-    /// scheme against the mask, so a kernel is never planned for the other.
+    /// group kernels per_group (as do the INT4 kernels).
+    /// validate_native_plan checks the call's scheme against the mask, so a
+    /// kernel is never planned for the other.
     uint8_t int8_schemes = 0;
 
     bool serves(native_int8_scheme_t scheme) const noexcept {
@@ -96,11 +98,12 @@ private:
 };
 
 /// Built once by probing select_bf16_brgemm_tall_kernel (mr 1 .. 12 at nr
-/// 16 / 32), select_native_int8_ukernel, select_native_int8_group_ukernel
-/// and select_native_fp32_ukernel (mr 1 .. 12 at nv 1 / 2).  BF16 tiles of
-/// 64 and 128 columns take the row counts of nr 32.  A dtype is probed only
-/// when the CPU has its ISA (AVX512-BF16, AVX512-VNNI, AVX-512 F); otherwise
-/// it has no entries.
+/// 16 / 32), select_native_int8_ukernel, select_native_int8_group_ukernel,
+/// select_native_int4_group_ukernel (both orders) and
+/// select_native_fp32_ukernel (mr 1 .. 12 at nv 1 / 2).  BF16 tiles of 64
+/// and 128 columns take the row counts of nr 32.  A dtype is probed only
+/// when the CPU has its ISA (AVX512-BF16, AVX512-VNNI for INT8 and INT4,
+/// AVX-512 F); otherwise it has no entries.
 const native_kernel_registry_t &native_kernel_registry();
 
 } // namespace native

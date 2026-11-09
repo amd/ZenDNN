@@ -293,9 +293,10 @@ struct BF16BKCWeight {
 class BF16BKCWeightCache {
 public:
     static BF16BKCWeightCache &instance();
-    /// The cached pack of key that the bytes of the raw weight at key's
-    /// pointer (bytes of them) still serve, else nullptr; packs nothing.
-    const BF16BKCWeight *find(const PrepackedWeightKey &key, size_t bytes);
+    /// The cached pack of key, else nullptr, whatever bytes the raw weight
+    /// holds now (a pack serves while they hold its source_ends); reads no
+    /// byte of the weight and packs nothing.
+    const BF16BKCWeight *find(const PrepackedWeightKey &key);
     /// The cached pack of key that weight, the raw weight (bytes of it),
     /// still serves, else a pack of weight, cached in place of a pack of
     /// other bytes; nullptr when it cannot be cached.

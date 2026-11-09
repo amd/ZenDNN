@@ -118,13 +118,32 @@ inline void load_group_columns(const uint8_t *const (&rows)[16], size_t at,
     transpose_groups(in, out);
 }
 
+/// The 8 two's-complement nibbles n0 .. n7 (n_i at bits 4i) of each 32-bit
+/// lane of v, one s4 octet of one column as the caller stores it, in the
+/// layout: byte q holds n_q + 8 in its low nibble and n_(q + 4) + 8 in its
+/// high nibble.  Zero bytes give the layout's zero, nibble 8.
+ZENDNNL_TARGET("avx512f,avx512bw")
+inline __m512i s4_octets(__m512i v) {
+    // Bytes 1 and 2 of each lane swap places: n0 n1 n4 n5 n2 n3 n6 n7.
+    const __m512i bytes
+            = _mm512_set4_epi32(0x0F0D0E0C, 0x0B090A08, 0x07050604, 0x03010200);
+    v = _mm512_shuffle_epi8(v, bytes);
+    // Then nibbles 1 and 2 of each 16 bits: n0 n4 n1 n5 n2 n6 n3 n7.
+    const __m512i t
+            = _mm512_and_si512(_mm512_xor_si512(_mm512_srli_epi32(v, 4), v),
+                    _mm512_set1_epi32(0x00F000F0));
+    v = _mm512_xor_si512(v, _mm512_xor_si512(t, _mm512_slli_epi32(t, 4)));
+    return _mm512_xor_si512(v, _mm512_set1_epi8(static_cast<char>(0x88)));
+}
+
 /// The block of pack columns p0 .. p0 + 31 of a weight stored [N, K]
 /// (transB): each pack column is a row of the buffer, row_bytes apart, of
 /// which k_bytes are the weight's; groups K groups of 4 bytes.  Sums: the s8
-/// column sums follow the groups.  Tail: only the first cols pack columns
+/// column sums follow the groups.  S4: each group of 4 bytes is an s4 octet,
+/// stored as s4_octets makes it.  Tail: only the first cols pack columns
 /// hold weight columns (cols even when interleaved); the others are zero and
 /// their rows are not read.
-template <bool Interleave, bool Sums, bool Tail>
+template <bool Interleave, bool Sums, bool Tail, bool S4 = false>
 ZENDNNL_TARGET("avx512f,avx512bw")
 void pack_block_rows_of_n(const uint8_t *w, size_t row_bytes, size_t k_bytes,
         int groups, int half, int p0, uint8_t *blk, int cols) {
@@ -158,6 +177,10 @@ void pack_block_rows_of_n(const uint8_t *w, size_t row_bytes, size_t k_bytes,
             if constexpr (Interleave) {
                 lo = _mm512_permutex2var_epi32(a[q], lo_idx, b[q]);
                 hi = _mm512_permutex2var_epi32(a[q], hi_idx, b[q]);
+            }
+            if constexpr (S4) {
+                lo = s4_octets(lo);
+                hi = s4_octets(hi);
             }
             uint8_t *d = blk + static_cast<size_t>(g0 + q) * kGroupRowBytes;
             _mm512_storeu_si512(d, lo);
@@ -468,6 +491,59 @@ void pack_s8_block_rows_of_k(const int8_t *w, int K, size_t ldb, int half,
         _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst + 32 * i), sums[i]);
 }
 
+/// The two's-complement nibble of element (k, n) of an s4 weight stored
+/// [K, N] ldb elements apart, or [N, K] when transB.
+inline uint8_t s4_nibble(
+        const uint8_t *w, size_t ldb, bool transB, int k, int n) {
+    const size_t i = transB
+            ? static_cast<size_t>(n) * ldb + static_cast<size_t>(k)
+            : static_cast<size_t>(k) * ldb + static_cast<size_t>(n);
+    return static_cast<uint8_t>((w[i >> 1] >> ((i & 1) * 4)) & 0x0F);
+}
+
+/// The block of pack columns p0 .. p0 + 31 of an s4 weight read element by
+/// element (any ldb, either storage); pack columns from N on and K past the
+/// weight's hold the layout's zero.
+template <bool Interleave>
+void pack_s4_block_of_elements(const uint8_t *w, int K, int N, size_t ldb,
+        bool transB, int p0, uint8_t *blk) {
+    const int half = N / 2;
+    const int octets = native_k_groups(data_type_t::s4, K);
+    for (int o = 0; o < octets; ++o) {
+        uint8_t *row = blk + static_cast<size_t>(o) * kGroupRowBytes;
+        for (int q = 0; q < 4; ++q) {
+            const int k0 = kNativeS4Octet * o + q;
+            const int k1 = k0 + kNativeS4Octet / 2;
+            for (int j = 0; j < kBlockCols; ++j) {
+                const int p = p0 + j;
+                uint8_t lo = 0, hi = 0;
+                if (p < N) {
+                    const int n = source_col<Interleave>(p, half);
+                    if (k0 < K) lo = s4_nibble(w, ldb, transB, k0, n);
+                    if (k1 < K) hi = s4_nibble(w, ldb, transB, k1, n);
+                }
+                row[j * 4 + q] = static_cast<uint8_t>(
+                        (lo ^ 0x08u) | ((hi ^ 0x08u) << 4));
+            }
+        }
+    }
+}
+
+/// The block nb of an s4 weight: by rows of whole bytes for a weight stored
+/// [N, K] with even ldb and K, else element by element; Tail as
+/// pack_bf16_block.
+template <bool TransB, bool Interleave, bool Tail>
+void pack_s4_block(const uint8_t *w, int K, int N, size_t ldb, int pack_nr,
+        int nb, uint8_t *blk) {
+    const int p0 = nb * pack_nr;
+    if (TransB && ldb % 2 == 0 && K % 2 == 0)
+        pack_block_rows_of_n<Interleave, false, Tail, true>(w, ldb / 2,
+                static_cast<size_t>(K) / 2, native_k_groups(data_type_t::s4, K),
+                N / 2, p0, blk, N - p0);
+    else
+        pack_s4_block_of_elements<Interleave>(w, K, N, ldb, TransB, p0, blk);
+}
+
 /// The block nb of a bf16 weight; Tail: the last block, of fewer than
 /// pack_nr columns of the weight (pack columns from N on are zero).
 template <bool TransB, bool Interleave, bool Tail>
@@ -576,6 +652,17 @@ void pack_typed(data_type_t wei_dt, const void *weight, int K, int N,
         if (tail)
             pack_s8_block<TransB, Interleave, true>(w, K, N, ldb, pack_nr,
                     n_blocks, reinterpret_cast<int8_t *>(tail_blk));
+        return;
+    }
+    if (wei_dt == data_type_t::s4) {
+        const uint8_t *w = static_cast<const uint8_t *>(weight);
+        for_each_part(n_blocks, num_threads, [=](int nb) {
+            pack_s4_block<TransB, Interleave, false>(
+                    w, K, N, ldb, pack_nr, nb, out + nb * block_bytes);
+        });
+        if (tail)
+            pack_s4_block<TransB, Interleave, true>(
+                    w, K, N, ldb, pack_nr, n_blocks, tail_blk);
         return;
     }
     if (wei_dt == data_type_t::f32) {

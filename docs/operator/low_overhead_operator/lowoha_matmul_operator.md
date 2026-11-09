@@ -156,7 +156,7 @@ struct matmul_data_types {
 | BF16 | BF16 | F32/BF16 | F32/BF16 | Mixed-precision BFloat16 |
 | F16 | F16 | F32/F16 | F16/F32 | Half-precision (requires AVX512-FP16). No scales or zero-points. |
 | BF16 | S4/U4 | F32/BF16 | F32/BF16 | Weight-only (`dynamic_quant=false`). Source stays BF16. S4 is symmetric (no zero-point). U4 is asymmetric (weight zero-point required, S8 or BF16). |
-| BF16/S8 | S4 | F32/BF16 | BF16 | W4A8 (`compute=s8`, no zero-points). BF16 source requires `dynamic_quant=true`. S8 source requires `dynamic_quant=false` and a source scale. Destination is BF16. See [W4A8](#w4a8-symmetric-w4--a8). |
+| BF16/F32/S8 | S4 | F32/BF16 | F32/BF16 | W4A8 (`compute=s8`, no zero-points). A BF16 or F32 source requires `dynamic_quant=true`. S8 source requires `dynamic_quant=false` and a source scale. An F32 source writes an F32 destination. See [W4A8](#w4a8-symmetric-w4--a8). |
 | S8 | S4 | F32/BF16 | F32 | GGML Q4_0. Packed symmetric S4 with an S8 source. Source scale is per-token or per-group. No zero-point. |
 | U8/S8 | S8 | F32/BF16/S8/U8/S32 | F32/BF16/S8/U8/S32/F16 | INT8. U8 source scale is per-tensor only. An S8 per-token or per-group source scale writes F32 or BF16 only. S32, S8, U8, and F16 outputs need a per-tensor source scale. |
 | BF16/F32 | S8 | F32/BF16/S8/U8 | F32/BF16/S8/U8 | INT8. No S32 or F16 output. A per-token source scale writes F32 or BF16 only. |
@@ -301,25 +301,25 @@ The source is plain BF16. It has no scale and no zero-point. Weight scales are F
 
 ### W4A8 (symmetric W4 + A8)
 
-Symmetric 4-bit weights with **s8** activations at GEMM time (AOCL-DLP `sym_quant` / native `s8s4`). Distinct from WOQ, which keeps **bf16** activations. Destination is **bf16**. Scale tensors accept **f32** or **bf16**. No `src_zp` / `wei_zp`. `dtypes.compute` must be **s8**.
+Symmetric 4-bit weights with **s8** activations at GEMM time (AOCL-DLP `sym_quant`, the custom kernel, or the native BRGEMM). Distinct from WOQ, which keeps **bf16** activations. Destination is **bf16** or **f32**. Scale tensors accept **f32** or **bf16**. No `src_zp` / `wei_zp`. `dtypes.compute` must be **s8**. A call that asks for the native BRGEMM (see [Native BRGEMM](#native-brgemm)) also takes **f16** weight scales.
 
 Two entry contracts:
 
 | Entry | Src dtype | `dynamic_quant` | Who quantizes A | `src_scale.buff` |
 |-------|-----------|-----------------|-----------------|------------------|
-| **Dynamic** | BF16 | `true` | Library at runtime | Optional (computed if null); `dims`/`dt` required |
+| **Dynamic** | BF16 or F32 | `true` | Library at runtime | Optional (computed if null); `dims`/`dt` required |
 | **Static** | S8 (pre-quantized) | `false` | Caller | **Required** |
 
 `s8` source with `dynamic_quant = true` is rejected. `bf16` source with `dynamic_quant = false` is **WOQ**, not W4A8.
 
 | Tensor  | Caller dtype | Compute dtype | Scale dtype | Scale granularity | Zero-point |
 |---------|--------------|---------------|-------------|-------------------|------------|
-| Source  | BF16 (dynamic) or S8 (static) | S8 | F32, BF16 | Per-token `{M, 1}` or per-group `{M, G}` (`{1, 1}` only when `M == 1`) | Not supported |
-| Weights | S4 (packed)  | S8            | F32, BF16   | Per-group `{G, N}` (G = K / group_size) | Not supported (symmetric) |
-| Output  | BF16         | —             | —           | —                 | —          |
+| Source  | BF16 or F32 (dynamic), or S8 (static) | S8 | F32, BF16 | Per-token `{M, 1}` or per-group `{M, G}` (`{1, 1}` only when `M == 1`) | Not supported |
+| Weights | S4 (packed)  | S8            | F32, BF16; F16 on the native BRGEMM | Per-group `{G, N}` (G = K / group_size; `{1, N}` is one group over K) | Not supported (symmetric) |
+| Output  | BF16 or F32 (F32 for an F32 source) | —             | —           | —                 | —          |
 
 > **Notes:**
-> - **Backend:** AOCL-DLP only (`aocl_dlp` / `aocl_dlp_blocked`).
+> - **Backends:** with the algorithm unset, the custom-kernel route where it serves the call and AOCL-DLP (`aocl_dlp` / `aocl_dlp_blocked`) otherwise; the native BRGEMM for a call that asks for it (`ZENDNNL_MATMUL_ALGO=10`, or `lowoha_algo = matmul_algo_t::native_brgemm`).
 > - **Shape constraints:** `src_scale` dims `{M, 1}` or `{M, G}` (`G` matching `wei_scale.dims[0]`); `wei_scale` dims `{G, N}` with `N` matching the matmul `N`; `K` divisible by `G`; `K / G` (group size) a multiple of 4. Compact `{M, 1}` scales are broadcast to `{M, G}` in the AOCL path before GEMM.
 > - **vs WOQ:** WOQ is bf16×s4 with `dynamic_quant = false`. W4A8 uses the symmetric grouped blocked weight layout, not the weight-only s4 layout.
 
@@ -337,12 +337,12 @@ Two entry contracts:
 | WOQ (S4)   | Weights | Zero-Point | ✗ *(symmetric, no zero-point)*     | ✗ *(WOQ always dispatches to DLP)* |
 | WOQ (U4)   | Weights | Scale      | F32, BF16                          | ✗ *(WOQ always dispatches to DLP)*  |
 | WOQ (U4)   | Weights | Zero-Point | S8, BF16                           | ✗ *(WOQ always dispatches to DLP)*  |
-| W4A8      | Source  | Scale      | F32, BF16                          | ✗ *(W4A8 always dispatches to DLP)* |
-| W4A8      | Weights | Scale      | F32, BF16                          | ✗ *(W4A8 always dispatches to DLP)* |
+| W4A8      | Source  | Scale      | F32, BF16                          | ✗ *(W4A8 never runs on oneDNN)*      |
+| W4A8      | Weights | Scale      | F32, BF16 (F16 on the native BRGEMM) | ✗ *(W4A8 never runs on oneDNN)*    |
 
 > **Notes:**
 > - **WOQ Routing:** WOQ is supported by the AOCL-DLP backend only.
-> - **W4A8 Routing:** W4A8 is supported by the AOCL-DLP backend only.
+> - **W4A8 Routing:** W4A8 runs on the custom-kernel route or AOCL-DLP with the algorithm unset, and on the native BRGEMM for a call that asks for it.
 > - **S4 vs U4:** S4 weights use symmetric quantization (no zero-point). U4 weights use asymmetric quantization with zero-point.
 > - **U4 Zero-Point Domain:** The dequantization formula for U4 depends on the zero-point data type. See the dequantization formulas in the WOQ key points section below for details.
 
@@ -963,7 +963,7 @@ int lowoha_int8_per_group_dynamic_quant_example() {
 
 ### Example 8: W4A8 dynamic (bf16 activations + symmetric s4 weights)
 
-W4A8 runs on **AOCL DLP** only. Dynamic entry: the library quantizes **bf16** activations to **s8** at runtime (`dynamic_quant = true`, `dtypes.compute = s8`). Packed **s4** weights use **per-group** `wei_scale` `{G, N}`; `src_scale` is `{M, 1}` or `{M, G}`. Output is **bf16**. Scale tensors may be **f32** or **bf16**. No `src_zp` / `wei_zp`. Requires **`K` divisible by `G`** and **`(K/G) % 4 == 0`**.
+W4A8 runs on the custom-kernel route or **AOCL DLP** with the algorithm unset, and on the native BRGEMM under `ZENDNNL_MATMUL_ALGO=10`. Dynamic entry: the library quantizes **bf16** activations to **s8** at runtime (`dynamic_quant = true`, `dtypes.compute = s8`). Packed **s4** weights use **per-group** `wei_scale` `{G, N}`; `src_scale` is `{M, 1}` or `{M, G}`. Output is **bf16** or **f32** (**f32** for an **f32** source). Scale tensors may be **f32** or **bf16**; a call on the native BRGEMM also takes **f16** weight scales. No `src_zp` / `wei_zp`. Requires **`K` divisible by `G`** and **`(K/G) % 4 == 0`**.
 
 ```cpp
 int lowoha_w4a8_matmul_example() {
@@ -1105,8 +1105,9 @@ int lowoha_w4a8_static_matmul_example() {
 - **Not WOQ**: `dynamic_quant = false` with **bf16×s4** selects weight-only quantization, not W4A8.
 - **Static vs dynamic**: pre-quantized **s8×s4** requires `dynamic_quant = false` and a populated `src_scale.buff`. Dynamic **bf16×s4** requires `dynamic_quant = true`. Mixing s8 src with `dynamic_quant = true` is rejected.
 - **Source scales**: logical dims `{M, 1}` or `{M, G}` (or `{1, 1}` when `M == 1`); dtype **f32** or **bf16**. `{M, 1}` is broadcast to `{M, G}` before the sym_quant GEMM.
-- **Weight scales**: `wei_scale` dims `{G, N}`; dtype **f32** or **bf16**.
-- **Weight prepack**: WOQ s4/u4 uses the weight-only blocked layout. Native W4A8 (`s4` weights, source `s8`) uses a separate blocked layout. Widening s4 to s8 before the GEMM uses the symmetric grouped s8 layout.
+- **Weight scales**: `wei_scale` dims `{G, N}`; dtype **f32** or **bf16** (**f16** too on the native BRGEMM).
+- **Weight prepack**: WOQ s4/u4 uses the weight-only blocked layout. Native W4A8 (`s4` weights, source `s8`) uses a separate blocked layout. Widening s4 to s8 before the GEMM uses the symmetric grouped s8 layout. The native BRGEMM keeps the s4 weight as nibbles in its own layout, the raw weight's size when `K` is a multiple of 8 and `N` of 32; for a contiguous weight (`ldb` equal to its row) of that size, weight cache mode 2 writes the layout over the weight under `ZENDNNL_MATMUL_ALGO=10`.
+- **Bits on the native BRGEMM**: a call with alpha 1 and beta 0 into an f32 or bf16 destination sums its groups as the custom kernel does: with a per-token (or `{1, 1}`) source scale, one FMA of each group's sum by its weight scale, then the source scale, whose product is rounded before the bias is added; with an `{M, G}` source scale, one FMA of each group's sum by the product of the group's source and weight scales (zero where the sum is zero); then the bias. A call with alpha or beta sums them as the reference kernel (`lowoha_algo = matmul_algo_t::reference`) does, and so does a call into an integer destination (with the checks off): with one group over K (`{1, N}` weight scales), alpha and beta apply to the integer sum before the source and weight scales, `((alpha * S + beta * C) * src_scale) * wei_scale`, as with per-channel s8 weights; with more groups, after the sum of the scaled groups, `alpha * sum + beta * C`. Without a gated activation or a post-op of a transcendental function (such as gelu), an f32 or bf16 result equals that of the custom kernel (the first order) or of the reference kernel (the second) bit for bit where that kernel serves the same call, with one exception: a per-token (or `{1, 1}`) call keeps the custom kernel's bits only without a bias. With a bias, the custom kernel may fuse the source scale's product and the bias into one FMA on some rows of a call, so its result can differ from the native BRGEMM's in the last bit on those rows.
 - **Runnable examples**: `run_lowoha_matmul_w4a8_test` (dynamic) and `run_lowoha_matmul_w4a8_static_test` (static) in `examples/lowoha_matmul_example.cpp`.
 
 ## Weight Caching and Reordering
@@ -1199,21 +1200,22 @@ The same algorithms can be selected by either the `matmul_algo_t` enum value (in
 A call asks for the native BRGEMM with `params.lowoha_algo = matmul_algo_t::native_brgemm`, or, for a single (not batched) call, with `lowoha_algo` left `none` under `ZENDNNL_MATMUL_ALGO=10`, which selects the kernel of single calls: a batched call with `lowoha_algo` left `none` takes its kernel from `ZENDNNL_BMM_ALGO`. Dynamic dispatch (`0`) and the auto tuner never select it. The native BRGEMM runs such a call or returns an error: no other backend runs it.
 
 It serves a single (not batched), row-major call with a plain source (`mem_format_a = 'n'`) that has:
-- bf16 × bf16, u8 / s8 × s8 (or a bf16 / f32 source the call quantizes to u8 / s8: `dynamic_quant` with `dtypes.compute` u8 / s8), or f32 × f32 data types, into an f32, bf16, f16, u8, s8 or s32 dst (f32 or bf16 for f32 × f32), with a bias of f32, bf16, f16, s8, u8 or s32;
+- bf16 × bf16, u8 / s8 × s8 (or a bf16 / f32 source the call quantizes to u8 / s8: `dynamic_quant` with `dtypes.compute` u8 / s8), s8 × s4 (an s8 source, given or quantized by the call from bf16 / f32, with symmetric s4 weights: W4A8), or f32 × f32 data types, into an f32, bf16, f16, u8, s8 or s32 dst (f32 or bf16 for f32 × f32 and for s4 weights with the checks on), with a bias of f32, bf16, f16, s8, u8 or s32;
 - a raw weight (`mem_format_b = 'n'`), an AOCL-DLP blocked prepack whose pack has an unreorder (under `ZENDNNL_MATMUL_ALGO=10` only), or a buffer the native BRGEMM rewrote in place;
-- any N ≥ 1, K ≥ 1 and ldb at least the weight row (a weight whose N is not a multiple of 32 is packed with zero columns up to whole 32-column blocks, never in place, and only its N columns are read and written); for s8 weights, K within the int32 accumulation bound and per-group weight scales over groups of whole K quads. At M = 1 a bf16 call with N ≤ 4 on a [K, N] weight runs on the native BRGEMM's narrow GEMV kernel instead, and a call on a constant weight may run on one thread on its BKC GEMV kernels (the `[MATMUL.NATIVE_BRGEMM]` line shows `gemv=<kind>`). At weight cache mode 1 or 2 a BKC kernel caches its own pack of the weight (a bf16 weight of any size, an s8 weight within the L2), next to the native layout that the weight's calls of M > 1 cache when it is out of place (weight cache mode 1, or `lowoha_algo` `native_brgemm` without `ZENDNNL_MATMUL_ALGO=10`): the weight is then held three times. Once an in-place image holds the weight, its M = 1 calls run on the tiles;
-- for INT8, no weight zero point; f32, bf16 or f16 scales per tensor or per row for the source, per tensor, per column or per group for the weight; s32, s8 or u8 source zero points per tensor or per row (with per-group weight scales, one per tensor and only with a u8 source); an `{M, G}` source scale with an s8 source and no zero point;
+- any N ≥ 1, K ≥ 1 and ldb at least the weight row (a weight whose N is not a multiple of 32 is packed with zero columns up to whole 32-column blocks, never in place, and only its N columns are read and written); for s8 and s4 weights, K within the int32 accumulation bound (for s4 weights, each group within it and K at most 2147483640, whose whole K octets an int holds) and per-group weight scales over groups of whole K quads (s4 weights always take `{G, N}` weight scales, `{1, N}` for one group over K). At M = 1 a bf16 call with N ≤ 4 on a [K, N] weight runs on the native BRGEMM's narrow GEMV kernel instead, and a call on a constant weight may run on one thread on its BKC GEMV kernels (the `[MATMUL.NATIVE_BRGEMM]` line shows `gemv=<kind>`). At weight cache mode 1 or 2 a BKC kernel caches its own pack of the weight (a bf16 weight of any size, an s8 weight within the L2), next to the native layout that the weight's calls of M > 1 cache when it is out of place (weight cache mode 1, or `lowoha_algo` `native_brgemm` without `ZENDNNL_MATMUL_ALGO=10`): the weight is then held three times. Once an in-place image holds the weight, its M = 1 calls run on the tiles;
+- for INT8 and W4A8, no weight zero point (and for s4 weights no u8 source and no source zero point, also with a source the call quantizes); f32, bf16 or f16 scales per tensor or per row for the source, per tensor, per column or per group for the weight (for s4 weights `{G, N}` only, `{1, N}` for one group over K); s32, s8 or u8 source zero points per tensor or per row (with per-group weight scales, one per tensor and only with a u8 source); an `{M, G}` source scale with an s8 source and no zero point;
 - the post-ops and gated activations of `matmul_direct`, except a softmax with a gated activation, and beta with a gated activation only over a dst of at least N columns.
 
-`matmul_direct` checks its inputs before any route runs, unless `ZENDNNL_DIAGNOSTICS_ENABLE=0` turns the checks off, and returns `status_t::failure` with an error line for a call they reject. With the checks on, three parts of the list above are narrower:
+`matmul_direct` checks its inputs before any route runs, unless `ZENDNNL_DIAGNOSTICS_ENABLE=0` turns the checks off, and returns `status_t::failure` with an error line for a call they reject. With the checks on, four parts of the list above are narrower:
 - source scales: per tensor, or per row or `{M, G}` only with an s8 source or a bf16 / f32 source the call quantizes to s8, no source zero point, an f32 or bf16 dst, and weight scales per column or per group (`G × N` of them with an `{M, G}` source scale);
+- W4A8 source scales: f32 or bf16, per row or `{M, G}` (`{1, 1}` only at M = 1);
 - source zero points: per tensor only;
 - data types, by the type of the source whatever the weight (a bf16 / f32 source the call quantizes included): no f32 source into a bf16 or f16 dst, no bf16 source into an f16 dst, and no f16 source into a bf16 dst.
 
 The native BRGEMM serves the whole list only with the checks off. An f16 dst or bias also needs AVX512-FP16, which `matmul_direct` checks on every call before the checks above: without it such a call returns `status_t::isa_unsupported`.
 
 Any other call that asks for it returns, with dst untouched and one error line naming the reason:
-- `status_t::unimplemented` for what the native BRGEMM does not implement, for example weight zero points, s4 / u4 weights, batched calls, column-major calls, reordered sources, GGML packed weights, a softmax with a gated activation, an f16 dst with per-group weight scales, or an s8 source with a zero point on per-group weight scales;
+- `status_t::unimplemented` for what the native BRGEMM does not implement, for example weight zero points, u4 weights, s4 weights with a u8 source, a source zero point or weight scales other than `{G, N}`, batched calls, column-major calls, reordered sources, GGML packed weights, a softmax with a gated activation, an f16 dst with per-group weight scales, or an s8 source with a zero point on per-group weight scales;
 - `status_t::isa_unsupported` on a CPU without the instruction set its data types need (AVX-512 F, BW, VL and DQ and FMA, with AVX512-BF16 for bf16, AVX512-VNNI for INT8 and AVX512-FP16 for an f16 dst or bias);
 - `status_t::failure` for a weight buffer only another route reads (a custom-kernel image) and for a call the native BRGEMM does not serve on a buffer it rewrote in place, which no other route reads.
 

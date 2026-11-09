@@ -71,10 +71,23 @@ nat::native_problem_t problem(
     return p;
 }
 
+/// The problem of an s4 weight in groups of gs: an s8 source the call
+/// quantizes, per-group scales.
+nat::native_problem_t int4_problem(int M, int N, int K, int threads, int gs) {
+    nat::native_problem_t p
+            = problem(M, N, K, nat::kNativeLayoutPackNr, threads, false);
+    p.wei_dt = data_type_t::s4;
+    p.int8_scheme = nat::native_int8_scheme_t::per_group;
+    p.wei_group_size = gs;
+    return p;
+}
+
 std::string describe(const nat::native_problem_t &p) {
     std::ostringstream os;
-    os << (p.bf16() ? "bf16" : "int8") << " M=" << p.M << " N=" << p.N
-       << " K=" << p.K << " pack_nr=" << p.pack_nr << " threads=" << p.threads;
+    os << (p.bf16() ? "bf16" : (p.int4() ? "int4" : "int8")) << " M=" << p.M
+       << " N=" << p.N << " K=" << p.K << " pack_nr=" << p.pack_nr
+       << " threads=" << p.threads;
+    if (p.int4()) os << " gs=" << p.wei_group_size;
     return os.str();
 }
 
@@ -158,6 +171,7 @@ enum field_t : unsigned {
     kGroups = 4, ///< col_groups, unit_tiles, domain_threads
     kScratch = 8, ///< scratch_floats
     kRowUnit = 16, ///< row_unit
+    kBudget = 32, ///< int8_pass_budget
 };
 
 /// The fields in which a and b differ, as a mask; other fields that differ
@@ -173,15 +187,15 @@ unsigned plan_fields(const nat::native_plan_t &a, const nat::native_plan_t &b) {
         m |= kGroups;
     if (a.scratch_floats != b.scratch_floats) m |= kScratch;
     if (a.row_unit != b.row_unit) m |= kRowUnit;
+    if (a.int8_pass_budget != b.int8_pass_budget) m |= kBudget;
     if (a.traversal != b.traversal || a.int8_rows_nv1 != b.int8_rows_nv1
             || a.int8_rows_nv2 != b.int8_rows_nv2
             || a.int8_cw_mask != b.int8_cw_mask
-            || a.int8_pass_budget != b.int8_pass_budget
             || a.int8_direct_store != b.int8_direct_store
             || a.int8_bias_in_dequant != b.int8_bias_in_dequant
             || a.copy_block != b.copy_block || a.copy_par_min != b.copy_par_min
             || a.sources != b.sources)
-        m |= ~0u << 5;
+        m |= ~0u << 6;
     return m;
 }
 
@@ -522,6 +536,101 @@ TEST(NativeTuningRules, BlocksRuleNarrowN) {
     EXPECT_TRUE(blocks(plan(domain8, "", 4096, 96, 1536, 16)));
     EXPECT_EQ(plan(domain8, "", 4096, 256, 1536, 16).unit_tiles, 0);
     EXPECT_EQ(plan(domain8, "", 4096, 256, 1536, 8).unit_tiles, 0);
+}
+
+// An s4 weight is half a byte an element: up to decode_m the makespan
+// weighs a source row as two weight columns, the traffic rule weighs the
+// weight at half the bytes of an s8 weight, and the tile's group batches
+// take the int4_l1_pct share of L1.  Next to an s8 weight of per-group
+// scales its plans differ only in the fields those rules (and the cost
+// model's row blocks) decide, and under each of the makespan and traffic
+// rules somewhere; the rules' plans do not depend on the group size (the
+// cost model's may, by the price of the groups), and the plans are legal
+// over every shape, M and team where the registry offers the s4 kernels.
+TEST(NativeTuningRules, Int4Weights) {
+    const bool kernels = nat::detect_uarch().avx512vnni;
+    const struct {
+        std::string setting;
+        unsigned fields;
+    } rules[] = {{every_switch("1"), kGrid | kGroups | kScratch | kBudget},
+            {only("makespan"), kGrid | kGroups | kScratch | kBudget},
+            {only("traffic_groups"), kGroups | kBudget}};
+    report_t report;
+    size_t changed[std::size(rules)] = {};
+    for (size_t r = 0; r < std::size(rules); ++r) {
+        const nat::heuristic_params_t hp = params(rules[r].setting);
+        for (const nat::UarchParams &u : {caches(32, 8), caches(128, 32)})
+            for (const int threads : {8, 24, 32, 64})
+                for (const shape_t &s : kShapes)
+                    for (const int M : kMs) {
+                        nat::native_problem_t s8 = problem(M, s.N, s.K,
+                                nat::kNativeLayoutPackNr, threads, false);
+                        s8.int8_scheme = nat::native_int8_scheme_t::per_group;
+                        const nat::native_problem_t s4
+                                = int4_problem(M, s.N, s.K, threads, 128);
+                        const nat::native_plan_t q
+                                = nat::heuristic_plan(s4, u, hp);
+                        const unsigned diff = plan_fields(
+                                q, nat::heuristic_plan(s8, u, hp));
+                        changed[r] += diff != 0;
+                        report.check((diff & ~rules[r].fields) == 0, [&] {
+                            return rules[r].setting + " " + describe(s4)
+                                    + " changes a field of another rule";
+                        });
+                        const nat::native_problem_t g32
+                                = int4_problem(M, s.N, s.K, threads, 32);
+                        nat::heuristic_params_t rules_only = hp;
+                        rules_only.cost_model = 0;
+                        report.check(same_plan(nat::heuristic_plan(
+                                                       s4, u, rules_only),
+                                             nat::heuristic_plan(
+                                                     g32, u, rules_only)),
+                                [&] {
+                            return rules[r].setting + " " + describe(s4)
+                                    + ": the plan depends on the group size";
+                        });
+                        const char *why = kernels
+                                ? nat::validate_native_plan(q, s4)
+                                : nullptr;
+                        report.check(why == nullptr, [&] {
+                            return rules[r].setting + " " + describe(s4)
+                                    + ": illegal plan: " + why;
+                        });
+                    }
+    }
+    report.finish();
+    for (size_t r = 0; r < std::size(rules); ++r)
+        EXPECT_GT(changed[r], 0u) << rules[r].setting << " changed no plan";
+}
+
+// The group batches of an s4 tile in a plan of at most decode_m rows take
+// the int4_l1_pct share of L1 (its later row calls read each batch again),
+// above decode_m rows and at int4_l1_pct=0 the int8_l2_pct share of L2, as
+// a per-group s8 tile does at any M; a slab of K 32768 then takes batches
+// that fit that share.
+TEST(NativeTuningRules, Int4GroupBatchesInL1) {
+    const nat::heuristic_params_t built_in;
+    ASSERT_EQ(built_in.int4_l1_pct, 125);
+    ASSERT_EQ(built_in.decode_m, 128);
+    for (const nat::UarchParams &u : {caches(32, 8), caches(128, 32)}) {
+        const int64_t l1 = static_cast<int64_t>(u.l1d_bytes) * 125 / 100;
+        const int64_t l2 = static_cast<int64_t>(u.l2_bytes) * 50 / 100;
+        for (const int M : {1, 32, 128, 129, 1024}) {
+            const nat::native_problem_t s4
+                    = int4_problem(M, 5120, 32768, 32, 128);
+            nat::native_problem_t s8 = problem(
+                    M, 5120, 32768, nat::kNativeLayoutPackNr, 32, false);
+            s8.int8_scheme = nat::native_int8_scheme_t::per_group;
+            const nat::native_plan_t q = nat::heuristic_plan(s4, u, built_in);
+            EXPECT_EQ(q.int8_pass_budget, M <= 128 ? l1 : l2) << M;
+            EXPECT_EQ(nat::heuristic_plan(s8, u, built_in).int8_pass_budget, l2)
+                    << M;
+            EXPECT_EQ(nat::heuristic_plan(s4, u, params("int4_l1_pct=0"))
+                              .int8_pass_budget,
+                    l2)
+                    << M;
+        }
+    }
 }
 
 TEST(NativeTuningRules, WorkedExamples) {

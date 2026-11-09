@@ -120,7 +120,9 @@ inline bool native_float_dt(data_type_t dt) {
 /// it.  The alpha and beta of an INT8 call with per-tensor or per-channel
 /// weight scales act on the integer sum, so its tile applies them and desc
 /// carries alpha 1 and beta 0; those of a call with per-group weight scales
-/// apply here, to the sum of the scaled groups.  A gated call's post-op
+/// (any call over an s4 weight) apply here, to the sum of the scaled groups.
+/// An INT8 call over an s8 or s4 weight with a dst scale stores the
+/// requantized value.  A gated call's post-op
 /// operands index its [M, N] pre-activation.  The CPU has AVX-512 F, BW, VL
 /// and DQ and FMA (native_base_isa).
 status_t prepare_epilogue(const GemmDescriptor &desc,

@@ -17,6 +17,7 @@
 #include "lowoha_operators/matmul/matmul_native/native_layout_policy.hpp"
 
 #include "lowoha_operators/matmul/lowoha_quant_layout.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/native_int4_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/native_int8_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_hw.hpp"
@@ -44,6 +45,7 @@ bool native_base_isa() {
 native_layout_decision_t decide_native_layout(const native_layout_query_t &q) {
     const UarchParams &uarch = detect_uarch();
     const bool int8 = q.wei_dt == data_type_t::s8;
+    const bool int4 = q.wei_dt == data_type_t::s4;
     if (!native_base_isa())
         return declined("no AVX-512 F / BW / VL / DQ or FMA", true);
     if (q.wei_dt == data_type_t::bf16) {
@@ -54,11 +56,17 @@ native_layout_decision_t decide_native_layout(const native_layout_query_t &q) {
         if (q.src_dt != data_type_t::u8 && q.src_dt != data_type_t::s8)
             return declined("s8 weight with a source other than u8 / s8");
         if (!uarch.avx512vnni) return declined("no AVX512-VNNI", true);
+    } else if (int4) {
+        if (q.src_dt == data_type_t::u8)
+            return declined("a u8 source with an s4 weight");
+        if (q.src_dt != data_type_t::s8)
+            return declined("s4 weight with a source other than s8");
+        if (!uarch.avx512vnni) return declined("no AVX512-VNNI", true);
     } else if (q.wei_dt == data_type_t::f32) {
         if (q.src_dt != data_type_t::f32)
             return declined("f32 weight with a non-f32 source");
     } else {
-        return declined("weight type other than bf16 / s8 / f32");
+        return declined("weight type other than bf16 / s8 / s4 / f32");
     }
     if (q.N < 1) return declined("N < 1");
     if (q.K < 1) return declined("K < 1");
@@ -69,6 +77,16 @@ native_layout_decision_t decide_native_layout(const native_layout_query_t &q) {
         return declined(
                 "per-group weight scales over groups of other than whole K "
                 "quads");
+    // An s4 weight is one group over K without per-group weight scales.
+    const int s4_group = q.wei_group_size != 0 ? q.wei_group_size : q.K;
+    if (int4 && !quant_group_size_is_whole_quads(q.K, s4_group))
+        return declined("an s4 weight in groups of other than whole K quads");
+    if (int4 && s4_group > kMaxSafeInt4GroupK)
+        return declined(
+                "an s4 weight group above the int32 accumulation "
+                "bound");
+    if (int4 && q.K > kMaxNativeInt4K)
+        return declined("an s4 weight of K whose whole octets exceed int");
     if (q.ldb < (q.transB ? q.K : q.N))
         return declined("ldb below the weight row length");
 

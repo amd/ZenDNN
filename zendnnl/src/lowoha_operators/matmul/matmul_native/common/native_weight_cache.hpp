@@ -17,6 +17,7 @@
 #ifndef MATMUL_NATIVE_COMMON_NATIVE_WEIGHT_CACHE_HPP
 #define MATMUL_NATIVE_COMMON_NATIVE_WEIGHT_CACHE_HPP
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -32,7 +33,8 @@ namespace native {
 using zendnnl::error_handling::status_t;
 
 /// Bytes from the first element of a raw [K, N] weight (or [N, K] when
-/// transB), rows ldb elements apart, to past its last one.
+/// transB), rows ldb elements apart, to past its last one (to past the byte
+/// that holds it, for an s4 weight of two elements per byte).
 size_t native_raw_weight_bytes(
         data_type_t wei_dt, int K, int N, int ldb, bool transB);
 
@@ -86,9 +88,10 @@ struct native_image_check_t {
 ///      on another thread may still read it.  New bytes equal to the old
 ///      ones at both ends are served the old layout until
 ///      clear_native_weight_caches drops it;
-///   2: as 1, except that a bf16 weight whose layout fits its buffer
-///      (contiguous ldb, wei_inplace_fits with capacity_bytes) is rewritten
-///      in place and recorded, and so is an aocl_blocked weight with a
+///   2: as 1, except that a bf16 or s4 weight whose layout fits its buffer
+///      (contiguous ldb, wei_inplace_fits with capacity_bytes; an s4 layout
+///      is the raw weight's size when K is a multiple of 8) is rewritten in
+///      place and recorded, and so is an aocl_blocked weight with a
 ///      contiguous ldb whose layout fits capacity_bytes (0: the size of its
 ///      AOCL prepack).  Other s8 weights, f32 weights and weights of N not a
 ///      multiple of pack_nr (whose layout holds zero columns past N) are
@@ -101,7 +104,7 @@ struct native_image_check_t {
 /// A buffer rewritten in place is never read as a raw or AOCL weight again
 /// while it holds the image: the same layout is served from it, another
 /// layout is packed from the raw weight rebuilt out of a bf16 image (an s8
-/// image serves its own layout only) when the caller's buffer covers the
+/// or s4 image serves its own layout only) when the caller's buffer covers the
 /// whole image, and a request that starts inside it, reads past it, reads
 /// into it from below or cannot cover it for a rebuild fails.  A record whose
 /// buffer no longer holds the image (digests of its two ends,
@@ -119,8 +122,15 @@ struct native_image_check_t {
 /// time (a call on that buffer waits, then finds the layout made), while
 /// lookups and packs of other buffers go on; the record of a rewrite exists
 /// before the buffer is written, so a call that meets the buffer meanwhile
-/// sees an image.  A call whose weight lies in no image takes no lock for
-/// images while they have not changed since its thread last looked.
+/// sees an image.  A pack at any mode holds the bytes it reads, which the
+/// exclusive lookup of its call records, and a rewrite writes none of them
+/// until no pack holds them: a call at mode 0 too takes the cache lock
+/// exclusively to pack, its packs of one buffer still running side by side.
+/// A lookup of a cached layout whose bytes a rewrite overwrites is served it
+/// without checking them while the rewrite runs when the rewrite marked it,
+/// and otherwise waits for the rewrite to end.
+/// A call whose weight lies in no image takes no lock for images while they
+/// have not changed since its thread last looked.
 /// Each calling thread keeps a memo of the cached layouts and images its
 /// calls were served, at most 512 (4 per set of 128 by weight pointer), about
 /// 50 KB, made when the thread stores its first entry (a cached layout or
@@ -130,9 +140,10 @@ struct native_image_check_t {
 /// lock or the lookup, as long as no cached layout or image record has gone
 /// and no image has been recorded since (a clear, a layout or image found
 /// stale, a rewrite in place).  A call served from the memo does not wait
-/// for a pack or rewrite of its buffer: it reads the cache generation after
-/// the digests, and a rewrite, which changes it before writing the buffer,
-/// sends the call to the lookup.
+/// for a pack of its buffer.  It reads the digests only while no rewrite in
+/// place runs, and a rewrite waits for the memo checks under way before it
+/// writes, holding no lock; while a rewrite runs, the calls of every thread
+/// take the lookup.
 status_t get_native_layout(const native_raw_weight_t &w,
         int32_t weight_cache_mode, size_t capacity_bytes, int num_threads,
         native_layout_t &out, const native_image_check_t *checked = nullptr);
@@ -163,14 +174,44 @@ enum class native_raw_read_t : uint8_t {
 };
 
 /// Runs read, a pack outside this cache that reads the extent bytes of the
-/// raw weight at weight, with the buffer held as the packs of weight cache
-/// modes 1 and 2 hold it (get_native_layout): no in-place rewrite of the
-/// buffer starts or runs while read runs.  A buffer that holds an image by
-/// then (at weight, or starting inside the extent bytes) has no raw weight
-/// left, and read does not run.  owned_bytes is the caller's buffer at
-/// weight, as for native_weight_find_image.
+/// raw weight at weight, with those bytes held as the packs of
+/// get_native_layout hold theirs: no in-place rewrite of bytes among them
+/// starts or runs while read runs, and other reads of them go on.  A buffer
+/// that holds an image by then (at weight, or starting inside the extent
+/// bytes) has no raw weight left, and read does not run.  owned_bytes is the
+/// caller's buffer at weight, as for native_weight_find_image.
 native_raw_read_t native_weight_read_raw(const void *weight, size_t extent,
         size_t owned_bytes, const std::function<void()> &read);
+
+/// A short read of weight bytes outside this cache that holds none of them
+/// (native_weight_read_raw holds what it reads), on the calling thread: it
+/// may read them only while the check lives and ok().  ok() is false while
+/// an in-place rewrite runs, and, with bytes, when an in-place image may
+/// overlap the bytes at weight or the images changed as the check began; a
+/// rewrite that starts meanwhile writes only once the check has ended.  It
+/// may take the cache lock shared before it begins (with bytes, when the
+/// images changed since the thread last looked), and none while it lives;
+/// what the caller does inside it takes no lock either, as a rewrite waits
+/// for it.  A thread runs one at a time, and calls nothing of this cache
+/// inside it.
+class native_weight_check_t {
+public:
+    explicit native_weight_check_t(
+            const void *weight = nullptr, size_t bytes = 0);
+    ~native_weight_check_t() {
+        if (reading_ != nullptr)
+            reading_->store(reading_->load(std::memory_order_relaxed) + 1,
+                    std::memory_order_release);
+    }
+    native_weight_check_t(const native_weight_check_t &) = delete;
+    native_weight_check_t &operator=(const native_weight_check_t &) = delete;
+
+    bool ok() const { return ok_; }
+
+private:
+    std::atomic<uint64_t> *reading_ = nullptr;
+    bool ok_ = false;
+};
 
 /// Drops every cached layout and every in-place record.  Same quiescence
 /// contract as clear_all_weight_caches, which calls it; a buffer that still

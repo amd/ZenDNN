@@ -37,6 +37,12 @@ using zendnnl::error_handling::status_t;
 
 /// The decision of an INT8 call with weight scales params.quant_params and
 /// bias (params.dtypes.bias, or nullptr):
+///   * an s4 weight: per_group, of the G of its {G, N} weight scales
+///     (int4_scale_groups; G 1 is one group over K); the fused order, with a
+///     direct store, at alpha 1 and beta 0 into an f32 or bf16 dst; the
+///     reference order otherwise, over one group with alpha other than 1 or
+///     beta other than 0 with the scales after the group
+///     (scales_after_groups);
 ///   * per_group when int8_scale_groups(params, desc.N) > 0, or, with
 ///     per-tensor or per-channel weight scales (or none), when
 ///     int8_source_groups(params, desc.M, desc.N) > 0 (scales_after_groups);
@@ -57,12 +63,13 @@ native_int8_decision_t decide_int8_call(const GemmDescriptor &desc,
 
 /// Per-call INT8 operands, prepared once before the tile loop.
 struct native_int8_call_t {
-    /// Source rows of K bytes zero padded to whole quads, lda apart: u8, or
-    /// s8 when src_signed, which the per-channel tile reads as s8 + 128
-    /// (compensated by a zero point raised by 128) and the group kernel reads
-    /// as it is (the weight read as w + 128, compensated by group_shift).
-    /// The group kernel reads a u8 source and the weight as they are and
-    /// takes the zero point times each group's column sums of the weight.
+    /// Source rows of K bytes zero padded to whole quads (whole octets for
+    /// an s4 weight), lda apart: u8, or s8 when src_signed, which the
+    /// per-channel tile reads as s8 + 128 (compensated by a zero point raised
+    /// by 128) and the group kernels read as it is (the weight read as w +
+    /// 128, or an s4 weight as w + 8, compensated by group_shift).  The group
+    /// kernel reads a u8 source and the weight as they are and takes the
+    /// zero point times each group's column sums of the weight.
     const uint8_t *A = nullptr;
     int lda = 0;
     bool src_signed = false;
@@ -81,22 +88,30 @@ struct native_int8_call_t {
     /// group_quads K quads, element (g, n) at g * N + n, and the source scale
     /// of row m and group g is at src_scale_stride * m +
     /// src_scale_group_stride * g.  The tile sums each group exactly, then
-    /// adds (f32(sum) * src scale) * wei scale over the groups in order;
-    /// alpha, beta and the bias are the epilogue's, unless:
+    /// adds (f32(sum) * src scale) * wei scale over the groups in order (in
+    /// the fused order of an s4 weight, fma(f32(sum), wei scale, C) over the
+    /// groups, then C * src scale, or, with src_scale_group_stride, fma(
+    /// f32(sum), src scale * wei scale, C), the product zero where the sum
+    /// is zero); alpha, beta and the bias are the epilogue's, unless:
     native_int8_scheme_t scheme = native_int8_scheme_t::per_channel;
     /// decide_int8_call's: the group kernel takes unit weight scales, and
     /// the tile applies alpha, beta and then wei_scale (per column or per
     /// tensor) to the sum of the groups, one rounding each, in the reference
-    /// algorithm's order: (alpha * S + beta * C) * wei_scale.
+    /// algorithm's order: (alpha * S + beta * C) * wei_scale.  Over an s4
+    /// weight of one group the kernel takes unit source scales too, and the
+    /// tile applies the source scale before wei_scale: ((alpha * S + beta *
+    /// C) * src_scale) * wei_scale.
     bool scales_after_groups = false;
     int groups = 0;
     int group_quads = 0;
     int src_scale_group_stride = 0;
-    /// per_group, s8 source: -128 times the sum of row m's source values over
-    /// group g, at m * groups + g: it cancels what the group kernel's reading
-    /// of the weight as w + 128 adds to the group's sum.  Written by
-    /// ready_group_shifts.
+    /// per_group, s8 source: -(1 << shift_bits) times the sum of row m's
+    /// source values over group g, at m * groups + g: it cancels what the
+    /// group kernel's reading of the weight as w + 128 (an s8 weight,
+    /// shift_bits 7) or w + 8 (an s4 weight, shift_bits 3) adds to the
+    /// group's sum.  Written by ready_group_shifts.
     int32_t *group_shift = nullptr;
+    int shift_bits = 7;
     /// per_group, s8 source: the rows, claimed shift_chunk at a time;
     /// shift_rows[0] is the next chunk a tile may claim, shift_rows[1 + c] is
     /// set once the shifts of chunk c are written.
@@ -143,12 +158,21 @@ struct native_int8_call_t {
 /// source without a zero point (or a bf16 / f32 source quantized to s8) with
 /// a per-tensor, per-token or {M, G} source scale, or a u8 source (or a
 /// bf16 / f32 source quantized to u8) with a per-tensor scale and zero point.
+/// An s4 weight needs K at most kMaxNativeInt4K, {G, N} weight scales (G >=
+/// 1) over groups of whole K quads of at most kMaxSafeInt4GroupK values,
+/// and an s8 source (given, or a bf16 / f32 source quantized to s8) as
+/// per-group weight scales take it: no u8 source, and no source zero point
+/// buffer, also with a source the call quantizes.
 status_t check_int8_call(const GemmDescriptor &desc,
         const matmul_params &params, const native_int8_decision_t &decision,
         const char **why = nullptr);
 
 /// G of a per-group {G > 1, N} weight scale, 0 for any other.
 int int8_scale_groups(const matmul_params &params, int N);
+
+/// G of a {G >= 1, N} weight scale, 0 for any other: the groups of an s4
+/// weight.
+int int4_scale_groups(const matmul_params &params, int N);
 
 /// G of a per-group {M, G > 1} source scale over a weight scale that
 /// int8_scale_groups does not take, 0 otherwise; 0 for a null source-scale
@@ -172,6 +196,14 @@ status_t prepare_int8_call(const GemmDescriptor &desc,
         const matmul_params &params, const native_int8_decision_t &decision,
         const void *src, int copy_block, int64_t copy_par_min,
         native_int8_call_t &call, const char **why = nullptr);
+
+/// The copy prepare_int8_call makes of a source it does not read in place:
+/// dst[m * ldd + k] = byte (m, k) of an M x K source stored row-major lds
+/// apart, or column-major when trans; bytes K .. ldd of each row are
+/// zeroed.  In blocks of block rows (block columns when trans), on nt
+/// threads when M * K >= par_min; any M and K up to the int bound.
+void copy_int8_source(const void *src, int lds, bool trans, int M, int K,
+        uint8_t *dst, int ldd, int nt, int block, int64_t par_min);
 
 /// Makes the group shifts of rows m0 .. m0 + mr of a prepared per-group call
 /// ready: the tiles of a call claim the chunks of rows nobody has claimed

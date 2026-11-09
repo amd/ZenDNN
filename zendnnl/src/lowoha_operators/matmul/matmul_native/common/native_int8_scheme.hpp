@@ -53,7 +53,8 @@ struct native_int8_decision_t {
     int groups = 0; ///< G of a per-group call, 0 otherwise
     /// per_group: the groups are those of an {M, G} source scale, and the
     /// weight scales, per tensor or per output column, apply after the sum
-    /// of the groups, with alpha and beta.
+    /// of the groups, with alpha and beta; over an s4 weight of one group,
+    /// the source and the weight scales apply after alpha and beta.
     bool scales_after_groups = false;
     native_int8_order_t order = native_int8_order_t::fused;
     /// The bias may move into the dequantization (native_int8_call_t::bias).

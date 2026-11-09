@@ -84,7 +84,11 @@ constexpr data_type_t kNone = data_type_t::none;
 constexpr const char *kConfig = "ZENDNNL_MATMUL_NATIVE_CONFIG";
 constexpr const char *kTuningFile = "ZENDNNL_MATMUL_NATIVE_TUNING_FILE";
 
-enum class src_t { bf16, dyn_s8, st_u8, st_s8, f32 };
+/// dyn_s4 / dyn_s4_groups: a bf16 source quantized per token / per group of
+/// K times an s4 weight in groups of kInt4Group with bf16 scales.
+enum class src_t { bf16, dyn_s8, st_u8, st_s8, f32, dyn_s4, dyn_s4_groups };
+
+constexpr int kInt4Group = 128;
 
 /// One dense call; threads is its params.num_threads.
 struct case_t {
@@ -101,6 +105,9 @@ struct case_t {
     float beta = 0.0f;
 
     bool int8() const { return src != src_t::bf16 && src != src_t::f32; }
+    bool int4() const {
+        return src == src_t::dyn_s4 || src == src_t::dyn_s4_groups;
+    }
     int cols() const { return gated == gated_t::none ? N : N / 2; }
 };
 
@@ -274,8 +281,13 @@ operands_t make_operands(const case_t &c, int k_max = 0, int32_t wc = 1) {
         o.src = nt::random_buffer(kS8, a_n, seed, -64, 64);
     else
         o.src = nt::random_buffer(float_dt, a_n, seed, -1.0f, 1.0f);
-    o.wei = c.int8() ? nt::random_buffer(kS8, b_n, seed + 1, -127, 127)
-                     : nt::random_buffer(float_dt, b_n, seed + 1, -1.0f, 1.0f);
+    // An s4 weight holds two elements per byte, every byte drawn.
+    if (c.int4())
+        o.wei = nt::random_buffer(kU8, (b_n + 1) / 2, seed + 1, 0, 255);
+    else if (c.int8())
+        o.wei = nt::random_buffer(kS8, b_n, seed + 1, -127, 127);
+    else
+        o.wei = nt::random_buffer(float_dt, b_n, seed + 1, -1.0f, 1.0f);
     if (c.bias != kNone)
         o.bias = nt::random_buffer(c.bias, c.N, seed + 2, -1.0f, 1.0f);
     o.init = nt::random_buffer(
@@ -285,21 +297,27 @@ operands_t make_operands(const case_t &c, int k_max = 0, int32_t wc = 1) {
     p.dtypes.src = c.src == src_t::st_u8
             ? kU8
             : (c.src == src_t::st_s8 ? kS8 : float_dt);
-    p.dtypes.wei = c.int8() ? kS8 : float_dt;
+    p.dtypes.wei = c.int4() ? data_type_t::s4 : c.int8() ? kS8 : float_dt;
     p.dtypes.dst = c.dst;
     p.dtypes.bias = c.bias;
     p.num_threads = c.threads;
     p.weight_cache_type = wc;
     auto &qp = p.quant_params;
-    if (c.int8()) {
+    const int64_t groups = o.k_max / kInt4Group;
+    if (c.int4()) {
+        o.wei_scale = nt::random_buffer(kBf16,
+                static_cast<size_t>(groups) * c.N, seed + 3, 0.002f, 0.01f);
+        set_quant(qp.wei_scale, o.wei_scale, kBf16, {groups, c.N});
+    } else if (c.int8()) {
         o.wei_scale = nt::random_buffer(kF32, c.N, seed + 3, 0.002f, 0.01f);
         set_quant(qp.wei_scale, o.wei_scale, kF32, {1, c.N});
     }
-    if (c.src == src_t::dyn_s8) {
+    if (c.src == src_t::dyn_s8 || c.int4()) {
         p.dynamic_quant = true;
         p.dtypes.compute = kS8;
-        o.src_scale = nt::make_buffer(static_cast<size_t>(c.M) * 4);
-        set_quant(qp.src_scale, o.src_scale, kF32, {c.M, 1});
+        const int64_t cols = c.src == src_t::dyn_s4_groups ? groups : 1;
+        o.src_scale = nt::make_buffer(static_cast<size_t>(c.M) * cols * 4);
+        set_quant(qp.src_scale, o.src_scale, kF32, {c.M, cols});
     } else if (c.int8()) {
         o.src_scale = nt::random_buffer(kF32, 1, seed + 4, 0.005f, 0.02f);
         set_quant(qp.src_scale, o.src_scale, kF32, {1, 1});
@@ -1001,10 +1019,12 @@ bool takes_model_tile(
 // five calls that computes longer than it streams takes the long K pass, one
 // of three calls that streams longer takes M blocks of 6 rows over all of K,
 // and an INT8 block takes 6 rows per call with the shorter L1 pass
-// (cm_int8_l1_pct) or two row groups.  A planner over 8-core domains takes
-// each setting's cases, and a child with each setting and one with
-// cost_model=0 give the outputs of the built-in plan, where the detected
-// caches let a setting take a case.
+// (cm_int8_l1_pct) or two row groups.  The built-in plan of an s4 call of
+// one row block whose column tiles do not divide over its threads takes two
+// to four M blocks (cm_int4_min_m), with a per-token and with a per-group
+// source.  A planner over 8-core domains takes each setting's cases, and a
+// child with each setting and one with cost_model=0 give the outputs of the
+// built-in plan, where the detected caches let a setting take a case.
 TEST_F(NativeTuningExec, CostModelChoicesKeepTheBits) {
     nt::child_buffers_t shared;
     const fixture_t f = make_fixture(
@@ -1013,9 +1033,13 @@ TEST_F(NativeTuningExec, CostModelChoicesKeepTheBits) {
                             8},
                     {"int8_three_calls", src_t::dyn_s8, 32, 1024, 4096, kBf16,
                             8},
-                    {"int8_groups", src_t::dyn_s8, 55, 512, 2048, kBf16, 8}},
+                    {"int8_groups", src_t::dyn_s8, 55, 512, 2048, kBf16, 8},
+                    {"int4_row_blocks", src_t::dyn_s4, 128, 1664, 2048, kBf16,
+                            8},
+                    {"int4_row_blocks_groups", src_t::dyn_s4_groups, 96, 960,
+                            2048, kBf16, 8}},
             shared);
-    if (f.cases.size() != 4)
+    if (f.cases.size() != 6)
         GTEST_SKIP() << "needs AVX512-BF16 and AVX512-VNNI";
     const char *const off = "cost_model=0";
     const struct {
@@ -1026,7 +1050,8 @@ TEST_F(NativeTuningExec, CostModelChoicesKeepTheBits) {
                             {"bf16_long_pass", "int8_three_calls"}},
             {"cm_stream_cycles=1048576,cm_block_kib=0", {"bf16_short_blocks"}},
             {"cm_stream_cycles=1048576,cm_mem_cycles=424,cm_group_skew_pct=100",
-                    {"int8_groups"}}};
+                    {"int8_groups"}},
+            {"cost_model=1", {"int4_row_blocks", "int4_row_blocks_groups"}}};
     int compared = 0;
     for (const auto &s : settings) {
         if (!nt::in_child()) {
