@@ -599,20 +599,21 @@ TEST(NativeCostModel, LongPassKeepsTheRowGroupBounds) {
 // The slice of a single row block of more than two calls whose worker
 // streams longer than it computes, over more than cm_block_kib KiB of
 // weights, takes M blocks of tile_rows rows over all of K where the block's
-// source rows and slab over K fit the bf16_l2_pct share of L2 and one core
-// streams slower than its share of the domain's link: M 32 of an lm_head
-// of N 248320, K 4096.  At K 6656 they do not fit and the block stays; a
-// shorter stream, the 8-thread domains and a higher cm_block_kib keep 32
-// rows.
+// source rows and slab over K fit the bf16_l2_pct share of L2, on either
+// hierarchy: M 32 of an lm_head of N 248320, K 4096.  At K 6656 they do
+// not fit and the block stays; a shorter stream and a higher cm_block_kib
+// keep 32 rows.
 TEST(NativeCostModel, ShortBlocksForLongMemoryBoundStreams) {
     if (!bf16_kernels()) GTEST_SKIP() << "needs AVX512-BF16";
-    const nat::native_plan_t q = plan(domains32(), 32, 248320, 4096, 32);
-    EXPECT_EQ(q.mb, 6) << text(q);
-    EXPECT_EQ(q.kc, 4096);
-    EXPECT_EQ(q.col_groups, 0);
-    EXPECT_EQ(plan(domains32(), 32, 202048, 6656, 32).mb, 32);
-    EXPECT_EQ(plan(domains32(), 32, 24576, 4096, 32).mb, 32);
-    EXPECT_EQ(plan(domains8(), 32, 248320, 4096, 32).mb, 32);
+    for (const nat::UarchParams *u : kBoth) {
+        SCOPED_TRACE("domain " + std::to_string(u->l3_domain_cores));
+        const nat::native_plan_t q = plan(*u, 32, 248320, 4096, 32);
+        EXPECT_EQ(q.mb, 6) << text(q);
+        EXPECT_EQ(q.kc, 4096);
+        EXPECT_EQ(q.col_groups, 0);
+        EXPECT_EQ(plan(*u, 32, 202048, 6656, 32).mb, 32);
+        EXPECT_EQ(plan(*u, 32, 24576, 4096, 32).mb, 32);
+    }
     EXPECT_EQ(nat::heuristic_plan(problem(32, 248320, 4096, 32, true),
                       domains32(), params("cm_block_kib=1073741824"))
                       .mb,
@@ -657,15 +658,16 @@ TEST(NativeCostModel, LongStreamRulesKeepTheBlocksSchedule) {
     EXPECT_GT(q.unit_tiles, 0);
 }
 
-// The rules for long weight streams need one core to stream slower than its
-// share of the domain's link, as on the 32-thread domains (424 cycles per
-// KiB against cm_stream_cycles 600).  The derived rate of 16 threads to a
-// domain ties it (2400 / sqrt(16) = 600): there the M 55 slices of the long
-// pass and the M 32 lm_head of the short blocks keep the plan the model
-// gives without those rules, on one domain and on two, while every tile's
-// idle still counts (8 + 8 rows at M 16 of N 248320, which the 8-thread
-// domains keep at 12 + 4).  A higher cm_stream_cycles gives them the rules,
-// and the tie holds on any hierarchy.
+// The long K pass needs one core to stream slower than its share of the
+// domain's link, as on the 32-thread domains (424 cycles per KiB against
+// cm_stream_cycles 600).  The derived rate of 16 threads to a domain ties
+// it (2400 / sqrt(16) = 600): there the M 55 slices of the long pass keep
+// the plan the model gives without the long-stream rules, on one domain
+// and on two, while every tile's idle still counts (8 + 8 rows at M 16 of
+// N 248320, which the 8-thread domains keep at 12 + 4), and the M 32
+// lm_head takes the short blocks, which need no slower core.  A higher
+// cm_stream_cycles gives them the long pass, and the tie holds on any
+// hierarchy.
 TEST(NativeCostModel, LongStreamRulesNeedASlowerCore) {
     const nat::heuristic_params_t hp;
     const nat::heuristic_params_t faster = params("cm_stream_cycles=601");
@@ -677,8 +679,7 @@ TEST(NativeCostModel, LongStreamRulesNeedASlowerCore) {
     EXPECT_FALSE(nat::native_plan_core_streams(
             domains32(), params("cm_mem_cycles=600")));
     if (!bf16_kernels()) GTEST_SKIP() << "needs AVX512-BF16";
-    const int shapes[][3]
-            = {{55, 65536, 5120}, {55, 24576, 4096}, {32, 248320, 4096}};
+    const int shapes[][3] = {{55, 65536, 5120}, {55, 24576, 4096}};
     for (const int threads : {32, 64})
         for (const auto &s : shapes) {
             const nat::native_problem_t p
@@ -693,10 +694,11 @@ TEST(NativeCostModel, LongStreamRulesNeedASlowerCore) {
                       problem(55, 65536, 5120, 32, true), domains16(), faster)
                       .kc,
             2048);
-    EXPECT_EQ(nat::heuristic_plan(
-                      problem(32, 248320, 4096, 32, true), domains16(), faster)
-                      .mb,
-            6);
+    for (const nat::heuristic_params_t *h : {&hp, &faster})
+        EXPECT_EQ(nat::heuristic_plan(
+                          problem(32, 248320, 4096, 32, true), domains16(), *h)
+                          .mb,
+                6);
     EXPECT_EQ(plan(domains16(), 16, 248320, 4096, 32).mr, 8);
     EXPECT_EQ(plan(domains8(), 16, 248320, 4096, 32).mr, 12);
 }
@@ -957,6 +959,58 @@ TEST(NativeCostModel, Int4RowBlocks) {
                           params("cm_int4_min_m=" + std::to_string(below.M)))
                           .m_blocks,
                 1);
+    }
+}
+
+// Under the cost model one group over K takes the int8_l2_pct share of L2,
+// on both hierarchies, whatever cm_pass_calls: one pass where the group's
+// slab fits it (M 32 of N 4096, K 14336, which the rules' plan splits into
+// passes of the int4_l1_pct share of L1; an lm_head of N 128256, K 4096 at
+// M 128; M 16), passes of that share for K 32768, whose slab exceeds it.
+// Groups of 128 keep the L1 share.
+TEST(NativeCostModel, Int4OneGroupTakesTheL2Share) {
+    const nat::heuristic_params_t built_in;
+    if (!int8_kernels()) GTEST_SKIP() << "needs AVX512-VNNI";
+    const auto passes = [](const nat::native_plan_t &q, int K) {
+        const int quads = K / 4;
+        return quads
+                / nat::native_int4_pass_quads(
+                        q, quads, 32, std::min(q.mb, 32), q.int8_rows_nv2);
+    };
+    for (const nat::UarchParams *u : kBoth) {
+        SCOPED_TRACE("domain " + std::to_string(u->l3_domain_cores));
+        const int64_t l2 = static_cast<int64_t>(u->l2_bytes)
+                * built_in.int8_l2_pct / 100;
+        const nat::native_problem_t dn
+                = int4_problem(32, 4096, 14336, 32, 14336);
+        const nat::native_plan_t r
+                = nat::heuristic_plan(dn, *u, params("cost_model=0"));
+        ASSERT_LT(r.int8_pass_budget, l2);
+        EXPECT_GT(passes(r, 14336), 1);
+        for (const char *input : {"", "cm_pass_calls=1", "cm_pass_calls=3"}) {
+            SCOPED_TRACE(input);
+            const nat::native_plan_t q = nat::heuristic_plan(
+                    dn, *u, *input ? params(input) : built_in);
+            EXPECT_EQ(q.int8_pass_budget, l2) << text(q);
+            EXPECT_EQ(passes(q, 14336), 1);
+        }
+        const nat::native_problem_t lm
+                = int4_problem(128, 128256, 4096, 32, 4096);
+        const nat::native_plan_t l = nat::heuristic_plan(lm, *u, built_in);
+        EXPECT_EQ(l.int8_pass_budget, l2) << text(l);
+        EXPECT_EQ(passes(l, 4096), 1);
+        const nat::native_problem_t dn16
+                = int4_problem(16, 4096, 14336, 32, 14336);
+        EXPECT_EQ(nat::heuristic_plan(dn16, *u, built_in).int8_pass_budget, l2);
+        const nat::native_problem_t wide
+                = int4_problem(32, 5120, 32768, 32, 32768);
+        const nat::native_plan_t w = nat::heuristic_plan(wide, *u, built_in);
+        EXPECT_EQ(w.int8_pass_budget, l2) << text(w);
+        EXPECT_GT(passes(w, 32768), 1);
+        EXPECT_LT(nat::heuristic_plan(int4_problem(128, 128256, 4096, 32, 128),
+                          *u, built_in)
+                          .int8_pass_budget,
+                l2);
     }
 }
 

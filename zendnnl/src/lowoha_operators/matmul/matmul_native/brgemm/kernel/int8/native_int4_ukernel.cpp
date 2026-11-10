@@ -70,16 +70,17 @@ inline __m512 scales_as_f32(const char *p) {
     }
 }
 
-/// acc[m][v] += the dot products of the K quads of one octet at b (the low
-/// nibbles, then the high ones) with source bytes a .. a + 7 of row m.  The
-/// loads outer and the rows inner keep two nibble planes live.
+/// acc[m][v] += the dot products of the K quads of one octet at b (vector v
+/// at b + v * b_second; the low nibbles, then the high ones) with source
+/// bytes a .. a + 7 of row m.  The loads outer and the rows inner keep two
+/// nibble planes live.
 template <int MR, int NV>
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vnni")
-inline void octet_sums(const uint8_t *b, const uint8_t *a, size_t lda,
-        __m512i (&acc)[MR][NV], __m512i low) {
+inline void octet_sums(const uint8_t *b, size_t b_second, const uint8_t *a,
+        size_t lda, __m512i (&acc)[MR][NV], __m512i low) {
     ZENDNNL_NATIVE_INT4_UNROLL(4)
     for (int v = 0; v < NV; ++v) {
-        const __m512i bits = _mm512_loadu_si512(b + v * 64);
+        const __m512i bits = _mm512_loadu_si512(b + v * b_second);
         const __m512i lo = _mm512_and_si512(bits, low);
         // No byte shift exists: the bits a 16-bit shift brings in from the
         // next byte are masked off.
@@ -99,14 +100,15 @@ inline void octet_sums(const uint8_t *b, const uint8_t *a, size_t lda,
 }
 
 /// acc[m][v] += the dot products of one K quad, the high nibbles (High) or
-/// the low ones of the octet at b, with source bytes a .. a + 3 of row m.
+/// the low ones of the octet at b (vector v at b + v * b_second), with
+/// source bytes a .. a + 3 of row m.
 template <int MR, int NV, bool High>
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vnni")
-inline void quad_sums(const uint8_t *b, const uint8_t *a, size_t lda,
-        __m512i (&acc)[MR][NV], __m512i low) {
+inline void quad_sums(const uint8_t *b, size_t b_second, const uint8_t *a,
+        size_t lda, __m512i (&acc)[MR][NV], __m512i low) {
     ZENDNNL_NATIVE_INT4_UNROLL(4)
     for (int v = 0; v < NV; ++v) {
-        const __m512i bits = _mm512_loadu_si512(b + v * 64);
+        const __m512i bits = _mm512_loadu_si512(b + v * b_second);
         const __m512i w = High
                 ? _mm512_and_si512(_mm512_srli_epi16(bits, 4), low)
                 : _mm512_and_si512(bits, low);
@@ -123,8 +125,9 @@ inline void quad_sums(const uint8_t *b, const uint8_t *a, size_t lda,
 
 /// The group kernel for weight scales of type S, in the fused order
 /// (Fused; over source scales per group with SrcGroups) or the reference
-/// order.
-template <int MR, int NV, data_type_t S, bool Fused, bool SrcGroups>
+/// order; Passes: the call may take a K pass (partial_in, partial_out).
+template <int MR, int NV, data_type_t S, bool Fused, bool SrcGroups,
+        bool Passes>
 ZENDNNL_TARGET_NOINLINE("avx512f,avx512bw,avx512vl,avx512dq,avx512vnni,fma")
 void native_int4_group_ukernel(const native_int4_group_ukernel_args_t &p) {
     static_assert(Fused || !SrcGroups, "source groups are a fused order");
@@ -144,6 +147,7 @@ void native_int4_group_ukernel(const native_int4_group_ukernel_args_t &p) {
     const __m512i low = _mm512_set1_epi8(0x0F);
     const size_t lda = static_cast<size_t>(p.lda);
     const size_t b_stride = static_cast<size_t>(p.b_stride);
+    const size_t b_second = p.b_second;
     const int k_quads = p.k_quads;
     const uint8_t *a = p.A;
     const int32_t *shift = p.shift;
@@ -152,13 +156,24 @@ void native_int4_group_ukernel(const native_int4_group_ukernel_args_t &p) {
     const char *wei_scale = static_cast<const char *>(p.wei_scale);
     const size_t wei_scale_step
             = static_cast<size_t>(p.wei_scale_step) * wei_scale_esz;
+    const size_t scale_second
+            = static_cast<size_t>(p.scale_second) * wei_scale_esz;
+    const bool partial_in = Passes && p.partial_in;
+    const bool partial_out = Passes && p.partial_out;
     // The group's first K quad, counted from the octet at B.
     int first = p.quad0;
     for (int g = 0; g < p.batch; ++g) {
-        // The sum of each row starts at its shift; the other sets at zero.
+        // The sum of each row starts at its shift, or at the int32 sum of
+        // the earlier K passes in C; the other sets at zero.
         __m512i acc[kSets][MR][NV];
         ZENDNNL_NATIVE_INT4_UNROLL(12)
         for (int m = 0; m < MR; ++m) {
+            if (partial_in) {
+                ZENDNNL_NATIVE_INT4_UNROLL(4)
+                for (int v = 0; v < NV; ++v)
+                    acc[0][m][v] = _mm512_loadu_si512(p.C + m * ldc + v * 16);
+                continue;
+            }
             const __m512i start = _mm512_set1_epi32(shift[m * p.shift_ld]);
             ZENDNNL_NATIVE_INT4_UNROLL(4)
             for (int v = 0; v < NV; ++v)
@@ -177,8 +192,8 @@ void native_int4_group_ukernel(const native_int4_group_ukernel_args_t &p) {
         // through an octet.
         int taken = 0;
         if ((first & 1) != 0) {
-            quad_sums<MR, NV, true>(
-                    p.B + (first >> 1) * b_stride, a, lda, acc[0], low);
+            quad_sums<MR, NV, true>(p.B + (first >> 1) * b_stride, b_second, a,
+                    lda, acc[0], low);
             taken = 1;
         }
         const int octets = (k_quads - taken) / 2;
@@ -188,14 +203,15 @@ void native_int4_group_ukernel(const native_int4_group_ukernel_args_t &p) {
         for (; o + kSets <= octets; o += kSets) {
             ZENDNNL_NATIVE_INT4_UNROLL(4)
             for (int s = 0; s < kSets; ++s)
-                octet_sums<MR, NV>(bo + (o + s) * b_stride, ao + (o + s) * 8,
-                        lda, acc[s], low);
+                octet_sums<MR, NV>(bo + (o + s) * b_stride, b_second,
+                        ao + (o + s) * 8, lda, acc[s], low);
         }
         for (; o < octets; ++o)
-            octet_sums<MR, NV>(bo + o * b_stride, ao + o * 8, lda, acc[0], low);
+            octet_sums<MR, NV>(
+                    bo + o * b_stride, b_second, ao + o * 8, lda, acc[0], low);
         if (taken + 2 * octets < k_quads)
-            quad_sums<MR, NV, false>(
-                    bo + octets * b_stride, ao + octets * 8, lda, acc[0], low);
+            quad_sums<MR, NV, false>(bo + octets * b_stride, b_second,
+                    ao + octets * 8, lda, acc[0], low);
         ZENDNNL_NATIVE_INT4_UNROLL(4)
         for (int s = 1; s < kSets; ++s) {
             ZENDNNL_NATIVE_INT4_UNROLL(12)
@@ -204,6 +220,15 @@ void native_int4_group_ukernel(const native_int4_group_ukernel_args_t &p) {
                 for (int v = 0; v < NV; ++v)
                     acc[0][m][v] = _mm512_add_epi32(acc[0][m][v], acc[s][m][v]);
             }
+        }
+        if (partial_out) {
+            ZENDNNL_NATIVE_INT4_UNROLL(12)
+            for (int m = 0; m < MR; ++m) {
+                ZENDNNL_NATIVE_INT4_UNROLL(4)
+                for (int v = 0; v < NV; ++v)
+                    _mm512_storeu_si512(p.C + m * ldc + v * 16, acc[0][m][v]);
+            }
+            return;
         }
 
         // The result bits depend on this operation order: the exact int32
@@ -214,7 +239,7 @@ void native_int4_group_ukernel(const native_int4_group_ukernel_args_t &p) {
         __m512 ws[NV];
         ZENDNNL_NATIVE_INT4_UNROLL(4)
         for (int v = 0; v < NV; ++v)
-            ws[v] = scales_as_f32<S>(wei_scale + v * 16 * wei_scale_esz);
+            ws[v] = scales_as_f32<S>(wei_scale + v * scale_second);
         ZENDNNL_NATIVE_INT4_UNROLL(12)
         for (int m = 0; m < MR; ++m) {
             if constexpr (SrcGroups) {
@@ -290,28 +315,44 @@ void native_int4_group_ukernel(const native_int4_group_ukernel_args_t &p) {
     }
 }
 
-/// The instance of the call's weight scale type, picked once per call: the
-/// batch loop tests no type.
-template <int MR, int NV, bool Fused, bool SrcGroups>
+/// The instance of the call's weight scale type and of whether it takes a K
+/// pass, picked once per call: the batch loop tests neither.
+template <int MR, int NV, bool Fused, bool SrcGroups, bool Passes>
 void native_int4_group_ukernel_of_dt(
         const native_int4_group_ukernel_args_t &p) {
     if (p.wei_scale_dt == data_type_t::f32)
-        native_int4_group_ukernel<MR, NV, data_type_t::f32, Fused, SrcGroups>(
-                p);
+        native_int4_group_ukernel<MR, NV, data_type_t::f32, Fused, SrcGroups,
+                Passes>(p);
     else if (p.wei_scale_dt == data_type_t::bf16)
-        native_int4_group_ukernel<MR, NV, data_type_t::bf16, Fused, SrcGroups>(
-                p);
+        native_int4_group_ukernel<MR, NV, data_type_t::bf16, Fused, SrcGroups,
+                Passes>(p);
     else {
         assert(p.wei_scale_dt == data_type_t::f16);
-        native_int4_group_ukernel<MR, NV, data_type_t::f16, Fused, SrcGroups>(
-                p);
+        native_int4_group_ukernel<MR, NV, data_type_t::f16, Fused, SrcGroups,
+                Passes>(p);
     }
+}
+
+/// Only a weight of one group over K takes K passes, and source scales per
+/// group need groups: a call over them has no pass instance.
+template <int MR, int NV, bool Fused, bool SrcGroups>
+void native_int4_group_ukernel_of_call(
+        const native_int4_group_ukernel_args_t &p) {
+    if constexpr (!SrcGroups) {
+        if (p.partial_in || p.partial_out) {
+            native_int4_group_ukernel_of_dt<MR, NV, Fused, false, true>(p);
+            return;
+        }
+    }
+    assert(!p.partial_in && !p.partial_out);
+    native_int4_group_ukernel_of_dt<MR, NV, Fused, SrcGroups, false>(p);
 }
 
 template <int NV, bool Fused, bool SrcGroups, int... I>
 constexpr std::array<native_int4_group_ukernel_fn_t, sizeof...(I)> make_table(
         std::integer_sequence<int, I...>) {
-    return {{&native_int4_group_ukernel_of_dt<I + 1, NV, Fused, SrcGroups>...}};
+    return {{&native_int4_group_ukernel_of_call<I + 1, NV, Fused,
+            SrcGroups>...}};
 }
 
 constexpr auto kNv1 = make_table<1, false, false>(

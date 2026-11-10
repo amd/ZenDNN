@@ -40,6 +40,7 @@
 
 #include "common/zendnnl_compat.hpp"
 #include "group_matmul/moe_test_utils.hpp"
+#include "lowoha_operators/matmul/backends/reference/reference_kernel.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/ukernel/int8_microkernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/native_int8_ukernel.hpp"
@@ -98,9 +99,18 @@ struct CkWeight {
     nat::native_weight_view_t view;
     /// Logical weight [N][K].
     std::vector<int8_t> nk;
+    /// Columns of the tiles a paired view is read in.
+    int tile_nr = 32;
+
+    /// The weight column at output column p of the tiles.
+    int col(int p) const {
+        return view.tile_col(p - p % tile_nr, tile_nr, p % tile_nr);
+    }
 };
 
-CkWeight make_weight(int K, int N, int pack_nr, bool transB, bool interleave,
+/// The plain pack of a random weight; with paired, its view pairs the gate
+/// and up halves (a gated call).
+CkWeight make_weight(int K, int N, int pack_nr, bool transB, bool paired,
         std::mt19937 &rng, int ld_pad = 0) {
     CkWeight w;
     w.K = K;
@@ -122,7 +132,7 @@ CkWeight make_weight(int K, int N, int pack_nr, bool transB, bool interleave,
     EXPECT_GT(bytes, 0u);
     w.packed.resize(bytes);
     EXPECT_EQ(ck::prepack_weight_into_int8(w.raw.data(), K, N, w.ldb, pack_nr,
-                      transB, interleave, w.packed.data()),
+                      transB, false, w.packed.data()),
             status_t::success);
     auto &v = w.view;
     v.base = w.packed.data();
@@ -133,7 +143,7 @@ CkWeight make_weight(int K, int N, int pack_nr, bool transB, bool interleave,
     v.k_groups = (K + 3) / 4;
     v.block_bytes = static_cast<size_t>(v.k_groups) * pack_nr * 4
             + static_cast<size_t>(pack_nr) * sizeof(int32_t);
-    v.interleaved = interleave;
+    v.paired = paired;
     EXPECT_LE(v.block_bytes * (N / pack_nr), bytes);
     return w;
 }
@@ -215,7 +225,7 @@ std::vector<float> reference(const std::vector<int> &a, int M, int K,
     for (int m = 0; m < M; ++m) {
         const int *row = a.data() + static_cast<size_t>(m) * K;
         for (int p = 0; p < N; ++p) {
-            const int col = w.view.logical_col(p);
+            const int col = w.col(p);
             const int8_t *wc = w.nk.data() + static_cast<size_t>(col) * K;
             int64_t acc = 0;
             for (int k = 0; k < K; ++k)
@@ -377,7 +387,7 @@ enum class Gran { none, tensor, row };
 
 struct StaticCase {
     int M, N, K, pack_nr;
-    bool transB, interleave, src_signed, transA;
+    bool transB, paired, src_signed, transA;
     int lda_pad;
     Gran scale;
     data_type_t scale_dt;
@@ -394,7 +404,7 @@ std::string static_name(const ::testing::TestParamInfo<StaticCase> &info) {
     return "c" + std::to_string(info.index) + "_M" + std::to_string(c.M) + "_N"
             + std::to_string(c.N) + "_K" + std::to_string(c.K) + "_nr"
             + std::to_string(c.pack_nr) + (c.src_signed ? "_s8" : "_u8")
-            + (c.transA ? "_tA" : "") + (c.interleave ? "_il" : "");
+            + (c.transA ? "_tA" : "") + (c.paired ? "_paired" : "");
 }
 
 // The base case is what an asymmetric quantization in the call gives the
@@ -436,14 +446,15 @@ std::vector<StaticCase> static_cases() {
         v.push_back(c);
     }
     for (int pack_nr : {32, 64}) {
-        for (bool il : {false, true}) {
+        for (bool paired : {false, true}) {
             for (bool tb : {false, true}) {
                 for (int nr : {16, 32, 64}) {
-                    if (nr > pack_nr) continue;
+                    // A paired view's tiles hold whole blocks of each half.
+                    if (paired ? nr % 64 != 0 : nr > pack_nr) continue;
                     auto c = base;
                     c.N = 128;
                     c.pack_nr = pack_nr;
-                    c.interleave = il;
+                    c.paired = paired;
                     c.transB = tb;
                     c.nr = nr;
                     v.push_back(c);
@@ -487,10 +498,11 @@ std::vector<StaticCase> static_cases() {
         }
     }
     for (data_type_t b : {f32, bf16, f16}) {
-        for (bool il : {false, true}) {
+        for (bool paired : {false, true}) {
             auto c = base;
             c.bias_dt = b;
-            c.interleave = il;
+            c.paired = paired;
+            if (paired) c.nr = 64;
             v.push_back(c);
         }
     }
@@ -552,7 +564,8 @@ TEST_P(NativeBrgemmInt8Static, MatchesIntegerReference) {
     const StaticCase c = GetParam();
     std::mt19937 rng(static_cast<uint32_t>(
             c.M * 131 + c.N * 7 + c.K * 3 + c.pack_nr + c.lda_pad));
-    CkWeight w = make_weight(c.K, c.N, c.pack_nr, c.transB, c.interleave, rng);
+    CkWeight w = make_weight(c.K, c.N, c.pack_nr, c.transB, c.paired, rng);
+    w.tile_nr = c.nr;
 
     const int lda = (c.transA ? c.M : c.K) + c.lda_pad;
     std::vector<uint8_t> src(
@@ -755,9 +768,11 @@ TEST(NativeBrgemmInt8Tile, DirectStoreMatchesEpilogueStore) {
     }
 }
 
-// alpha and beta in the reference algorithm's order: ((alpha * S + beta * C
-// + Z) * src_scale) * wei_scale, one rounding per step, C read as float the
-// way the reference reads the destination.  Calls give per-row scales only
+// alpha and beta in the reference algorithm's order: ((alpha * S + Z) *
+// src_scale) * wei_scale + beta * C into an f32, bf16 or f16 destination,
+// ((alpha * S + beta * C + Z) * src_scale) * wei_scale into an integer one,
+// one rounding per step, C read as float the way the reference reads the
+// destination.  Calls give per-row scales only
 // with per-row zero points or none, and an f32 / bf16 destination; the other
 // variants unit-test the finish, which reads every granularity and
 // destination type the same way.
@@ -776,14 +791,14 @@ TEST(NativeBrgemmInt8Tile, AlphaBetaFollowReferenceOrder) {
                          data_type_t::f16, data_type_t::s32}) {
                 const int K = (variant % 2) ? 63 : 100;
                 const int pack_nr = (variant % 3) ? 32 : 64;
-                // An interleaved pack (a gated activation) reads C at the
-                // columns its pack columns hold.
-                const bool interleave = (variant % 4) == 1;
+                // A paired view (a gated activation) reads C at the columns
+                // its tiles hold.
+                const bool paired = (variant % 4) == 1;
                 const AlphaBeta ab = coeffs[variant % 5];
                 ++variant;
                 const int M = 13, N = 128, ldc = N + 3;
                 std::mt19937 rng(static_cast<uint32_t>(variant));
-                CkWeight w = make_weight(K, N, pack_nr, true, interleave, rng);
+                CkWeight w = make_weight(K, N, pack_nr, true, paired, rng);
                 std::vector<uint8_t> src(static_cast<size_t>(M) * K);
                 std::uniform_int_distribution<int> byte(0, 255);
                 for (auto &b : src)
@@ -847,7 +862,9 @@ TEST(NativeBrgemmInt8Tile, AlphaBetaFollowReferenceOrder) {
                 call.dst = dst.data();
                 call.dst_dt = dst_dt;
                 call.ldc = ldc;
-                const auto got = run_tiles(call, w.view, M, 12, 32, 4);
+                // A paired view's tiles hold whole blocks of each half.
+                w.tile_nr = paired ? 64 : 32;
+                const auto got = run_tiles(call, w.view, M, 12, w.tile_nr, 4);
 
                 std::vector<float> want(static_cast<size_t>(M) * N);
                 for (int m = 0; m < M; ++m) {
@@ -855,7 +872,7 @@ TEST(NativeBrgemmInt8Tile, AlphaBetaFollowReferenceOrder) {
                             ? 0
                             : zp[zp_gran == Gran::row ? m : 0];
                     for (int p = 0; p < N; ++p) {
-                        const int col = w.view.logical_col(p);
+                        const int col = w.col(p);
                         int64_t s = 0;
                         int32_t col_sum = 0;
                         for (int k = 0; k < K; ++k) {
@@ -867,12 +884,10 @@ TEST(NativeBrgemmInt8Tile, AlphaBetaFollowReferenceOrder) {
                             s += static_cast<int64_t>(a) * wv;
                             col_sum += wv;
                         }
-                        float v = static_cast<float>(static_cast<int32_t>(s));
-                        if (ab.alpha != 1.0f) v *= ab.alpha;
+                        float c = 0.0f;
                         if (ab.beta != 0.0f) {
                             const size_t at
                                     = static_cast<size_t>(m) * ldc + col;
-                            float c = 0.0f;
                             if (dst_dt == data_type_t::f32)
                                 std::memcpy(&c, dst.data() + 4 * at, 4);
                             else if (dst_dt == data_type_t::bf16) {
@@ -891,11 +906,17 @@ TEST(NativeBrgemmInt8Tile, AlphaBetaFollowReferenceOrder) {
                                 c = static_cast<int8_t>(dst[at]);
                             else
                                 c = dst[at];
-                            v += c * ab.beta;
                         }
+                        const bool beta_last = dst_dt == data_type_t::f32
+                                || dst_dt == data_type_t::bf16
+                                || dst_dt == data_type_t::f16;
+                        float v = static_cast<float>(static_cast<int32_t>(s));
+                        if (ab.alpha != 1.0f) v *= ab.alpha;
+                        if (ab.beta != 0.0f && !beta_last) v += c * ab.beta;
                         if (z != 0) v += static_cast<float>(-z * col_sum);
                         v *= ss[m];
                         v *= ws.rounded[col];
+                        if (ab.beta != 0.0f && beta_last) v += c * ab.beta;
                         want[static_cast<size_t>(m) * N + p] = v;
                     }
                 }
@@ -905,7 +926,7 @@ TEST(NativeBrgemmInt8Tile, AlphaBetaFollowReferenceOrder) {
                         << " dst=" << static_cast<int>(dst_dt)
                         << " alpha=" << ab.alpha << " beta=" << ab.beta
                         << " K=" << K << " pack_nr=" << pack_nr
-                        << " interleave=" << interleave;
+                        << " paired=" << paired;
             }
         }
     }
@@ -936,7 +957,7 @@ enum class CkCompute { sym, asym, static_u8 };
 
 struct CkKernelCase {
     int M, N, K, pack_nr;
-    bool interleave;
+    bool paired;
     CkCompute compute;
     data_type_t bias_dt;
     bool wei_per_tensor;
@@ -949,7 +970,7 @@ std::string ck_kernel_name(const ::testing::TestParamInfo<CkKernelCase> &info) {
                                                   : "static";
     return "c" + std::to_string(info.index) + "_" + cmp + "_M"
             + std::to_string(c.M) + "_K" + std::to_string(c.K) + "_nr"
-            + std::to_string(c.pack_nr) + (c.interleave ? "_il" : "");
+            + std::to_string(c.pack_nr) + (c.paired ? "_paired" : "");
 }
 
 std::vector<CkKernelCase> ck_kernel_cases() {
@@ -962,7 +983,7 @@ std::vector<CkKernelCase> ck_kernel_cases() {
         for (int pack_nr : {32, 64})
             for (int M : {1, 3, 8, 13, 64})
                 for (int K : {4, 64, 1000})
-                    v.push_back({M, 128, K, pack_nr, (i % 3) == 1, cmp,
+                    v.push_back({M, 128, K, pack_nr, false, cmp,
                             biases[i++ % 4],
                             cmp == CkCompute::static_u8 && (i % 2) == 0});
     return v;
@@ -975,7 +996,7 @@ TEST_P(NativeBrgemmInt8VsCkKernel, BitIdentical) {
     NATIVE_BRGEMM_INT8_SKIP_IF_NO_VNNI();
     const CkKernelCase c = GetParam();
     std::mt19937 rng(static_cast<uint32_t>(c.M * 17 + c.K * 5 + c.pack_nr));
-    CkWeight w = make_weight(c.K, c.N, c.pack_nr, true, c.interleave, rng);
+    CkWeight w = make_weight(c.K, c.N, c.pack_nr, true, c.paired, rng);
 
     const bool sym = c.compute == CkCompute::sym;
     const bool per_tensor = c.compute == CkCompute::static_u8;
@@ -1000,7 +1021,7 @@ TEST_P(NativeBrgemmInt8VsCkKernel, BitIdentical) {
     std::vector<bfloat16_t> bias_pack_bf16(c.N);
     std::vector<float16_t> bias_pack_f16(c.N);
     for (int p = 0; p < c.N; ++p) {
-        const int col = w.view.logical_col(p);
+        const int col = w.col(p);
         wei_pack[p] = wei_scale[c.wei_per_tensor ? 0 : col];
         if (bias_ptr) {
             bias_pack[p] = bias.rounded[col];
@@ -1341,6 +1362,8 @@ DynamicSetup make_dynamic(int M, int K, int N, bool asym, std::mt19937 &rng) {
     return s;
 }
 
+// With f32 source scales a transposed source is made row-major first and
+// quantizes to the values and scales of the same rows given row-major.
 TEST(NativeBrgemmInt8Dynamic, TransposedSourceQuantizesLikeRowMajor) {
     NATIVE_BRGEMM_INT8_SKIP_IF_NO_VNNI();
     for (const bool asym : {false, true}) {
@@ -1379,6 +1402,101 @@ TEST(NativeBrgemmInt8Dynamic, TransposedSourceQuantizesLikeRowMajor) {
     }
 }
 
+// A transposed bf16 source the call quantizes to s8, per tensor, per token
+// or per group ({M, 4} source scales over {4, N} weight scales), with f32 or
+// bf16 source scales, at M 64 and M 1: the scales the call writes back and,
+// in the reference order (alpha 2), its result are the reference
+// algorithm's bit for bit, which quantizes the source as given.  With bf16
+// scales per row (per tensor at M 1) or per group, the same rows given
+// row-major quantize with each scale before it is narrowed to bf16, which
+// gives another result.
+TEST(NativeBrgemmInt8Dynamic, TransposedS8SourceQuantizesAsGiven) {
+    NATIVE_BRGEMM_INT8_SKIP_IF_NO_VNNI();
+    using zendnnl::common::matmul_algo_t;
+    const int N = 256, K = 512;
+    std::mt19937 rng(37);
+    std::vector<int8_t> wei(static_cast<size_t>(K) * N);
+    std::uniform_int_distribution<int> wd(-127, 127);
+    for (auto &v : wei)
+        v = static_cast<int8_t>(wd(rng));
+    const std::vector<float> wei_scale
+            = random_floats(4 * N, 0.001f, 0.02f, rng);
+    struct out_t {
+        std::vector<float> dst;
+        std::vector<float> scales;
+    };
+    for (const int M : {64, 1}) {
+        const int lda = M + 3;
+        const auto x
+                = random_floats(static_cast<size_t>(M) * K, -3.0f, 3.0f, rng);
+        const std::vector<bfloat16_t> rows(x.begin(), x.end());
+        std::vector<bfloat16_t> cols(static_cast<size_t>(K) * lda, rows[0]);
+        for (int m = 0; m < M; ++m)
+            for (int k = 0; k < K; ++k)
+                cols[static_cast<size_t>(k) * lda + m]
+                        = rows[static_cast<size_t>(m) * K + k];
+        // 0: one scale for the tensor; 1: per token; 4: per group.
+        for (const int groups : {0, 1, 4})
+            for (const data_type_t scale_dt :
+                    {data_type_t::f32, data_type_t::bf16}) {
+                SCOPED_TRACE("M " + std::to_string(M)
+                        + (groups == 0                ? ", per tensor"
+                                        : groups == 1 ? ", per token"
+                                                      : ", per group")
+                        + (scale_dt == data_type_t::f32 ? ", f32 scales"
+                                                        : ", bf16 scales"));
+                const auto run = [&](matmul_algo_t algo, bool trans) {
+                    const size_t n
+                            = groups == 0 ? 1 : static_cast<size_t>(M) * groups;
+                    std::vector<float> s32(n, 0.0f);
+                    std::vector<bfloat16_t> s16(n, bfloat16_t(0.0f));
+                    matmul_params p;
+                    p.dtypes.src = data_type_t::bf16;
+                    p.dtypes.wei = data_type_t::s8;
+                    p.dtypes.dst = data_type_t::f32;
+                    p.dtypes.compute = data_type_t::s8;
+                    p.dynamic_quant = true;
+                    p.lowoha_algo = algo;
+                    p.quant_params.src_scale.buff = scale_dt == data_type_t::f32
+                            ? static_cast<const void *>(s32.data())
+                            : static_cast<const void *>(s16.data());
+                    p.quant_params.src_scale.dt = scale_dt;
+                    p.quant_params.src_scale.dims = groups == 0
+                            ? std::vector<int64_t> {1, 1}
+                            : std::vector<int64_t> {M, groups};
+                    p.quant_params.wei_scale.buff = wei_scale.data();
+                    p.quant_params.wei_scale.dt = data_type_t::f32;
+                    p.quant_params.wei_scale.dims = {std::max(groups, 1), N};
+                    out_t o;
+                    o.dst.assign(static_cast<size_t>(M) * N, 0.0f);
+                    mm::matmul_batch_params_t batch;
+                    EXPECT_EQ(mm::matmul_direct('r', trans, false, M, N, K,
+                                      2.0f, trans ? cols.data() : rows.data(),
+                                      trans ? lda : K, wei.data(), N, nullptr,
+                                      0.0f, o.dst.data(), N, false, batch, p),
+                            status_t::success);
+                    for (size_t i = 0; i < n; ++i)
+                        o.scales.push_back(scale_dt == data_type_t::f32
+                                        ? s32[i]
+                                        : static_cast<float>(s16[i]));
+                    return o;
+                };
+                const out_t ref = run(matmul_algo_t::reference, true);
+                const out_t got = run(matmul_algo_t::native_brgemm, true);
+                EXPECT_TRUE(same_bits(got.scales, ref.scales, 1))
+                        << "the scales written back";
+                EXPECT_TRUE(same_bits(got.dst, ref.dst, N));
+                if (scale_dt == data_type_t::bf16 && (M == 1 || groups > 0)) {
+                    const out_t row_major
+                            = run(matmul_algo_t::native_brgemm, false);
+                    EXPECT_FALSE(same_bits(row_major.dst, got.dst, N))
+                            << "the same rows given row-major";
+                }
+            }
+    }
+    mm::clear_matmul_weight_caches();
+}
+
 TEST(NativeBrgemmInt8Dynamic, UnalignedKPadsQuantizedRows) {
     NATIVE_BRGEMM_INT8_SKIP_IF_NO_VNNI();
     for (const bool asym : {false, true}) {
@@ -1386,6 +1504,7 @@ TEST(NativeBrgemmInt8Dynamic, UnalignedKPadsQuantizedRows) {
             const int M = 9, N = 64;
             std::mt19937 rng(K * 2 + (asym ? 1 : 0));
             CkWeight w = make_weight(K, N, 64, false, true, rng);
+            w.tile_nr = 64;
             DynamicSetup s = make_dynamic(M, K, N, asym, rng);
             const auto params = s.params(N);
             nat::native_int8_call_t call;
@@ -1841,7 +1960,8 @@ std::vector<E2ECase> e2e_ref_cases() {
 
 // Gated INT8 calls with per-tensor source and per-channel weight scales
 // through matmul_direct under ALGO 10, as it defines them: alpha, beta (over
-// the dst's N pre-activation columns), the bias and the post-ops act on the
+// the dst's N pre-activation columns, after the scales into an f32 / bf16
+// dst, before them into a u8 / s8 one), the bias and the post-ops act on the
 // pre-activation in the reference algorithm's order, then the activation
 // and the store, requantized into a u8 / s8 dst.  The native BRGEMM serves
 // them, with the bits of the call on its own; against the reference
@@ -1909,8 +2029,6 @@ TEST(NativeBrgemmInt8Gated, PerChannelMatchesTheReference) {
                 ref.pack_nr = 32;
                 ref.weight = call.wei;
                 ref.weight_cache_mode = 0;
-                ref.interleave_split_halves
-                        = act != mm::matmul_gated_act_t::swiglu_oai_mul;
                 ASSERT_EQ(nat::native_brgemm_execute(d, ref, call.src,
                                   dsts[1].get(), call.bias, call.params),
                         status_t::success);
@@ -1934,11 +2052,33 @@ TEST(NativeBrgemmInt8Gated, PerChannelMatchesTheReference) {
             r.params.dtypes.dst = f32;
             r.params.quant_params.dst_scale = {};
             r.params.quant_params.dst_zp = {};
+            // Into an f32 dst beta * C follows the scales, while into a u8 /
+            // s8 dst it joins the integer sum: there the reference runs at
+            // beta 0, and beta * C * src_scale * wei_scale is added here.
+            const bool int_dst = c.dst_dt == u8 || c.dst_dt == s8;
+            if (int_dst) r.beta = 0.0f;
             ASSERT_EQ(nbt::run_reference(r, pb.wei.get(), pre.get()),
                     status_t::success);
+            const auto &qp = call.params.quant_params;
+            if (int_dst && c.beta != 0.0f) {
+                const bool per_row = qp.src_scale.dims[0] > 1;
+                for (int m = 0; m < c.M; ++m)
+                    for (int n = 0; n < c.N; ++n) {
+                        const size_t at = static_cast<size_t>(m) * c.N + n;
+                        const float s
+                                = nbt::load_f32(qp.src_scale.buff, f32,
+                                          per_row ? static_cast<size_t>(m) : 0)
+                                * nbt::load_f32(pb.wei_scale.get(), f32, n);
+                        nbt::store_f32(pre.get(), f32, at,
+                                nbt::load_f32(pre.get(), f32, at)
+                                        + c.beta
+                                                * nbt::load_f32(init.get(),
+                                                        c.dst_dt, at)
+                                                * s);
+                    }
+            }
             std::vector<float> out(static_cast<size_t>(c.M) * I);
             nbt::gated_act_ref(pre.as<float>(), c.M, c.N, act, out.data());
-            const auto &qp = call.params.quant_params;
             std::vector<float> want(static_cast<size_t>(c.M) * I);
             for (size_t i = 0; i < want.size(); ++i) {
                 float v = out[i];
@@ -2060,6 +2200,415 @@ TEST(NativeBrgemmInt8E2EOrder, IntegerDestinationTakesReferenceRoundings) {
     mm::clear_matmul_weight_caches();
 }
 
+// ── beta on every route ───────────────────────────────────────────────────
+
+/// One quantized call of NativeBrgemmInt8Beta: an s8 source, given or a
+/// bf16 source the call quantizes to s8 per token, times s8 or s4 weights.
+struct beta_case_t {
+    const char *name;
+    data_type_t wei;
+    /// 0: per token, -1: per tensor, G: {M, G} source scales.
+    int src_groups;
+    /// G of the {G, N} weight scales.
+    int wei_groups;
+    bool dynamic;
+};
+
+// One call into an f32 or bf16 dst with a nonzero beta, on every route that
+// serves it: the native BRGEMM, the reference algorithm and AOCL-DLP give
+// matmul_direct's alpha * (A x B) + beta * C, beta * C added after the
+// scales, within the rounding of the dst; the native BRGEMM and the
+// reference algorithm bit for bit.  Per-channel s8 weights with a per-token
+// source (given, or a bf16 source the call quantizes) or a per-tensor one
+// (AOCL-DLP refuses beta with one source scale value), per-group s8
+// weights over {M, 4} source scales, and s4 weights of one group and of 4.
+// AOCL-DLP takes integer alpha and beta only.
+TEST(NativeBrgemmInt8Beta, EveryRouteAddsBetaAfterTheScales) {
+    NATIVE_BRGEMM_INT8_SKIP_IF_NO_VNNI();
+    using zendnnl::common::matmul_algo_t;
+    const int M = 4, N = 64, K = 128;
+    const beta_case_t cases[] = {
+            {"s8 per channel, per-token source", data_type_t::s8, 0, 1, false},
+            {"s8 per channel, per-token source quantized in the call",
+                    data_type_t::s8, 0, 1, true},
+            {"s8 per channel, per-tensor source", data_type_t::s8, -1, 1,
+                    false},
+            {"s8 per group, {M, 4} source", data_type_t::s8, 4, 4, false},
+            {"s4 of one group, per-token source", data_type_t::s4, 0, 1, false},
+            {"s4 of 4 groups, per-token source", data_type_t::s4, 0, 4, false}};
+    struct ab_t {
+        float alpha, beta;
+    };
+    const ab_t coeffs[] = {{2.0f, 1.0f}, {0.5f, -0.75f}};
+    std::mt19937 rng(43);
+    std::uniform_int_distribution<int> qd(-100, 100), w8d(-127, 127),
+            w4d(-8, 7);
+    // A quantized row holds 127 once: the call quantizes x = q / 64 back to
+    // q, with a scale of 1 / 64.
+    std::vector<int> q(static_cast<size_t>(M) * K);
+    for (int m = 0; m < M; ++m)
+        for (int k = 0; k < K; ++k)
+            q[static_cast<size_t>(m) * K + k] = k == m ? 127 : qd(rng);
+    std::vector<int8_t> src_s8(q.begin(), q.end());
+    std::vector<bfloat16_t> src_bf16(q.size(), bfloat16_t(0.0f));
+    for (size_t i = 0; i < q.size(); ++i)
+        src_bf16[i] = bfloat16_t(static_cast<float>(q[i]) / 64.0f);
+    std::vector<int> wv(static_cast<size_t>(K) * N);
+    const auto c0 = random_floats(static_cast<size_t>(M) * N, -2.0f, 2.0f, rng);
+    const auto src_scales = random_floats(M * 4, 0.02f, 0.1f, rng);
+    const auto wei_scales = random_floats(4 * N, 0.01f, 0.05f, rng);
+    for (const beta_case_t &bc : cases) {
+        const bool s4 = bc.wei == data_type_t::s4;
+        for (auto &v : wv)
+            v = s4 ? w4d(rng) : w8d(rng);
+        // s8 [K, N]; s4 [N, K] two per byte, the even index low.
+        std::vector<int8_t> w8(wv.size());
+        std::vector<uint8_t> w4(wv.size() / 2, 0);
+        for (int k = 0; k < K; ++k)
+            for (int n = 0; n < N; ++n) {
+                const int v = wv[static_cast<size_t>(k) * N + n];
+                w8[static_cast<size_t>(k) * N + n] = static_cast<int8_t>(v);
+                const size_t i = static_cast<size_t>(n) * K + k;
+                w4[i / 2] |= static_cast<uint8_t>((v & 0x0F) << (i % 2 * 4));
+            }
+        const int G = bc.src_groups > 0 ? bc.src_groups : bc.wei_groups;
+        const int gs = K / G;
+        for (const ab_t ab : coeffs)
+            for (const data_type_t dst :
+                    {data_type_t::f32, data_type_t::bf16}) {
+                SCOPED_TRACE(::testing::Message()
+                        << bc.name << ", alpha " << ab.alpha << " beta "
+                        << ab.beta << ", "
+                        << (dst == data_type_t::f32 ? "f32" : "bf16")
+                        << " dst");
+                // matmul_direct's alpha * (A x B) + beta * C.
+                std::vector<double> api(static_cast<size_t>(M) * N);
+                double max_abs = 0.0;
+                for (int m = 0; m < M; ++m)
+                    for (int n = 0; n < N; ++n) {
+                        double deq = 0.0;
+                        for (int g = 0; g < G; ++g) {
+                            int64_t s = 0;
+                            for (int k = g * gs; k < (g + 1) * gs; ++k)
+                                s += static_cast<int64_t>(
+                                             q[static_cast<size_t>(m) * K + k])
+                                        * wv[static_cast<size_t>(k) * N + n];
+                            const double ss = bc.dynamic ? 1.0 / 64.0
+                                    : bc.src_groups < 0  ? src_scales[0]
+                                    : bc.src_groups == 0
+                                    ? src_scales[m]
+                                    : src_scales[m * G + g];
+                            const double ws
+                                    = wei_scales[(bc.wei_groups > 1 ? g : 0) * N
+                                            + n];
+                            deq += static_cast<double>(s) * ss * ws;
+                        }
+                        const size_t i = static_cast<size_t>(m) * N + n;
+                        const float cv = dst == data_type_t::f32
+                                ? c0[i]
+                                : static_cast<float>(bfloat16_t(c0[i]));
+                        api[i] = ab.alpha * deq
+                                + static_cast<double>(ab.beta) * cv;
+                        max_abs = std::max(max_abs, std::fabs(api[i]));
+                    }
+                const float rtol = dst == data_type_t::f32 ? 1e-5f : 1.0f / 128;
+                const float abs_bound = static_cast<float>(1e-5 * max_abs);
+                const auto run = [&](matmul_algo_t algo, nbt::buffer_t &out) {
+                    matmul_params p;
+                    p.dtypes.src
+                            = bc.dynamic ? data_type_t::bf16 : data_type_t::s8;
+                    p.dtypes.wei = bc.wei;
+                    p.dtypes.dst = dst;
+                    p.dtypes.compute = bc.dynamic || s4 ? data_type_t::s8
+                                                        : data_type_t::none;
+                    p.dynamic_quant = bc.dynamic;
+                    p.lowoha_algo = algo;
+                    std::vector<float> ss(src_scales);
+                    p.quant_params.src_scale.buff = ss.data();
+                    p.quant_params.src_scale.dt = data_type_t::f32;
+                    p.quant_params.src_scale.dims = bc.src_groups < 0
+                            ? std::vector<int64_t> {1, 1}
+                            : bc.src_groups == 0
+                            ? std::vector<int64_t> {M, 1}
+                            : std::vector<int64_t> {M, bc.src_groups};
+                    p.quant_params.wei_scale.buff = wei_scales.data();
+                    p.quant_params.wei_scale.dt = data_type_t::f32;
+                    p.quant_params.wei_scale.dims = {bc.wei_groups, N};
+                    out = nbt::make_buffer(
+                            static_cast<size_t>(M) * N * nbt::dt_bytes(dst));
+                    for (size_t i = 0; i < c0.size(); ++i)
+                        nbt::store_f32(out.get(), dst, i, c0[i]);
+                    mm::matmul_batch_params_t batch;
+                    return mm::matmul_direct('r', false, s4, M, N, K, ab.alpha,
+                            bc.dynamic
+                                    ? static_cast<const void *>(src_bf16.data())
+                                    : static_cast<const void *>(src_s8.data()),
+                            K,
+                            s4 ? static_cast<const void *>(w4.data())
+                               : static_cast<const void *>(w8.data()),
+                            s4 ? K : N, nullptr, ab.beta, out.get(), N, false,
+                            batch, p);
+                };
+                nbt::buffer_t native, reference;
+                ASSERT_EQ(run(matmul_algo_t::native_brgemm, native),
+                        status_t::success);
+                ASSERT_EQ(run(matmul_algo_t::reference, reference),
+                        status_t::success);
+                nbt::buffer_t model
+                        = nbt::make_buffer(static_cast<size_t>(M) * N * 4);
+                for (size_t i = 0; i < api.size(); ++i)
+                    nbt::store_f32(model.get(), data_type_t::f32, i,
+                            static_cast<float>(api[i]));
+                nbt::buffer_t native_f32
+                        = nbt::make_buffer(static_cast<size_t>(M) * N * 4);
+                for (size_t i = 0; i < api.size(); ++i)
+                    nbt::store_f32(native_f32.get(), data_type_t::f32, i,
+                            nbt::load_f32(native.get(), dst, i));
+                EXPECT_TRUE(nbt::within_band(native_f32.get(), N, model.get(),
+                        N, data_type_t::f32, M, N, rtol, abs_bound))
+                        << "the native BRGEMM vs alpha * (A x B) + beta * C";
+                EXPECT_TRUE(nbt::within_steps(
+                        native.get(), N, reference.get(), N, dst, M, N, 0))
+                        << "the native BRGEMM vs the reference algorithm";
+#if ZENDNNL_DEPENDS_AOCLDLP
+                if (bc.src_groups < 0 || ab.alpha != std::trunc(ab.alpha)
+                        || ab.beta != std::trunc(ab.beta))
+                    continue;
+                nbt::buffer_t aocl;
+                ASSERT_EQ(run(matmul_algo_t::aocl_dlp_blocked, aocl),
+                        status_t::success);
+                EXPECT_TRUE(nbt::within_band(aocl.get(), N, reference.get(), N,
+                        dst, M, N, rtol, abs_bound))
+                        << "AOCL-DLP vs the reference algorithm";
+#endif
+            }
+    }
+}
+
+// An f16 dst takes beta * C after the scales too, as matmul_direct defines
+// it: the native BRGEMM's INT8 tile and the reference kernel, run directly
+// (matmul_direct takes an f16 dst only on a CPU with AVX512-FP16), give
+// alpha * (A x B) + beta * C within the rounding of f16, for an s8 source
+// with a per-tensor or a per-token scale over per-channel s8 weights.
+TEST(NativeBrgemmInt8Beta, AnF16DstAddsBetaAfterTheScales) {
+    NATIVE_BRGEMM_INT8_SKIP_IF_NO_VNNI();
+    const int M = 4, N = 64, K = 128;
+    std::mt19937 rng(47);
+    std::uniform_int_distribution<int> qd(-100, 100), wd(-127, 127);
+    std::vector<int8_t> src(static_cast<size_t>(M) * K);
+    std::vector<int8_t> wei(static_cast<size_t>(K) * N);
+    for (auto &v : src)
+        v = static_cast<int8_t>(qd(rng));
+    for (auto &v : wei)
+        v = static_cast<int8_t>(wd(rng));
+    const auto c0 = random_floats(static_cast<size_t>(M) * N, -2.0f, 2.0f, rng);
+    std::vector<float> src_scales = random_floats(M, 0.02f, 0.1f, rng);
+    std::vector<float> wei_scales = random_floats(N, 0.01f, 0.05f, rng);
+    struct ab_t {
+        float alpha, beta;
+    };
+    for (const bool per_token : {false, true})
+        for (const ab_t ab : {ab_t {1.0f, 1.0f}, ab_t {2.0f, -0.75f}}) {
+            SCOPED_TRACE(::testing::Message()
+                    << (per_token ? "per-token" : "per-tensor")
+                    << " source, alpha " << ab.alpha << " beta " << ab.beta);
+            matmul_params p;
+            p.dtypes.src = data_type_t::s8;
+            p.dtypes.wei = data_type_t::s8;
+            p.dtypes.dst = data_type_t::f16;
+            p.num_threads = 1;
+            p.quant_params.src_scale.buff = src_scales.data();
+            p.quant_params.src_scale.dt = data_type_t::f32;
+            p.quant_params.src_scale.dims = per_token
+                    ? std::vector<int64_t> {M, 1}
+                    : std::vector<int64_t> {1, 1};
+            p.quant_params.wei_scale.buff = wei_scales.data();
+            p.quant_params.wei_scale.dt = data_type_t::f32;
+            p.quant_params.wei_scale.dims = {1, N};
+            std::vector<double> api(static_cast<size_t>(M) * N);
+            double max_abs = 0.0;
+            for (int m = 0; m < M; ++m)
+                for (int n = 0; n < N; ++n) {
+                    int64_t s = 0;
+                    for (int k = 0; k < K; ++k)
+                        s += static_cast<int64_t>(
+                                     src[static_cast<size_t>(m) * K + k])
+                                * wei[static_cast<size_t>(k) * N + n];
+                    const size_t i = static_cast<size_t>(m) * N + n;
+                    const double ss = src_scales[per_token ? m : 0];
+                    api[i] = ab.alpha * static_cast<double>(s) * ss
+                                    * wei_scales[n]
+                            + static_cast<double>(ab.beta)
+                                    * static_cast<float>(float16_t(c0[i]));
+                    max_abs = std::max(max_abs, std::fabs(api[i]));
+                }
+            const auto prior = [&]() {
+                nbt::buffer_t out = nbt::make_buffer(
+                        static_cast<size_t>(M) * N * sizeof(uint16_t));
+                for (size_t i = 0; i < c0.size(); ++i)
+                    nbt::store_f32(out.get(), data_type_t::f16, i, c0[i]);
+                return out;
+            };
+            nbt::buffer_t native = prior();
+            nat::GemmDescriptor d;
+            d.M = M;
+            d.N = N;
+            d.K = K;
+            d.lda = K;
+            d.ldb = N;
+            d.ldc = N;
+            d.alpha = ab.alpha;
+            d.beta = ab.beta;
+            d.src_dt = data_type_t::s8;
+            d.wei_dt = data_type_t::s8;
+            d.dst_dt = data_type_t::f16;
+            d.is_weights_const = true;
+            d.num_threads = 1;
+            nat::native_weight_ref_t ref;
+            ref.pack_nr = 32;
+            ref.weight = wei.data();
+            ref.weight_cache_mode = 0;
+            ASSERT_EQ(nat::native_brgemm_execute(
+                              d, ref, src.data(), native.get(), nullptr, p),
+                    status_t::success);
+            nbt::buffer_t reference = prior();
+            mm::matmul_batch_params_t batch;
+            ASSERT_EQ(mm::reference_matmul_execute('r', false, false, M, N, K,
+                              ab.alpha, src.data(), K, wei.data(), N, nullptr,
+                              ab.beta, reference.get(), N, false, batch, p),
+                    status_t::success);
+            const auto values_off = [&](const nbt::buffer_t &out) {
+                int off = 0;
+                for (size_t i = 0; i < api.size(); ++i) {
+                    const double got
+                            = nbt::load_f32(out.get(), data_type_t::f16, i);
+                    if (std::fabs(got - api[i])
+                            > std::fabs(api[i]) / 1024 + 1e-5 * max_abs)
+                        ++off;
+                }
+                return off;
+            };
+            EXPECT_EQ(values_off(native), 0)
+                    << "the native BRGEMM vs alpha * (A x B) + beta * C";
+            EXPECT_EQ(values_off(reference), 0)
+                    << "the reference kernel vs alpha * (A x B) + beta * C";
+        }
+}
+
+// beta * C into an s32 dst, as the operator page states it: in the integer
+// sum before the scales when the source and the weight scales have one group
+// over K each, after the sum of the scaled groups with {G, N} weight scales,
+// and before the weight scale only with {M, G} source scales over
+// per-channel weight scales.  The native BRGEMM's INT8 tiles, run directly
+// (the checks take the last layout only for the default route's kernels),
+// give each formula's f64 value within one step, with alpha 2 and beta 0.5
+// over a C large enough that another placement is far off.
+TEST(NativeBrgemmInt8Beta, AnIntegerDstPlacesBetaByItsScaleGroups) {
+    NATIVE_BRGEMM_INT8_SKIP_IF_NO_VNNI();
+    const int M = 4, N = 64, K = 128, G = 4, gs = K / G;
+    const float alpha = 2.0f, beta = 0.5f;
+    std::mt19937 rng(53);
+    std::uniform_int_distribution<int> qd(-100, 100), wd(-127, 127),
+            cd(-100000, 100000);
+    std::vector<int8_t> src(static_cast<size_t>(M) * K);
+    std::vector<int8_t> wei(static_cast<size_t>(K) * N);
+    std::vector<int32_t> c0(static_cast<size_t>(M) * N);
+    for (auto &v : src)
+        v = static_cast<int8_t>(qd(rng));
+    for (auto &v : wei)
+        v = static_cast<int8_t>(wd(rng));
+    for (auto &v : c0)
+        v = cd(rng);
+    std::vector<float> src_scales = random_floats(M * G, 0.02f, 0.1f, rng);
+    std::vector<float> wei_scales = random_floats(G * N, 0.01f, 0.05f, rng);
+    // S of group g of row m and column n.
+    const auto group_sum = [&](int m, int n, int g) {
+        int64_t s = 0;
+        for (int k = g * gs; k < (g + 1) * gs; ++k)
+            s += static_cast<int64_t>(src[static_cast<size_t>(m) * K + k])
+                    * wei[static_cast<size_t>(k) * N + n];
+        return static_cast<double>(s);
+    };
+    enum class layout_t { one_group, weight_groups, source_groups };
+    for (const layout_t lay : {layout_t::one_group, layout_t::weight_groups,
+                 layout_t::source_groups}) {
+        const char *name = lay == layout_t::one_group
+                ? "per-token source over per-channel weights"
+                : lay == layout_t::weight_groups
+                ? "per-token source over {G, N} weights"
+                : "{M, G} source over per-channel weights";
+        SCOPED_TRACE(name);
+        std::vector<double> want(static_cast<size_t>(M) * N);
+        for (int m = 0; m < M; ++m)
+            for (int n = 0; n < N; ++n) {
+                const size_t i = static_cast<size_t>(m) * N + n;
+                const double c = c0[i];
+                double v = 0.0;
+                if (lay == layout_t::one_group) {
+                    double s = 0.0;
+                    for (int g = 0; g < G; ++g)
+                        s += group_sum(m, n, g);
+                    v = (alpha * s + beta * c) * src_scales[m] * wei_scales[n];
+                } else if (lay == layout_t::weight_groups) {
+                    double sum = 0.0;
+                    for (int g = 0; g < G; ++g)
+                        sum += group_sum(m, n, g) * src_scales[m]
+                                * wei_scales[static_cast<size_t>(g) * N + n];
+                    v = alpha * sum + beta * c;
+                } else {
+                    double sum = 0.0;
+                    for (int g = 0; g < G; ++g)
+                        sum += group_sum(m, n, g)
+                                * src_scales[static_cast<size_t>(m) * G + g];
+                    v = (alpha * sum + beta * c) * wei_scales[n];
+                }
+                want[i] = v;
+            }
+        matmul_params p;
+        p.dtypes.src = data_type_t::s8;
+        p.dtypes.wei = data_type_t::s8;
+        p.dtypes.dst = data_type_t::s32;
+        p.num_threads = 1;
+        auto &qp = p.quant_params;
+        qp.src_scale.buff = src_scales.data();
+        qp.src_scale.dt = data_type_t::f32;
+        qp.src_scale.dims = lay == layout_t::source_groups
+                ? std::vector<int64_t> {M, G}
+                : std::vector<int64_t> {M, 1};
+        qp.wei_scale.buff = wei_scales.data();
+        qp.wei_scale.dt = data_type_t::f32;
+        qp.wei_scale.dims = lay == layout_t::weight_groups
+                ? std::vector<int64_t> {G, N}
+                : std::vector<int64_t> {1, N};
+        std::vector<int32_t> out(c0);
+        nat::GemmDescriptor d;
+        d.M = M;
+        d.N = N;
+        d.K = K;
+        d.lda = K;
+        d.ldb = N;
+        d.ldc = N;
+        d.alpha = alpha;
+        d.beta = beta;
+        d.src_dt = data_type_t::s8;
+        d.wei_dt = data_type_t::s8;
+        d.dst_dt = data_type_t::s32;
+        d.is_weights_const = true;
+        d.num_threads = 1;
+        nat::native_weight_ref_t ref;
+        ref.pack_nr = 32;
+        ref.weight = wei.data();
+        ref.weight_cache_mode = 0;
+        ASSERT_EQ(nat::native_brgemm_execute(
+                          d, ref, src.data(), out.data(), nullptr, p),
+                status_t::success);
+        int off = 0;
+        for (size_t i = 0; i < want.size(); ++i)
+            if (std::fabs(out[i] - want[i]) > 1.0) ++off;
+        EXPECT_EQ(off, 0) << "values off the formula by more than one step";
+    }
+}
+
 // ── Status contract ───────────────────────────────────────────────────────
 
 TEST(NativeBrgemmInt8Status, UnservedCallsReportUnimplemented) {
@@ -2139,6 +2688,80 @@ TEST(NativeBrgemmInt8Status, UnservedCallsReportUnimplemented) {
     short_lda.lda = K - 1;
     EXPECT_EQ(prepare(short_lda, good(), src.data(), call), status_t::failure);
     EXPECT_EQ(prepare(desc, good(), nullptr, call), status_t::failure);
+}
+
+// A bf16 / f32 source the call quantizes to s8 with a source zero point
+// buffer, over per-channel and {2, N} weight scales: its symmetric
+// quantization would drop the zero point, which the reference algorithm
+// subtracts.  The INT8 check refuses it with its reason, and
+// native_brgemm_execute returns unimplemented with dst untouched.  A
+// quantization to u8 takes the buffer for the zero point it writes.
+TEST(NativeBrgemmInt8Status, QuantizedS8SourceWithAZeroPointIsNotServed) {
+    NATIVE_BRGEMM_INT8_SKIP_IF_NO_VNNI();
+    const int M = 3, K = 64, N = 64;
+    std::mt19937 rng(29);
+    CkWeight w = make_weight(K, N, 32, true, false, rng);
+    const auto f = random_floats(static_cast<size_t>(M) * K, -2.0f, 2.0f, rng);
+    const std::vector<bfloat16_t> src_bf16(f.begin(), f.end());
+    const std::vector<float> wei_scale
+            = random_floats(2 * N, 0.01f, 0.05f, rng);
+    for (const data_type_t src_dt : {data_type_t::bf16, data_type_t::f32})
+        for (const int groups : {1, 2})
+            for (const data_type_t compute :
+                    {data_type_t::s8, data_type_t::u8}) {
+                SCOPED_TRACE(std::string(src_dt == data_type_t::bf16 ? "bf16"
+                                                                     : "f32")
+                        + " source, " + std::to_string(groups)
+                        + " weight scale rows, quantized to "
+                        + (compute == data_type_t::s8 ? "s8" : "u8"));
+                std::vector<float> scale(1, 0.0f);
+                int32_t zp = 3;
+                matmul_params p;
+                p.dtypes.src = src_dt;
+                p.dtypes.wei = data_type_t::s8;
+                p.dtypes.dst = data_type_t::f32;
+                p.dtypes.compute = compute;
+                p.dynamic_quant = true;
+                p.quant_params.src_scale.buff = scale.data();
+                p.quant_params.src_scale.dt = data_type_t::f32;
+                p.quant_params.src_scale.dims = {1, 1};
+                p.quant_params.src_zp.buff = &zp;
+                p.quant_params.src_zp.dt = data_type_t::s32;
+                p.quant_params.src_zp.dims = {1, 1};
+                p.quant_params.wei_scale.buff = wei_scale.data();
+                p.quant_params.wei_scale.dt = data_type_t::f32;
+                p.quant_params.wei_scale.dims = {groups, N};
+                const nat::GemmDescriptor desc = make_desc(
+                        M, N, K, K, false, src_dt, data_type_t::f32, 1);
+                const bool sym = compute == data_type_t::s8;
+                const char *reason = nullptr;
+                EXPECT_EQ(nat::check_int8_call(desc, p,
+                                  nat::decide_int8_call(desc, p, nullptr),
+                                  &reason),
+                        sym ? status_t::unimplemented : status_t::success);
+                if (sym) {
+                    EXPECT_STREQ(reason,
+                            "a source the call quantizes to s8 with a source "
+                            "zero point");
+                }
+                std::vector<float> dst(static_cast<size_t>(M) * N, 7.0f);
+                nat::native_weight_ref_t ref;
+                ref.weight = w.raw.data();
+                ref.pack_nr = nat::kNativeLayoutPackNr;
+                ref.weight_cache_mode = 0;
+                const void *src = src_dt == data_type_t::bf16
+                        ? static_cast<const void *>(src_bf16.data())
+                        : static_cast<const void *>(f.data());
+                EXPECT_EQ(nat::native_brgemm_execute(
+                                  desc, ref, src, dst.data(), nullptr, p),
+                        sym ? status_t::unimplemented : status_t::success);
+                if (sym) {
+                    EXPECT_TRUE(
+                            std::all_of(dst.begin(), dst.end(), [](float v) {
+                        return v == 7.0f;
+                    })) << "dst written by a refused call";
+                }
+            }
 }
 
 // decide_int8_call against the rules it encodes, for both schemes, alpha and

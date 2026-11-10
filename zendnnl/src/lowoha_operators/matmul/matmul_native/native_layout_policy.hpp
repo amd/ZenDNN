@@ -17,6 +17,9 @@
 #ifndef MATMUL_NATIVE_NATIVE_LAYOUT_POLICY_HPP
 #define MATMUL_NATIVE_NATIVE_LAYOUT_POLICY_HPP
 
+#include <cstdint>
+#include <limits>
+
 #include "lowoha_operators/matmul/lowoha_common.hpp"
 
 namespace zendnnl {
@@ -27,6 +30,10 @@ namespace native {
 /// Columns per block of every weight the layout rule places on the native
 /// layout.
 inline constexpr int kNativeLayoutPackNr = 32;
+
+/// Largest K of a bf16 weight whose K pairs the bf16 kernels offset in an
+/// int: each pair of a block lies 64 elements after the one before.
+inline constexpr int kMaxNativeBf16K = 1 << 26;
 
 /// The weight-only facts the layout rule decides on.  Execution-only fields
 /// (M, threads, alpha / beta, bias, post-ops, dst type) must not enter the
@@ -62,6 +69,8 @@ struct native_layout_decision_t {
 ///     with src f32;
 ///   * N >= 1 (a weight of N not a multiple of 32 is held padded with zero
 ///     columns to whole blocks), K >= 1, ldb >= (transB ? K : N);
+///   * bf16: K at most kMaxNativeBf16K, whose pairs the kernels offset in an
+///     int;
 ///   * s8: K <= INT32_MAX / (255 * 128), the bound that keeps the int32
 ///     accumulation exact, and per-group weight scales only over groups of
 ///     whole K quads (a group size that divides K and is a multiple of 4);

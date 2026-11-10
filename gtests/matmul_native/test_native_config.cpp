@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -44,6 +45,7 @@
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_hw.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_pack.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_utils.hpp"
 #include "lowoha_operators/matmul/matmul_native/native_layout_policy.hpp"
 #include "matmul_native/native_brgemm_test_utils.hpp"
 #include "nlohmann/json.hpp"
@@ -622,6 +624,49 @@ TEST(NativeConfigValidate, BuiltInPlansAreLegal) {
                                 << " T=" << T << " bf16=" << bf16;
                         ASSERT_TRUE(same_plan(planner->plan(p), q));
                     }
+}
+
+// The K passes of a plan start where the one before ends: a bf16 plan of K
+// 2147483646 under the kc override 1024 takes 2097152
+// passes, the last of 1022 values from 2147482624, and an f32 plan of K
+// 2147483647 under the largest kc override, 1 << 30, two passes, the last
+// of 1073741823 values; no start passes K.
+TEST(NativeConfigValidate, KPassesOfAPlanEndAtK) {
+    struct case_t {
+        data_type_t dt;
+        int K, kc, passes, last;
+    };
+    for (const case_t c :
+            {case_t {data_type_t::bf16, 2147483646, 1024, 2097152, 1022},
+                    case_t {data_type_t::f32, std::numeric_limits<int>::max(),
+                            1 << 30, 2, (1 << 30) - 1}}) {
+        SCOPED_TRACE("K " + std::to_string(c.K));
+        native_problem_t p = problem(4, 32, c.K, true, 1);
+        p.src_dt = p.wei_dt = c.dt;
+        p.dst_dt = data_type_t::f32;
+        heuristic_params_t hp;
+        hp.kc = c.kc;
+        const native_plan_t q = heuristic_plan(p, native_plan_uarch(), hp);
+        // validate_native_plan() asks the kernel registry, which holds only
+        // the kernels of the CPU's ISA; the walk below needs no kernel.
+        if (has_isa()) { ASSERT_EQ(validate_native_plan(q, p), nullptr); }
+        ASSERT_EQ(q.kc, c.kc);
+        int passes = 0, last = 0;
+        int64_t done = 0;
+        native_k_passes_t pass {c.K, q.kc};
+        while (pass.next()) {
+            ASSERT_EQ(pass.k0, done) << "pass " << passes;
+            ASSERT_GE(pass.kl, 1);
+            ASSERT_LE(pass.kl, q.kc);
+            done += pass.kl;
+            last = pass.kl;
+            ASSERT_LT(passes++, c.passes) << "a pass past K";
+        }
+        EXPECT_EQ(passes, c.passes);
+        EXPECT_EQ(done, c.K);
+        EXPECT_EQ(last, c.last);
+        EXPECT_EQ(pass.k0, c.K);
+    }
 }
 
 TEST(NativeConfigValidate, RejectsEachRule) {

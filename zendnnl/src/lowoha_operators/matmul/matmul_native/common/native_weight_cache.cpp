@@ -57,15 +57,14 @@ namespace {
 struct native_key_t {
     const void *weight;
     int K, N, ldb, pack_nr;
-    bool transB, interleave;
+    bool transB;
     data_type_t wei_dt;
     bool aocl_blocked;
 
     bool operator==(const native_key_t &o) const {
         return weight == o.weight && K == o.K && N == o.N && ldb == o.ldb
                 && pack_nr == o.pack_nr && transB == o.transB
-                && interleave == o.interleave && wei_dt == o.wei_dt
-                && aocl_blocked == o.aocl_blocked;
+                && wei_dt == o.wei_dt && aocl_blocked == o.aocl_blocked;
     }
 };
 
@@ -78,8 +77,7 @@ struct native_key_hash_t {
         mix(static_cast<uint32_t>(k.N));
         mix(static_cast<uint32_t>(k.ldb));
         mix(static_cast<uint32_t>(k.pack_nr));
-        mix((k.transB ? 1u : 0u) | (k.interleave ? 2u : 0u)
-                | (static_cast<uint32_t>(k.wei_dt) << 2)
+        mix((k.transB ? 1u : 0u) | (static_cast<uint32_t>(k.wei_dt) << 2)
                 | (k.aocl_blocked ? 1u << 31 : 0u));
         return h;
     }
@@ -364,8 +362,7 @@ const native_image_t *live_image_locked(const void *p, size_t extent,
 
 bool same_layout(const native_raw_weight_t &a, const native_raw_weight_t &b) {
     return a.wei_dt == b.wei_dt && a.K == b.K && a.N == b.N && a.ldb == b.ldb
-            && a.transB == b.transB && a.pack_nr == b.pack_nr
-            && a.interleave_split_halves == b.interleave_split_halves;
+            && a.transB == b.transB && a.pack_nr == b.pack_nr;
 }
 
 /// Packs the AOCL inverse of an aocl_blocked w into dst.
@@ -381,7 +378,7 @@ status_t pack_from_aocl(
         return status_t::unimplemented;
     }
     return native_pack_weight(w.wei_dt, raw.get(), w.K, w.N, w.ldb, w.pack_nr,
-            w.transB, w.interleave_split_halves, dst, num_threads);
+            w.transB, dst, num_threads);
 }
 
 /// Packs w into dst; when its buffer holds image, from the raw weight
@@ -393,8 +390,7 @@ status_t pack_from_source(const native_raw_weight_t &w,
     if (image == nullptr) {
         if (w.aocl_blocked) return pack_from_aocl(w, dst, num_threads);
         return native_pack_weight(w.wei_dt, w.weight, w.K, w.N, w.ldb,
-                w.pack_nr, w.transB, w.interleave_split_halves, dst,
-                num_threads);
+                w.pack_nr, w.transB, dst, num_threads);
     }
     const native_raw_weight_t &img = image->layout;
     const size_t extent = static_cast<size_t>(img.K) * img.N;
@@ -419,9 +415,9 @@ status_t pack_from_source(const native_raw_weight_t &w,
         return status_t::failure;
     }
     native_unpack_bf16(image->layout.weight, img.K, img.N, img.ldb, img.pack_nr,
-            img.transB, img.interleave_split_halves, raw.get(), num_threads);
+            img.transB, raw.get(), num_threads);
     return native_pack_weight(w.wei_dt, raw.get(), w.K, w.N, w.ldb, w.pack_nr,
-            w.transB, w.interleave_split_halves, dst, num_threads);
+            w.transB, dst, num_threads);
 }
 
 /// Bytes writable at an aocl_blocked weight: the caller's capacity, else
@@ -522,7 +518,6 @@ void log_pack(const native_raw_weight_t &w, int32_t wc, const char *where) {
     apilog_verbose("[MATMUL.NATIVE_BRGEMM PACK] weight=", w.weight,
             " wei=", dtype_info(w.wei_dt), " K=", w.K, " N=", w.N,
             " ldb=", w.ldb, " transB=", w.transB ? 1 : 0,
-            " interleave=", w.interleave_split_halves ? 1 : 0,
             " pack_nr=", w.pack_nr, " wc=", wc, " into=", where,
             w.aocl_blocked ? " from=aocl_blocked" : "", padded);
 }
@@ -728,8 +723,7 @@ status_t rewrite_in_place(exclusive_lock_t &lock, const native_raw_weight_t &w,
     } else {
         std::unique_ptr<void, native_aligned_free_t> tmp(alloc_layout(bytes));
         st = tmp ? native_pack_weight(w.wei_dt, w.weight, w.K, w.N, w.ldb,
-                           w.pack_nr, w.transB, w.interleave_split_halves,
-                           tmp.get(), num_threads)
+                           w.pack_nr, w.transB, tmp.get(), num_threads)
                  : status_t::unimplemented;
         // Weight cache mode 2 is the caller's consent that the weight buffer
         // is writable storage read by this backend only.
@@ -907,8 +901,8 @@ void memo_put_locked(const native_key_t &key, const native_layout_t &layout,
 }
 
 native_key_t key_of(const native_raw_weight_t &w) {
-    return {w.weight, w.K, w.N, w.ldb, w.pack_nr, w.transB,
-            w.interleave_split_halves, w.wei_dt, w.aocl_blocked};
+    return {w.weight, w.K, w.N, w.ldb, w.pack_nr, w.transB, w.wei_dt,
+            w.aocl_blocked};
 }
 
 native_raw_weight_t raw_of(const native_key_t &k) {
@@ -920,7 +914,6 @@ native_raw_weight_t raw_of(const native_key_t &k) {
     w.ldb = k.ldb;
     w.transB = k.transB;
     w.pack_nr = k.pack_nr;
-    w.interleave_split_halves = k.interleave;
     w.aocl_blocked = k.aocl_blocked;
     return w;
 }
@@ -1383,6 +1376,14 @@ bool native_weight_packed_in_place(const void *weight, size_t owned_bytes) {
 
 native_raw_read_t native_weight_read_raw(const void *weight, size_t extent,
         size_t owned_bytes, const std::function<void()> &read) {
+    native_weight_raw_hold_t hold;
+    const native_raw_read_t got = hold.hold(weight, extent, owned_bytes);
+    if (got == native_raw_read_t::done) read();
+    return got;
+}
+
+native_raw_read_t native_weight_raw_hold_t::hold(
+        const void *weight, size_t extent, size_t owned_bytes) {
     native_cache_state_t &state = cache_state();
     exclusive_lock_t lock(state.mutex);
     state.packed.wait(lock, [&] { return state.packing.count(weight) == 0; });
@@ -1396,9 +1397,15 @@ native_raw_read_t native_weight_read_raw(const void *weight, size_t extent,
     }
     read_hold_t hold {state};
     if (!hold.hold_locked(weight, extent)) return native_raw_read_t::failed;
-    lock.unlock();
-    read();
+    span_ = hold.span;
+    held_ = true;
+    hold.held = false;
     return native_raw_read_t::done;
+}
+
+native_weight_raw_hold_t::~native_weight_raw_hold_t() {
+    if (!held_) return;
+    read_hold_t release {cache_state(), span_, true};
 }
 
 native_weight_check_t::native_weight_check_t(const void *weight, size_t bytes) {

@@ -119,6 +119,28 @@ size_t aocl_prepack_bytes(int K, int N, int ldb, bool transB, bool int8_u8s8) {
     return bytes;
 }
 
+size_t aocl_prepack_bytes(data_type_t src, data_type_t wei, int group, int K,
+        int N, int ldb, bool transB) {
+#if !ZENDNNL_DEPENDS_AOCLDLP
+    (void)src;
+    (void)wei;
+    (void)group;
+    (void)K;
+    (void)N;
+    (void)ldb;
+    (void)transB;
+    return 0;
+#else
+    reorder::reorder_params_t params
+            = aocl_prepack_params(K, N, ldb, transB, false);
+    params.prepack.wei_dtype = wei;
+    params.prepack.src_dtype = src;
+    params.prepack.sym_group_size = group;
+    params.is_prepack = true;
+    return reorder::weight_prepack_size(params);
+#endif
+}
+
 bool custom_kernel_packed_in_place(const void *weight) {
     return custom_kernel::weight_packed_in_place(weight);
 }

@@ -416,8 +416,10 @@ TEST(NativeMatmulDispatch, GemvPlanChoiceOfRequestedCalls) {
 }
 
 // A call that asks for the native BRGEMM at M = 1 with N <= 4 on a [K, N]
-// weight runs on the narrow kernel, per call and under ZENDNNL_MATMUL_ALGO=10:
-// the bits of the kernel run directly, and no native layout of the weight.
+// weight at weight cache mode 1 (a GEMV kernel serves a call only below
+// mode 2) runs on the narrow kernel, per call and under
+// ZENDNNL_MATMUL_ALGO=10: the bits of the kernel run directly, and no native
+// layout of the weight.
 TEST(NativeMatmulDispatch, RequestedNarrowCallsTakeTheNarrowKernel) {
     if (!gemv_isa()) GTEST_SKIP() << "needs AVX512-BF16 and AVX512-VNNI";
     const data_type_t bf16 = data_type_t::bf16, f32 = data_type_t::f32;
@@ -445,6 +447,7 @@ TEST(NativeMatmulDispatch, RequestedNarrowCallsTakeTheNarrowKernel) {
                 pin.reset(new nt::algo_pin_t(matmul_algo_t::native_brgemm));
             route_call_t r(
                     bf16, bf16, cs.dst, 1, cs.N, cs.K, cs.threads, seed += 4);
+            r.c.params.weight_cache_type = 1;
             const nt::buffer_t bias
                     = nt::random_buffer(f32, cs.N, seed + 2, -1.0f, 1.0f);
             if (cs.bias) {
@@ -478,7 +481,8 @@ TEST(NativeMatmulDispatch, RequestedNarrowCallsTakeTheNarrowKernel) {
 }
 
 // A call that asks for the native BRGEMM at M = 1 whose GEMV plan choice is a
-// BKC kernel runs on it, per call and under ZENDNNL_MATMUL_ALGO=10: the bits
+// BKC kernel, at weight cache mode 1 (a GEMV kernel serves a call only below
+// mode 2), runs on it, per call and under ZENDNNL_MATMUL_ALGO=10: the bits
 // of the kernel run directly, within the band of the reference, and no
 // native layout of the weight.
 TEST(NativeMatmulDispatch, RequestedBkcCallsTakeTheBkcKernels) {
@@ -512,6 +516,7 @@ TEST(NativeMatmulDispatch, RequestedBkcCallsTakeTheBkcKernels) {
             const bool int8 = cs.src != bf16;
             route_call_t r(cs.src, int8 ? s8 : bf16, cs.dst, 1, cs.N, cs.K,
                     cs.threads, seed += 4);
+            r.c.params.weight_cache_type = 1;
             const nt::buffer_t bias
                     = nt::random_buffer(f32, cs.N, seed + 2, -1.0f, 1.0f);
             if (cs.bias) {

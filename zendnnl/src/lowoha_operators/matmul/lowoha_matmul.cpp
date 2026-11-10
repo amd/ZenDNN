@@ -34,6 +34,7 @@
 #include "lowoha_operators/matmul/group_matmul/prepack/prepack.hpp"
 #include "lowoha_operators/matmul/group_matmul/single_expert/single_expert_route.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_weight_cache.hpp"
 #include "lowoha_operators/matmul/quantization/reorder_quantization.hpp"
 #include "matmul_native/native_matmul.hpp"
 #include "partitioning/bmm/looper/bmm_looper.hpp"
@@ -337,6 +338,7 @@ static bool to_group_gated_act(
         case matmul_gated_act_t::swiglu_oai_mul:
             group_act = grp_matmul_gated_act_t::swiglu_oai_mul;
             return true;
+        case matmul_gated_act_t::gelu_tanh_and_mul: return false;
     }
     return false;
 }
@@ -354,6 +356,8 @@ struct direct_call_t {
     grp_matmul_gated_act_params group_gated_act;
     bool has_gated_act = false; ///< a gated_act argument was given
     bool run_gated_act = false; ///< and it is an activation
+    /// The activation has no group form: only the native BRGEMM runs it.
+    bool native_only_act = false;
     int batch_count = 1;
     /// A post-op the AOCL-DLP chain does not take (aocl_dlp_maps_post_op).
     bool aocl_unmapped_post_op = false;
@@ -435,7 +439,11 @@ ZENDNNL_ALWAYS_INLINE inline status_t prepare_direct_call(const int M,
 
     call.batch_count = std::max(batch_params.Batch_A, batch_params.Batch_B);
     if (gated_act != nullptr) {
-        if (!to_group_gated_act(gated_act->act, call.group_gated_act.act)) {
+        call.native_only_act
+                = gated_act->act == matmul_gated_act_t::gelu_tanh_and_mul;
+        if (!call.native_only_act
+                && !to_group_gated_act(
+                        gated_act->act, call.group_gated_act.act)) {
             log_error("matmul_direct: unsupported gated activation value ",
                     static_cast<int>(gated_act->act));
             return status_t::failure;
@@ -443,7 +451,9 @@ ZENDNNL_ALWAYS_INLINE inline status_t prepare_direct_call(const int M,
         call.has_gated_act = true;
     }
     call.run_gated_act = call.has_gated_act
-            && call.group_gated_act.act != grp_matmul_gated_act_t::none;
+            && (call.native_only_act
+                    || call.group_gated_act.act
+                            != grp_matmul_gated_act_t::none);
     if (call.run_gated_act && call.batch_count != 1) {
         log_error(
                 "matmul_direct: gated activation is supported only for a "
@@ -537,8 +547,11 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
     const int32_t omp_mt = thread_guard::max_threads();
     const int32_t num_threads
             = resolve_num_threads(exec_params.num_threads, omp_mt);
-    // The native BRGEMM takes every call that asks for it: it serves it or
-    // returns the call's error; the others continue below as without it.
+    // The native BRGEMM takes the calls that ask for it: it serves them or
+    // returns their error, except the calls of ZENDNNL_MATMUL_ALGO=10 it
+    // hands back (native_layout_matmul); those and the others continue below
+    // as without it.
+    native::native_weight_raw_hold_t handed_back_weight;
     if (native::native_brgemm_selected(exec_params)) {
         status_t native_status = status_t::success;
         if (native::native_layout_matmul(layout, transA, transB, M, N, K, alpha,
@@ -549,6 +562,38 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
                     native_status, &exec_batch_params)) {
             return native_status;
         }
+        // A call without lowoha_algo runs on the default route, through its
+        // checks: those of a single call took what only the native BRGEMM
+        // serves.  Its weight stays raw (weight cache mode 1 at most), as a
+        // later call on the buffer may read it on the native BRGEMM, and the
+        // call holds the bytes it reads of it (every matrix of a batched
+        // call) against an in-place rewrite by a concurrent native call
+        // until it returns.
+        if (exec_params.lowoha_algo == matmul_algo_t::none
+                && matmul_config_t::is_native_brgemm_algo()) {
+            if (batch_count == 1) {
+                const status_t status
+                        = zendnnl::common::op_instrumentation::validate([&]() {
+                    return validate_matmul_direct_inputs(src, weight, dst, M, N,
+                            K, batch_params.Batch_A, batch_params.Batch_B,
+                            params, is_weights_const, false);
+                });
+                if (status != status_t::success) { return status; }
+            }
+            const status_t held = native::native_hold_handed_back_weight(
+                    handed_back_weight, layout, weight, K, N, ldb, transB,
+                    exec_params, &exec_batch_params);
+            if (held != status_t::success) { return held; }
+            exec_params.weight_cache_type
+                    = std::min<int32_t>(exec_params.weight_cache_type, 1);
+        }
+    }
+    if (call.native_only_act) {
+        log_error(
+                "matmul_direct: gelu_tanh_and_mul runs only on the native "
+                "BRGEMM (ZENDNNL_MATMUL_ALGO=10, or lowoha_algo "
+                "native_brgemm)");
+        return status_t::unimplemented;
     }
 
     // Unpack GGML before the group route. The route rejects pack_format_b==1,

@@ -90,7 +90,10 @@ void matmul_execute(const char layout, const bool transA, const bool transB,
  *     dst[:, 0:N/2] = act(gate) * up. Uses the same contract as
  *     @c group_matmul_direct; nullptr or @c act==none disables it. An active
  *     gated activation is supported only for a single batch and is dispatched
- *     through the one-op grouped path. See @c matmul_gated_act_params.
+ *     through the one-op grouped path, or the native BRGEMM when the call
+ *     asks for it. @c gelu_tanh_and_mul runs only on the native BRGEMM: on
+ *     any other route the call returns @c status_t::unimplemented. See
+ *     @c matmul_gated_act_params.
  *
  * @note Thread safety: This entry point does not mutate the @c matmul_params or
  *       @c matmul_batch_params_t objects themselves. Callers may share them

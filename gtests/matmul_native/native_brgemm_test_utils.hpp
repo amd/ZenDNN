@@ -98,7 +98,8 @@ status_t run_matmul(const call_t &c);
 
 /// The GEMV kernel native_layout_matmul runs c on: decide_native_gemv's
 /// choice over the descriptor it builds for c (none for the native tiles,
-/// and for a call that does not ask for the native BRGEMM).
+/// for a call that does not ask for the native BRGEMM, and at weight cache
+/// mode 2, a constant weight under ZENDNNL_MATMUL_ALGO=10).
 zendnnl::lowoha::matmul::native::native_gemv_t gemv_kernel(const call_t &c);
 
 /// The status native_brgemm_refusal gives c (success when the native BRGEMM
@@ -127,7 +128,7 @@ status_t run_group_one_op(
 
 /// out[M, N / 2] = act over the pairs of pre[M, N] (f32, row stride N), in
 /// the order of group_matmul_moe_act.cpp: split halves [gate | up] for
-/// silu / gelu (erf), interleaved pairs for swiglu_oai.
+/// silu / gelu (erf) / gelu (tanh), interleaved pairs for swiglu_oai.
 void gated_act_ref(
         const float *pre, int M, int N, mm::matmul_gated_act_t act, float *out);
 

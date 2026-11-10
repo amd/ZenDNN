@@ -94,6 +94,7 @@ void native_int8_ukernel(const native_int8_ukernel_args_t &p) {
     const int8_t *b = p.B;
     const size_t lda = static_cast<size_t>(p.lda);
     const size_t b_stride = static_cast<size_t>(p.b_stride);
+    const size_t b_second = p.b_second;
     const int k_quads = p.k_quads;
     const int k_main = k_quads - k_quads % kSets;
 
@@ -106,7 +107,7 @@ void native_int8_ukernel(const native_int8_ukernel_args_t &p) {
             __m512i bv[NV];
             ZENDNNL_NATIVE_INT8_UNROLL(4)
             for (int v = 0; v < NV; ++v)
-                bv[v] = _mm512_loadu_si512(bq + v * 64);
+                bv[v] = _mm512_loadu_si512(bq + v * b_second);
             ZENDNNL_NATIVE_INT8_UNROLL(12)
             for (int m = 0; m < MR; ++m) {
                 uint32_t quad;
@@ -127,7 +128,7 @@ void native_int8_ukernel(const native_int8_ukernel_args_t &p) {
         __m512i bv[NV];
         ZENDNNL_NATIVE_INT8_UNROLL(4)
         for (int v = 0; v < NV; ++v)
-            bv[v] = _mm512_loadu_si512(bq + v * 64);
+            bv[v] = _mm512_loadu_si512(bq + v * b_second);
         ZENDNNL_NATIVE_INT8_UNROLL(12)
         for (int m = 0; m < MR; ++m) {
             uint32_t quad;
@@ -278,6 +279,7 @@ void native_int8_group_ukernel(const native_int8_group_ukernel_args_t &p) {
         (void)ones;
     const size_t lda = static_cast<size_t>(p.lda);
     const size_t b_stride = static_cast<size_t>(p.b_stride);
+    const size_t b_second = p.b_second;
     const int k_quads = p.k_quads;
     const int k_main = k_quads - k_quads % kSets;
     const uint8_t *a = p.A;
@@ -288,6 +290,8 @@ void native_int8_group_ukernel(const native_int8_group_ukernel_args_t &p) {
     const char *wei_scale = static_cast<const char *>(p.wei_scale);
     const size_t wei_scale_step
             = static_cast<size_t>(p.wei_scale_step) * wei_scale_esz;
+    const size_t scale_second
+            = static_cast<size_t>(p.scale_second) * wei_scale_esz;
     for (int g = 0; g < p.batch; ++g) {
         // The sum of each row starts at its shift (zero for a u8 source);
         // the other sets at zero.
@@ -328,12 +332,12 @@ void native_int8_group_ukernel(const native_int8_group_ukernel_args_t &p) {
                 ZENDNNL_NATIVE_INT8_UNROLL(4)
                 for (int v = 0; v < NV; ++v) {
                     if constexpr (U8) {
-                        bv[v] = _mm512_loadu_si512(bq + v * 64);
+                        bv[v] = _mm512_loadu_si512(bq + v * b_second);
                         col[s][v] = _mm512_dpbusd_epi32(col[s][v], ones, bv[v]);
                         ZENDNNL_NATIVE_INT8_ACC_BARRIER(col[s][v]);
                     } else {
                         bv[v] = _mm512_xor_si512(
-                                _mm512_loadu_si512(bq + v * 64), flip);
+                                _mm512_loadu_si512(bq + v * b_second), flip);
                     }
                 }
                 ZENDNNL_NATIVE_INT8_UNROLL(12)
@@ -359,12 +363,12 @@ void native_int8_group_ukernel(const native_int8_group_ukernel_args_t &p) {
             ZENDNNL_NATIVE_INT8_UNROLL(4)
             for (int v = 0; v < NV; ++v) {
                 if constexpr (U8) {
-                    bv[v] = _mm512_loadu_si512(bq + v * 64);
+                    bv[v] = _mm512_loadu_si512(bq + v * b_second);
                     col[0][v] = _mm512_dpbusd_epi32(col[0][v], ones, bv[v]);
                     ZENDNNL_NATIVE_INT8_ACC_BARRIER(col[0][v]);
                 } else {
                     bv[v] = _mm512_xor_si512(
-                            _mm512_loadu_si512(bq + v * 64), flip);
+                            _mm512_loadu_si512(bq + v * b_second), flip);
                 }
             }
             ZENDNNL_NATIVE_INT8_UNROLL(12)
@@ -426,7 +430,7 @@ void native_int8_group_ukernel(const native_int8_group_ukernel_args_t &p) {
         __m512 ws[NV];
         ZENDNNL_NATIVE_INT8_UNROLL(4)
         for (int v = 0; v < NV; ++v)
-            ws[v] = scales_as_f32<S>(wei_scale + v * 16 * wei_scale_esz);
+            ws[v] = scales_as_f32<S>(wei_scale + v * scale_second);
         ZENDNNL_NATIVE_INT8_UNROLL(12)
         for (int m = 0; m < MR; ++m) {
             const __m512 sa = _mm512_set1_ps(src_scale[m * p.src_scale_ld]);

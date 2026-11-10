@@ -1754,13 +1754,13 @@ TEST(AoclDlpUnmappedPostOps, GroupOperationsOnAoclDlpFail) {
 
 namespace {
 
-// An INT8 call with alpha and beta against matmul_direct's order: with one
-// source scale value ((alpha * S + beta * C + Z) * src_scale) * wei_scale +
-// bias, S the integer sum of the source and weight values and Z =
-// -zero_point * column sum; with per-token source scales alpha * S *
-// src_scale * wei_scale + beta * C + bias; then the elementwise post-ops,
-// the destination scale and zero point.  Every value is a small multiple of
-// a power of two, so the sums are exact in f32.
+// An INT8 call with alpha and beta against matmul_direct's order: into an
+// f32 or bf16 destination (alpha * S + Z) * src_scale * wei_scale + beta * C
+// + bias, into an integer one ((alpha * S + beta * C + Z) * src_scale) *
+// wei_scale + bias, S the integer sum of the source and weight values and
+// Z = -zero_point * column sum; then the elementwise post-ops, the
+// destination scale and zero point.  Every value is a small multiple of a
+// power of two, so the sums are exact in f32.
 struct alpha_beta_call_t {
     int M = 4, N = 64, K = 128;
     data_type_t src_dt = data_type_t::s8;
@@ -1896,12 +1896,12 @@ struct alpha_beta_call_t {
                 const double scale
                         = static_cast<double>(s_src(m)) * wei_scale[n];
                 const double z = -static_cast<double>(zero_point) * column;
-                double v = per_token
-                        ? alpha * static_cast<double>(s) * scale + beta * c0[i]
-                                + bias[n]
-                        : (alpha * static_cast<double>(s) + beta * c0[i] + z)
+                double v = integer_dst()
+                        ? (alpha * static_cast<double>(s) + beta * c0[i] + z)
                                         * scale
-                                + bias[n];
+                                + bias[n]
+                        : (alpha * static_cast<double>(s) + z) * scale
+                                + beta * c0[i] + bias[n];
                 for (const auto &po : postops)
                     v = eltwise(po, v);
                 if (quantized_dst()) v = v * dst_scale + dst_zero_point;
@@ -1941,9 +1941,6 @@ void expect_refused_on_aocl_dlp(alpha_beta_call_t c) {
         EXPECT_EQ(c.run(), status_t::unimplemented);
         EXPECT_EQ(c.dst, before);
     }
-    // The reference kernel adds beta * C before the scales also for
-    // per-token source scales.
-    if (c.per_token && c.beta != 0.0f) return;
     SCOPED_TRACE("reference");
     c.algo = matmul_algo_t::reference;
     c.prepare();

@@ -404,8 +404,6 @@ status_t run_execute(const nt::call_t &c) {
     nat::native_weight_ref_t ref;
     ref.weight = c.wei;
     ref.pack_nr = nat::kNativeLayoutPackNr;
-    ref.interleave_split_halves = c.gated == gated_t::silu_and_mul
-            || c.gated == gated_t::gelu_and_mul;
     ref.weight_cache_mode = c.params.weight_cache_type;
     return nat::native_brgemm_execute(d, ref, c.src, c.dst, c.bias, c.params);
 }
@@ -853,22 +851,26 @@ std::vector<ncase_t> large_n_cases(route_t route) {
     return named(v);
 }
 
-/// Gated activations over even N: silu / gelu over an interleaved pack of
-/// gate / up halves, swiglu over weight columns that interleave the pairs;
-/// with a bias, beta over the dst's pre-activation columns, BF16, FP32,
-/// INT8 per-channel and per-group, and per-channel weight scales after
-/// {M, G} source groups.
+/// Gated activations over even N: silu / gelu over the gate / up halves of
+/// the weight's plain layout (paired in the tiles, or staged rows), swiglu
+/// over weight columns that interleave the pairs; with a bias, beta over the
+/// dst's pre-activation columns, BF16, FP32, INT8 per-channel (static, and
+/// per token quantized in the call) and per-group, and per-channel weight
+/// scales after {M, G} source groups.
 std::vector<ncase_t> gated_cases(route_t route) {
-    static const gated_t kActs[] = {gated_t::silu_and_mul,
-            gated_t::gelu_and_mul, gated_t::swiglu_oai_mul};
-    std::vector<q_t> qs = {q_t::bf16, q_t::f32, q_t::st_u8, q_t::grp_s8};
+    static const gated_t kActs[]
+            = {gated_t::silu_and_mul, gated_t::gelu_and_mul,
+                    gated_t::swiglu_oai_mul, gated_t::gelu_tanh_and_mul};
+    std::vector<q_t> qs
+            = {q_t::bf16, q_t::f32, q_t::st_u8, q_t::dyn_s8, q_t::grp_s8};
     // A call of {M, G} source scales and per-channel weight scales reaches
     // the native BRGEMM through matmul_direct only without its checks.
     if (route == route_t::execute) qs.push_back(q_t::after);
     std::vector<ncase_t> v;
     int i = 0;
     for (q_t q : qs)
-        for (int N = 2; N <= 100; N += (q == q_t::bf16 ? 2 : 6)) {
+        for (int N = 2; N <= 100;
+                N += (q == q_t::bf16 || q == q_t::dyn_s8 ? 2 : 6)) {
             ncase_t c;
             c.q = q;
             c.route = route;
@@ -881,7 +883,7 @@ std::vector<ncase_t> gated_cases(route_t route) {
             c.wc = i % 3;
             c.pad = i % 4;
             c.dst = q == q_t::f32 ? kF32 : (i % 2 ? kBf16 : kF32);
-            c.gated = kActs[i % 3];
+            c.gated = kActs[i % 4];
             c.bias = i % 4 == 1 ? kF32 : kNone;
             // beta with swiglu reads a copy of the pre-activation columns.
             if (i % 5 == 2) c.beta = 0.5f;

@@ -195,7 +195,10 @@ enum class matmul_gated_act_t : int {
     none = 0, ///< No gated activation.
     silu_and_mul = 1, ///< SiLU(gate) * up — split-halves [gate | up].
     gelu_and_mul = 2, ///< GELU(gate) * up — split-halves [gate | up].
-    swiglu_oai_mul = 3 ///< SwigluOAI — interleaved [g0,u0,g1,u1,...].
+    swiglu_oai_mul = 3, ///< SwigluOAI — interleaved [g0,u0,g1,u1,...].
+    /// GELU of the tanh approximation (gate) * up — split-halves [gate | up];
+    /// only the native BRGEMM serves it.
+    gelu_tanh_and_mul = 4
 };
 
 /**

@@ -363,6 +363,9 @@ class INT8KContiguousWeightCache {
 public:
     static INT8KContiguousWeightCache &instance();
 
+    /// @copydoc BF16BKCWeightCache::find()
+    const INT8KContiguousWeight *find(const PrepackedWeightKey &key);
+
     /// Get or pack INT8 weights with their column sums: the cached entry of
     /// key that weight, the raw weight (bytes of it), still serves, else a
     /// pack of weight, cached in place of a pack of other bytes; nullptr

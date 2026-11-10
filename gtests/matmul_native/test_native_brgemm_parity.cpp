@@ -339,7 +339,8 @@ buffer_t copy_of(const buffer_t &b) {
 /// per-token source scale of an asymmetric source (an asymmetric dynamic
 /// quantization of more than one row included), of a destination other than
 /// f32 / bf16 or with per-tensor weight scales, and no mish on a dynamically
-/// quantized source.
+/// quantized source (which it takes for the native BRGEMM alone, not for the
+/// reference algorithm the comparison runs).
 bool direct_accepts(const pcase_t &c) {
     return c.bias != kF16 || zendnnl_platform_info().get_avx512_f16_status();
 }
@@ -691,7 +692,8 @@ std::vector<pcase_t> postop_cases() {
     };
     for (q_t q : {q_t::bf16, q_t::dyn_s8, q_t::st_u8})
         for (const auto &chain : eltwise) {
-            // matmul_direct takes no mish on a dynamically quantized source.
+            // matmul_direct takes mish on a dynamically quantized source
+            // only for the native BRGEMM, not for the reference algorithm.
             if (is_dyn(q) && chain[0].type == post_op_type_t::mish) continue;
             pcase_t c = mk(q, 16, 128, 64,
                     q == q_t::bf16 ? kBf16 : (q == q_t::dyn_s8 ? kF32 : kU8));

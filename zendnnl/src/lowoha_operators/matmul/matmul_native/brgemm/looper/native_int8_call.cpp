@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <thread>
 
@@ -198,7 +199,9 @@ status_t quantize_source(const GemmDescriptor &desc,
                 why);
     const int64_t n_scale
             = quant_param_tensor_or_row_values(qp.src_scale.dims, M);
-    if (n_scale == 0 && !quant_param_is_per_group_src(qp.src_scale, M, groups))
+    const bool per_group_src
+            = quant_param_is_per_group_src(qp.src_scale, M, groups);
+    if (n_scale == 0 && !per_group_src)
         return turned_away(status_t::unimplemented,
                 "a dynamic quantization with a source scale other than per "
                 "tensor, per token or per group",
@@ -211,11 +214,19 @@ status_t quantize_source(const GemmDescriptor &desc,
                 "shape than its scale",
                 why);
 
-    // A transposed source is made row-major first, so it quantizes exactly
-    // as the same rows given row-major; with an s4 weight it is quantized as
-    // given, as matmul's other routes quantize it for W4A8, and its
-    // quantized rows stay transposed.
-    trans = desc.transA && desc.wei_dt == data_type_t::s4;
+    // A transposed source is quantized as given, as matmul's other routes
+    // quantize it, with its quantized rows still transposed, where the
+    // quantization of the same rows made row-major gives other values:
+    // with an s4 weight, and quantized to s8 with a scale per row (per
+    // tensor at M 1) or per group stored narrower than f32, which the row
+    // kernels quantize with before they narrow it.  Any other transposed
+    // source is made row-major first (a quantization to u8 has to be: the
+    // shared quantizer takes no per-row zero points of a transposed source).
+    const bool narrowed_rows = qp.src_scale.dt != data_type_t::f32
+            && (n_scale == M || per_group_src);
+    trans = desc.transA
+            && (desc.wei_dt == data_type_t::s4
+                    || (compute == data_type_t::s8 && narrowed_rows));
     const void *rows = src;
     int rows_ld = desc.lda;
     std::vector<uint8_t> transposed;
@@ -234,8 +245,29 @@ status_t quantize_source(const GemmDescriptor &desc,
 
     const void *quantized = rows;
     int quantized_lda = rows_ld;
-    const status_t st = reorder_quantize_source(params, rows, rows_ld, M, K, nt,
-            call.src_buffers, quantized, quantized_lda, q, trans);
+    status_t st = status_t::success;
+    const auto quantize = [&]() {
+        st = reorder_quantize_source(params, rows, rows_ld, M, K, nt,
+                call.src_buffers, quantized, quantized_lda, q, trans);
+    };
+    // Fewer source groups than the team are quantized by the calling thread
+    // in a region of the whole team: a region of another size than the
+    // team's resizes it, twice per call.
+    if (n_scale == 0 && !omp_in_parallel()
+            && static_cast<int64_t>(M) * groups < nt) {
+        std::exception_ptr error;
+#pragma omp parallel num_threads(nt)
+        {
+            if (omp_get_thread_num() == 0) {
+                try {
+                    quantize();
+                } catch (...) { error = std::current_exception(); }
+            }
+        }
+        if (error) std::rethrow_exception(error);
+    } else {
+        quantize();
+    }
     if (st != status_t::success) return st;
     a = quantized;
     lda = quantized_lda;
@@ -450,6 +482,13 @@ status_t check_int8_call(const GemmDescriptor &desc,
                     why);
         return check_group_call(desc, params, decision.groups, why);
     }
+    // The symmetric quantization of a source the call quantizes to s8 would
+    // drop a source zero point.
+    if (dynamic_source(params) && params.dtypes.compute == data_type_t::s8
+            && qp.src_zp.buff != nullptr)
+        return turned_away(status_t::unimplemented,
+                "a source the call quantizes to s8 with a source zero point",
+                why);
     if (decision.scheme == native_int8_scheme_t::per_group)
         return decision.scales_after_groups
                 ? check_source_group_call(desc, params, decision.groups, why)
@@ -593,8 +632,8 @@ status_t prepare_int8_call(const GemmDescriptor &desc,
     int lda = desc.lda;
     bool trans = desc.transA;
     data_type_t a_dt = src_dt;
-    // A symmetric dynamic quantization has no zero point, whatever buffer
-    // was passed.
+    // A symmetric dynamic quantization has no zero point (check_int8_call
+    // refuses a buffer of one).
     const bool dynamic_sym = dynamic_source(params)
             && params.dtypes.compute != data_type_t::u8;
     const quant_t *src_scale = &qp.src_scale;

@@ -89,8 +89,9 @@ Current pairing:
   scales and per-tensor, per-column, or per-group weight scales; and every
   post-op and gated activation of `matmul_direct` except a softmax with a
   gated activation. Its epilogue (`native_epilogue.cpp`) applies them, mish
-  included. It never falls back: a call outside that list returns an error
-  status (see Native matmul below). At M = 1 a GEMV kernel takes the call
+  included. A call outside that list returns an error status, or under
+  `ZENDNNL_MATMUL_ALGO=10` without `lowoha_algo` goes back to the default
+  route (see Native matmul below). At M = 1 a GEMV kernel takes the call
   only when `decide_native_gemv` chooses one (its post-ops among the ones
   that kernel fuses), and the native tiles serve every other call. Check
   the kernel that runs, not only `native_epilogue.cpp`.
@@ -200,12 +201,25 @@ it. `native_brgemm_selected` is `lowoha_algo == native_brgemm` or
   32-column blocks with zero columns, and the last column tile reads and
   writes only the columns below N. Flag a change that reads or writes an
   operand or dst past N.
-- A call that asks for the native BRGEMM and uses a dtype, layout, post-op,
-  or shape it does not implement returns an error status (unimplemented,
-  isa_unsupported, or failure for a weight it cannot read), with dst
-  untouched and one error line naming the reason; it never falls back to
-  AOCL-DLP. Tests decide the expected status with `native_brgemm_refusal`,
-  not with a copy of the rules.
+- A call with `lowoha_algo == native_brgemm` that uses a dtype, layout,
+  post-op, or shape the native BRGEMM does not implement returns an error
+  status (unimplemented, isa_unsupported, or failure for a weight it cannot
+  read), with dst untouched and one error line naming the reason; it never
+  takes another route. Tests decide the expected status with
+  `native_brgemm_refusal`, not with a copy of the rules.
+- Under `ZENDNNL_MATMUL_ALGO=10`, a single call without `lowoha_algo` that
+  the native BRGEMM refuses with unimplemented or isa_unsupported is handed
+  back to the default route (`native_layout_matmul` returns false), after
+  the default route's own input checks, with its weight cache capped at
+  mode 1 and its raw weight held against an in-place rewrite while the
+  default route reads it. It keeps the native error instead when its
+  arguments are wrong (ldb checked against a weight row of the caller's
+  layout), when its buffer holds an image a native call wrote in place,
+  and for the forms `kept_from_default_route` lists, which the default route
+  computes wrongly or does not implement (in a build without AOCL-DLP also
+  what `kept_in_this_build` adds for the reference kernel). Flag a hand-back of a form without a test that
+  compares its dst with an independent model, and a kept form whose error
+  line does not say why it is not handed back.
 - Do not call native code from the `aocl_dlp_blocked`, oneDNN, libxsmm, BMM,
   or reference paths.
 

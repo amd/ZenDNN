@@ -159,7 +159,9 @@ struct problem_t {
     int M = 7;
     int N = 64; ///< weight (pack) columns
     gated_t gated = gated_t::none;
-    bool interleaved = false;
+    /// Paired tiles (gated halves): tile column t < tile_n / 2 holds gate
+    /// column n0 / 2 + t, the others the up columns N / 2 + n0 / 2 on.
+    bool paired = false;
     float alpha = 1.0f;
     float beta = 0.0f;
     data_type_t bias_dt = data_type_t::none;
@@ -181,14 +183,20 @@ struct problem_t {
 
     int n_out() const { return gated == gated_t::none ? N : N / 2; }
     int ldc() const { return n_out() + ldc_pad; }
+    /// Weight column of accumulator column p.
     int logical(int p) const {
-        return !interleaved ? p : (p & 1) ? N / 2 + p / 2 : p / 2;
+        if (!paired) return p;
+        const int n0 = p - p % tile_n, t = p % tile_n, half = tile_n / 2;
+        return t < half ? n0 / 2 + t : N / 2 + n0 / 2 + t - half;
+    }
+    bool halves() const {
+        return gated == gated_t::silu_and_mul || gated == gated_t::gelu_and_mul
+                || gated == gated_t::gelu_tanh_and_mul;
     }
     std::string str() const {
         std::ostringstream os;
         os << "M=" << M << " N=" << N << " gated=" << static_cast<int>(gated)
-           << " interleaved=" << interleaved << " alpha=" << alpha
-           << " beta=" << beta
+           << " paired=" << paired << " alpha=" << alpha << " beta=" << beta
            << " bias=" << zendnnl::common::dtype_info(bias_dt)
            << " dst=" << zendnnl::common::dtype_info(dst_dt) << " int8=" << int8
            << " tile=" << tile_m << "x" << tile_n << " po=";
@@ -242,6 +250,14 @@ float ref_gated(gated_t g, float gate, float up) {
             return gate * (1.0f / (1.0f + std::exp(-gate))) * up;
         case gated_t::gelu_and_mul:
             return gate * 0.5f * (1.0f + std::erf(gate * 0.7071067811865476f))
+                    * up;
+        case gated_t::gelu_tanh_and_mul:
+            return 0.5f * gate
+                    * (1.0f
+                            + std::tanh(kSqrt2OverPi
+                                    * (gate
+                                            + kFittingConst * gate * gate
+                                                    * gate)))
                     * up;
         default: {
             const float gc = std::max(-7.0f, std::min(gate, 7.0f));
@@ -407,7 +423,7 @@ std::vector<float> reference(const problem_t &pb, const inputs_t &in) {
         for (int m = 0; m < M; ++m)
             for (int o = 0; o < no; ++o) {
                 const float *row = wide.data() + static_cast<size_t>(m) * N;
-                out[static_cast<size_t>(m) * no + o] = pb.interleaved
+                out[static_cast<size_t>(m) * no + o] = pb.halves()
                         ? ref_gated(pb.gated, row[o], row[N / 2 + o])
                         : ref_gated(pb.gated, row[2 * o], row[2 * o + 1]);
             }
@@ -528,7 +544,7 @@ void check(const problem_t &pb, float tol = 3e-4f) {
     nat::native_epilogue_t ep;
     const status_t st = nat::prepare_epilogue(make_desc(pb), params,
             pb.bias_dt == data_type_t::none ? nullptr : in.bias.data(),
-            dst.data(), pb.interleaved, ep);
+            dst.data(), pb.paired, ep);
     ASSERT_EQ(st, status_t::success);
     // The tiles of a swiglu call store over pre-activation columns other
     // tiles read for beta: beta reads a copy, as in native_brgemm_execute.
@@ -536,6 +552,12 @@ void check(const problem_t &pb, float tol = 3e-4f) {
     if (pb.gated == gated_t::swiglu_oai_mul && pb.beta != 0.0f)
         ep.beta_src = beta_copy.data();
     run_tiles(pb, ep, in.acc);
+    if (ep.staged_halves) {
+        const int shares = pb.threaded ? 4 : 1;
+#pragma omp parallel for num_threads(shares) schedule(static, 1)
+        for (int i = 0; i < shares; ++i)
+            nat::pair_staged_halves(ep, pb.M, i, shares);
+    }
 
     int bad = 0;
     for (int m = 0; m < pb.M; ++m) {
@@ -676,27 +698,32 @@ TEST(NativeBrgemmEpilogue, GatedActsBiasLayouts) {
     SKIP_WITHOUT_AVX512();
     uint32_t seed = 100;
     for (gated_t g : {gated_t::silu_and_mul, gated_t::gelu_and_mul,
-                 gated_t::swiglu_oai_mul})
+                 gated_t::gelu_tanh_and_mul, gated_t::swiglu_oai_mul})
         for (data_type_t bdt : {data_type_t::none, data_type_t::f32,
                      data_type_t::bf16, data_type_t::f16})
             for (data_type_t dst : {data_type_t::f32, data_type_t::bf16})
-                for (int tn : {16, 32, 64}) {
-                    problem_t pb;
-                    pb.M = 11;
-                    pb.N = 128;
-                    pb.gated = g;
-                    pb.interleaved = g != gated_t::swiglu_oai_mul;
-                    pb.bias_dt = bdt;
-                    pb.dst_dt = dst;
-                    pb.tile_n = tn;
-                    pb.tile_m = 4;
-                    pb.ldc_pad = 3;
-                    pb.alpha = seed % 2 ? 1.0f : 0.5f;
-                    pb.acc_lo = -6.0f;
-                    pb.acc_hi = 6.0f;
-                    pb.seed = seed++;
-                    check(pb);
-                }
+                for (int tn : {16, 32, 64})
+                    for (bool paired : {false, true}) {
+                        if (paired
+                                && (g == gated_t::swiglu_oai_mul
+                                        || tn % 32 != 0))
+                            continue;
+                        problem_t pb;
+                        pb.M = 11;
+                        pb.N = 128;
+                        pb.gated = g;
+                        pb.paired = paired;
+                        pb.bias_dt = bdt;
+                        pb.dst_dt = dst;
+                        pb.tile_n = tn;
+                        pb.tile_m = 4;
+                        pb.ldc_pad = 3;
+                        pb.alpha = seed % 2 ? 1.0f : 0.5f;
+                        pb.acc_lo = -6.0f;
+                        pb.acc_hi = 6.0f;
+                        pb.seed = seed++;
+                        check(pb);
+                    }
 }
 
 TEST(NativeBrgemmEpilogue, GatedWithPostOpsAndInt8Store) {
@@ -705,7 +732,7 @@ TEST(NativeBrgemmEpilogue, GatedWithPostOpsAndInt8Store) {
     pb.M = 13;
     pb.N = 192;
     pb.gated = gated_t::silu_and_mul;
-    pb.interleaved = true;
+    pb.paired = true;
     pb.bias_dt = data_type_t::bf16;
     pb.po = {
             binary(post_op_type_t::binary_mul, data_type_t::bf16, {pb.M, pb.N}),
@@ -713,9 +740,10 @@ TEST(NativeBrgemmEpilogue, GatedWithPostOpsAndInt8Store) {
             binary(post_op_type_t::binary_add, data_type_t::f32, {1, pb.N})};
     pb.tile_n = 64;
     check(pb, 1e-3f);
+    pb.paired = false;
+    check(pb, 1e-3f);
 
     pb.gated = gated_t::swiglu_oai_mul;
-    pb.interleaved = false;
     pb.int8 = true;
     pb.dst_dt = data_type_t::u8;
     pb.dst_scale_dt = data_type_t::f32;
@@ -727,7 +755,7 @@ TEST(NativeBrgemmEpilogue, GatedWithPostOpsAndInt8Store) {
 
 // Gated calls with beta, post-ops and other destinations, as matmul_direct
 // defines them: beta reads the dst's N pre-activation columns (the gate and
-// up columns of an interleaved pack's pairs), the bias and the post-ops act
+// up columns of a paired tile), the bias and the post-ops act
 // on the pre-activation, the activation and the store (requantized for an
 // INT8 u8 / s8 dst) follow; the columns past N / 2 stay as they were.
 TEST(NativeBrgemmEpilogue, GatedBetaPostOpsDestinations) {
@@ -746,7 +774,7 @@ TEST(NativeBrgemmEpilogue, GatedBetaPostOpsDestinations) {
     uint32_t seed = 500;
     int variant = 0;
     for (gated_t g : {gated_t::silu_and_mul, gated_t::gelu_and_mul,
-                 gated_t::swiglu_oai_mul})
+                 gated_t::gelu_tanh_and_mul, gated_t::swiglu_oai_mul})
         for (data_type_t dst : {data_type_t::f32, data_type_t::bf16,
                      data_type_t::f16, data_type_t::u8, data_type_t::s8})
             for (size_t c = 0; c < chains.size(); ++c) {
@@ -755,7 +783,6 @@ TEST(NativeBrgemmEpilogue, GatedBetaPostOpsDestinations) {
                 pb.M = M;
                 pb.N = N;
                 pb.gated = g;
-                pb.interleaved = g != gated_t::swiglu_oai_mul;
                 pb.dst_dt = dst;
                 // An INT8 call's alpha and beta are its tile's.
                 pb.int8 = (dst == data_type_t::u8 || dst == data_type_t::s8)
@@ -771,6 +798,7 @@ TEST(NativeBrgemmEpilogue, GatedBetaPostOpsDestinations) {
                 pb.bias_dt = v % 2 ? data_type_t::f32 : data_type_t::bf16;
                 pb.po = chains[c];
                 pb.tile_n = v % 3 == 0 ? 16 : (v % 3 == 1 ? 32 : 64);
+                pb.paired = pb.halves() && pb.tile_n % 32 == 0 && v % 4 != 1;
                 pb.tile_m = 4;
                 pb.threaded = v % 2 == 1;
                 pb.acc_lo = -4.0f;
@@ -787,14 +815,14 @@ TEST(NativeBrgemmEpilogue, GatedSoftmaxAndNarrowBetaUnimplemented) {
     problem_t pb;
     pb.N = 128;
     pb.gated = gated_t::silu_and_mul;
-    pb.interleaved = true;
+    pb.paired = true;
     pb.po = {eltwise(post_op_type_t::softmax)};
     {
         inputs_t in = make_inputs(pb);
         buf_t dst = in.dst0;
         nat::native_epilogue_t ep;
         EXPECT_EQ(nat::prepare_epilogue(make_desc(pb), make_params(pb, in),
-                          nullptr, dst.data(), pb.interleaved, ep),
+                          nullptr, dst.data(), pb.paired, ep),
                 status_t::unimplemented);
     }
     pb.po.clear();
@@ -805,7 +833,7 @@ TEST(NativeBrgemmEpilogue, GatedSoftmaxAndNarrowBetaUnimplemented) {
         buf_t dst = in.dst0;
         nat::native_epilogue_t ep;
         EXPECT_EQ(nat::prepare_epilogue(make_desc(pb), make_params(pb, in),
-                          nullptr, dst.data(), pb.interleaved, ep),
+                          nullptr, dst.data(), pb.paired, ep),
                 pad < pb.N / 2 ? status_t::unimplemented : status_t::success)
                 << "ldc " << pb.ldc();
     }
@@ -1011,10 +1039,10 @@ TEST(NativeBrgemmEpilogue, StoreOnlyStoresTheGeneralPathsBytes) {
             }
     // Anything to apply, or another dst type, takes the general path.
     const auto store_only = [](nat::GemmDescriptor d, mm::matmul_params p,
-                                    const void *bias, bool interleaved) {
+                                    const void *bias, bool paired) {
         std::vector<uint8_t> dst(static_cast<size_t>(d.M) * d.ldc * 4);
         nat::native_epilogue_t e;
-        EXPECT_EQ(nat::prepare_epilogue(d, p, bias, dst.data(), interleaved, e),
+        EXPECT_EQ(nat::prepare_epilogue(d, p, bias, dst.data(), paired, e),
                 status_t::success);
         return e.store_only;
     };
@@ -1046,7 +1074,8 @@ TEST(NativeBrgemmEpilogue, StoreOnlyStoresTheGeneralPathsBytes) {
     mm::matmul_params f16 = p;
     f16.dtypes.dst = data_type_t::f16;
     EXPECT_FALSE(store_only(a, f16, nullptr, false));
-    // A gated activation, of split or interleaved halves.
+    // A gated activation, of interleaved pairs or of halves on paired
+    // tiles.
     a = d;
     a.gated_act = gated_t::swiglu_oai_mul;
     EXPECT_FALSE(store_only(a, p, nullptr, false));
@@ -1168,8 +1197,10 @@ TEST(NativeBrgemmEpilogue, ThreadedTilesMatchModel) {
                     {pb.M, pb.N})};
     check(pb);
     pb.gated = gated_t::gelu_and_mul;
-    pb.interleaved = true;
+    pb.paired = true;
     pb.po = {eltwise(post_op_type_t::mish)};
+    check(pb);
+    pb.paired = false;
     check(pb);
 }
 
@@ -1244,7 +1275,10 @@ TEST(NativeBrgemmEpilogue, RefusesWhatItCannotFinish) {
 
     d.gated_act = gated_t::silu_and_mul;
     EXPECT_EQ(prep(d, p, true), status_t::success);
-    EXPECT_EQ(prep(d, p, false), status_t::failure);
+    EXPECT_EQ(prep(d, p, false), status_t::success);
+    bad = d;
+    bad.N = N + 1;
+    EXPECT_EQ(prep(bad, p, false), status_t::failure);
     bad = d;
     bad.ldc = N / 2;
     EXPECT_EQ(prep(bad, p, true), status_t::success);
@@ -1287,7 +1321,7 @@ struct e2e_t {
     int lda() const { return (transA ? M : K) + lda_pad; }
     int ldb() const { return transB ? K : N; }
     int ldc() const { return n_out() + ldc_pad; }
-    bool interleave() const {
+    bool halves() const {
         return gated == gated_t::silu_and_mul || gated == gated_t::gelu_and_mul;
     }
     std::string str() const {
@@ -1378,7 +1412,6 @@ status_t run_native(const e2e_t &c, const e2e_data_t &d, buf_t &dst) {
     nat::native_weight_ref_t ref;
     ref.weight = d.w.data();
     ref.pack_nr = 32;
-    ref.interleave_split_halves = c.interleave();
     ref.weight_cache_mode = 0;
     return nat::native_brgemm_execute(
             desc, ref, d.a.data(), dst.data(), d.bias_ptr(c), p);
@@ -1566,8 +1599,8 @@ TEST(NativeBrgemmEpilogueE2E, GatedVsReferenceAndGroupCall) {
                 std::vector<float> model(static_cast<size_t>(c.M) * I);
                 for (int m = 0; m < c.M; ++m)
                     for (int i = 0; i < I; ++i) {
-                        const int gate = c.interleave() ? i : 2 * i;
-                        const int up = c.interleave() ? I + i : 2 * i + 1;
+                        const int gate = c.halves() ? i : 2 * i;
+                        const int up = c.halves() ? I + i : 2 * i + 1;
                         model[static_cast<size_t>(m) * I + i] = ref_gated(g,
                                 wide[static_cast<size_t>(m) * c.N + gate],
                                 wide[static_cast<size_t>(m) * c.N + up]);
@@ -1622,8 +1655,8 @@ TEST(NativeBrgemmEpilogueE2E, RoutedGatedOutputLayouts) {
             std::vector<float> model(static_cast<size_t>(c.M) * I);
             for (int m = 0; m < c.M; ++m)
                 for (int i = 0; i < I; ++i) {
-                    const int gate = c.interleave() ? i : 2 * i;
-                    const int up = c.interleave() ? I + i : 2 * i + 1;
+                    const int gate = c.halves() ? i : 2 * i;
+                    const int up = c.halves() ? I + i : 2 * i + 1;
                     model[static_cast<size_t>(m) * I + i] = ref_gated(g,
                             pre.get(static_cast<int64_t>(m) * c.N + gate),
                             pre.get(static_cast<int64_t>(m) * c.N + up));
@@ -1747,8 +1780,8 @@ TEST(NativeBrgemmEpilogueE2E, RoutedGatedBetaAndPostOps) {
             std::vector<float> model(static_cast<size_t>(c.M) * I);
             for (int m = 0; m < c.M; ++m)
                 for (int i = 0; i < I; ++i) {
-                    const int gate = c.interleave() ? i : 2 * i;
-                    const int up = c.interleave() ? I + i : 2 * i + 1;
+                    const int gate = c.halves() ? i : 2 * i;
+                    const int up = c.halves() ? I + i : 2 * i + 1;
                     model[static_cast<size_t>(m) * I + i] = ref_gated(g,
                             pre.get(static_cast<int64_t>(m) * c.N + gate),
                             pre.get(static_cast<int64_t>(m) * c.N + up));
@@ -2044,8 +2077,6 @@ status_t run_zero_weight(bool int8, gated_t gated,
     ref.weight = int8 ? static_cast<const void *>(w_s8.data())
                       : static_cast<const void *>(w_bf16.data());
     ref.pack_nr = 32;
-    ref.interleave_split_halves
-            = gated == gated_t::silu_and_mul || gated == gated_t::gelu_and_mul;
     ref.weight_cache_mode = 0;
     dst.assign(static_cast<size_t>(M) * n_out, -777.0f);
     const void *src = int8 ? static_cast<const void *>(a_u8.data())

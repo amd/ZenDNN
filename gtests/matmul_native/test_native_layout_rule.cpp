@@ -47,6 +47,7 @@
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/native_int8_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_brgemm_looper.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_gemv.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_operator_bridge.hpp"
@@ -218,6 +219,84 @@ TEST(NativeLayoutRule, KIsPositiveAndS8KIsBounded) {
     expect_native(query(data_type_t::f32, data_type_t::f32, kBound + 1, 64));
 }
 
+// A bf16 weight of K up to 67108864 (2^26): the bf16 kernels offset its K
+// pairs, 64 elements apart in a block, in an int.  The layout rule refuses a
+// larger K, and an M = 1 call of it gets no GEMV choice, so the native
+// BRGEMM turns it away as at M = 2: the same status and reason, before any
+// work.
+TEST(NativeLayoutRule, Bf16KWhosePairsExceedAnInt) {
+    const data_type_t bf16 = data_type_t::bf16;
+    const char *const reason
+            = "a bf16 weight of K past the bf16 kernels' int offsets";
+    EXPECT_EQ(native::kMaxNativeBf16K, 1 << 26);
+    expect_native(query(bf16, bf16, native::kMaxNativeBf16K, 64));
+    expect_aocl(query(bf16, bf16, native::kMaxNativeBf16K + 1, 64));
+    if (!has_bf16() || !native::native_base_isa())
+        GTEST_SKIP() << "needs AVX512-BF16 and AVX-512 F / BW / VL / DQ";
+    EXPECT_STREQ(native::decide_native_layout(
+                         query(bf16, bf16, native::kMaxNativeBf16K + 1, 64))
+                         .reason,
+            reason);
+
+    // The narrow kernel's widths on a [K, N] weight, and the BKC kernel's
+    // on a constant [N, K] weight on one thread.
+    struct shape_t {
+        int N;
+        bool transB;
+        native::native_gemv_t kernel;
+    };
+    for (const shape_t s :
+            {shape_t {4, false, native::native_gemv_t::bf16_narrow},
+                    shape_t {64, true, native::native_gemv_t::bf16_bkc}}) {
+        SCOPED_TRACE(native::native_gemv_name(s.kernel));
+        for (const int K : {1000, native::kMaxNativeBf16K + 1}) {
+            native::GemmDescriptor d;
+            d.M = 1;
+            d.N = s.N;
+            d.K = K;
+            d.lda = K;
+            d.ldb = s.transB ? K : s.N;
+            d.ldc = s.N;
+            d.transB = s.transB;
+            d.src_dt = bf16;
+            d.wei_dt = bf16;
+            d.dst_dt = bf16;
+            d.is_weights_const = true;
+            d.num_threads = 1;
+            matmul_params p;
+            p.dtypes.src = bf16;
+            p.dtypes.wei = bf16;
+            p.dtypes.dst = bf16;
+            EXPECT_EQ(static_cast<int>(native::decide_native_gemv(d, p).kernel),
+                    static_cast<int>(
+                            K == 1000 ? s.kernel : native::native_gemv_t::none))
+                    << "K " << K;
+        }
+    }
+
+    // Through the native BRGEMM's check, which reads no buffer for these
+    // calls: no layout or image is cached anywhere near the stand-in
+    // buffers.
+    mm::clear_matmul_weight_caches();
+    const int K = native::kMaxNativeBf16K + 1, N = 4;
+    alignas(64) uint16_t buf[64] = {};
+    for (const int M : {1, 2}) {
+        SCOPED_TRACE("M " + std::to_string(M));
+        matmul_params p;
+        p.dtypes.src = bf16;
+        p.dtypes.wei = bf16;
+        p.dtypes.dst = bf16;
+        p.lowoha_algo = matmul_algo_t::native_brgemm;
+        status_t status = status_t::success;
+        const char *why = nullptr;
+        EXPECT_TRUE(native::native_layout_check('r', false, false, M, N, K,
+                1.0f, buf, K, buf, N, nullptr, 0.0f, buf, N, true, 1, 1,
+                matmul_gated_act_t::none, p, status, why));
+        EXPECT_EQ(status, status_t::unimplemented);
+        EXPECT_STREQ(why != nullptr ? why : "", reason);
+    }
+}
+
 TEST(NativeLayoutRule, S8PerGroupWeightScalesNeedWholeQuadGroups) {
     constexpr int K = 192;
     expect_native(query(data_type_t::s8, data_type_t::u8, K, 64, 0, false, 0));
@@ -281,11 +360,11 @@ std::vector<T> raw_weight(int K, int N, int ldb, bool transB) {
 }
 
 /// native_pack_weight into a buffer of native_packed_bytes.
-std::vector<uint8_t> native_image(const void *w, data_type_t wei, int K, int N,
-        int ldb, bool transB, bool interleave = false) {
+std::vector<uint8_t> native_image(
+        const void *w, data_type_t wei, int K, int N, int ldb, bool transB) {
     std::vector<uint8_t> out(native::native_packed_bytes(wei, K, N, kNr), 0);
-    EXPECT_EQ(native::native_pack_weight(wei, w, K, N, ldb, kNr, transB,
-                      interleave, out.data(), 1),
+    EXPECT_EQ(native::native_pack_weight(
+                      wei, w, K, N, ldb, kNr, transB, out.data(), 1),
             status_t::success);
     return out;
 }
@@ -301,67 +380,59 @@ TEST(NativeLayoutRulePack, Bf16BytesEqualCustomKernelPackAt32) {
     for (int K : {1, 2, 3, 63, 64, 100})
         for (int N : {32, 96})
             for (bool transB : {false, true})
-                for (bool interleave : {false, true})
-                    for (int pad : {0, 5}) {
-                        SCOPED_TRACE("K=" + std::to_string(K)
-                                + " N=" + std::to_string(N)
-                                + " transB=" + std::to_string(transB)
-                                + " interleave=" + std::to_string(interleave)
-                                + " pad=" + std::to_string(pad));
-                        const int ldb = (transB ? K : N) + pad;
-                        const std::vector<bfloat16_t> w
-                                = raw_weight<bfloat16_t>(K, N, ldb, transB);
-                        const size_t bytes
-                                = native_image_bytes(data_type_t::bf16, K, N);
-                        const std::vector<uint8_t> got
-                                = native_image(w.data(), data_type_t::bf16, K,
-                                        N, ldb, transB, interleave);
-                        std::vector<uint8_t> want(
-                                ck::packed_weight_size_bf16(K, N, kNr), 0);
-                        ASSERT_GE(got.size(), bytes);
-                        ASSERT_GE(want.size(), bytes);
-                        ASSERT_EQ(ck::prepack_weight_into_bf16(w.data(), K, N,
-                                          ldb, kNr, transB, interleave,
-                                          want.data()),
-                                status_t::success);
-                        EXPECT_EQ(
-                                std::memcmp(got.data(), want.data(), bytes), 0);
-                    }
+                for (int pad : {0, 5}) {
+                    SCOPED_TRACE("K=" + std::to_string(K)
+                            + " N=" + std::to_string(N)
+                            + " transB=" + std::to_string(transB)
+                            + " pad=" + std::to_string(pad));
+                    const int ldb = (transB ? K : N) + pad;
+                    const std::vector<bfloat16_t> w
+                            = raw_weight<bfloat16_t>(K, N, ldb, transB);
+                    const size_t bytes
+                            = native_image_bytes(data_type_t::bf16, K, N);
+                    const std::vector<uint8_t> got = native_image(
+                            w.data(), data_type_t::bf16, K, N, ldb, transB);
+                    std::vector<uint8_t> want(
+                            ck::packed_weight_size_bf16(K, N, kNr), 0);
+                    ASSERT_GE(got.size(), bytes);
+                    ASSERT_GE(want.size(), bytes);
+                    ASSERT_EQ(ck::prepack_weight_into_bf16(w.data(), K, N, ldb,
+                                      kNr, transB, false, want.data()),
+                            status_t::success);
+                    EXPECT_EQ(std::memcmp(got.data(), want.data(), bytes), 0);
+                }
 }
 
 TEST(NativeLayoutRulePack, Int8BytesEqualCustomKernelPackAt32) {
     if (!has_vnni()) GTEST_SKIP() << "the s8 native layout needs AVX512-VNNI";
     for (int K : {1, 3, 4, 63, 64, 100})
         for (int N : {32, 96})
-            for (bool transB : {false, true})
-                for (bool interleave : {false, true}) {
-                    SCOPED_TRACE("K=" + std::to_string(K)
-                            + " N=" + std::to_string(N)
-                            + " transB=" + std::to_string(transB)
-                            + " interleave=" + std::to_string(interleave));
-                    const int ldb = (transB ? K : N) + 3;
-                    const std::vector<int8_t> w
-                            = raw_weight<int8_t>(K, N, ldb, transB);
-                    const size_t bytes
-                            = native_image_bytes(data_type_t::s8, K, N);
-                    const std::vector<uint8_t> got = native_image(w.data(),
-                            data_type_t::s8, K, N, ldb, transB, interleave);
-                    std::vector<uint8_t> want(
-                            ck::packed_weight_size_int8(K, N, kNr), 0);
-                    ASSERT_GE(got.size(), bytes);
-                    ASSERT_GE(want.size(), bytes);
-                    ASSERT_EQ(ck::prepack_weight_into_int8(w.data(), K, N, ldb,
-                                      kNr, transB, interleave, want.data()),
-                            status_t::success);
-                    EXPECT_EQ(std::memcmp(got.data(), want.data(), bytes), 0);
-                }
+            for (bool transB : {false, true}) {
+                SCOPED_TRACE("K=" + std::to_string(K)
+                        + " N=" + std::to_string(N)
+                        + " transB=" + std::to_string(transB));
+                const int ldb = (transB ? K : N) + 3;
+                const std::vector<int8_t> w
+                        = raw_weight<int8_t>(K, N, ldb, transB);
+                const size_t bytes = native_image_bytes(data_type_t::s8, K, N);
+                const std::vector<uint8_t> got = native_image(
+                        w.data(), data_type_t::s8, K, N, ldb, transB);
+                std::vector<uint8_t> want(
+                        ck::packed_weight_size_int8(K, N, kNr), 0);
+                ASSERT_GE(got.size(), bytes);
+                ASSERT_GE(want.size(), bytes);
+                ASSERT_EQ(ck::prepack_weight_into_int8(w.data(), K, N, ldb, kNr,
+                                  transB, false, want.data()),
+                        status_t::success);
+                EXPECT_EQ(std::memcmp(got.data(), want.data(), bytes), 0);
+            }
 }
 
 /// The layout of a K x N weight of wei, element by element as
 /// native_weight_view_t defines it: the reference of the pack.  The pack
 /// columns from N to whole blocks stay zero, column sums included.
-std::vector<uint8_t> reference_layout(data_type_t wei, const void *w, int K,
-        int N, int ldb, bool transB, bool interleave) {
+std::vector<uint8_t> reference_layout(
+        data_type_t wei, const void *w, int K, int N, int ldb, bool transB) {
     const bool s8 = wei == data_type_t::s8;
     const int per_group = s8 ? 4 : (wei == data_type_t::f32 ? 1 : 2);
     const size_t es = size_of(wei);
@@ -372,12 +443,11 @@ std::vector<uint8_t> reference_layout(data_type_t wei, const void *w, int K,
             0);
     const auto *src = static_cast<const uint8_t *>(w);
     for (int p = 0; p < N; ++p) {
-        const int c = interleave ? ((p & 1) ? N / 2 + p / 2 : p / 2) : p;
         uint8_t *blk = out.data() + static_cast<size_t>(p / kNr) * block;
         int32_t sum = 0;
         for (int k = 0; k < K; ++k) {
-            const size_t i = transB ? static_cast<size_t>(c) * ldb + k
-                                    : static_cast<size_t>(k) * ldb + c;
+            const size_t i = transB ? static_cast<size_t>(p) * ldb + k
+                                    : static_cast<size_t>(k) * ldb + p;
             const size_t at
                     = (static_cast<size_t>(k / per_group) * kNr + p % kNr)
                             * per_group * es
@@ -403,8 +473,8 @@ std::vector<uint8_t> random_bytes(size_t n, uint32_t seed) {
 }
 
 // The pack writes the layout byte for byte (s8 column sums included) at
-// every K tail of the vector groups, N, padded ldb, transB and interleave,
-// on one and several threads, and nothing past it; the K from 1024 on and N
+// every K tail of the vector groups, N, padded ldb and transB, on one and
+// several threads, and nothing past it; the K from 1024 on and N
 // 544 cover the tiles of a bf16 [K, N] weight of many rows, the last of them
 // partial in K pairs and in blocks.
 TEST(NativeLayoutRulePack, PackEqualsTheLayoutAtEveryTail) {
@@ -417,46 +487,40 @@ TEST(NativeLayoutRulePack, PackEqualsTheLayoutAtEveryTail) {
             for (int N : {32, 64, 96, 160, 544})
                 for (int pad : {0, 1, 37})
                     for (bool transB : {false, true})
-                        for (bool interleave : {false, true})
-                            for (int threads : {1, 3}) {
-                                const int ldb = (transB ? K : N) + pad;
-                                const size_t es = size_of(wei);
-                                const std::vector<uint8_t> w = random_bytes(
-                                        static_cast<size_t>(transB ? N : K)
-                                                * ldb * es,
-                                        ++seed);
-                                const std::vector<uint8_t> want
-                                        = reference_layout(wei, w.data(), K, N,
-                                                ldb, transB, interleave);
-                                std::vector<uint8_t> got(
-                                        native::native_packed_bytes(
-                                                wei, K, N, kNr)
-                                                + 64,
-                                        0xA5);
-                                ++cases;
-                                const bool ok = native::native_pack_weight(wei,
-                                                        w.data(), K, N, ldb,
-                                                        kNr, transB, interleave,
-                                                        got.data(), threads)
-                                                == status_t::success
-                                        && std::memcmp(got.data(), want.data(),
-                                                   want.size())
-                                                == 0
-                                        && std::all_of(
-                                                got.begin() + want.size(),
-                                                got.end(), [](uint8_t b) {
-                                    return b == 0xA5;
-                                });
-                                if (!ok && bad++ < 10)
-                                    ADD_FAILURE()
-                                            << (wei == data_type_t::s8 ? "s8"
-                                                                       : "bf16")
-                                            << " K=" << K << " N=" << N
-                                            << " ldb=" << ldb
-                                            << " transB=" << transB
-                                            << " interleave=" << interleave
-                                            << " threads=" << threads;
-                            }
+                        for (int threads : {1, 3}) {
+                            const int ldb = (transB ? K : N) + pad;
+                            const size_t es = size_of(wei);
+                            const std::vector<uint8_t> w = random_bytes(
+                                    static_cast<size_t>(transB ? N : K) * ldb
+                                            * es,
+                                    ++seed);
+                            const std::vector<uint8_t> want = reference_layout(
+                                    wei, w.data(), K, N, ldb, transB);
+                            std::vector<uint8_t> got(
+                                    native::native_packed_bytes(wei, K, N, kNr)
+                                            + 64,
+                                    0xA5);
+                            ++cases;
+                            const bool ok = native::native_pack_weight(wei,
+                                                    w.data(), K, N, ldb, kNr,
+                                                    transB, got.data(), threads)
+                                            == status_t::success
+                                    && std::memcmp(got.data(), want.data(),
+                                               want.size())
+                                            == 0
+                                    && std::all_of(got.begin() + want.size(),
+                                            got.end(), [](uint8_t b) {
+                                return b == 0xA5;
+                            });
+                            if (!ok && bad++ < 10)
+                                ADD_FAILURE()
+                                        << (wei == data_type_t::s8 ? "s8"
+                                                                   : "bf16")
+                                        << " K=" << K << " N=" << N
+                                        << " ldb=" << ldb
+                                        << " transB=" << transB
+                                        << " threads=" << threads;
+                        }
     EXPECT_EQ(bad, 0u) << "of " << cases << " packs";
 }
 
@@ -468,8 +532,8 @@ const char *wei_name(data_type_t wei) {
 // A weight of N not a multiple of 32 packs to whole blocks: its N columns
 // as the layout places them, then zero columns (s8 column sums zero) up to
 // native_padded_n, and nothing past the padded blocks; every type, both
-// storages, the interleave (N even), padded ldb, the K tails and the tiles
-// of a [K, N] weight of many rows, on one and several threads.
+// storages, padded ldb, the K tails and the tiles of a [K, N] weight of many
+// rows, on one and several threads.
 TEST(NativeLayoutRulePack, PackPadsTheColumnsPastNWithZeros) {
     if (!native::native_base_isa()) GTEST_SKIP() << "needs AVX-512 F / BW / VL";
     uint32_t seed = 7000;
@@ -481,45 +545,37 @@ TEST(NativeLayoutRulePack, PackPadsTheColumnsPastNWithZeros) {
                          63, 65, 95, 100, 545})
                 for (int pad : {0, 3})
                     for (bool transB : {false, true})
-                        for (bool interleave : {false, true})
-                            for (int threads : {1, 3}) {
-                                if (interleave && N % 2 != 0) continue;
-                                const int ldb = (transB ? K : N) + pad;
-                                const size_t es = size_of(wei);
-                                const std::vector<uint8_t> w = random_bytes(
-                                        static_cast<size_t>(transB ? N : K)
-                                                * ldb * es,
-                                        ++seed);
-                                const std::vector<uint8_t> want
-                                        = reference_layout(wei, w.data(), K, N,
-                                                ldb, transB, interleave);
-                                const size_t bytes
-                                        = native::native_packed_bytes(
-                                                wei, K, N, kNr);
-                                std::vector<uint8_t> got(bytes + 64, 0xA5);
-                                ++cases;
-                                const bool ok = bytes >= want.size()
-                                        && native::native_pack_weight(wei,
-                                                   w.data(), K, N, ldb, kNr,
-                                                   transB, interleave,
-                                                   got.data(), threads)
-                                                == status_t::success
-                                        && std::memcmp(got.data(), want.data(),
-                                                   want.size())
-                                                == 0
-                                        && std::all_of(
-                                                got.begin() + want.size(),
-                                                got.end(), [](uint8_t b) {
-                                    return b == 0xA5;
-                                });
-                                if (!ok && bad++ < 10)
-                                    ADD_FAILURE()
-                                            << wei_name(wei) << " K=" << K
-                                            << " N=" << N << " ldb=" << ldb
-                                            << " transB=" << transB
-                                            << " interleave=" << interleave
-                                            << " threads=" << threads;
-                            }
+                        for (int threads : {1, 3}) {
+                            const int ldb = (transB ? K : N) + pad;
+                            const size_t es = size_of(wei);
+                            const std::vector<uint8_t> w = random_bytes(
+                                    static_cast<size_t>(transB ? N : K) * ldb
+                                            * es,
+                                    ++seed);
+                            const std::vector<uint8_t> want = reference_layout(
+                                    wei, w.data(), K, N, ldb, transB);
+                            const size_t bytes = native::native_packed_bytes(
+                                    wei, K, N, kNr);
+                            std::vector<uint8_t> got(bytes + 64, 0xA5);
+                            ++cases;
+                            const bool ok = bytes >= want.size()
+                                    && native::native_pack_weight(wei, w.data(),
+                                               K, N, ldb, kNr, transB,
+                                               got.data(), threads)
+                                            == status_t::success
+                                    && std::memcmp(got.data(), want.data(),
+                                               want.size())
+                                            == 0
+                                    && std::all_of(got.begin() + want.size(),
+                                            got.end(), [](uint8_t b) {
+                                return b == 0xA5;
+                            });
+                            if (!ok && bad++ < 10)
+                                ADD_FAILURE() << wei_name(wei) << " K=" << K
+                                              << " N=" << N << " ldb=" << ldb
+                                              << " transB=" << transB
+                                              << " threads=" << threads;
+                        }
     EXPECT_EQ(bad, 0u) << "of " << cases << " packs";
     EXPECT_EQ(native::native_padded_n(1, kNr), 32);
     EXPECT_EQ(native::native_padded_n(32, kNr), 32);
@@ -546,46 +602,37 @@ TEST(NativeLayoutRulePack, PackReadsNoBytePastTheWeight) {
         for (int K : {1, 3, 33, 63, 129, 1025})
             for (int N : {64, 1, 2, 17, 50, 95})
                 for (bool transB : {false, true})
-                    for (bool interleave : {false, true})
-                        for (int pad : {0, 5}) {
-                            if (interleave && N % 2 != 0) continue;
-                            SCOPED_TRACE(std::string(wei_name(wei))
-                                    + " K=" + std::to_string(K)
-                                    + " N=" + std::to_string(N) + " transB="
-                                    + std::to_string(transB) + " interleave="
-                                    + std::to_string(interleave)
-                                    + " pad=" + std::to_string(pad));
-                            const int ldb = (transB ? K : N) + pad;
-                            const size_t bytes
-                                    = native::native_raw_weight_bytes(
-                                            wei, K, N, ldb, transB);
-                            const size_t mapped
-                                    = (bytes + page - 1) / page * page;
-                            void *m = mmap(nullptr, mapped + page,
-                                    PROT_READ | PROT_WRITE,
-                                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-                            ASSERT_NE(m, MAP_FAILED);
-                            auto *base = static_cast<uint8_t *>(m);
-                            ASSERT_EQ(mprotect(base + mapped, page, PROT_NONE),
-                                    0);
-                            uint8_t *w = base + mapped - bytes;
-                            const std::vector<uint8_t> src
-                                    = random_bytes(bytes, ++seed);
-                            std::memcpy(w, src.data(), bytes);
-                            const std::vector<uint8_t> want = reference_layout(
-                                    wei, w, K, N, ldb, transB, interleave);
-                            std::vector<uint8_t> got(
-                                    native::native_packed_bytes(wei, K, N, kNr),
-                                    0);
-                            EXPECT_EQ(native::native_pack_weight(wei, w, K, N,
-                                              ldb, kNr, transB, interleave,
-                                              got.data(), 2),
-                                    status_t::success);
-                            EXPECT_EQ(std::memcmp(got.data(), want.data(),
-                                              want.size()),
-                                    0);
-                            munmap(m, mapped + page);
-                        }
+                    for (int pad : {0, 5}) {
+                        SCOPED_TRACE(std::string(wei_name(wei)) + " K="
+                                + std::to_string(K) + " N=" + std::to_string(N)
+                                + " transB=" + std::to_string(transB)
+                                + " pad=" + std::to_string(pad));
+                        const int ldb = (transB ? K : N) + pad;
+                        const size_t bytes = native::native_raw_weight_bytes(
+                                wei, K, N, ldb, transB);
+                        const size_t mapped = (bytes + page - 1) / page * page;
+                        void *m = mmap(nullptr, mapped + page,
+                                PROT_READ | PROT_WRITE,
+                                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                        ASSERT_NE(m, MAP_FAILED);
+                        auto *base = static_cast<uint8_t *>(m);
+                        ASSERT_EQ(mprotect(base + mapped, page, PROT_NONE), 0);
+                        uint8_t *w = base + mapped - bytes;
+                        const std::vector<uint8_t> src
+                                = random_bytes(bytes, ++seed);
+                        std::memcpy(w, src.data(), bytes);
+                        const std::vector<uint8_t> want
+                                = reference_layout(wei, w, K, N, ldb, transB);
+                        std::vector<uint8_t> got(
+                                native::native_packed_bytes(wei, K, N, kNr), 0);
+                        EXPECT_EQ(native::native_pack_weight(wei, w, K, N, ldb,
+                                          kNr, transB, got.data(), 2),
+                                status_t::success);
+                        EXPECT_EQ(std::memcmp(
+                                          got.data(), want.data(), want.size()),
+                                0);
+                        munmap(m, mapped + page);
+                    }
 #endif
 }
 
@@ -1155,8 +1202,6 @@ TEST_F(NativeLayoutRuleRoute, GatedActivationOnRawWeightReachesNative) {
                 if (per_call) p.lowoha_algo = matmul_algo_t::native_brgemm;
                 native::native_weight_ref_t ref
                         = weight_ref(c.wei.data(), kNr, 0);
-                ref.interleave_split_halves
-                        = act != matmul_gated_act_t::swiglu_oai_mul;
                 const bfloat16_t canary(kCanary);
                 std::vector<bfloat16_t> direct(
                         static_cast<size_t>(c.M) * ldc, canary);
@@ -1174,11 +1219,12 @@ TEST_F(NativeLayoutRuleRoute, GatedActivationOnRawWeightReachesNative) {
             }
 }
 
-// A gated call with a softmax: under ALGO 10 the native BRGEMM returns
-// unimplemented, with dst untouched; with ALGO unset the one-op group route
-// runs it on AOCL-DLP, which takes a gated activation only with post-ops its
-// chain applies (unimplemented, dst untouched), and serves it in a build
-// without AOCL-DLP.  A gated call over a weight of N not a multiple of 32 is
+// A gated call with a softmax: with lowoha_algo native_brgemm the native
+// BRGEMM returns unimplemented, with dst untouched; with ALGO unset the
+// one-op group route runs it on AOCL-DLP, which takes a gated activation only
+// with post-ops its chain applies (unimplemented, dst untouched), and serves
+// it in a build without AOCL-DLP; under ALGO 10 the native BRGEMM hands it to
+// that route.  A gated call over a weight of N not a multiple of 32 is
 // served over its padded layout, with the group route's result within its
 // band.
 TEST_F(NativeLayoutRuleRoute, GatedCallsNativeDoesNotServeReturnAnError) {
@@ -1217,10 +1263,25 @@ TEST_F(NativeLayoutRuleRoute, GatedCallsNativeDoesNotServeReturnAnError) {
             reset_grp_matmul_caches();
             config_.cfg.set_algo(kAlgoNative);
             if (post_op) {
-                EXPECT_EQ(refused_call(c.M, c.N, c.K, c.src.data(), c.K,
+                EXPECT_EQ(routed_call(c.M, c.N, c.K, c.src.data(), c.K,
                                   w_native.data(), c.ldb, false, dst.data(),
-                                  c.N, p, 1, act),
+                                  c.N, p, 1, true, nullptr, act),
+                        want_status);
+                EXPECT_EQ(std::memcmp(dst.data(), want.data(),
+                                  want.size() * sizeof(float)),
+                        0);
+                EXPECT_EQ(native::native_weight_layouts(w_native.data()), 0u);
+                reset_grp_matmul_caches();
+                config_.cfg.set_algo(kAlgoNone);
+                matmul_params named = p;
+                named.lowoha_algo = matmul_algo_t::native_brgemm;
+                std::vector<float> refused(want.size(), kCanary);
+                EXPECT_EQ(refused_call(c.M, c.N, c.K, c.src.data(), c.K,
+                                  w_native.data(), c.ldb, false, refused.data(),
+                                  c.N, named, 1, act),
                         status_t::unimplemented);
+                EXPECT_EQ(std::count(refused.begin(), refused.end(), kCanary),
+                        static_cast<std::ptrdiff_t>(refused.size()));
                 EXPECT_EQ(native::native_weight_layouts(w_native.data()), 0u);
             } else {
                 ASSERT_EQ(routed_call(c.M, c.N, c.K, c.src.data(), c.K,
@@ -1390,10 +1451,15 @@ TEST_F(NativeLayoutRuleRoute, RefusedCallOnAnInPlaceImageFails) {
     }
 }
 
-// The same calls on a raw weight that ask for the native BRGEMM return an
+// The same calls on a raw weight that name the native BRGEMM return an
 // error, with dst untouched: the native BRGEMM keeps nothing for the weight
-// and the weight stays raw.  A batched call asks for it only by naming it
-// (NativeBrgemmDeclinedRoute.BatchedCallsAskForTheNativeBrgemmOnlyByName).
+// and the weight stays raw.  Under ALGO 10 without lowoha_algo it hands them
+// to the default route: the status and dst of the same call with the
+// algorithm unset, the weight raw; the column-major call on its constant
+// weight, the reordered source and the f32 source over the bf16 weight,
+// which the default route does not compute correctly, keep unimplemented
+// with dst untouched.  A batched call asks for it only by
+// naming it (NativeBrgemmDeclinedRoute.BatchedCallsAskForTheNativeBrgemmOnlyByName).
 TEST_F(NativeLayoutRuleRoute, RefusedCallOnARawWeightReturnsAnError) {
     if (!has_bf16()) GTEST_SKIP() << "needs AVX512-BF16";
     for (bool per_call : {true, false})
@@ -1420,7 +1486,8 @@ TEST_F(NativeLayoutRuleRoute, RefusedCallOnARawWeightReturnsAnError) {
                     : static_cast<const void *>(src.data());
             matmul_params p = c.params();
             if (per_call) p.lowoha_algo = matmul_algo_t::native_brgemm;
-            const status_t st = [&] {
+            const auto run
+                    = [&](std::vector<bfloat16_t> &w, std::vector<float> &out) {
                 matmul_params q = p;
                 q.dtypes.src = call.src_dt;
                 q.mem_format_a = call.mem_format_a;
@@ -1440,8 +1507,26 @@ TEST_F(NativeLayoutRuleRoute, RefusedCallOnARawWeightReturnsAnError) {
                         col ? c.M : c.N, true, bp, q,
                         call.gated == matmul_gated_act_t::none ? nullptr
                                                                : &act);
-            }();
-            EXPECT_NE(st, status_t::success);
+            };
+            const status_t st = run(w, out);
+            if (per_call) {
+                EXPECT_NE(st, status_t::success);
+            } else if (call.layout != 'r' || call.mem_format_a != 'n'
+                    || call.src_dt != data_type_t::bf16) {
+                EXPECT_EQ(st, status_t::unimplemented);
+                EXPECT_TRUE(std::all_of(out.begin(), out.end(),
+                        [](float x) { return x == kCanary; }));
+            } else {
+                reset_grp_matmul_caches();
+                config_.cfg.set_algo(kAlgoNone);
+                std::vector<bfloat16_t> w_unset = c.wei;
+                std::vector<float> out_unset(out.size(), kCanary);
+                EXPECT_EQ(run(w_unset, out_unset), st);
+                EXPECT_EQ(std::memcmp(out.data(), out_unset.data(),
+                                  out.size() * sizeof(float)),
+                        0)
+                        << "dst differs from the default route's";
+            }
             EXPECT_EQ(native::native_weight_layouts(w.data()), 0u);
             EXPECT_FALSE(packed_in_place(w));
             EXPECT_EQ(std::memcmp(w.data(), c.wei.data(),
@@ -1451,7 +1536,10 @@ TEST_F(NativeLayoutRuleRoute, RefusedCallOnARawWeightReturnsAnError) {
 }
 
 // A GGML-packed weight is never read in the native layout: the native
-// BRGEMM returns unimplemented for a call on it and leaves dst untouched.
+// BRGEMM returns unimplemented for a call on it that names it and leaves dst
+// untouched; under ALGO 10 without lowoha_algo it hands the call back, or
+// in a build without AOCL-DLP, whose reference kernel does not read the
+// pack, returns unimplemented.
 TEST_F(NativeLayoutRuleRoute, GgmlPackedWeightReturnsAnError) {
     if (!has_vnni()) GTEST_SKIP() << "needs AVX512-VNNI";
     config_.cfg.set_algo(kAlgoNative);
@@ -1461,6 +1549,12 @@ TEST_F(NativeLayoutRuleRoute, GgmlPackedWeightReturnsAnError) {
     std::vector<int8_t> w = c.wei;
     std::vector<float> dst(static_cast<size_t>(c.M) * c.N, kCanary);
     status_t st = status_t::success;
+    EXPECT_EQ(native::native_layout_matmul('r', false, false, c.M, c.N, c.K,
+                      1.0f, c.src.data(), c.K, w.data(), c.N, nullptr, 0.0f,
+                      dst.data(), c.N, true, 1, kThreads,
+                      matmul_gated_act_t::none, p, nullptr, st),
+            !ZENDNNL_DEPENDS_AOCLDLP);
+    p.lowoha_algo = matmul_algo_t::native_brgemm;
     EXPECT_TRUE(native::native_layout_matmul('r', false, false, c.M, c.N, c.K,
             1.0f, c.src.data(), c.K, w.data(), c.N, nullptr, 0.0f, dst.data(),
             c.N, true, 1, kThreads, matmul_gated_act_t::none, p, nullptr, st));
@@ -1639,8 +1733,8 @@ std::vector<uint8_t> aocl_prepack(const void *w, data_type_t wei,
 
 /// The request an ALGO 10 call on an AOCL prepack makes of the native weight
 /// cache.
-native::native_raw_weight_t aocl_request(const void *buffer, data_type_t wei,
-        int K, int N, bool transB, bool interleave = false) {
+native::native_raw_weight_t aocl_request(
+        const void *buffer, data_type_t wei, int K, int N, bool transB) {
     native::native_raw_weight_t r;
     r.wei_dt = wei;
     r.weight = buffer;
@@ -1649,7 +1743,6 @@ native::native_raw_weight_t aocl_request(const void *buffer, data_type_t wei,
     r.ldb = transB ? K : N;
     r.transB = transB;
     r.pack_nr = kNr;
-    r.interleave_split_halves = interleave;
     r.aocl_blocked = true;
     return r;
 }
@@ -2016,15 +2109,14 @@ TEST_F(NativeLayoutRuleRoute, AoclPrepackedGatedActivationUnderAlgo10) {
             SCOPED_TRACE("gated_act " + std::to_string(static_cast<int>(act))
                     + " wc=" + std::to_string(wc));
             reset_grp_matmul_caches();
-            const bool interleave = act != matmul_gated_act_t::swiglu_oai_mul;
             std::vector<uint8_t> packed
                     = aocl_prepack(c.wei.data(), data_type_t::bf16,
                             data_type_t::bf16, c.K, c.N, c.ldb, false);
-            const std::vector<uint8_t> image = native_image(c.wei.data(),
-                    data_type_t::bf16, c.K, c.N, c.ldb, false, interleave);
+            // Every activation's image is the plain layout.
+            const std::vector<uint8_t> image = native_image(
+                    c.wei.data(), data_type_t::bf16, c.K, c.N, c.ldb, false);
             matmul_params p = c.params(data_type_t::bf16);
             native::native_weight_ref_t ref = weight_ref(c.wei.data(), kNr, 0);
-            ref.interleave_split_halves = interleave;
             const bfloat16_t canary(kCanary);
             const int ldc = c.N / 2;
             std::vector<bfloat16_t> want(

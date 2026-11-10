@@ -180,6 +180,13 @@ inline int native_int8_call_rows(const native_plan_t &p, int nv) {
 /// call, with the pass budget of the plan.
 int native_int8_pass_quads(
         const native_plan_t &p, int k_quads, int cw, int rows, int max_mr);
+/// Quads per K pass of the one group (group_quads quads) of an s4 tile cw
+/// columns wide and rows tall, max_mr rows per call: the whole group while
+/// the tile takes one row call or the group's slab and one call's source
+/// rows fit the pass budget of the plan; else equal passes of whole octets
+/// within it, so every row call after the first reads a pass's slab again.
+int native_int4_pass_quads(
+        const native_plan_t &p, int group_quads, int cw, int rows, int max_mr);
 
 /// A partial config and where it came from.  Owned by its source and
 /// immutable, except for the one-warning flag.

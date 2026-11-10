@@ -37,22 +37,15 @@ namespace native {
 inline constexpr int kMaxTileMr = 12;
 inline constexpr int kMaxTileNr = kNativeInt8MaxCallCols;
 
-/// The f32 values at pack columns p0 .. p0 + cw (cw a multiple of 16) of a
-/// per-column (stride 1, weight column order) or per-tensor (stride 0)
-/// vector of f32, bf16 or f16: in place for f32 per column over a plain
-/// pack, else converted, exactly, into buf.
+/// The f32 values at weight columns p0 .. p0 + cw (cw a multiple of 16) of
+/// a per-column (stride 1) or per-tensor (stride 0) vector of f32, bf16 or
+/// f16: in place for f32 per column, else converted, exactly, into buf.
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
-static inline const float *column_values(const void *v, data_type_t dt,
-        int stride, const native_weight_view_t &w, int p0, int cw, float *buf) {
+static inline const float *column_values(
+        const void *v, data_type_t dt, int stride, int p0, int cw, float *buf) {
     if (stride == 0) {
         std::fill(
                 buf, buf + cw, zendnnl::memory::read_and_cast<float>(v, dt, 0));
-        return buf;
-    }
-    if (w.interleaved) {
-        for (int j = 0; j < cw; ++j)
-            buf[j] = zendnnl::memory::read_and_cast<float>(
-                    v, dt, w.logical_col(p0 + j));
         return buf;
     }
     if (dt == data_type_t::f32) return static_cast<const float *>(v) + p0;
@@ -67,22 +60,58 @@ static inline const float *column_values(const void *v, data_type_t dt,
     return buf;
 }
 
-/// column_values of the pack columns p0 .. p0 + cols only (cols <= cw, the
+/// column_values of a call of 32 columns whose first 16 are the weight
+/// columns p0 .. p0 + 16 and whose second 16 are p1 .. p1 + 16 (a paired
+/// tile's up run, or the next block), into buf.
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
+static inline const float *column_values_apart(
+        const void *v, data_type_t dt, int stride, int p0, int p1, float *buf) {
+    for (int h = 0; h < 2; ++h) {
+        float *out = buf + 16 * h;
+        const float *in
+                = column_values(v, dt, stride, h == 0 ? p0 : p1, 16, out);
+        if (in != out) _mm512_storeu_ps(out, _mm512_loadu_ps(in));
+    }
+    return buf;
+}
+
+/// The column sums of that call, into buf.
+inline const int32_t *col_sums_apart(
+        const native_weight_view_t &w, int p0, int p1, int32_t *buf) {
+    std::copy(w.col_sum(p0), w.col_sum(p0) + 16, buf);
+    std::copy(w.col_sum(p1), w.col_sum(p1) + 16, buf + 16);
+    return buf;
+}
+
+/// The weight columns of the second 16 columns of the call of nv vectors at
+/// column t of the tile of pack columns n0 .. n0 + nr: the next 16 columns
+/// of the block, or on a paired view the up run (native_weight_view_t).
+inline int second_col(
+        const native_weight_view_t &w, int n0, int nr, int t, int nv, int p0) {
+    return w.paired && nv == 2 ? w.tile_col(n0, nr, t + 16) : p0 + 16;
+}
+
+/// Whether that call's second 16 columns lie elsewhere than right after its
+/// first 16 inside one block.
+inline bool second_apart(
+        const native_weight_view_t &w, int nv, int p0, int p1) {
+    return nv == 2 && (p1 != p0 + 16 || p0 % w.pack_nr != 0);
+}
+
+/// column_values of the columns p0 .. p0 + cols only (cols <= cw, the
 /// columns below the weight's N), the other cw - cols values zero, into
 /// buf: no element of v is read past the weight's N columns.
 static inline const float *column_values_below(const void *v, data_type_t dt,
-        int stride, const native_weight_view_t &w, int p0, int cw, int cols,
-        float *buf) {
+        int stride, int p0, int cw, int cols, float *buf) {
     for (int j = 0; j < cw; ++j)
-        buf[j] = j < cols ? zendnnl::memory::read_and_cast<float>(v, dt,
-                                    stride == 0 ? 0 : w.logical_col(p0 + j))
+        buf[j] = j < cols ? zendnnl::memory::read_and_cast<float>(
+                                    v, dt, stride == 0 ? 0 : p0 + j)
                           : 0.0f;
     return buf;
 }
 
 /// The destination at row and columns p .. p + 16, read as float the way
-/// the reference reads it: exactly, an s32 value rounded to nearest.  Pack
-/// columns are destination columns: a call with beta has a plain pack.
+/// the reference reads it: exactly, an s32 value rounded to nearest.
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
 static inline __m512 dst_values(
         const native_int8_call_t &call, int row, int p) {
@@ -152,19 +181,6 @@ static inline __m512 dst_lanes(
     return _mm512_load_ps(v);
 }
 
-/// dst_values over an interleaved pack (p even): pack column p + 2t holds
-/// gate column p / 2 + t and p + 2t + 1 up column w.N / 2 + p / 2 + t.
-ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
-static inline __m512 dst_pair_values(const native_int8_call_t &call,
-        const native_weight_view_t &w, int row, int p) {
-    alignas(64) static constexpr int32_t kPairs[16]
-            = {0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23};
-    const size_t at = static_cast<size_t>(row) * call.ldc + p / 2;
-    const __mmask16 half = static_cast<__mmask16>(0xFF);
-    return _mm512_permutex2var_ps(dst_lanes(call, at, half),
-            _mm512_load_si512(kPairs), dst_lanes(call, at + w.N / 2, half));
-}
-
 /// dst_values of the lanes below lanes (the destination's columns below the
 /// weight's N), the others zero; no column from N on is read.
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
@@ -176,19 +192,25 @@ static inline __m512 dst_values_below(
     return dst_lanes(call, static_cast<size_t>(row) * call.ldc + p, k);
 }
 
-/// dst_pair_values of the pack columns p .. p + lanes (lanes even when below
-/// 16: whole gate / up pairs below the weight's N), the others zero; no
-/// gate or up column of a pair past N is read.
+/// Whether beta * C of a call whose integer sum the tile scales follows the
+/// scales: into an f32, bf16 or f16 destination, as matmul_direct defines
+/// it; into an integer one it joins the sum before them.
+inline bool native_int8_beta_after_scales(data_type_t dst_dt) {
+    return dst_dt == data_type_t::f32 || dst_dt == data_type_t::bf16
+            || dst_dt == data_type_t::f16;
+}
+
+/// beta * C at row and columns p .. p + 16 of call's destination, the
+/// product rounded on its own.  Tail: only the first lanes columns lie below
+/// the weight's N, and no column past it is read.
+template <bool Tail>
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
-static inline __m512 dst_pair_values_below(const native_int8_call_t &call,
-        const native_weight_view_t &w, int row, int p, int lanes) {
-    alignas(64) static constexpr int32_t kPairs[16]
-            = {0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23};
-    const size_t at = static_cast<size_t>(row) * call.ldc + p / 2;
-    const int pairs = std::min(8, std::max(0, lanes / 2));
-    const __mmask16 half = static_cast<__mmask16>((1u << pairs) - 1u);
-    return _mm512_permutex2var_ps(dst_lanes(call, at, half),
-            _mm512_load_si512(kPairs), dst_lanes(call, at + w.N / 2, half));
+static inline __m512 native_int8_beta_term(const native_int8_call_t &call,
+        int row, int p, int lanes, __m512 beta) {
+    if constexpr (Tail)
+        return avx512_mul_unfused(dst_values_below(call, row, p, lanes), beta);
+    else
+        return avx512_mul_unfused(dst_values(call, row, p), beta);
 }
 
 /// compute_int8_tile of a call with per-tensor or per-channel weight scales;
@@ -225,19 +247,10 @@ void compute_int4_group_tile(const native_plan_t &plan,
 int native_int8_group_span(const native_plan_t &plan, int groups,
         int group_quads, int cw, int rows, int max_mr, int quad_bytes = 4);
 
-/// The per-group weight scales of call (f32, bf16 or f16) at pack columns
-/// p0 .. p0 + cw (multiples of 16, and p0 + cw <= w.N: each group's gate and
-/// up scales are read cw / 2 at a time from its row) of the interleaved pack
-/// w, for groups g0 .. g0 + n, as f32, exactly, cw apart, into buf: pack
-/// column p holds weight column w.logical_col(p).
-void gather_group_wei_scales(const native_int8_call_t &call,
-        const native_weight_view_t &w, int g0, int n, int p0, int cw,
-        float *buf);
-
-/// The per-group weight scales of call at pack columns p0 .. p0 + cols of w
-/// (plain or interleaved; cols <= cw, the columns below the weight's N), for
-/// groups g0 .. g0 + n, as f32, exactly, cw apart, into buf; the other cw -
-/// cols values of a group are zero and no scale past N is read.
+/// The per-group weight scales of call at the weight columns p0 .. p0 +
+/// cols of w (cols <= cw, the columns below the weight's N), for groups g0
+/// .. g0 + n, as f32, exactly, cw apart, into buf; the other cw - cols
+/// values of a group are zero and no scale past N is read.
 void gather_group_wei_scales_below(const native_int8_call_t &call,
         const native_weight_view_t &w, int g0, int n, int p0, int cw, int cols,
         float *buf);

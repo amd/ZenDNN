@@ -154,7 +154,7 @@ void apply_bmm_postop_offsets(
 *
 * @param native The call asks for the native BRGEMM (ZENDNNL_MATMUL_ALGO=10 or
 *        lowoha_algo native_brgemm, native_brgemm_requested), which also takes
-*        f16 weight scales.
+*        f16 weight and source scales.
 * @return status_t::failure for s4-weight parameters the W4A8 path does not
 *         take, status_t::success otherwise
 */
@@ -186,6 +186,17 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
         const void *dst, const int M, const int N, const int K,
         const int Batch_A, const int Batch_B, const matmul_params &params,
         const bool is_weights_const);
+
+/**
+* @brief validate_matmul_direct_inputs with the rules of the native BRGEMM
+*        (native), or with those of the other routes, whatever the call asks
+*        for; the overload above takes the native BRGEMM's for a call that
+*        asks for it (native_brgemm_requested).
+*/
+status_t validate_matmul_direct_inputs(const void *src, const void *weight,
+        const void *dst, const int M, const int N, const int K,
+        const int Batch_A, const int Batch_B, const matmul_params &params,
+        const bool is_weights_const, const bool native);
 
 inline bool quant_scale_dtype_supported(data_type_t dt) noexcept {
     return dt == data_type_t::f32 || dt == data_type_t::bf16;

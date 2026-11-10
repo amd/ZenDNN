@@ -1136,7 +1136,7 @@ TEST_F(NativeWeightLifetime, GemvReadsOfAWeightWaitForItsRewrite) {
 // than the other calls take.
 TEST_F(NativeWeightLifetime, FirstLayoutsGoOnWhileARewriteWaitsForAGemv) {
 #if defined(__linux__)
-    const int K = 1 << 27, n = 4;
+    const int K = nat::kMaxNativeBf16K, n = 4;
     const size_t wei_bytes = static_cast<size_t>(K) * n * sizeof(uint16_t);
     const size_t src_bytes = static_cast<size_t>(K) * sizeof(uint16_t);
     struct mapping_t {

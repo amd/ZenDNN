@@ -46,6 +46,7 @@
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_brgemm_looper.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_int8_call.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_int8_tile_internal.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_cost_model.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_planner.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_hw.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_pack.hpp"
@@ -411,13 +412,15 @@ struct case_t {
     int threads = 4; ///< 0: every thread
     int calls = 1; ///< native calls on the same weight
     /// The call goes to native_brgemm_execute directly: matmul_direct does
-    /// not take it (an integer dst, f16 source scales, an f32 source with a
-    /// bf16 dst).
+    /// not take it (an integer dst, an f32 source with a bf16 dst).
     bool direct = false;
     /// The full tiles of the call over its plain pack take their groups in
     /// more than one batch, and with odd_batches the batches past the first
     /// start on the high nibbles of a K octet.
     bool batches = false, odd_batches = false;
+    /// The full tiles of the call over its plain pack take its one group in
+    /// more than one K pass.
+    bool passes = false;
     int K() const { return gs * G; }
     bool integer_dst() const { return dst == kS8 || dst == kU8 || dst == kS32; }
     /// The order decide_int8_call takes for the call.
@@ -426,8 +429,9 @@ struct case_t {
     }
     /// The source scales are per group of the weight's groups.
     bool src_groups() const { return gran == gran_t::group && G > 1; }
-    /// The reference order over one group over K: alpha and beta before the
-    /// source and weight scales.
+    /// The reference order over one group over K: alpha before the source
+    /// and weight scales, beta after them into an f32 or bf16 dst and before
+    /// them into an integer one.
     bool scales_after_group() const {
         return G == 1 && (alpha != 1.0f || beta != 0.0f);
     }
@@ -661,21 +665,25 @@ int weight_at(const case_t &c, const operands_t &o, int k, int n) {
 /// FMA per group with the product of its source and weight scales, zero
 /// where the group's sum is zero, or one rounding per operation), then
 /// alpha, beta, the bias and the post-ops, as the reference algorithm
-/// orders them: over one group over K, alpha and beta come before the
-/// source and weight scales.
+/// orders them: over one group over K, alpha comes before the source and
+/// weight scales, and beta after them into an f32 or bf16 dst, before them
+/// into any other.
 float model_at(
         const case_t &c, const operands_t &o, const source_t &s, int m, int n) {
     const int K = c.K(), G = c.G, gs = c.gs;
     const bool fused = c.fused();
     const bool after = c.scales_after_group();
+    const bool beta_last = c.dst == kF32 || c.dst == kBf16;
     // beta of a gated call reads the pre-activation columns: a call of
     // beta is not gated here.
+    const auto beta_term = [&]() {
+        return nt::load_f32(
+                       o.init.get(), c.dst, static_cast<size_t>(m) * o.ldc + n)
+                * c.beta;
+    };
     const auto add_alpha_beta = [&](float v) {
         if (c.alpha != 1.0f) v *= c.alpha;
-        if (c.beta != 0.0f)
-            v += nt::load_f32(o.init.get(), c.dst,
-                         static_cast<size_t>(m) * o.ldc + n)
-                    * c.beta;
+        if (c.beta != 0.0f) v += beta_term();
         return v;
     };
     float sum = 0.0f;
@@ -693,9 +701,11 @@ float model_at(
             sum = std::fma(static_cast<float>(d), ws, sum);
         } else {
             float v = static_cast<float>(d);
-            if (after) v = add_alpha_beta(v);
+            if (after && c.alpha != 1.0f) v *= c.alpha;
+            if (after && c.beta != 0.0f && !beta_last) v += beta_term();
             v = v * sa;
             v = v * ws;
+            if (after && c.beta != 0.0f && beta_last) v += beta_term();
             sum = after ? v : sum + v;
         }
     }
@@ -784,9 +794,6 @@ status_t run_direct(const nt::call_t &c) {
     nat::native_weight_ref_t ref;
     ref.weight = c.wei;
     ref.pack_nr = nat::kNativeLayoutPackNr;
-    ref.interleave_split_halves
-            = c.gated == mm::matmul_gated_act_t::silu_and_mul
-            || c.gated == mm::matmul_gated_act_t::gelu_and_mul;
     ref.weight_cache_mode = 0;
     return nat::native_brgemm_execute(
             desc, ref, c.src, c.dst, c.bias, c.params);
@@ -847,6 +854,31 @@ nat::native_problem_t problem_of(const nt::call_t &c) {
     return ::testing::AssertionSuccess();
 }
 
+/// The K passes of the one group the full tiles of the call over its plain
+/// pack take at the process planner's plan, at each of their call widths,
+/// as compute_int4_group_tile cuts them (native_int4_pass_quads): more than
+/// one.
+::testing::AssertionResult tiles_take_passes(
+        const case_t &c, const operands_t &o) {
+    const buffer_t scale = copy_of(o.src_scale);
+    const nat::native_plan_t plan = nat::native_planner().plan(
+            problem_of(make_call(c, o, o.wei.get(), nullptr, scale)));
+    const int rows = std::min(plan.mb, c.M);
+    const int quads = c.K() / 4;
+    for (int col = 0; col < plan.nr;) {
+        const int cw = nat::native_int8_col_width(plan, plan.nr - col);
+        const int max_mr = nat::native_int8_call_rows(plan, cw / 16);
+        const int pass
+                = nat::native_int4_pass_quads(plan, quads, cw, rows, max_mr);
+        if (pass >= quads)
+            return ::testing::AssertionFailure()
+                    << "one pass of " << quads << " quads at " << cw
+                    << " columns";
+        col += cw;
+    }
+    return ::testing::AssertionSuccess();
+}
+
 /// The call on the native BRGEMM into a copy of the initial dst, calls times
 /// (through matmul_direct under ALGO 10 unless direct); every call must be
 /// served, each with the same result.
@@ -888,19 +920,16 @@ std::vector<uint8_t> layout_of(
         const case_t &c, const operands_t &o, const buffer_t &raw) {
     std::vector<uint8_t> out(nat::native_packed_bytes(
             kS4, c.K(), c.N, nat::kNativeLayoutPackNr));
-    const bool interleave = c.gated == mm::matmul_gated_act_t::silu_and_mul
-            || c.gated == mm::matmul_gated_act_t::gelu_and_mul;
     EXPECT_EQ(nat::native_pack_weight(kS4, raw.get(), c.K(), c.N, o.ldb,
-                      nat::kNativeLayoutPackNr, c.transB, interleave,
-                      out.data(), 1),
+                      nat::kNativeLayoutPackNr, c.transB, out.data(), 1),
             status_t::success);
     return out;
 }
 
 /// matmul_direct takes the call for the reference algorithm: f16 weight
-/// scales it takes for the native BRGEMM only.
+/// and source scales it takes for the native BRGEMM only.
 bool reference_takes(const case_t &c) {
-    return !c.direct && c.wei_scale_dt != kF16;
+    return !c.direct && c.wei_scale_dt != kF16 && c.src_scale_dt != kF16;
 }
 
 /// The default route runs the call on its custom kernel: the fused order (a
@@ -937,6 +966,7 @@ TEST_P(NativeBrgemmInt4Calls, MatchTheirOrder) {
     const case_t &c = GetParam();
     const operands_t o = make_operands(c);
     if (c.batches) { EXPECT_TRUE(tiles_take_batches(c, o, c.odd_batches)); }
+    if (c.passes) { EXPECT_TRUE(tiles_take_passes(c, o)); }
     const buffer_t raw = copy_of(o.wei);
     const source_t s = source_of(c, o);
     // The model reads the raw weight, which an in-place call rewrites.
@@ -1060,6 +1090,22 @@ std::vector<case_t> call_cases() {
         c.M = 9;
         add(c);
     }
+    // One source row of per-group scales, quantized on the calling thread:
+    // fewer and more groups than a team of every thread, from a bf16 or an
+    // f32 source.
+    for (int G : {30, 40})
+        for (src_t src : {src_t::bf16, src_t::f32}) {
+            case_t c;
+            c.M = 1;
+            c.N = 64;
+            c.gs = 128;
+            c.G = G;
+            c.gran = gran_t::group;
+            c.src = src;
+            c.dst = src == src_t::f32 ? kF32 : kBf16;
+            c.threads = 0;
+            add(c);
+        }
     // Sources, their scales and the weight scales.
     for (src_t src : {src_t::bf16, src_t::s8})
         for (gran_t gran : {gran_t::tensor, gran_t::token, gran_t::group})
@@ -1136,12 +1182,13 @@ std::vector<case_t> call_cases() {
         c.gran = gran_t::group;
         add(c);
     }
-    // alpha and beta over one group over K, before the source and weight
-    // scales, and over groups, after their sum, against the reference
+    // alpha over one group over K before the source and weight scales, beta
+    // after them into a float dst and before them into an integer one, and
+    // both over groups after their sum, against the reference
     // algorithm: a static or a dynamic source, per tensor at M 1, per token
     // or per group of one, a bf16 or f32 dst, a dst of padded columns, and
     // an integer dst (with the checks off); and alpha over one group of the
-    // interleaved pack of a gated activation, against the model.
+    // paired tiles of a gated activation, against the model.
     {
         case_t c;
         c.src = src_t::s8;
@@ -1209,7 +1256,9 @@ std::vector<case_t> call_cases() {
         q.alpha = 1.0f;
         add(q);
     }
-    // Gated activations over interleaved packs.
+    // Gated activations over the plain layout: [gate | up] halves paired in
+    // the tiles (N a multiple of 64) or staged rows (every other even N),
+    // and interleaved pairs.
     for (mm::matmul_gated_act_t act : {mm::matmul_gated_act_t::silu_and_mul,
                  mm::matmul_gated_act_t::gelu_and_mul,
                  mm::matmul_gated_act_t::swiglu_oai_mul})
@@ -1222,9 +1271,20 @@ std::vector<case_t> call_cases() {
             c.bias = kBf16;
             add(c);
         }
-    // An f32 source or dst, which matmul_direct takes, and f16 weight scales,
-    // which it takes for the native BRGEMM; integer destinations, f16 source
-    // scales and an f32 source with a bf16 dst, which it does not take,
+    for (mm::matmul_gated_act_t act : {mm::matmul_gated_act_t::silu_and_mul,
+                 mm::matmul_gated_act_t::gelu_and_mul,
+                 mm::matmul_gated_act_t::gelu_tanh_and_mul,
+                 mm::matmul_gated_act_t::swiglu_oai_mul})
+        for (int N = 2; N <= 66; N += 2) {
+            case_t c;
+            c.gated = act;
+            c.N = N;
+            c.M = 5;
+            add(c);
+        }
+    // An f32 source or dst, which matmul_direct takes, and f16 weight and
+    // source scales, which it takes for the native BRGEMM; integer
+    // destinations and an f32 source with a bf16 dst, which it does not take,
     // through native_brgemm_execute.
     for (data_type_t dst : {kF32, kBf16, kS8, kU8, kS32})
         for (src_t src : {src_t::bf16, src_t::f32}) {
@@ -1240,7 +1300,8 @@ std::vector<case_t> call_cases() {
             c.gran = gran_t::group;
             add(c);
             c.src_scale_dt = kF16;
-            c.direct = true;
+            add(c);
+            c.gran = gran_t::token;
             add(c);
         }
     for (data_type_t ws : {kF32, kBf16, kF16}) {
@@ -1251,6 +1312,16 @@ std::vector<case_t> call_cases() {
         c.M = 6;
         add(c);
     }
+    for (gran_t gran : {gran_t::token, gran_t::group})
+        for (data_type_t ws : {kF32, kF16}) {
+            case_t c;
+            c.src = src_t::s8;
+            c.gran = gran;
+            c.src_scale_dt = kF16;
+            c.wei_scale_dt = ws;
+            c.M = 7;
+            add(c);
+        }
     // Weight cache modes, repeated calls, threads.
     for (int wc : {0, 1, 2})
         for (int threads : {1, 7, 0}) {
@@ -1270,7 +1341,8 @@ std::vector<case_t> call_cases() {
     // twice the budget, in batches of whole octets (groups of 2 K quads) and
     // of an odd number of quads (groups of 3, at weight cache 2 over the
     // image).  Scales gathered 32 groups at a time over 100 groups: the last
-    // 8 columns of N 40, and an interleaved pack.
+    // 8 columns of N 40; and the same groups over the paired tiles of a gated
+    // call, which read them in place.
     for (gran_t gran : {gran_t::token, gran_t::group}) {
         case_t c;
         c.gran = gran;
@@ -1297,6 +1369,48 @@ std::vector<case_t> call_cases() {
         g.N = 128;
         g.gated = mm::matmul_gated_act_t::silu_and_mul;
         add(g);
+    }
+    // One group over K in K passes, between which C carries the exact int32
+    // sum, on one thread (a group whose slab exceeds the int8_l2_pct share
+    // of L2): whole octets, and an odd number of quads over a dst of padded
+    // columns (K 65540, N 48); the fused order into a bf16 or f32 dst, from
+    // a dynamic bf16 or f32 or a static s8 source, at weight cache 2 over
+    // the image; alpha and beta before the scales, and an integer dst, in
+    // the reference order.
+    {
+        case_t c;
+        c.gs = 65536;
+        c.G = 1;
+        c.M = 24;
+        c.N = 64;
+        c.threads = 1;
+        c.passes = true;
+        add(c);
+        c.dst = kF32;
+        c.src = src_t::f32;
+        add(c);
+        c.src = src_t::s8;
+        c.wc = 2;
+        add(c);
+        c.src = src_t::bf16;
+        c.wc = 1;
+        c.gs = 65540;
+        c.M = 25;
+        c.N = 48;
+        c.dst = kBf16;
+        add(c);
+        c.gs = 65536;
+        c.M = 20;
+        c.N = 64;
+        c.dst = kF32;
+        c.alpha = 0.5f;
+        c.beta = 0.25f;
+        c.direct = true;
+        add(c);
+        c.alpha = 1.0f;
+        c.beta = 1.0f;
+        c.dst = kS8;
+        add(c);
     }
     // Prompt-sized calls.
     for (int M : {256, 1024}) {
@@ -1374,7 +1488,8 @@ TEST(NativeBrgemmInt4Decision, OrderOfTheCall) {
     EXPECT_EQ(d.order, nat::native_int8_order_t::reference);
     EXPECT_FALSE(d.scales_after_groups) << "alpha and beta after the groups";
     call.beta = 0.0f;
-    // One group over K: alpha and beta before both scales.
+    // One group over K: alpha before both scales, and beta before or after
+    // them by the dst.
     call.params.dtypes.dst = kBf16;
     call.params.quant_params.wei_scale.dims = {1, c.N};
     d = decide(call);
@@ -1763,8 +1878,9 @@ TEST(NativeBrgemmInt4InPlace, TheImageHasNoOtherReader) {
 }
 
 // The calls with an s4 weight that the native BRGEMM takes and does not
-// serve: each returns unimplemented from matmul_direct under ALGO 10 with
-// dst untouched and its reason logged (refused_with).
+// serve: each returns unimplemented from matmul_direct with lowoha_algo
+// native_brgemm, with dst untouched and its reason logged (refused_with);
+// under ALGO 10 without lowoha_algo the native BRGEMM hands it back.
 TEST(NativeBrgemmInt4Refusal, UnservedCallsReturnUnimplemented) {
     if (!vnni()) GTEST_SKIP() << "no AVX-512 VNNI";
     mm::clear_matmul_weight_caches();
@@ -1857,15 +1973,22 @@ TEST(NativeBrgemmInt4Refusal, UnservedCallsReturnUnimplemented) {
         EXPECT_EQ(std::memcmp(zdst.get(), q.init.get(), zdst.bytes), 0)
                 << "dst written by a refused call";
     }
+    // Without AOCL-DLP a GGML pack and a reordered weight keep the error:
+    // the reference kernel does not read them.
+    const status_t handed_back = ZENDNNL_DEPENDS_AOCLDLP
+            ? status_t::success
+            : status_t::unimplemented;
     {
         nt::call_t k = good;
         k.params.packing.pack_format_b = 1;
+        EXPECT_EQ(nt::refusal_of(k), handed_back);
+        k.params.lowoha_algo = matmul_algo_t::native_brgemm;
         EXPECT_TRUE(nt::refused_with(k, status_t::unimplemented));
     }
     {
         nt::call_t k = good;
         k.params.mem_format_b = 'r';
-        EXPECT_TRUE(nt::refused_with(k, status_t::unimplemented));
+        EXPECT_EQ(nt::refusal_of(k), handed_back);
         k.params.lowoha_algo = matmul_algo_t::native_brgemm;
         EXPECT_TRUE(nt::refused_with(k, status_t::unimplemented));
     }

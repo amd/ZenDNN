@@ -28,16 +28,17 @@ namespace native {
 
 /// Where compute_int8_tile stores a finished tile instead of C: element
 /// (m, n) of a bf16 or f32 matrix at dst + m * ldc + n.  Pack column n must
-/// be output column n (no interleaved halves).
+/// be output column n (a plain tile).
 struct native_int8_out_t {
     void *dst = nullptr;
     bool bf16 = false;
     int ldc = 0;
 };
 
-/// C[mr][nr] (f32) = dequantized rows m0 .. m0 + mr of the source times pack
-/// columns n0 .. n0 + nr (a multiple of 16) of one block, plus call.bias when
-/// the call carries it.  With per-tensor or per-channel weight scales alpha
+/// C[mr][nr] (f32) = dequantized rows m0 .. m0 + mr of the source times the
+/// weight columns the tile of pack columns n0 .. n0 + nr (a multiple of 16)
+/// holds (native_weight_view_t: those of one block, or a paired view's gate
+/// and up columns), plus call.bias when the call carries it.  With per-tensor or per-channel weight scales alpha
 /// and beta apply here (see native_int8_call_t::order) and the epilogue then
 /// takes alpha 1 and beta 0; with per-group weight scales the epilogue
 /// applies them.  Post-ops are left to the epilogue.  With out (alpha 1 and

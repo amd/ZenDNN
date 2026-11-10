@@ -113,6 +113,13 @@ private:
 /// nullptr when it cannot be allocated.
 float *native_thread_scratch(size_t floats);
 
+/// A step every thread of a team region runs once all its units are done:
+/// run(ctx, i, n) on thread i of the region's n.
+struct native_team_step_t {
+    void (*run)(const void *ctx, int i, int n) = nullptr;
+    const void *ctx = nullptr;
+};
+
 /// The call's OpenMP team: a region of team threads, the caller's team, of
 /// which the first workers (at most the threads the runtime gives) run the
 /// units of part, worker tid of workers, with their thread-local scratch of
@@ -120,10 +127,14 @@ float *native_thread_scratch(size_t floats);
 /// region.  Opening every region with the caller's team keeps one team size
 /// across calls, so the runtime never resizes its team between them.  One
 /// worker or a team of 1 runs inline.  team_used, when set, receives the
-/// threads of the region (1 inline).  Fails when a worker gets no scratch.
+/// threads of the region (1 inline).  after, when set, runs on every thread
+/// of the region (inline: once, 0 of 1) after a barrier past every unit.
+/// Fails when a worker gets no scratch, after the other workers ran their
+/// units.
 template <typename Tile>
 status_t native_run_cpu_team(const native_partition_t &part, int workers,
-        int team, size_t scratch_floats, Tile &&tile, int *team_used = nullptr);
+        int team, size_t scratch_floats, Tile &&tile, int *team_used = nullptr,
+        const native_team_step_t *after = nullptr);
 
 template <typename F>
 void native_partition_t::for_each(
@@ -185,7 +196,8 @@ void native_partition_t::for_each(
 
 template <typename Tile>
 status_t native_run_cpu_team(const native_partition_t &part, int workers,
-        int team, size_t scratch_floats, Tile &&tile, int *team_used) {
+        int team, size_t scratch_floats, Tile &&tile, int *team_used,
+        const native_team_step_t *after) {
     std::atomic<bool> no_scratch {false};
     // The counters of a blocks run; the static schedules leave them unset.
     native_unit_deal_t deal;
@@ -203,6 +215,8 @@ status_t native_run_cpu_team(const native_partition_t &part, int workers,
     if (workers <= 1 || team <= 1) {
         run(0, 1);
         if (team_used != nullptr) *team_used = 1;
+        if (after != nullptr && !no_scratch.load(std::memory_order_relaxed))
+            after->run(after->ctx, 0, 1);
     } else {
         const int threads = std::max(workers, team);
 #pragma omp parallel num_threads(threads)
@@ -212,6 +226,11 @@ status_t native_run_cpu_team(const native_partition_t &part, int workers,
             const int tid = omp_get_thread_num();
             if (tid < n) run(tid, n);
             if (tid == 0 && team_used != nullptr) *team_used = given;
+            if (after != nullptr) {
+#pragma omp barrier
+                if (!no_scratch.load(std::memory_order_relaxed))
+                    after->run(after->ctx, tid, given);
+            }
         }
     }
     return no_scratch.load(std::memory_order_relaxed) ? status_t::failure

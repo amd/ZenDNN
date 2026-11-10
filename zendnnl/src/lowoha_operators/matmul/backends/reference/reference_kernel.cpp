@@ -602,6 +602,12 @@ void compute_quantized_matmul(int batch_size, int M, int N, int K, int lda,
     }
 
     const size_t accum_batch_stride = static_cast<size_t>(M) * N;
+    // beta * C into an f32, bf16 or f16 output follows the scales, as
+    // matmul_direct defines it: alpha * (A x B) + beta * C.  Into an integer
+    // output it joins the integer sum before them.
+    const bool beta_after_scales = output_dtype == data_type_t::f32
+            || output_dtype == data_type_t::bf16
+            || output_dtype == data_type_t::f16;
     const auto *packed_s4 = static_cast<const uint8_t *>(weights);
     auto weight_at = [&](size_t wt_idx) -> int32_t {
         if (weight_dtype != data_type_t::s4) {
@@ -718,7 +724,7 @@ void compute_quantized_matmul(int batch_size, int M, int N, int K, int lda,
         }
 
         if (alpha != 1.0f) { sum *= alpha; }
-        if (beta) {
+        if (beta && !beta_after_scales) {
             sum += read_and_cast<float>(output, output_dtype, op_idx) * beta;
         }
         if (zp_comp) { sum += (float)(zp_comp[(i * N + j) % zp_comp_size]); }
@@ -730,6 +736,9 @@ void compute_quantized_matmul(int batch_size, int M, int N, int K, int lda,
         if (wei_scale_size && !(src_scale_per_group && wei_scale_per_group)) {
             sum *= read_and_cast<float>(quant_param.wei_scale.buff,
                     quant_param.wei_scale.dt, j % wei_scale_size);
+        }
+        if (beta && beta_after_scales) {
+            sum += read_and_cast<float>(output, output_dtype, op_idx) * beta;
         }
         if (bias) { sum += read_and_cast<float>(bias, bias_dtype, j); }
         accum_buff_f32[ac_idx] = sum;

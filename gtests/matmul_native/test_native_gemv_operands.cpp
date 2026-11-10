@@ -19,7 +19,9 @@
 // (in other buffers or in the same ones) get the result of their own
 // operands, as on the native tiles.
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -39,6 +41,8 @@
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_brgemm_looper.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_gemv.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_weight_cache.hpp"
 #include "lowoha_operators/matmul/matmul_native/native_layout_policy.hpp"
 #include "native_brgemm_test_utils.hpp"
 
@@ -49,6 +53,7 @@ namespace nat = zendnnl::lowoha::matmul::native;
 namespace nt = native_brgemm_test;
 using zendnnl::common::matmul_algo_t;
 using zendnnl::common::matmul_config_t;
+using zendnnl::common::post_op_type_t;
 using zendnnl::memory::data_type_t;
 using zendnnl::memory::status_t;
 
@@ -64,7 +69,8 @@ bool gemv_isa() {
 
 /// An M = 1 call on one thread that asks for the native BRGEMM
 /// (lowoha_algo native_brgemm) on a constant [K, N] weight (or [N, K] with
-/// transB).  The weight stays allocated until the process exits, so that no
+/// transB), at weight cache mode 1: a GEMV kernel serves a call only below
+/// mode 2.  The weight stays allocated until the process exits, so that no
 /// later weight takes its address in the pointer-keyed caches of the GEMV
 /// packs.  INT8: a per-tensor f32 source scale (and an s32 zero point for a
 /// u8 source) and f32 weight scales per column.
@@ -99,6 +105,7 @@ struct gemv_call_t {
         c.params.dtypes.dst = dst_dt;
         c.params.num_threads = 1;
         c.params.lowoha_algo = matmul_algo_t::native_brgemm;
+        c.params.weight_cache_type = 1;
         if (int8) {
             wei_scales.resize(N);
             for (int n = 0; n < N; ++n)
@@ -372,8 +379,9 @@ TEST(NativeGemvOperands, GemvCallsPastTheCacheCapacityPackForTheCall) {
     }
 }
 
-// A constant weight whose buffer takes a new weight between calls, per call
-// at weight cache mode 1 and under ZENDNNL_MATMUL_ALGO=10 at mode 2: the
+// A constant weight whose buffer takes a new weight between calls, at
+// weight cache mode 1 per call, with lowoha_algo native_brgemm and under
+// ZENDNNL_MATMUL_ALGO=10 (a GEMV choice is made only below mode 2): the
 // M = 1 calls on the BF16 and INT8 BKC kernels get the new weight's result,
 // on the calling thread and on another one, as the calls of M > 1 on the
 // native tiles do.
@@ -392,17 +400,14 @@ TEST(NativeGemvOperands, GemvPacksFollowNewBytesOfTheirWeight) {
         for (const auto &cs : cases) {
             SCOPED_TRACE(std::string(nat::native_gemv_name(cs.kernel)) + ", "
                     + (cs.src == kS8 ? "s8" : "") + (cs.src == kU8 ? "u8" : "")
-                    + (algo10 ? " ZENDNNL_MATMUL_ALGO=10, weight cache mode 2"
-                              : " lowoha_algo native_brgemm, weight cache "
-                                "mode 1"));
+                    + (algo10 ? " ZENDNNL_MATMUL_ALGO=10"
+                              : " lowoha_algo native_brgemm"));
             restore.cfg.set_weight_cache(2);
             std::unique_ptr<nt::algo_pin_t> pin;
             gemv_call_t call(cs.src, cs.wei, kF32, N, K, seed += 8);
             if (algo10) {
                 call.c.params.lowoha_algo = matmul_algo_t::none;
                 pin.reset(new nt::algo_pin_t(matmul_algo_t::native_brgemm));
-            } else {
-                call.c.params.weight_cache_type = 1;
             }
             ASSERT_EQ(static_cast<int>(call.kernel()),
                     static_cast<int>(cs.kernel));
@@ -418,8 +423,7 @@ TEST(NativeGemvOperands, GemvPacksFollowNewBytesOfTheirWeight) {
             EXPECT_TRUE(call.runs_to_reference())
                     << "a new weight in the same buffer";
 
-            // The native tiles of the same weight: M > 1 on its bytes now,
-            // which a first call at mode 2 may rewrite in place.
+            // The native tiles of the same weight: M > 1 on its bytes now.
             nt::call_t tiles = call.c;
             tiles.M = rows;
             const nt::buffer_t src = nt::random_buffer(cs.src,
@@ -457,11 +461,11 @@ TEST(NativeGemvOperands, GemvPacksFollowNewBytesOfTheirWeight) {
 // the zero first source element multiplies, and runs an M = 1 call after
 // each change, which packs the weight again and replaces its cached pack,
 // while other threads keep running M = 1 calls on the weight: on the BF16
-// and INT8 BKC kernels, per call at weight cache mode 1 and under
-// ZENDNNL_MATMUL_ALGO=10 at mode 2.  No call reads a pack after it is freed
-// (AddressSanitizer reports such a read), and every call gets the bits of
-// the first call, which match the reference algorithm.  The caches are
-// cleared between rounds, when no call runs.
+// and INT8 BKC kernels, at weight cache mode 1 per call, with lowoha_algo
+// native_brgemm and under ZENDNNL_MATMUL_ALGO=10.  No call reads a pack
+// after it is freed (AddressSanitizer reports such a read), and every call
+// gets the bits of the first call, which match the reference algorithm.
+// The caches are cleared between rounds, when no call runs.
 TEST(NativeGemvOperands, ReplacedGemvPacksOutliveTheCallsReadingThem) {
     if (!gemv_isa()) GTEST_SKIP() << "needs AVX512-BF16 and AVX512-VNNI";
     const config_restore_t restore;
@@ -476,17 +480,14 @@ TEST(NativeGemvOperands, ReplacedGemvPacksOutliveTheCallsReadingThem) {
     for (const bool algo10 : {false, true})
         for (const auto &cs : cases) {
             SCOPED_TRACE(std::string(nat::native_gemv_name(cs.kernel))
-                    + (algo10 ? ", ZENDNNL_MATMUL_ALGO=10, weight cache mode 2"
-                              : ", lowoha_algo native_brgemm, weight cache "
-                                "mode 1"));
+                    + (algo10 ? ", ZENDNNL_MATMUL_ALGO=10"
+                              : ", lowoha_algo native_brgemm"));
             restore.cfg.set_weight_cache(2);
             std::unique_ptr<nt::algo_pin_t> pin;
             gemv_call_t call(cs.src, cs.wei, kF32, N, K, seed += 8);
             if (algo10) {
                 call.c.params.lowoha_algo = matmul_algo_t::none;
                 pin.reset(new nt::algo_pin_t(matmul_algo_t::native_brgemm));
-            } else {
-                call.c.params.weight_cache_type = 1;
             }
             ASSERT_EQ(static_cast<int>(call.kernel()),
                     static_cast<int>(cs.kernel));
@@ -565,7 +566,8 @@ nat::GemmDescriptor descriptor_of(const nt::call_t &c) {
     return d;
 }
 
-/// A call of rows rows on the weight of g, with its own source and dst.
+/// A call of rows rows on the weight of g, with its own source (of g's
+/// source type and range) and an f32 dst.
 struct rows_call_t {
     nt::call_t c;
     nt::buffer_t src, dst, ref;
@@ -573,8 +575,12 @@ struct rows_call_t {
         c = g.c;
         c.M = rows;
         c.params.num_threads = threads;
-        src = nt::random_buffer(
-                kBf16, static_cast<size_t>(rows) * g.c.K, seed, -1.0f, 1.0f);
+        c.params.dtypes.dst = kF32;
+        const data_type_t src_dt = g.c.params.dtypes.src;
+        const bool int8 = g.c.params.dtypes.wei == kS8;
+        src = nt::random_buffer(src_dt, static_cast<size_t>(rows) * g.c.K, seed,
+                int8 ? (src_dt == kS8 ? -8.0f : 0.0f) : -1.0f,
+                int8 ? 15.0f : 1.0f);
         dst = nt::make_buffer(static_cast<size_t>(rows) * g.c.N * 4);
         ref = nt::make_buffer(static_cast<size_t>(rows) * g.c.N * 4);
         c.src = src.get();
@@ -586,8 +592,8 @@ struct rows_call_t {
             return ::testing::AssertionFailure() << "no reference result";
         return nt::within_band(dst.get(), c.N, ref.get(), c.N, kF32, c.M, c.N,
                 rtol_bf16,
-                nt::comparison_abs_bound(
-                        c.K, epsilon_bf16, 1.0f, 0.0f, true, false, false));
+                nt::comparison_abs_bound(c.K, epsilon_bf16, 1.0f, 0.0f, true,
+                        c.params.dtypes.wei == kS8, false));
     }
 };
 
@@ -599,8 +605,9 @@ struct in_place_mode_t {
     in_place_mode_t() { restore.cfg.set_weight_cache(2); }
 };
 
-// The worst order of a bf16_bkc call and the first call of the tiles on its
-// weight: the GEMV call finds the raw weight, then the tiles' first call
+// The worst order of a bf16_bkc call (at weight cache mode 1: a GEMV choice
+// is made only below mode 2) and the first call of the tiles on its weight
+// at mode 2: the GEMV call finds the raw weight, then the tiles' first call
 // rewrites the buffer in place, then the GEMV call runs.  It is served from
 // the image, with the weight's result, and the buffer keeps the image.
 TEST(NativeGemvOperands, GemvCallAfterAnInPlaceRewriteRunsOnTheImage) {
@@ -617,11 +624,12 @@ TEST(NativeGemvOperands, GemvCallAfterAnInPlaceRewriteRunsOnTheImage) {
             static_cast<int>(nat::native_gemv_t::bf16_bkc));
     nat::native_weight_ref_t ref;
     ref.weight = call.c.wei;
-    ref.weight_cache_mode = 2;
+    ref.weight_cache_mode = 1;
     const nt::buffer_t raw = nt::make_buffer(call.wei.bytes);
     std::memcpy(raw.get(), call.wei.get(), call.wei.bytes);
 
-    const rows_call_t first(call, 16, 4, 8301);
+    rows_call_t first(call, 16, 4, 8301);
+    first.c.params.weight_cache_type = 2;
     ASSERT_EQ(nt::run_matmul(first.c), status_t::success);
     ASSERT_NE(std::memcmp(call.wei.get(), raw.get(), raw.bytes), 0)
             << "the first call of the tiles did not rewrite the buffer";
@@ -640,23 +648,38 @@ TEST(NativeGemvOperands, GemvCallAfterAnInPlaceRewriteRunsOnTheImage) {
             << "the buffer no longer holds the image";
 }
 
-// bf16_bkc calls racing the first call of the tiles on their weight, which
-// rewrites the buffer in place: on fresh weights, an M = 1 call on one
-// thread and an M = 8 call on eight start together, and each gets the
-// weight's result whatever the order.
+// GEMV calls at weight cache mode 1 racing the first call of the tiles on
+// their weight at mode 2, which rewrites a bf16 buffer in place (an s8
+// weight's layout, with its column sums, is cached out of place, and its
+// buffer keeps its bytes): on fresh weights, an M = 1 call on one thread
+// and an M = 8 call on eight start together, and each gets the weight's
+// result whatever the order, on bf16_bkc and on int8_bkc with u8 and s8
+// sources.
 TEST(NativeGemvOperands, GemvCallsRacingAnInPlaceRewriteGetTheWeightsResult) {
     if (!gemv_isa()) GTEST_SKIP() << "needs AVX512-BF16 and AVX512-VNNI";
     const in_place_mode_t mode;
-    const int N = 1024, K = 2048, kRuns = 12;
-    for (int run = 0; run < kRuns; ++run) {
-        SCOPED_TRACE("run " + std::to_string(run));
-        gemv_call_t one(kBf16, kBf16, kF32, N, K, 8500 + 8 * run);
+    using g = nat::native_gemv_t;
+    const struct {
+        data_type_t src, wei;
+        int N, K;
+        g kernel;
+    } cases[] = {{kBf16, kBf16, 1024, 2048, g::bf16_bkc},
+            {kU8, kS8, 256, 1024, g::int8_bkc},
+            {kS8, kS8, 256, 1024, g::int8_bkc}};
+    const int kRuns = 12;
+    for (int i = 0; i < 3 * kRuns; ++i) {
+        const auto &cs = cases[i / kRuns];
+        const int run = i % kRuns, N = cs.N, K = cs.K;
+        SCOPED_TRACE(std::string(nat::native_gemv_name(cs.kernel))
+                + (cs.src == kS8 ? ", s8 source" : "") + ", run "
+                + std::to_string(run));
+        gemv_call_t one(cs.src, cs.wei, kF32, N, K, 8500 + 8 * run);
         one.c.params.lowoha_algo = matmul_algo_t::none;
-        ASSERT_EQ(static_cast<int>(one.kernel()),
-                static_cast<int>(nat::native_gemv_t::bf16_bkc));
+        ASSERT_EQ(static_cast<int>(one.kernel()), static_cast<int>(cs.kernel));
         const nt::buffer_t raw = nt::make_buffer(one.wei.bytes);
         std::memcpy(raw.get(), one.wei.get(), one.wei.bytes);
-        const rows_call_t eight(one, 8, 8, 8502 + 8 * run);
+        rows_call_t eight(one, 8, 8, 8502 + 8 * run);
+        eight.c.params.weight_cache_type = 2;
         std::atomic<int> ready {0};
         status_t st_one = status_t::failure, st_eight = status_t::failure;
         {
@@ -679,11 +702,232 @@ TEST(NativeGemvOperands, GemvCallsRacingAnInPlaceRewriteGetTheWeightsResult) {
                 status_t::success);
         EXPECT_TRUE(nt::within_band(one.dst.get(), N, one.ref.get(), N, kF32, 1,
                 N, rtol_bf16,
-                nt::comparison_abs_bound(
-                        K, epsilon_bf16, 1.0f, 0.0f, true, false, false)))
+                nt::comparison_abs_bound(K, epsilon_bf16, 1.0f, 0.0f, true,
+                        cs.wei == kS8, false)))
                 << "the M = 1 call";
         EXPECT_TRUE(eight.matches(raw.get())) << "the M = 8 call";
+        if (cs.wei == kS8) {
+            EXPECT_EQ(std::memcmp(one.wei.get(), raw.get(), raw.bytes), 0)
+                    << "the buffer of an s8 weight was rewritten";
+        }
     }
+}
+
+/// The f64 model of the dst of c (M x N, row-major) on the [K, N] weight
+/// raw: bf16 operands, or a u8 / s8 source on an s8 weight with c's source
+/// scale and zero point and per-tensor or per-column weight scales; then
+/// c's bias and its unary post-op.
+std::vector<double> model_of(const nt::call_t &c, const void *raw) {
+    const auto &q = c.params.quant_params;
+    const data_type_t src_dt = c.params.dtypes.src,
+                      wei_dt = c.params.dtypes.wei;
+    const bool int8 = wei_dt == kS8;
+    const double src_scale = int8 && q.src_scale.buff != nullptr
+            ? *static_cast<const float *>(q.src_scale.buff)
+            : 1.0;
+    const double zp = int8 && q.src_zp.buff != nullptr
+            ? *static_cast<const int32_t *>(q.src_zp.buff)
+            : 0.0;
+    const bool per_column = int8 && q.wei_scale.buff != nullptr
+            && q.wei_scale.dims.size() == 2 && q.wei_scale.dims[1] == c.N;
+    std::vector<double> out(static_cast<size_t>(c.M) * c.N);
+    for (int m = 0; m < c.M; ++m)
+        for (int n = 0; n < c.N; ++n) {
+            double acc = 0.0;
+            for (int k = 0; k < c.K; ++k)
+                acc += (nt::load_f32(
+                                c.src, src_dt, static_cast<size_t>(m) * c.K + k)
+                               - zp)
+                        * nt::load_f32(
+                                raw, wei_dt, static_cast<size_t>(k) * c.N + n);
+            if (int8 && q.wei_scale.buff != nullptr)
+                acc *= src_scale
+                        * static_cast<const float *>(
+                                q.wei_scale.buff)[per_column ? n : 0];
+            else if (int8)
+                acc *= src_scale;
+            if (c.bias != nullptr)
+                acc += nt::load_f32(c.bias, c.params.dtypes.bias, n);
+            for (const mm::matmul_post_op &po : c.params.postop_) {
+                if (po.po_type == post_op_type_t::relu)
+                    acc = std::max(acc, 0.0);
+                else if (po.po_type == post_op_type_t::tanh)
+                    acc = std::tanh(acc);
+                else if (po.po_type == post_op_type_t::gelu_erf)
+                    acc = 0.5 * acc * (1.0 + std::erf(acc / std::sqrt(2.0)));
+            }
+            out[static_cast<size_t>(m) * c.N + n] = acc;
+        }
+    return out;
+}
+
+/// c's dst against model_of(c, raw): within the rounding of the dst (bf16
+/// or f32) of the model's value, plus f32 accumulation over the call's K
+/// terms and the kernels' approximation of the post-op.
+::testing::AssertionResult matches_model(const nt::call_t &c, const void *raw) {
+    const std::vector<double> want = model_of(c, raw);
+    const data_type_t dst_dt = c.params.dtypes.dst;
+    const double rel = dst_dt == kBf16 ? 1.0 / 128 : 1e-4;
+    double terms = 0.0;
+    for (int k = 0; k < c.K; ++k)
+        terms = std::max(terms,
+                static_cast<double>(std::fabs(
+                        nt::load_f32(c.src, c.params.dtypes.src, k))));
+    for (size_t i = 0; i < want.size(); ++i) {
+        const double got = nt::load_f32(c.dst, dst_dt, i);
+        const double tol
+                = rel * std::fabs(want[i]) + 1e-4 + 1e-5 * c.K * (terms + 1.0);
+        if (!(std::fabs(got - want[i]) <= tol))
+            return ::testing::AssertionFailure()
+                    << "dst[" << i << "] = " << got << ", the model " << want[i]
+                    << " (M " << c.M << ")";
+    }
+    return ::testing::AssertionSuccess();
+}
+
+/// A GEMV kind at weight cache mode 1 and what the first call of the tiles
+/// on its weight does at mode 2.
+struct mode_two_case_t {
+    data_type_t src;
+    int N;
+    nat::native_gemv_t kernel; ///< at weight cache mode 1
+    bool in_place; ///< the tiles rewrite the buffer (else cache out of place)
+};
+
+const mode_two_case_t kModeTwoCases[]
+        = {{kBf16, 64, nat::native_gemv_t::bf16_bkc, true},
+                {kBf16, 4, nat::native_gemv_t::bf16_narrow, false},
+                {kU8, 64, nat::native_gemv_t::int8_bkc, false},
+                {kS8, 64, nat::native_gemv_t::int8_bkc, false}};
+
+std::string mode_two_name(const mode_two_case_t &cs) {
+    return std::string(nat::native_gemv_name(cs.kernel))
+            + (cs.src == kS8 ? ", s8 source" : "")
+            + (cs.src == kU8 ? ", u8 source" : "");
+}
+
+// At weight cache mode 2 (a constant weight under ZENDNNL_MATMUL_ALGO=10) a
+// weight has one layout, the tiles', which serves its M = 1 calls: an M = 1
+// call of a kind that takes a GEMV kernel at mode 1 runs on the tiles; the
+// first one rewrites a bf16 weight of whole column blocks in place (and
+// caches the layout of the other weights out of place); no GEMV pack of the
+// weight exists afterwards; and the first and the next call get the f64
+// model's result.
+TEST(NativeGemvOperands, AtWeightCacheModeTwoAnM1CallMakesTheTilesLayout) {
+    if (!gemv_isa()) GTEST_SKIP() << "needs AVX512-BF16 and AVX512-VNNI";
+    const in_place_mode_t mode;
+    const int K = 256;
+    uint32_t seed = 9500;
+    for (const mode_two_case_t &cs : kModeTwoCases) {
+        SCOPED_TRACE(mode_two_name(cs));
+        gemv_call_t call(cs.src, cs.src == kBf16 ? kBf16 : kS8, kF32, cs.N, K,
+                seed += 4);
+        call.c.params.lowoha_algo = matmul_algo_t::none;
+        ASSERT_EQ(static_cast<int>(call.kernel()), static_cast<int>(cs.kernel))
+                << "at weight cache mode 1";
+        call.c.params.weight_cache_type = 2;
+        EXPECT_EQ(static_cast<int>(call.kernel()),
+                static_cast<int>(nat::native_gemv_t::none));
+        const nt::buffer_t raw = nt::make_buffer(call.wei.bytes);
+        std::memcpy(raw.get(), call.wei.get(), call.wei.bytes);
+        for (const char *which : {"the first call", "the next call"}) {
+            ASSERT_EQ(nt::run_matmul(call.c), status_t::success) << which;
+            EXPECT_TRUE(matches_model(call.c, raw.get())) << which;
+        }
+        EXPECT_EQ(std::memcmp(call.wei.get(), raw.get(), raw.bytes) != 0,
+                cs.in_place);
+        EXPECT_EQ(nat::native_weight_packed_in_place(
+                          call.wei.get(), call.wei.bytes),
+                cs.in_place);
+        EXPECT_EQ(nt::native_layouts(call.wei.get()), 1u);
+        const nat::PrepackedWeightKey key {
+                call.wei.get(), K, cs.N, cs.N, false};
+        EXPECT_EQ(nat::BF16BKCWeightCache::instance().find(key), nullptr);
+        EXPECT_EQ(
+                nat::INT8KContiguousWeightCache::instance().find(key), nullptr);
+    }
+}
+
+// At weight cache mode 2, M = 1 calls run on the tiles' layout whichever
+// call on the weight comes first: on fresh weights of the GEMV kinds, an
+// M = 1 call, then an M = 8 call, then the M = 1 call again, and the M = 8
+// call first, then the M = 1 call twice, with a bias (f32 or bf16) or none,
+// per-tensor or per-column weight scales (INT8), a unary post-op the GEMV
+// kernels fuse or none, and an f32 or bf16 dst, each get the f64 model's
+// result.
+TEST(NativeGemvOperands, AtWeightCacheModeTwoM1CallsGetTheModelsResult) {
+    if (!gemv_isa()) GTEST_SKIP() << "needs AVX512-BF16 and AVX512-VNNI";
+    const in_place_mode_t mode;
+    const int K = 256, rows = 8;
+    const post_op_type_t post_ops[]
+            = {post_op_type_t::none, post_op_type_t::gelu_erf,
+                    post_op_type_t::relu, post_op_type_t::tanh};
+    uint32_t seed = 9700;
+    int variant = 0;
+    for (const mode_two_case_t &cs : kModeTwoCases)
+        for (const bool m1_first : {true, false})
+            for (const bool per_column : {true, false}) {
+                if (cs.src == kBf16 && !per_column) continue;
+                for (const post_op_type_t po : post_ops) {
+                    ++variant;
+                    const bool int8 = cs.src != kBf16;
+                    const data_type_t dst_dt = variant % 2 ? kBf16 : kF32;
+                    const data_type_t bias_dt = variant % 3 == 1 ? kBf16 : kF32;
+                    const bool bias = variant % 3 != 0;
+                    SCOPED_TRACE(mode_two_name(cs)
+                            + (m1_first ? ", M = 1 first" : ", M = 8 first")
+                            + (int8 && !per_column ? ", per-tensor scale" : "")
+                            + ", variant " + std::to_string(variant));
+                    gemv_call_t one(cs.src, int8 ? kS8 : kBf16, dst_dt, cs.N, K,
+                            seed += 8);
+                    one.c.params.lowoha_algo = matmul_algo_t::none;
+                    one.c.params.weight_cache_type = 2;
+                    if (cs.src == kU8) one.src_zp = 3;
+                    float scale = 0.0625f;
+                    if (int8 && !per_column) {
+                        auto &ws = one.c.params.quant_params.wei_scale;
+                        ws.buff = &scale;
+                        ws.dims = {1, 1};
+                    }
+                    const nt::buffer_t bias_buf = nt::random_buffer(bias_dt,
+                            static_cast<size_t>(cs.N), seed + 1,
+                            int8 ? -16.0f : -1.0f, int8 ? 16.0f : 1.0f);
+                    if (bias) one.set_bias(bias_buf.get(), bias_dt);
+                    if (po != post_op_type_t::none) {
+                        mm::matmul_post_op m;
+                        m.po_type = po;
+                        if (po == post_op_type_t::relu) m.alpha = 0.0f;
+                        one.c.params.postop_.push_back(m);
+                    }
+                    const nt::buffer_t raw = nt::make_buffer(one.wei.bytes);
+                    std::memcpy(raw.get(), one.wei.get(), one.wei.bytes);
+                    rows_call_t eight(one, rows, rows, seed + 2);
+                    eight.c.params.dtypes.dst = dst_dt;
+                    const nt::buffer_t eight_dst
+                            = nt::make_buffer(static_cast<size_t>(rows) * cs.N
+                                    * nt::dt_bytes(dst_dt));
+                    eight.c.dst = eight_dst.get();
+                    const auto run_one = [&](const char *which) {
+                        ASSERT_EQ(nt::run_matmul(one.c), status_t::success)
+                                << which;
+                        EXPECT_TRUE(matches_model(one.c, raw.get())) << which;
+                    };
+                    const auto run_eight = [&] {
+                        ASSERT_EQ(nt::run_matmul(eight.c), status_t::success)
+                                << "M = 8";
+                        EXPECT_TRUE(matches_model(eight.c, raw.get()))
+                                << "M = 8";
+                    };
+                    if (m1_first) {
+                        run_one("M = 1 first");
+                        run_eight();
+                    } else {
+                        run_eight();
+                        run_one("M = 1 after M = 8");
+                    }
+                    run_one("M = 1 again");
+                }
+            }
 }
 
 // An M = 1 call on a GEMV choice with a null src, weight or dst, or a bf16

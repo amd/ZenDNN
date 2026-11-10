@@ -50,6 +50,20 @@ inline int ceil_div(int a, int b) {
     return a / b + (a % b != 0);
 }
 
+/// The K passes of at most kc values over K (K >= 0, kc >= 1) in order:
+/// next() moves to the next pass, k0 its first value and kl its length,
+/// and is false past the last.  A pass starts where the one before ends,
+/// so no start passes K, at any K an int holds.
+struct native_k_passes_t {
+    int K = 0, kc = 1;
+    int k0 = 0, kl = 0;
+    bool next() {
+        k0 += kl;
+        kl = std::min(kc, K - k0);
+        return k0 < K;
+    }
+};
+
 /// Extracted INT8 quantization parameters (per-tensor src, per-tensor/channel wei).
 struct Int8QuantParams {
     float src_scale = 1.0f;

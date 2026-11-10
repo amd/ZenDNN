@@ -91,7 +91,11 @@ struct row_operands_t {
     std::unique_ptr<T, native_aligned_free_t> rows;
 };
 
-using bf16_operands_t = row_operands_t<uint16_t, bf16_brgemm_fn_t>;
+/// The BF16 operands; paired, for a call whose tiles pair gated halves, the
+/// kernels of a slab whose second 16 columns lie in the up run.
+struct bf16_operands_t : row_operands_t<uint16_t, bf16_brgemm_fn_t> {
+    const bf16_brgemm_paired_fn_t *paired = nullptr;
+};
 
 /// The FP32 operands; with dst set (an epilogue left with only the store to
 /// an f32 dst), the kernels accumulate into the destination itself, rows
@@ -111,11 +115,15 @@ struct int8_operands_t {
 
 /// The kernel calls of tiles column tiles from n0: per K pass, per tile, per
 /// row call, the slabs of the tile (one slab, or nr / 32 slabs of 32
-/// columns), so a row call's source rows serve every slab of the tile in
-/// turn and a pass's source rows serve every tile.  Across K passes each
-/// tile keeps its own mb * nr accumulators.  Tail (a weight of padded
-/// columns): the epilogue of a tile takes only its columns below N, and a
-/// tile past N is skipped.
+/// columns, each inside one block at the weight columns the tile holds), so
+/// a row call's source rows serve every slab of the tile in turn and a
+/// pass's source rows serve every tile.  A paired tile runs each slab over
+/// all its rows instead, as a tile of one slab, and keeps the mb * nr
+/// accumulators of its rows until the epilogue pairs them; the slab of a
+/// paired tile of 32 columns reads its second 16 columns from the up run.
+/// Across K passes each tile keeps its own mb * nr accumulators.  Tail (a
+/// weight of padded columns): the epilogue of a tile takes only its columns
+/// below N, and a tile past N is skipped.
 template <bool Tail>
 void bf16_block(const native_plan_t &p, const bf16_operands_t &op,
         const native_weight_view_t &w, const native_epilogue_t &ep, int mb,
@@ -125,8 +133,8 @@ void bf16_block(const native_plan_t &p, const bf16_operands_t &op,
     const int slabs = p.nr / slab;
     assert(slabs <= kNativeBf16MaxTileCols / kNativeBf16SlabCols);
     const bool one_pass = p.kc >= K;
-    for (int k0 = 0; k0 < K; k0 += p.kc) {
-        const int kl = std::min(p.kc, K - k0);
+    for (native_k_passes_t pass {K, p.kc}; pass.next();) {
+        const int k0 = pass.k0, kl = pass.kl;
         const float beta = k0 == 0 ? 0.0f : 1.0f;
         const size_t k_off = static_cast<size_t>(k0 / VNNI_PAIR) * b_stride;
         for (int t = 0; t < tiles; ++t) {
@@ -135,14 +143,41 @@ void bf16_block(const native_plan_t &p, const bf16_operands_t &op,
             if (Tail && cols <= 0) continue;
             const uint16_t
                     *slab_b[kNativeBf16MaxTileCols / kNativeBf16SlabCols];
-            for (int s = 0; s < slabs; ++s) {
-                const int col = n + s * slab;
+            for (int s = 0; s < slabs; ++s)
                 slab_b[s] = reinterpret_cast<const uint16_t *>(
-                                    w.block(col / w.pack_nr))
-                        + (col % w.pack_nr) * VNNI_PAIR + k_off;
-            }
+                                    w.column(w.tile_col(n, p.nr, s * slab)))
+                        + k_off;
             float *tile_acc
                     = one_pass ? acc : acc + static_cast<size_t>(t) * mb * p.nr;
+            if (w.paired) {
+                for (int s = 0; s < slabs; ++s) {
+                    const size_t second
+                            = w.column_distance(w.tile_col(n, p.nr, s * slab),
+                                      w.tile_col(n, p.nr, s * slab + 16))
+                            / 2;
+                    for (int ir = 0; ir < mb; ir += p.mr) {
+                        const int mr = std::min(p.mr, mb - ir);
+                        const uint16_t *a = op.A
+                                + static_cast<size_t>(m0 + ir) * op.lda + k0;
+                        float *c = tile_acc + static_cast<size_t>(ir) * p.nr
+                                + s * slab;
+                        if (second == 16 * VNNI_PAIR)
+                            op.kern[mr](a, op.lda, slab_b[s], b_stride, c, p.nr,
+                                    kl, kl, beta, nullptr, fused_postop_t::none,
+                                    nullptr, 0);
+                        else
+                            op.paired[mr](a, op.lda, slab_b[s], b_stride,
+                                    second, c, p.nr, kl, kl, beta, nullptr,
+                                    fused_postop_t::none, nullptr, 0);
+                    }
+                }
+                if (k0 + kl == K)
+                    for (int ir = 0; ir < mb; ir += p.mr)
+                        apply_epilogue_tile(ep,
+                                tile_acc + static_cast<size_t>(ir) * p.nr, p.nr,
+                                m0 + ir, std::min(p.mr, mb - ir), n, p.nr);
+                continue;
+            }
             for (int ir = 0; ir < mb; ir += p.mr) {
                 const int mr = std::min(p.mr, mb - ir);
                 float *c = one_pass ? tile_acc
@@ -173,8 +208,8 @@ void f32_block(const native_plan_t &p, const f32_operands_t &op,
         int K, int m0, int n0, int tiles, float *acc) {
     const int b_stride = w.group_stride();
     const bool one_pass = p.kc >= K;
-    for (int k0 = 0; k0 < K; k0 += p.kc) {
-        const int kl = std::min(p.kc, K - k0);
+    for (native_k_passes_t pass {K, p.kc}; pass.next();) {
+        const int k0 = pass.k0, kl = pass.kl;
         const float beta = k0 == 0 ? 0.0f : 1.0f;
         const size_t k_off = static_cast<size_t>(k0) * b_stride;
         for (int t = 0; t < tiles; ++t) {
@@ -285,6 +320,14 @@ ZENDNNL_ALWAYS_INLINE inline status_t check_call_operands(
             && (c.src == nullptr || c.weight.weight == nullptr
                     || c.dst == nullptr))
         return turned_away(status_t::failure, "a null src, weight or dst", why);
+    // The bf16 kernels offset the source rows of their calls, up to 12, in
+    // an int; a transposed source is copied into rows K apart.
+    if (c.bf16 && !desc.transA && M > 1
+            && static_cast<int64_t>(std::min(M, 12) - 1) * desc.lda + K
+                    > std::numeric_limits<int32_t>::max())
+        return turned_away(status_t::unimplemented,
+                "a bf16 source of rows past the bf16 kernels' int offsets",
+                why);
     return status_t::success;
 }
 
@@ -322,11 +365,12 @@ status_t decide_int8(const execute_call_t &c, native_int8_decision_t &decision,
     return check_int8_call(c.desc, c.params, decision, why);
 }
 
-/// The epilogue of the call; with bias_in_dequant the INT8 dequantization
-/// takes the bias instead.
+/// The epilogue of the call over paired tiles or not; with bias_in_dequant
+/// the INT8 dequantization takes the bias instead; buffers as
+/// prepare_epilogue.
 status_t prepare_call_epilogue(const execute_call_t &c,
         const native_int8_decision_t &decision, bool bias_in_dequant,
-        native_epilogue_t &ep, const char **why) {
+        bool paired, bool buffers, native_epilogue_t &ep, const char **why) {
     GemmDescriptor ep_desc = c.desc;
     if (c.int8
             && ((decision.scheme == native_int8_scheme_t::per_channel
@@ -339,8 +383,8 @@ status_t prepare_call_epilogue(const execute_call_t &c,
         ep_desc.beta = 0.0f;
     }
     return prepare_epilogue(ep_desc, c.params,
-            bias_in_dequant ? nullptr : c.bias, c.dst,
-            c.weight.interleave_split_halves, ep, why);
+            bias_in_dequant ? nullptr : c.bias, c.dst, paired, ep, why,
+            buffers);
 }
 
 /// The INT8 call of the plan and, when the epilogue is left with only the
@@ -472,7 +516,9 @@ status_t copy_pre_activation(const execute_call_t &c, const native_plan_t &p,
 
 /// Runs the plan's work units on a team of up to threads threads; team
 /// receives the threads of the region.  Tail: a weight of padded columns.
-/// int8_op is the INT8 call's operands, null for any other call.
+/// int8_op is the INT8 call's operands, null for any other call.  Staged
+/// gated rows pair on the same team once every unit is done, or, too few of
+/// them for the barrier that takes to pay, on the calling thread after it.
 template <bool Tail>
 status_t run_units(const execute_call_t &c, const native_plan_t &p, int threads,
         const native_weight_view_t &view, const native_epilogue_t &ep,
@@ -497,15 +543,30 @@ status_t run_units(const execute_call_t &c, const native_plan_t &p, int threads,
     };
     // Workers past the units have nothing to do.
     const native_partition_t part(p, c.desc.M, 0, p.n_tiles);
+    struct pairing_t {
+        const native_epilogue_t *ep;
+        int M;
+    };
+    const pairing_t pairing {&ep, c.desc.M};
+    const native_team_step_t pair {[](const void *ctx, int i, int n) {
+        const pairing_t &q = *static_cast<const pairing_t *>(ctx);
+        pair_staged_halves(*q.ep, q.M, i, n);
+    }, &pairing};
+    const bool pair_in_team = ep.staged_halves
+            && staged_pair_units(ep, c.desc.M)
+                    >= 4 * static_cast<int64_t>(threads);
     const status_t st = native_run_cpu_team(part,
             static_cast<int>(std::min<int64_t>(p.threads, part.units())),
-            threads, p.scratch_floats, tile, &team);
+            threads, p.scratch_floats, tile, &team,
+            pair_in_team ? &pair : nullptr);
     // After work no status may let the call fall back to another route.
     if (st != status_t::success) {
         log_error("native BRGEMM: no accumulator scratch of ", p.scratch_floats,
                 " floats");
         return status_t::failure;
     }
+    if (ep.staged_halves && !pair_in_team)
+        pair_staged_halves(ep, c.desc.M, 0, 1);
     return status_t::success;
 }
 
@@ -522,10 +583,45 @@ status_t run_team(const execute_call_t &c, const native_plan_t &p, int threads,
             c, p, threads, view, ep, bf16_op, int8_op, f32_op, team);
 }
 
-/// The [MATMUL.NATIVE_BRGEMM] line of a call that ran.
+/// The plan the paired tiles of a gated call over [gate | up] halves run
+/// (native_weight_view_t) at width (native_paired_width): planned's, with
+/// tiles width wide when that is wider, and for BF16 the accumulators of a
+/// tile's rows.  Where the wider tiles leave the static deal fewer units
+/// than threads, row blocks of fewer rows give back the units the plan was
+/// balanced for.
+native_plan_t paired_plan(const native_plan_t &planned,
+        const native_problem_t &problem, int width) {
+    native_plan_t p = planned;
+    if (width > planned.nr) {
+        p.nr = width;
+        p.n_tiles = problem.N / p.nr;
+        if (p.unit_tiles > 0)
+            p.unit_tiles = std::max(1, p.unit_tiles * planned.nr / width);
+        const int64_t units
+                = static_cast<int64_t>(planned.n_tiles) * planned.m_blocks;
+        if (p.unit_tiles == 0 && p.col_groups == 0
+                && static_cast<int64_t>(p.n_tiles) * p.m_blocks < p.threads
+                && units > static_cast<int64_t>(p.n_tiles) * p.m_blocks) {
+            const int want
+                    = static_cast<int>(std::min<int64_t>(units, p.threads));
+            const int m_blocks = std::min(problem.M, ceil_div(want, p.n_tiles));
+            p.mb = ceil_div(problem.M, m_blocks);
+            p.m_blocks = ceil_div(problem.M, p.mb);
+        }
+        p.scratch_floats = native_plan_scratch_floats(p, problem);
+    }
+    // A paired BF16 tile keeps the accumulators of all its rows.
+    if (problem.bf16())
+        p.scratch_floats
+                = std::max(p.scratch_floats, static_cast<size_t>(p.mb) * p.nr);
+    return p;
+}
+
+/// The [MATMUL.NATIVE_BRGEMM] line of a call that ran; paired: its tiles
+/// paired the halves of a gated call.
 void log_plan_line(const execute_call_t &c, const native_plan_t &p,
         const native_int8_decision_t &decision, bool bias_in_dequant,
-        bool direct, int pack_nr, int team) {
+        bool direct, int pack_nr, int team, bool paired) {
     const GemmDescriptor &desc = c.desc;
     // A BF16 or FP32 call has a K pass; an INT8 call has call shapes and,
     // unless its weight scales are per group, a K pass, a direct store and a
@@ -569,6 +665,12 @@ void log_plan_line(const execute_call_t &c, const native_plan_t &p,
     const std::string padded_field = desc.N % kNativeLayoutPackNr != 0
             ? " padded_n=" + std::to_string(native_padded_n(desc.N, pack_nr))
             : std::string();
+    // A gated call over [gate | up] halves names the width at which its
+    // tiles paired them, or that it staged its rows.
+    const std::string pairing_field = native_gated_halves(desc.gated_act)
+            ? " pairing="
+                    + (paired ? std::to_string(p.nr) : std::string("staged"))
+            : std::string();
     apilog_verbose("[MATMUL.NATIVE_BRGEMM] M=", desc.M, " N=", desc.N,
             " K=", desc.K, " pack_nr=", pack_nr, " nr=", p.nr, " mb=", p.mb,
             kc_field, " tiles=", p.tiles(), " threads=", p.threads,
@@ -579,7 +681,8 @@ void log_plan_line(const execute_call_t &c, const native_plan_t &p,
             p.traversal == native_traversal_t::m_inner ? "m_inner" : "n_inner",
             int8_fields, " copy_block=", p.copy_block,
             " source=", native_plan_source_names(p),
-            " cfg=", native_plan_config_text(p), " team=", team, padded_field);
+            " cfg=", native_plan_config_text(p), " team=", team, padded_field,
+            pairing_field);
 }
 
 /// The native tiles of the call: every step up to the acquisition of the
@@ -607,11 +710,20 @@ status_t run_tiles(const GemmDescriptor &desc,
     }
     const native_problem_t problem
             = make_native_problem(desc, params, bias, weight.pack_nr, decision);
-    const native_plan_t p = native_planner().plan(problem);
+    native_plan_t p = native_planner().plan(problem);
+    // The gate and up halves of a gated weight pair up in the tiles of the
+    // BF16 and INT8 kernels, from the weight's plain layout, in whole blocks
+    // or in runs of 16 columns.
+    const int paired_width = native_gated_halves(desc.gated_act) && !c.f32
+            ? native_paired_width(desc.N, p.nr, p.m_blocks, p.threads)
+            : 0;
+    const bool paired = paired_width > 0;
+    if (paired) p = paired_plan(p, problem, paired_width);
     const bool bias_in_dequant
             = c.int8 && p.int8_bias_in_dequant && decision.bias_in_dequant;
     native_epilogue_t ep;
-    st = prepare_call_epilogue(c, decision, bias_in_dequant, ep, why);
+    st = prepare_call_epilogue(
+            c, decision, bias_in_dequant, paired, !CheckOnly, ep, why);
     if (st != status_t::success) return st;
     std::optional<int8_operands_t> int8_op;
     if (c.int8) {
@@ -624,6 +736,7 @@ status_t run_tiles(const GemmDescriptor &desc,
     if (c.bf16) {
         st = prepare_bf16_operands(c, p, problem.threads, bf16_op);
         if (st != status_t::success) return st;
+        if (paired) bf16_op.paired = bf16_brgemm_paired_table();
     }
     f32_operands_t f32_op;
     if (c.f32) {
@@ -653,6 +766,7 @@ status_t run_tiles(const GemmDescriptor &desc,
     st = acquire_native_weight(weight, desc.wei_dt, desc.K, desc.N, desc.ldb,
             desc.transB, view, lease, problem.threads);
     if (st != status_t::success) return st;
+    view.paired = paired;
 
     int team = 1;
     st = run_team(c, p, problem.threads, view, ep, bf16_op,
@@ -661,7 +775,7 @@ status_t run_tiles(const GemmDescriptor &desc,
 
     if (s_log)
         log_plan_line(c, p, decision, bias_in_dequant,
-                int8_op && int8_op->direct, view.pack_nr, team);
+                int8_op && int8_op->direct, view.pack_nr, team, paired);
     return status_t::success;
 }
 

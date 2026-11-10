@@ -56,6 +56,12 @@ struct native_int4_group_ukernel_args_t {
     size_t a_step = 0;
     const uint8_t *B = nullptr;
     int b_stride = 0;
+    /// The tile's second 16 columns (nv 2): their octet b_second bytes after
+    /// B's, their weight scales scale_second elements after the first 16
+    /// columns'; 64 and 16 inside one block, or where a paired tile's up run
+    /// starts.
+    size_t b_second = 64;
+    int scale_second = 16;
     int quad0 = 0; ///< 0 or 1
     int k_quads = 0;
     int batch = 0;
@@ -84,6 +90,13 @@ struct native_int4_group_ukernel_args_t {
     /// The fused order's last batch of a source scale per row: the sum is
     /// multiplied by the row's source scale after it.
     bool finish = false;
+    /// K passes of a batch of one group: with partial_in its int32 sum
+    /// starts at the int32 values C holds (the earlier passes' sum, shift
+    /// included) instead of the shift; with partial_out the sum is stored
+    /// to C as int32, and neither a scale nor dst is applied.  accumulate
+    /// is then false.
+    bool partial_in = false;
+    bool partial_out = false;
     /// When set, the result is stored here instead of C: MR rows dst_ldc
     /// elements apart, bf16 rounded to nearest even or f32.
     void *dst = nullptr;
@@ -101,7 +114,8 @@ struct native_int4_group_ukernel_args_t {
 ///     with finish then C * src_scale[m * src_scale_ld];
 ///   fused over source scales per group: fma(f32(S_g), src_scale_g *
 ///     wei_scale_g[n], C), the product rounded and +0.0 where S_g is 0.
-/// Equal inputs give equal bits.
+/// Equal inputs give equal bits; a group taken in K passes (partial_in,
+/// partial_out) gives the bits of the group taken whole.
 using native_int4_group_ukernel_fn_t
         = void (*)(const native_int4_group_ukernel_args_t &);
 

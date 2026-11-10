@@ -34,21 +34,23 @@ namespace native {
 
 namespace {
 
-/// C holds f32(S) for rows m0 .. m0 + mr and pack columns p0 .. p0 + nr (a
-/// multiple of 16), wei_scale the f32 weight scales of those columns.
-/// Applies alpha, beta, the zero-point term and the scales one rounding at a
-/// time, in the reference algorithm's order: ((alpha * S + beta * C + Z) *
-/// src_scale) * wei_scale[j].  Pairs: w is an interleaved pack, and beta
-/// reads C at the columns its pack columns hold.  Tail: only the first cols
-/// pack columns lie below the weight's N; beta reads no column past it.
-template <bool Pairs, bool Tail>
+/// C holds f32(S) for rows m0 .. m0 + mr and weight columns p0 .. p0 + nr
+/// (a multiple of 16), wei_scale the f32 weight scales of those columns.
+/// Applies alpha, the zero-point term, the scales and beta one rounding at a
+/// time, in the reference algorithm's order: ((alpha * S + Z) * src_scale) *
+/// wei_scale[j] + beta * C into an f32, bf16 or f16 destination, ((alpha *
+/// S + beta * C + Z) * src_scale) * wei_scale[j] into an integer one; beta
+/// reads C at those columns.  Tail: only the first cols columns lie below the weight's
+/// N; beta reads no column past it.
+template <bool Tail>
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,avx512dq")
-void finish_in_reference_order(const native_int8_call_t &call,
-        const native_weight_view_t &w, int m0, int mr, int p0, int nr, int cols,
-        const int32_t *col_sum, const float *wei_scale, float *C, int ldc) {
+void finish_in_reference_order(const native_int8_call_t &call, int m0, int mr,
+        int p0, int nr, int cols, const int32_t *col_sum,
+        const float *wei_scale, float *C, int ldc) {
     const bool scale_alpha = call.alpha != 1.0f;
-    const bool add_beta = call.beta != 0.0f;
-    assert(Pairs == w.interleaved);
+    const bool beta_last
+            = call.beta != 0.0f && native_int8_beta_after_scales(call.dst_dt);
+    const bool beta_first = call.beta != 0.0f && !beta_last;
     const __m512 alpha = _mm512_set1_ps(call.alpha);
     const __m512 beta = _mm512_set1_ps(call.beta);
     for (int r = 0; r < mr; ++r) {
@@ -64,27 +66,10 @@ void finish_in_reference_order(const native_int8_call_t &call,
             __m512 v = _mm512_loadu_ps(c + j);
             // No product may fuse with the add that follows it.
             if (scale_alpha) v = avx512_mul_unfused(v, alpha);
-            if (add_beta) {
-                if constexpr (Tail && Pairs)
-                    v = _mm512_add_ps(v,
-                            avx512_mul_unfused(dst_pair_values_below(call, w,
-                                                       row, p0 + j, cols - j),
-                                    beta));
-                else if constexpr (Tail)
-                    v = _mm512_add_ps(v,
-                            avx512_mul_unfused(dst_values_below(call, row,
-                                                       p0 + j, cols - j),
-                                    beta));
-                else if constexpr (Pairs)
-                    v = _mm512_add_ps(v,
-                            avx512_mul_unfused(
-                                    dst_pair_values(call, w, row, p0 + j),
-                                    beta));
-                else
-                    v = _mm512_add_ps(v,
-                            avx512_mul_unfused(
-                                    dst_values(call, row, p0 + j), beta));
-            }
+            if (beta_first)
+                v = _mm512_add_ps(v,
+                        native_int8_beta_term<Tail>(
+                                call, row, p0 + j, cols - j, beta));
             if (zp != 0) {
                 // In int64, each product rounded once: exact for any zero
                 // point, and equal to the wrapping int32 product wherever
@@ -99,8 +84,14 @@ void finish_in_reference_order(const native_int8_call_t &call,
                 v = _mm512_add_ps(v,
                         _mm512_insertf32x8(_mm512_castps256_ps512(lo), hi, 1));
             }
-            v = _mm512_mul_ps(
-                    _mm512_mul_ps(v, a), _mm512_loadu_ps(wei_scale + j));
+            v = _mm512_mul_ps(v, a);
+            if (beta_last)
+                v = _mm512_add_ps(
+                        avx512_mul_unfused(v, _mm512_loadu_ps(wei_scale + j)),
+                        native_int8_beta_term<Tail>(
+                                call, row, p0 + j, cols - j, beta));
+            else
+                v = _mm512_mul_ps(v, _mm512_loadu_ps(wei_scale + j));
             _mm512_storeu_ps(c + j, v);
         }
     }
@@ -113,19 +104,17 @@ void compute_channel_tile(const native_plan_t &plan,
         const native_int8_call_t &call, const native_weight_view_t &w, int m0,
         int mr, int n0, int nr, float *C, int ldc,
         const native_int8_out_t *out) {
-    const int nb = n0 / w.pack_nr;
-    const int j0 = n0 - nb * w.pack_nr;
-    const int8_t *block = reinterpret_cast<const int8_t *>(w.block(nb));
-    const int32_t *col_sums = w.col_sums(nb);
     const uint32_t zp_shift = call.src_signed ? 128u : 0u;
     // The kernel then yields f32(S) (unit scales, only the +128 term), and
     // the reference-order finish does the rest.
     const bool reference_order = call.order == native_int8_order_t::reference;
     assert(out == nullptr || !reference_order);
+    assert(out == nullptr || !w.paired);
     const size_t out_esz = out != nullptr && out->bf16 ? 2 : 4;
 
     alignas(64) float scale_buf[kMaxTileNr];
     alignas(64) float bias_buf[kMaxTileNr];
+    alignas(64) int32_t sum_buf[kMaxTileNr];
     alignas(64) float ones[kMaxTileNr];
     alignas(64) int32_t zp[kMaxTileMr];
     alignas(64) float src_scale[kMaxTileMr];
@@ -151,32 +140,48 @@ void compute_channel_tile(const native_plan_t &plan,
         const int cw = native_int8_col_width(plan, nr - c);
         assert(cw <= kMaxTileNr);
         const int nv = cw / 16;
+        // The weight columns of the call's first 16 columns, and of its
+        // second 16 (a paired tile's up run, or the next block): their
+        // sums, scales and bias then follow the first 16's in the buffers.
+        const int p0 = w.tile_col(n0, nr, c);
+        const int p1 = second_col(w, n0, nr, c, nv, p0);
+        const bool apart = second_apart(w, nv, p0, p1);
         // Tail: the columns of this call below the weight's N.
         const int cols = Tail ? std::min(cw, w.N - (n0 + c)) : cw;
         const bool part = Tail && cols < cw;
-        const float *col_scale = part
-                ? column_values_below(call.wei_scale, call.wei_scale_dt,
-                          call.wei_scale_stride, w, n0 + c, cw, cols, scale_buf)
-                : column_values(call.wei_scale, call.wei_scale_dt,
-                          call.wei_scale_stride, w, n0 + c, cw, scale_buf);
+        assert(!(part && apart));
+        const float *col_scale = apart
+                ? column_values_apart(call.wei_scale, call.wei_scale_dt,
+                          call.wei_scale_stride, p0, p1, scale_buf)
+                : part ? column_values_below(call.wei_scale, call.wei_scale_dt,
+                                 call.wei_scale_stride, p0, cw, cols, scale_buf)
+                       : column_values(call.wei_scale, call.wei_scale_dt,
+                                 call.wei_scale_stride, p0, cw, scale_buf);
         if (!reference_order) args.wei_scale = col_scale;
         if (call.bias == nullptr)
             args.bias = nullptr;
+        else if (apart)
+            args.bias = column_values_apart(
+                    call.bias, call.bias_dt, 1, p0, p1, bias_buf);
         else if (part)
             args.bias = column_values_below(
-                    call.bias, call.bias_dt, 1, w, n0 + c, cw, cols, bias_buf);
+                    call.bias, call.bias_dt, 1, p0, cw, cols, bias_buf);
         else
             args.bias = column_values(
-                    call.bias, call.bias_dt, 1, w, n0 + c, cw, bias_buf);
-        args.col_sum = col_sums + j0 + c;
+                    call.bias, call.bias_dt, 1, p0, cw, bias_buf);
+        args.col_sum
+                = apart ? col_sums_apart(w, p0, p1, sum_buf) : w.col_sum(p0);
+        args.b_second = apart ? w.column_distance(p0, p1) : 64;
+        const int8_t *b0 = reinterpret_cast<const int8_t *>(w.column(p0));
         const int max_mr = native_int8_call_rows(plan, nv);
         assert(max_mr >= 1 && max_mr <= kMaxTileMr);
-        const int pass
-                = native_int8_pass_quads(plan, w.k_groups, cw, mr, max_mr);
+        // A call apart reads one line of each pair of its runs' blocks: its
+        // K pass takes the cache sets of twice its width.
+        const int pass = native_int8_pass_quads(
+                plan, w.k_groups, apart ? 2 * cw : cw, mr, max_mr);
         for (int kq = 0; kq < w.k_groups; kq += pass) {
             args.k_quads = std::min(pass, w.k_groups - kq);
-            args.B = block + static_cast<size_t>(j0 + c) * 4
-                    + static_cast<size_t>(kq) * args.b_stride;
+            args.B = b0 + static_cast<size_t>(kq) * args.b_stride;
             args.first_pass = kq == 0;
             args.last_pass = kq + args.k_quads == w.k_groups;
             for (int i = 0; i < mr;) {
@@ -205,15 +210,15 @@ void compute_channel_tile(const native_plan_t &plan,
                             + (static_cast<size_t>(m0 + i) * out->ldc + n0 + c)
                                     * out_esz;
                 select_native_int8_ukernel(rows, nv, call.src_signed)(args);
-                if (reference_order && args.last_pass) {
-                    if (w.interleaved)
-                        finish_in_reference_order<true, Tail>(call, w, m0 + i,
-                                rows, n0 + c, cw, cols, args.col_sum, col_scale,
-                                args.C, ldc);
-                    else
-                        finish_in_reference_order<false, Tail>(call, w, m0 + i,
-                                rows, n0 + c, cw, cols, args.col_sum, col_scale,
-                                args.C, ldc);
+                if (reference_order && args.last_pass && apart) {
+                    finish_in_reference_order<Tail>(call, m0 + i, rows, p0, 16,
+                            16, args.col_sum, col_scale, args.C, ldc);
+                    finish_in_reference_order<Tail>(call, m0 + i, rows, p1, 16,
+                            16, args.col_sum + 16, col_scale + 16, args.C + 16,
+                            ldc);
+                } else if (reference_order && args.last_pass) {
+                    finish_in_reference_order<Tail>(call, m0 + i, rows, p0, cw,
+                            cols, args.col_sum, col_scale, args.C, ldc);
                 }
                 i += rows;
             }

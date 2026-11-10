@@ -151,6 +151,10 @@ zendnnl::lowoha::matmul::native::native_gemv_t gemv_kernel(const call_t &c) {
     if (c.M != 1 || c.params.mem_format_b != 'n'
             || !nat::native_brgemm_requested(c.params, 1))
         return nat::native_gemv_t::none;
+    if (c.is_weights_const
+            && zendnnl::common::matmul_config_t::is_native_brgemm_algo()
+            && mm::effective_weight_cache_type(c.params.weight_cache_type) == 2)
+        return nat::native_gemv_t::none;
     nat::GemmDescriptor d;
     d.M = c.M;
     d.N = c.N;
@@ -330,9 +334,16 @@ void gated_act_ref(const float *pre, int M, int N, mm::matmul_gated_act_t act,
                 v = (1.0f + u) * g / (1.0f + std::exp(-1.702f * g));
             } else {
                 const float g = row[i];
-                const float a = act == mm::matmul_gated_act_t::silu_and_mul
-                        ? g / (1.0f + std::exp(-g))
-                        : 0.5f * g * (1.0f + std::erf(g * 0.70710678118f));
+                float a = 0.0f;
+                if (act == mm::matmul_gated_act_t::silu_and_mul)
+                    a = g / (1.0f + std::exp(-g));
+                else if (act == mm::matmul_gated_act_t::gelu_tanh_and_mul)
+                    a = 0.5f * g
+                            * (1.0f
+                                    + std::tanh(0.7978845608f
+                                            * (g + 0.044715f * g * g * g)));
+                else
+                    a = 0.5f * g * (1.0f + std::erf(g * 0.70710678118f));
                 v = a * row[I + i];
             }
             out[static_cast<size_t>(m) * I + i] = v;

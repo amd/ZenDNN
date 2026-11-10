@@ -44,6 +44,9 @@ struct native_int8_ukernel_args_t {
     int lda = 0;
     /// Quad 0 of the tile's first pack column.
     const int8_t *B = nullptr;
+    /// Bytes from B to quad 0 of the tile's second 16 columns (nv 2): 64
+    /// inside one block, or where a paired tile's up run starts.
+    size_t b_second = 64;
     /// Bytes between consecutive K quads of B.
     int b_stride = 0;
     int k_quads = 0;
@@ -103,6 +106,11 @@ struct native_int8_group_ukernel_args_t {
     const int8_t *B = nullptr;
     int b_stride = 0;
     size_t b_step = 0;
+    /// The tile's second 16 columns (nv 2): quad 0 b_second bytes after B,
+    /// weight scales scale_second elements after the first 16 columns'; 64
+    /// and 16 inside one block, or where a paired tile's up run starts.
+    size_t b_second = 64;
+    int scale_second = 16;
     int k_quads = 0;
     int batch = 0;
     // The step of element g, for row m: against an s8 source the row's int32

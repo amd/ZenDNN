@@ -47,9 +47,6 @@ alignas(64) constexpr int32_t kGateLanes[16]
         = {0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30};
 alignas(64) constexpr int32_t kUpLanes[16]
         = {1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31};
-/// Lane 2i from the first source's lane i, lane 2i + 1 from the second's.
-alignas(64) constexpr int32_t kPairLanes[16]
-        = {0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23};
 
 bool is_operand_dt(data_type_t dt) {
     return native_float_dt(dt) || dt == data_type_t::s8 || dt == data_type_t::u8
@@ -246,10 +243,22 @@ inline __m512 exp_op(__m512 x) {
     return avx512_scalar_lanes(y, x, tail, [](float v) { return std::exp(v); });
 }
 
+/// 0.5 x (1 + tanh(sqrt(2 / pi) x (1 + 0.044715 x^2))), the gelu_tanh
+/// post-op and the gate of gelu_tanh_and_mul.
+ZENDNNL_TARGET("avx512f,fma")
+inline __m512 gelu_tanh(__m512 x) {
+    const __m512 one = _mm512_set1_ps(1.0f);
+    const __m512 inner = _mm512_mul_ps(
+            _mm512_mul_ps(_mm512_set1_ps(kSqrt2OverPi), x),
+            _mm512_fmadd_ps(
+                    _mm512_mul_ps(_mm512_set1_ps(kGeluTanhCoeff), x), x, one));
+    return _mm512_mul_ps(_mm512_mul_ps(_mm512_set1_ps(0.5f), x),
+            _mm512_add_ps(one, avx512_tanh(inner)));
+}
+
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,avx512dq,fma")
 inline __m512 eltwise(const native_postop_t &op, __m512 x, int lanes) {
     const __m512 zero = _mm512_setzero_ps();
-    const __m512 one = _mm512_set1_ps(1.0f);
     switch (op.type) {
         case post_op_type_t::relu: return _mm512_max_ps(x, zero);
         case post_op_type_t::leaky_relu:
@@ -257,15 +266,7 @@ inline __m512 eltwise(const native_postop_t &op, __m512 x, int lanes) {
                     _mm512_mul_ps(x, _mm512_set1_ps(op.alpha)),
                     _mm512_cmp_ps_mask(x, zero, _CMP_GT_OQ), x);
         case post_op_type_t::elu: return elu_op(x, op.alpha);
-        case post_op_type_t::gelu_tanh: {
-            const __m512 inner = _mm512_mul_ps(
-                    _mm512_mul_ps(_mm512_set1_ps(kSqrt2OverPi), x),
-                    _mm512_fmadd_ps(
-                            _mm512_mul_ps(_mm512_set1_ps(kGeluTanhCoeff), x), x,
-                            one));
-            return _mm512_mul_ps(_mm512_mul_ps(_mm512_set1_ps(0.5f), x),
-                    _mm512_add_ps(one, avx512_tanh(inner)));
-        }
+        case post_op_type_t::gelu_tanh: return gelu_tanh(x);
         case post_op_type_t::gelu_erf: return avx512_gelu_erf(x);
         case post_op_type_t::sigmoid: return sigmoid_op(x);
         case post_op_type_t::swish: return avx512_swish(x, op.alpha);
@@ -375,50 +376,29 @@ void finish_row(const native_epilogue_t &ep, int m) {
     }
 }
 
-/// The bias of pack columns p .. p + lanes (p even for an interleaved pack)
-/// as f32; the conversions are exact.
-ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
-inline __m512 load_bias(
-        const native_epilogue_t &ep, int p, int lanes, __mmask16 k) {
-    const char *b = static_cast<const char *>(ep.bias_raw);
-    if (!ep.interleaved)
-        return load_f32(
-                b + static_cast<size_t>(p) * ep.bias_esz, ep.bias_dt, k);
-    const __mmask16 half = lane_mask((lanes + 1) / 2);
-    const __m512 gate = load_f32(
-            b + static_cast<size_t>(p / 2) * ep.bias_esz, ep.bias_dt, half);
-    const __m512 up
-            = load_f32(b + static_cast<size_t>(ep.N / 2 + p / 2) * ep.bias_esz,
-                    ep.bias_dt, half);
-    return _mm512_maskz_permutex2var_ps(
-            k, gate, _mm512_load_si512(kPairLanes), up);
-}
-
-/// The pre-activation columns of pack columns p .. p + lanes (p even for an
-/// interleaved pack) of row m of beta_src, as f32; the conversions are
+/// The bias of weight columns p .. p + lanes as f32; the conversions are
 /// exact.
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
-inline __m512 load_pre_activation(
-        const native_epilogue_t &ep, int m, int p, int lanes, __mmask16 k) {
-    const char *row = static_cast<const char *>(ep.beta_src)
-            + static_cast<size_t>(m) * ep.beta_ld * ep.dst_esz;
-    if (!ep.interleaved)
-        return load_f32(
-                row + static_cast<size_t>(p) * ep.dst_esz, ep.dst_dt, k);
-    const __mmask16 half = lane_mask((lanes + 1) / 2);
-    const __m512 gate = load_f32(
-            row + static_cast<size_t>(p / 2) * ep.dst_esz, ep.dst_dt, half);
-    const __m512 up
-            = load_f32(row + static_cast<size_t>(ep.N / 2 + p / 2) * ep.dst_esz,
-                    ep.dst_dt, half);
-    return _mm512_maskz_permutex2var_ps(
-            k, gate, _mm512_load_si512(kPairLanes), up);
+inline __m512 load_bias(const native_epilogue_t &ep, int p, __mmask16 k) {
+    return load_f32(static_cast<const char *>(ep.bias_raw)
+                    + static_cast<size_t>(p) * ep.bias_esz,
+            ep.bias_dt, k);
 }
 
-/// v = alpha * acc + beta * dst + bias at pack columns p .. p + lanes, in the
-/// reference order, one rounding per operation (neither product is fused
-/// with the add that follows it); a gated call reads beta's dst at the
-/// pre-activation columns.
+/// The pre-activation columns p .. p + lanes of row m of beta_src, as f32;
+/// the conversions are exact.
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+inline __m512 load_pre_activation(
+        const native_epilogue_t &ep, int m, int p, __mmask16 k) {
+    const char *row = static_cast<const char *>(ep.beta_src)
+            + static_cast<size_t>(m) * ep.beta_ld * ep.dst_esz;
+    return load_f32(row + static_cast<size_t>(p) * ep.dst_esz, ep.dst_dt, k);
+}
+
+/// v = alpha * acc + beta * dst + bias at weight columns p .. p + lanes, in
+/// the reference order, one rounding per operation (neither product is
+/// fused with the add that follows it); a gated call reads beta's dst at
+/// the pre-activation columns.
 template <bool Gated>
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
 inline __m512 pre(const native_epilogue_t &ep, const float *acc, int m, int p,
@@ -429,7 +409,7 @@ inline __m512 pre(const native_epilogue_t &ep, const float *acc, int m, int p,
     if (ep.beta != 0.0f) {
         if constexpr (Gated)
             v = _mm512_add_ps(v,
-                    avx512_mul_unfused(load_pre_activation(ep, m, p, lanes, k),
+                    avx512_mul_unfused(load_pre_activation(ep, m, p, k),
                             _mm512_set1_ps(ep.beta)));
         else
             v = _mm512_add_ps(v,
@@ -439,8 +419,19 @@ inline __m512 pre(const native_epilogue_t &ep, const float *acc, int m, int p,
     if (ep.bias != nullptr)
         v = _mm512_add_ps(v, _mm512_maskz_loadu_ps(k, ep.bias + p));
     else if (ep.bias_raw != nullptr)
-        v = _mm512_add_ps(v, load_bias(ep, p, lanes, k));
+        v = _mm512_add_ps(v, load_bias(ep, p, k));
     return v;
+}
+
+/// The pre-activation of weight columns p .. p + lanes of row m: pre, then
+/// the post-ops, whose binary operands index the [M, N] pre-activation.
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,avx512dq,fma")
+inline __m512 pre_activation(const native_epilogue_t &ep, const float *acc,
+        int m, int p, int lanes) {
+    const __m512 v = pre<true>(ep, acc, m, p, lanes);
+    if (ep.ops.empty()) return v;
+    return run_ops(
+            ep, 0, ep.ops.size(), v, m, p, ep.N, lane_mask(lanes), lanes);
 }
 
 /// The rows of a store_only epilogue: whole vectors stored unmasked, the
@@ -477,30 +468,82 @@ inline __m512 gated_value(matmul_gated_act_t gated, __m512 g, __m512 u) {
             return _mm512_mul_ps(avx512_silu(g), u);
         case matmul_gated_act_t::gelu_and_mul:
             return _mm512_mul_ps(avx512_gelu_erf(g), u);
+        case matmul_gated_act_t::gelu_tanh_and_mul:
+            return _mm512_mul_ps(gelu_tanh(g), u);
         default: return avx512_swiglu_oai(g, u);
     }
 }
 
+/// The outputs j0 .. j1 of a staged row m of a gated call over [gate | up]
+/// halves: the activation of its staged pre-activation columns i and N / 2
+/// + i.
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,avx512dq,fma")
+void finish_gated_row(const native_epilogue_t &ep, int m, int j0, int j1) {
+    const float *row = ep.staged + static_cast<size_t>(m) * ep.N;
+    const int half = ep.N / 2;
+    for (int j = j0; j < j1; j += 16) {
+        const int lanes = std::min(16, j1 - j);
+        const __mmask16 k = lane_mask(lanes);
+        store_out(ep,
+                gated_value(ep.gated, _mm512_maskz_loadu_ps(k, row + j),
+                        _mm512_maskz_loadu_ps(k, row + half + j)),
+                m, j, lanes);
+    }
+}
+
+struct thread_staged_t {
+    std::unique_ptr<float[]> buf;
+    size_t cap = 0;
+};
+
+thread_staged_t &thread_staged() {
+    static thread_local thread_staged_t staged;
+    return staged;
+}
+
+/// The calling thread's staging rows of at least floats floats, kept for
+/// the thread's lifetime: grown to at least twice their size up to
+/// kNativeThreadStagedFloats, or to floats above it; rows above that bound
+/// are freed by the thread's next request that fits it.  nullptr when they
+/// cannot be allocated.
+float *thread_staged_rows(size_t floats) {
+    thread_staged_t &t = thread_staged();
+    const size_t bound = kNativeThreadStagedFloats;
+    const bool shrink = t.cap > bound && floats <= bound;
+    if (t.cap < floats || shrink) {
+        const size_t cap = floats > bound
+                ? floats
+                : std::min(bound, std::max(floats, shrink ? 0 : 2 * t.cap));
+        t.buf.reset();
+        t.buf.reset(new (std::nothrow) float[cap]);
+        t.cap = t.buf ? cap : 0;
+    }
+    return t.buf.get();
+}
+
 } // namespace
 
+size_t native_thread_staged_floats() {
+    return thread_staged().cap;
+}
+
 status_t prepare_epilogue(const GemmDescriptor &desc,
-        const matmul_params &params, const void *bias, void *dst,
-        bool interleaved, native_epilogue_t &ep, const char **why) {
+        const matmul_params &params, const void *bias, void *dst, bool paired,
+        native_epilogue_t &ep, const char **why, bool buffers) {
     const matmul_gated_act_t gated = desc.gated_act;
     const bool is_gated = gated != matmul_gated_act_t::none;
+    const bool halves = native_gated_halves(gated);
     if (is_gated) {
-        if (gated != matmul_gated_act_t::silu_and_mul
-                && gated != matmul_gated_act_t::gelu_and_mul
-                && gated != matmul_gated_act_t::swiglu_oai_mul)
+        if (!halves && gated != matmul_gated_act_t::swiglu_oai_mul)
             return turned_away(status_t::unimplemented,
                     "an unknown gated activation", why);
-        // silu / gelu weights are [gate | up] halves, which pair up only in
-        // an interleaved pack; swiglu weights arrive interleaved.
-        if (desc.N % 2 != 0
-                || interleaved != (gated != matmul_gated_act_t::swiglu_oai_mul))
+        if (desc.N % 2 != 0)
             return turned_away(status_t::failure,
-                    "a gated activation over a pack that does not pair its "
-                    "columns",
+                    "a gated activation over an odd number of columns", why);
+        // swiglu weights interleave their pairs: their tiles are plain.
+        if (paired && !halves)
+            return turned_away(status_t::failure,
+                    "paired tiles for a gated activation of interleaved pairs",
                     why);
         // beta reads the dst's N pre-activation columns.
         if (desc.beta != 0.0f && desc.ldc < desc.N)
@@ -508,9 +551,9 @@ status_t prepare_epilogue(const GemmDescriptor &desc,
                     "beta with a gated activation over a dst of fewer than N "
                     "columns",
                     why);
-    } else if (interleaved) {
+    } else if (paired) {
         return turned_away(status_t::unimplemented,
-                "an interleaved pack without a gated activation", why);
+                "paired tiles without a gated activation", why);
     }
     switch (desc.dst_dt) {
         case data_type_t::f32:
@@ -532,7 +575,8 @@ status_t prepare_epilogue(const GemmDescriptor &desc,
     ep.alpha = desc.alpha;
     ep.beta = desc.beta;
     ep.gated = gated;
-    ep.interleaved = interleaved;
+    ep.paired = paired;
+    ep.staged_halves = halves && !paired;
     ep.dst = dst;
     ep.dst_dt = desc.dst_dt;
     ep.dst_esz = static_cast<int>(size_of(desc.dst_dt));
@@ -555,7 +599,7 @@ status_t prepare_epilogue(const GemmDescriptor &desc,
         if (!is_operand_dt(bdt))
             return turned_away(status_t::unimplemented,
                     "a bias other than f32, bf16, f16, s8, u8 or s32", why);
-        if (bdt == data_type_t::f32 && !interleaved) {
+        if (bdt == data_type_t::f32) {
             ep.bias = static_cast<const float *>(bias);
         } else {
             ep.bias_raw = bias;
@@ -623,17 +667,25 @@ status_t prepare_epilogue(const GemmDescriptor &desc,
 
     ep.rows.reset();
     ep.row_cols.reset();
-    if (softmax && desc.M > 0) {
+    ep.staged = nullptr;
+    if (softmax && desc.M > 0 && buffers) {
         const size_t cells = static_cast<size_t>(desc.M) * ep.n_out;
         ep.rows.reset(new (std::nothrow) float[cells]);
         ep.row_cols.reset(new (std::nothrow) std::atomic<int>[desc.M]);
         if (!ep.rows || !ep.row_cols) {
-            log_error("native epilogue: no softmax rows buffer of ", cells,
-                    " floats");
+            log_error("native epilogue: no rows buffer of ", cells, " floats");
             return status_t::failure;
         }
         for (int m = 0; m < desc.M; ++m)
             ep.row_cols[m].store(0, std::memory_order_relaxed);
+    }
+    if (ep.staged_halves && desc.M > 0 && buffers) {
+        const size_t cells = static_cast<size_t>(desc.M) * desc.N;
+        ep.staged = thread_staged_rows(cells);
+        if (ep.staged == nullptr) {
+            log_error("native epilogue: no rows buffer of ", cells, " floats");
+            return status_t::failure;
+        }
     }
 
     const auto &qp = params.quant_params;
@@ -674,6 +726,39 @@ void apply_epilogue_tile(const native_epilogue_t &ep, float *C, int ldc_acc,
         return;
     }
     const bool gated = ep.gated != matmul_gated_act_t::none;
+    if (ep.paired) {
+        // Column j of the tile's first half is gate column n0 / 2 + j, and
+        // column half + j the up column paired with it.
+        const int half = nr / 2;
+        const int i0 = n0 / 2;
+        const int up0 = ep.N / 2 + i0;
+        for (int i = 0; i < mr; ++i) {
+            const int m = m0 + i;
+            const float *acc = C + static_cast<size_t>(i) * ldc_acc;
+            for (int j = 0; j < half; j += 16) {
+                const int lanes = std::min(16, half - j);
+                const __m512 g = pre_activation(ep, acc + j, m, i0 + j, lanes);
+                const __m512 u
+                        = pre_activation(ep, acc + half + j, m, up0 + j, lanes);
+                store_out(ep, gated_value(ep.gated, g, u), m, i0 + j, lanes);
+            }
+        }
+        return;
+    }
+    if (ep.staged_halves) {
+        // The pre-activation of whole rows, paired by pair_staged_halves.
+        for (int i = 0; i < mr; ++i) {
+            const int m = m0 + i;
+            const float *acc = C + static_cast<size_t>(i) * ldc_acc;
+            float *row = ep.staged + static_cast<size_t>(m) * ep.N;
+            for (int j = 0; j < nr; j += 16) {
+                const int lanes = std::min(16, nr - j);
+                _mm512_mask_storeu_ps(row + n0 + j, lane_mask(lanes),
+                        pre_activation(ep, acc + j, m, n0 + j, lanes));
+            }
+        }
+        return;
+    }
     const int width = gated ? nr / 2 : nr;
     const __m512i gate_lanes = _mm512_load_si512(kGateLanes);
     const __m512i up_lanes = _mm512_load_si512(kUpLanes);
@@ -687,37 +772,21 @@ void apply_epilogue_tile(const native_epilogue_t &ep, float *C, int ldc_acc,
                         lanes);
             }
         } else {
-            // The post-ops act on the pre-activation: at weight columns 2i
-            // and 2i + 1 before the halves of a swiglu weight separate, at
-            // the gate and up columns i and N / 2 + i after the pairs of an
-            // interleaved pack do.
-            const bool ops = !ep.ops.empty();
+            // swiglu: the post-ops act on the pre-activation at weight
+            // columns 2i and 2i + 1, before the pairs separate.
             for (int j = 0; j < nr; j += 32) {
                 const int lanes = std::min(32, nr - j);
                 const int hi_lanes = lanes - 16;
                 const int i0 = (n0 + j) / 2;
                 const int pairs = lanes / 2;
-                __m512 lo = pre<true>(
+                const __m512 lo = pre_activation(
                         ep, acc + j, m, n0 + j, std::min(16, lanes));
-                __m512 hi = hi_lanes > 0
-                        ? pre<true>(ep, acc + j + 16, m, n0 + j + 16, hi_lanes)
+                const __m512 hi = hi_lanes > 0
+                        ? pre_activation(
+                                  ep, acc + j + 16, m, n0 + j + 16, hi_lanes)
                         : _mm512_setzero_ps();
-                if (ops && !ep.interleaved) {
-                    lo = run_ops(ep, 0, ep.ops.size(), lo, m, n0 + j, ep.N,
-                            lane_mask(std::min(16, lanes)),
-                            std::min(16, lanes));
-                    if (hi_lanes > 0)
-                        hi = run_ops(ep, 0, ep.ops.size(), hi, m, n0 + j + 16,
-                                ep.N, lane_mask(hi_lanes), hi_lanes);
-                }
-                __m512 g = _mm512_permutex2var_ps(lo, gate_lanes, hi);
-                __m512 u = _mm512_permutex2var_ps(lo, up_lanes, hi);
-                if (ops && ep.interleaved) {
-                    const __mmask16 k = lane_mask(pairs);
-                    g = run_ops(ep, 0, ep.ops.size(), g, m, i0, ep.N, k, pairs);
-                    u = run_ops(ep, 0, ep.ops.size(), u, m, ep.N / 2 + i0, ep.N,
-                            k, pairs);
-                }
+                const __m512 g = _mm512_permutex2var_ps(lo, gate_lanes, hi);
+                const __m512 u = _mm512_permutex2var_ps(lo, up_lanes, hi);
                 store_out(ep, gated_value(ep.gated, g, u), m, i0, pairs);
             }
         }
@@ -726,6 +795,30 @@ void apply_epilogue_tile(const native_epilogue_t &ep, float *C, int ldc_acc,
                                 + width
                         == ep.n_out)
             finish_row(ep, m);
+    }
+}
+
+namespace {
+
+/// Units of the staged pairing: a row and up to 256 of its outputs.
+constexpr int kStagedPairUnit = 256;
+
+} // namespace
+
+int64_t staged_pair_units(const native_epilogue_t &ep, int M) {
+    const int per_row = (ep.N / 2 + kStagedPairUnit - 1) / kStagedPairUnit;
+    return static_cast<int64_t>(M) * per_row;
+}
+
+void pair_staged_halves(const native_epilogue_t &ep, int M, int i, int n) {
+    const int half = ep.N / 2;
+    const int unit = kStagedPairUnit;
+    const int per_row = (half + unit - 1) / unit;
+    const int64_t units = static_cast<int64_t>(M) * per_row;
+    for (int64_t u = units * i / n; u < units * (i + 1) / n; ++u) {
+        const int m = static_cast<int>(u / per_row);
+        const int j0 = static_cast<int>(u % per_row) * unit;
+        finish_gated_row(ep, m, j0, std::min(half, j0 + unit));
     }
 }
 

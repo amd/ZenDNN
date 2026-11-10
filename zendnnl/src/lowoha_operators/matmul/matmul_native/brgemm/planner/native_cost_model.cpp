@@ -99,7 +99,7 @@ public:
             mr_ = q.mr;
             kc_ = std::min(std::max(1, q.kc), p.K);
             passes_ = ceil_div(p.K, kc_);
-            k_steps_ = (p.K + 1) / 2;
+            k_steps_ = ceil_div(p.K, 2);
             wei_bytes_ = kBf16Bytes;
             step_bytes_ = 2 * kBf16Bytes;
             src_bytes_ = kBf16Bytes;

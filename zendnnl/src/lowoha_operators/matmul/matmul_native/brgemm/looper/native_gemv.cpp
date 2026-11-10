@@ -16,6 +16,7 @@
 
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_gemv.hpp"
 
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/native_int8_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/bf16_gemv_direct.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/int8_gemv_direct.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
@@ -92,6 +93,11 @@ native_gemv_plan_t decide_native_gemv(
     // m1_gemv_cap_threads (at least 64 columns per thread) when that is one,
     // an INT8 call at any team.
     const bool bf16 = bf16_call(desc);
+    // A K the layout rule turns away goes to the tiles, which turn it away
+    // with the rule's reason: the GEMV choices count K padded to whole pairs
+    // or quads in an int.
+    if (desc.K > (bf16 ? kMaxNativeBf16K : kMaxSafeInt8AccumK))
+        return native_gemv_plan_t {};
     const int threads
             = bf16 ? m1_gemv_cap_threads(desc.N, desc.num_threads) : 1;
     if (threads > 1 || beyond_the_gemv_kernels(desc, params))

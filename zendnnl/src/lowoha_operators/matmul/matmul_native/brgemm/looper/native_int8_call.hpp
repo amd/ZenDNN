@@ -95,12 +95,15 @@ struct native_int8_call_t {
     /// is zero); alpha, beta and the bias are the epilogue's, unless:
     native_int8_scheme_t scheme = native_int8_scheme_t::per_channel;
     /// decide_int8_call's: the group kernel takes unit weight scales, and
-    /// the tile applies alpha, beta and then wei_scale (per column or per
-    /// tensor) to the sum of the groups, one rounding each, in the reference
-    /// algorithm's order: (alpha * S + beta * C) * wei_scale.  Over an s4
-    /// weight of one group the kernel takes unit source scales too, and the
-    /// tile applies the source scale before wei_scale: ((alpha * S + beta *
-    /// C) * src_scale) * wei_scale.
+    /// the tile applies alpha, wei_scale (per column or per tensor) and beta
+    /// to the sum of the groups, one rounding each, in the reference
+    /// algorithm's order: (alpha * S) * wei_scale + beta * C into an f32,
+    /// bf16 or f16 destination, (alpha * S + beta * C) * wei_scale into an
+    /// integer one.
+    /// Over an s4 weight of one group the kernel takes unit source scales
+    /// too, and the tile applies the source scale before wei_scale: ((alpha
+    /// * S) * src_scale) * wei_scale + beta * C, or ((alpha * S + beta * C) *
+    /// src_scale) * wei_scale.
     bool scales_after_groups = false;
     int groups = 0;
     int group_quads = 0;
@@ -126,10 +129,12 @@ struct native_int8_call_t {
     float alpha = 1.0f;
     float beta = 0.0f;
     /// decide_int8_call's.  reference, per channel: the kernel yields f32(S),
-    /// and alpha, beta, the zero-point term and the scales take one rounding
-    /// each in the reference algorithm's order, ((alpha * S + beta * C + Z) *
-    /// src_scale) * wei_scale, S the raw integer sum, C the destination read
-    /// as float, Z the zero-point term; the bias is the epilogue's.
+    /// and alpha, the zero-point term, the scales and beta take one rounding
+    /// each in the reference algorithm's order, ((alpha * S + Z) *
+    /// src_scale) * wei_scale + beta * C into an f32, bf16 or f16
+    /// destination, ((alpha * S + beta * C + Z) * src_scale) * wei_scale
+    /// into an integer one, S the raw integer sum, C the destination read as
+    /// float, Z the zero-point term; the bias is the epilogue's.
     native_int8_order_t order = native_int8_order_t::fused;
     /// The C a nonzero beta of a per-channel call reads, element (m, n) at
     /// m * ldc + n; the caller sets it after prepare_int8_call.
@@ -151,8 +156,9 @@ struct native_int8_call_t {
 /// The INT8 tile serves the call's weight, source and quantization params
 /// with decision, decide_int8_call's for them (unimplemented otherwise, with
 /// *why, when why is not null, naming the reason).  Does no work and reads
-/// no buffer.  Weight zero points, K above kMaxSafeInt8AccumK, and a gated
-/// activation with beta over a dst of fewer than N columns are not served.
+/// no buffer.  Weight zero points, K above kMaxSafeInt8AccumK, a gated
+/// activation with beta over a dst of fewer than N columns, and a source
+/// the call quantizes to s8 with a source zero point buffer are not served.
 /// Per-group weight scales
 /// need groups of whole K quads, an f32, bf16, u8, s8 or s32 dst, and an s8
 /// source without a zero point (or a bf16 / f32 source quantized to s8) with
@@ -184,9 +190,13 @@ int int8_source_groups(const matmul_params &params, int M, int N);
 /// reorder_quantization_wrapper (scales and zero points written back to the
 /// caller's buffers when it gave them), or adopts a u8 / s8 source with its
 /// per-tensor, per-token or per-group scale and zero point, for a call
-/// check_int8_call accepts with decision.  The source is copied only when it
-/// is transposed or K is not whole quads.  The copies (and the transpose
-/// before a dynamic quantization) work in blocks of copy_block rows (by
+/// check_int8_call accepts with decision.  A transposed source of an s4
+/// weight, or one the call quantizes to s8 with a scale per row (per tensor
+/// at M 1) or per group of a type narrower than f32, is quantized in its own
+/// layout, as matmul's other routes quantize it; any other transposed source
+/// is made row-major first.  The source is copied only when it is transposed
+/// or K is not whole quads.  The copies (and the transpose before a
+/// quantization of the rows) work in blocks of copy_block rows (by
 /// copy_block columns when they transpose), on the requested threads when
 /// M * K >= copy_par_min.  The group shifts of a per-group call with an s8
 /// source are left to its tiles (ready_group_shifts).  A call whose

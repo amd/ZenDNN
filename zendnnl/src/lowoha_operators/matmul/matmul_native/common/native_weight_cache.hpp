@@ -21,6 +21,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <utility>
 
 #include "common/error_status.hpp"
 #include "lowoha_operators/matmul/lowoha_common.hpp"
@@ -48,7 +49,6 @@ struct native_raw_weight_t {
     int ldb = 0;
     bool transB = false;
     int pack_nr = 0;
-    bool interleave_split_halves = false;
     /// weight holds the raw weight as an aocl_dlp_blocked prepack (bf16, or
     /// s8 packed for a u8 source), which the AOCL inverse rebuilds with ldb.
     bool aocl_blocked = false;
@@ -182,6 +182,29 @@ enum class native_raw_read_t : uint8_t {
 /// caller's buffer at weight, as for native_weight_find_image.
 native_raw_read_t native_weight_read_raw(const void *weight, size_t extent,
         size_t owned_bytes, const std::function<void()> &read);
+
+/// Holds the extent bytes of the raw weight at weight for a reader outside
+/// this cache whose read is not one function: from a hold that returns done
+/// until the holder is destroyed, as native_weight_read_raw holds them while
+/// its read runs.  hold returns image, holding nothing, when the buffer holds
+/// an image by then, and failed when there is no memory to hold it.  One
+/// hold per holder; while it holds, its thread waits for no rewrite of those
+/// bytes (as a native call on the buffer may).
+class native_weight_raw_hold_t {
+public:
+    native_weight_raw_hold_t() = default;
+    ~native_weight_raw_hold_t();
+    native_weight_raw_hold_t(const native_weight_raw_hold_t &) = delete;
+    native_weight_raw_hold_t &operator=(const native_weight_raw_hold_t &)
+            = delete;
+
+    native_raw_read_t hold(
+            const void *weight, size_t extent, size_t owned_bytes);
+
+private:
+    std::pair<std::uintptr_t, std::uintptr_t> span_ {0, 0};
+    bool held_ = false;
+};
 
 /// A short read of weight bytes outside this cache that holds none of them
 /// (native_weight_read_raw holds what it reads), on the calling thread: it

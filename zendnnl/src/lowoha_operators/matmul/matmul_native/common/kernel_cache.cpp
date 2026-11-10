@@ -106,6 +106,12 @@ INT8KContiguousWeightCache &INT8KContiguousWeightCache::instance() {
     return inst;
 }
 
+const INT8KContiguousWeight *INT8KContiguousWeightCache::find(
+        const PrepackedWeightKey &key) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return cache_.find_and_touch(key);
+}
+
 const INT8KContiguousWeight *INT8KContiguousWeightCache::get_or_pack(
         const PrepackedWeightKey &key, const int8_t *weight, size_t bytes) {
 

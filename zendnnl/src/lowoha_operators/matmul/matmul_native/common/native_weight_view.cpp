@@ -55,7 +55,6 @@ status_t acquire_native_weight(const native_weight_ref_t &ref,
     view.K = K;
     view.N = N;
     view.pack_nr = pack_nr;
-    view.interleaved = ref.interleave_split_halves;
     view.k_groups = native_k_groups(wei_dt, K);
     view.block_bytes = native_block_bytes(wei_dt, K, pack_nr);
 
@@ -72,7 +71,6 @@ status_t acquire_native_weight(const native_weight_ref_t &ref,
     raw.ldb = ref.aocl_blocked ? (transB ? K : N) : ldb;
     raw.transB = transB;
     raw.pack_nr = pack_nr;
-    raw.interleave_split_halves = ref.interleave_split_halves;
     raw.aocl_blocked = ref.aocl_blocked;
     native_layout_t layout;
     const status_t st = get_native_layout(raw, ref.weight_cache_mode,

@@ -92,7 +92,9 @@ struct heuristic_params_t {
     /// Percent of L1 one batch of an s4 tile's groups (its B slab and one
     /// call's source rows) takes in a plan of at most decode_m rows, where
     /// the tile's later row calls read each batch again; 0: batches of the
-    /// int8_l2_pct share of L2.
+    /// int8_l2_pct share of L2.  One group over K takes K passes of that
+    /// share without the cost model; with it, of the int8_l2_pct share of
+    /// L2 (one pass where the group's slab fits it).
     int int4_l1_pct = 125;
     bool direct_store = true;
     bool bias_in_dequant = true;
@@ -163,8 +165,9 @@ struct heuristic_params_t {
     /// percent faster, and to the model's rules for long weight streams
     /// (cm_pass_kib, cm_block_kib); a per-channel INT8 plan likewise to two
     /// row groups, and with cm_int8_l1_pct to its rule for blocks of three
-    /// calls; an s4 plan to M blocks (cm_int4_min_m).  The model places the
-    /// team's threads in L3 domains in order, domain_threads to a domain.
+    /// calls; an s4 plan to M blocks (cm_int4_min_m) and, over one group, to
+    /// its K passes (int4_l1_pct).  The model places the team's threads in
+    /// L3 domains in order, domain_threads to a domain.
     int cost_model = 1;
     int cm_gain_pct = 5;
     // Cost model (native_cost_model.hpp): the inputs of the modeled time of
@@ -205,8 +208,8 @@ struct heuristic_params_t {
     /// is slower, the link of the L3 domain limits the streams, and the
     /// other streams of the domain fill the link while one idles, past the
     /// first cm_sync_tiles tiles of each worker (the workers start in step);
-    /// while it is faster, one core's stream limits, and the rules for long
-    /// weight streams (cm_drift_kib, cm_block_kib, cm_int8_l1_pct) apply.
+    /// while it is faster, one core's stream limits, and the long K pass
+    /// (cm_drift_kib) and the INT8 rule of cm_int8_l1_pct apply.
     /// At a tie neither holds: the derived cm_mem_cycles of 16 threads to a
     /// domain is 600.
     int cm_stream_cycles = 600;
@@ -247,8 +250,7 @@ struct heuristic_params_t {
     int cm_drift_kib = 4096;
     int cm_pass_kib = 128;
     int cm_pass_calls = 4;
-    /// KiB of weights a worker of the slice streams past which, where one
-    /// core streams slower than its share of the domain's link and the
+    /// KiB of weights a worker of the slice streams past which, where the
     /// worker streams longer than it computes, a single row block of more
     /// than two calls takes M blocks of tile_rows rows over all of K.
     int cm_block_kib = 16384;

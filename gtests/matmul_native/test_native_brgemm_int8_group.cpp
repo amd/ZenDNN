@@ -418,11 +418,17 @@ float model_at(const gcase_t &c, const operands_t &o, const source_t &s, int m,
         sum = sum + v;
     }
     const size_t mn = static_cast<size_t>(m) * c.N + n;
+    // beta * C into an f32 or bf16 dst follows the weight scales; into any
+    // other it comes before them.
+    const bool beta_last = c.dst == kF32 || c.dst == kBf16;
     if (c.alpha != 1.0f) sum *= c.alpha;
-    if (c.beta != 0.0f) sum += nt::load_f32(o.init.get(), c.dst, mn) * c.beta;
+    if (c.beta != 0.0f && !beta_last)
+        sum += nt::load_f32(o.init.get(), c.dst, mn) * c.beta;
     if (c.wgran == wgran_t::channel || c.wgran == wgran_t::tensor)
         sum *= nt::load_f32(o.wei_scale.get(), c.wei_scale_dt,
                 c.wgran == wgran_t::channel ? static_cast<size_t>(n) : 0);
+    if (c.beta != 0.0f && beta_last)
+        sum += nt::load_f32(o.init.get(), c.dst, mn) * c.beta;
     if (c.bias != kNone) sum += nt::load_f32(o.bias.get(), c.bias, n);
     if (c.po == po_t::gelu || c.po == po_t::gelu_add)
         sum = 0.5f * sum * (1.0f + std::erf(sum * kSqrt2Over2));
@@ -576,9 +582,6 @@ status_t run_direct(const nt::call_t &c) {
     nat::native_weight_ref_t ref;
     ref.weight = c.wei;
     ref.pack_nr = nat::kNativeLayoutPackNr;
-    ref.interleave_split_halves
-            = c.gated == mm::matmul_gated_act_t::silu_and_mul
-            || c.gated == mm::matmul_gated_act_t::gelu_and_mul;
     ref.weight_cache_mode = 0;
     return nat::native_brgemm_execute(
             desc, ref, c.src, c.dst, c.bias, c.params);
@@ -1132,11 +1135,10 @@ INSTANTIATE_TEST_SUITE_P(NativeBrgemmInt8PerGroup, NativeBrgemmInt8PerGroup,
             return info.param.name;
         });
 
-// A gated activation over a pack of interleaved gate / up columns: the
-// group sums and scales of both halves in the reference order, then the
-// activation within the band of the epilogue suite.  The tile gathers the
-// weight scales of such a pack a bounded number of groups at a time, so 40
-// groups carry the sum from one batch of groups to the next.
+// A gated activation over [gate | up] halves, which the tiles pair (N 128):
+// the group sums and scales of both halves in the reference order, then the
+// activation within the band of the epilogue suite, over 4 and 40 groups of
+// weight scales read in place.
 TEST(NativeBrgemmInt8PerGroupGated, MatchesTheModel) {
     if (!vnni()) GTEST_SKIP() << "no AVX-512 VNNI";
     mm::clear_matmul_weight_caches();
@@ -1286,87 +1288,6 @@ TEST(NativeBrgemmInt8PerGroupGated, BetaPostOpsAndDestinations) {
                 }
             mm::clear_matmul_weight_caches();
         }
-}
-
-// The weight scales of an interleaved pack as the group kernel reads them:
-// bit for bit the scalar gather (weight column logical_col(p) at pack
-// column p, read as f32), at every chunk position and width, for the
-// tile's batches of 32 groups (the last one partial) and a batch from an
-// odd group to the last, with f32, bf16 and f16 scales that include signed
-// zeros, subnormals, infinities and NaNs.  Nothing past the batch is
-// written.
-TEST(NativeBrgemmInt8GroupTile, GatherMatchesTheScalarGather) {
-    if (!nat::native_base_isa()) GTEST_SKIP() << "no AVX-512 F / BW / VL";
-    constexpr int kBatch = 32;
-    constexpr uint32_t kUnwritten = 0x7fa5a5a5u;
-    for (data_type_t dt : {kF32, kBf16, kF16})
-        for (int N : {16, 48, 96, 160})
-            for (int G : {1, 5, 32, 33, 70}) {
-                const std::string name = std::string(dt_name(dt)) + "_n"
-                        + std::to_string(N) + "_g" + std::to_string(G);
-                SCOPED_TRACE(name);
-                const size_t count = static_cast<size_t>(G) * N;
-                buffer_t scales = nt::random_buffer(
-                        dt, count, seed_of(name), 0.002f, 0.01f);
-                const uint32_t f32_special[]
-                        = {0x80000000u, 0x00000001u, 0x80400000u, 0x7f800000u,
-                                0xff800000u, 0x7fc00001u, 0x7f800001u};
-                const uint16_t bf16_special[] = {0x8000u, 0x0001u, 0x8040u,
-                        0x7f80u, 0xff80u, 0x7fc1u, 0x7f81u};
-                const uint16_t f16_special[] = {0x8000u, 0x0001u, 0x83ffu,
-                        0x7c00u, 0xfc00u, 0x7e01u, 0x7c01u};
-                for (size_t s = 0; s < std::size(f32_special); ++s) {
-                    const size_t i = (s * 37 + 11) % count;
-                    if (dt == kF32)
-                        std::memcpy(scales.as<uint8_t>() + 4 * i,
-                                &f32_special[s], 4);
-                    else
-                        std::memcpy(scales.as<uint8_t>() + 2 * i,
-                                dt == kBf16 ? &bf16_special[s]
-                                            : &f16_special[s],
-                                2);
-                }
-                nat::native_int8_call_t call;
-                call.wei_scale = scales.get();
-                call.wei_scale_dt = dt;
-                nat::native_weight_view_t w;
-                w.N = N;
-                w.interleaved = true;
-                std::vector<std::pair<int, int>> batches;
-                for (int g0 = 0; g0 < G; g0 += kBatch)
-                    batches.emplace_back(g0, std::min(kBatch, G - g0));
-                if (G > 1) {
-                    const int g0 = std::max(1, G - kBatch) | 1;
-                    batches.emplace_back(g0, G - g0);
-                }
-                size_t bad = 0, written = 0;
-                for (int cw : {16, 32})
-                    for (int p0 = 0; p0 + cw <= N; p0 += 16)
-                        for (const auto &[g0, n] : batches) {
-                            std::vector<uint32_t> got(
-                                    static_cast<size_t>(kBatch + 1) * cw,
-                                    kUnwritten);
-                            nat::gather_group_wei_scales(call, w, g0, n, p0, cw,
-                                    reinterpret_cast<float *>(got.data()));
-                            for (int i = 0; i < n; ++i)
-                                for (int j = 0; j < cw; ++j) {
-                                    const float want = read_and_cast<float>(
-                                            scales.get(), dt,
-                                            static_cast<size_t>(g0 + i) * N
-                                                    + w.logical_col(p0 + j));
-                                    bad += std::memcmp(&got[static_cast<size_t>(
-                                                                    i) * cw
-                                                               + j],
-                                                   &want, 4)
-                                            != 0;
-                                }
-                            for (size_t i = static_cast<size_t>(n) * cw;
-                                    i < got.size(); ++i)
-                                written += got[i] != kUnwritten;
-                        }
-                EXPECT_EQ(bad, 0u);
-                EXPECT_EQ(written, 0u);
-            }
 }
 
 // The batches of a per-group tile over a plain pack: all groups, unless the
@@ -1620,9 +1541,10 @@ TEST(NativeBrgemmInt8PerGroupCheck, ServedCalls) {
     EXPECT_EQ(problem_of(c).epilogue, nat::native_epilogue_class_t::store);
 }
 
-// Calls the native BRGEMM does not serve return unimplemented, with dst
-// untouched and no layout of their weight: groups of other than whole K
-// quads, and an s8 source with a zero point.
+// Calls the native BRGEMM does not serve return unimplemented with
+// lowoha_algo native_brgemm, with dst untouched and no layout of their
+// weight: groups of other than whole K quads, and an s8 source with a zero
+// point.
 TEST(NativeBrgemmInt8PerGroupDecline, UnservedCallsReturnUnimplemented) {
     if (!vnni()) GTEST_SKIP() << "no AVX-512 VNNI";
     mm::clear_matmul_weight_caches();
@@ -1656,9 +1578,10 @@ TEST(NativeBrgemmInt8PerGroupDecline, UnservedCallsReturnUnimplemented) {
             set_quant(o.params.quant_params.src_zp, &zp, kS32, {1, 1});
         buffer_t dst = copy_of(o.init);
         const nt::algo_pin_t pin(matmul_algo_t::native_brgemm);
-        EXPECT_TRUE(nt::refused_with(
-                make_call(d.c, o, o.wei.get(), dst.get(), o.src_scale),
-                status_t::unimplemented));
+        nt::call_t call
+                = make_call(d.c, o, o.wei.get(), dst.get(), o.src_scale);
+        call.params.lowoha_algo = matmul_algo_t::native_brgemm;
+        EXPECT_TRUE(nt::refused_with(call, status_t::unimplemented));
         EXPECT_EQ(nt::native_layouts(o.wei.get()), 0u)
                 << "served by the native BRGEMM";
     }
@@ -1753,7 +1676,8 @@ std::vector<gcase_t> source_group_cases() {
         c.G = gs <= 12 ? 8 : 3;
         v.push_back(c);
     }
-    // alpha / beta before the weight scales, then the bias and a post-op
+    // alpha before the weight scales, beta after them into f32 and before
+    // them into s8, then the bias and a post-op
     const float ab[][2] = {{0.5f, 0.0f}, {2.0f, 0.75f}, {1.0f, -1.0f}};
     for (const auto &x : ab)
         for (data_type_t dst : {kF32, kS8}) {
@@ -1824,7 +1748,9 @@ std::vector<gcase_t> source_group_cases() {
 
 // A per-group {M, G} source scale with per-tensor or per-channel weight
 // scales, or none: the reference algorithm adds f32(sum) * src scale over
-// the groups of each row, then applies alpha, beta and the weight scale.
+// the groups of each row, then applies alpha and the weight scale, with
+// beta after the weight scale into an f32 or bf16 dst and before it into
+// any other.
 // matmul_direct's checks refuse the pairing on every route, so the native
 // BRGEMM runs on the call itself: against the reference algorithm on the
 // same call bit for bit (a static s8 source), and against the model of that
@@ -1854,9 +1780,9 @@ TEST(NativeBrgemmInt8SourceGroups, MatchesTheReferenceAlgorithm) {
 }
 
 // The same calls with a gated activation and beta over the dst's N
-// pre-activation columns (the gate and up columns of an interleaved pack's
-// pairs): the model of the reference order up to the pre-activation, then
-// the activation within its band.
+// pre-activation columns (the gate and up columns a paired tile holds, or
+// the interleaved pairs of swiglu_oai_mul): the model of the reference
+// order up to the pre-activation, then the activation within its band.
 TEST(NativeBrgemmInt8SourceGroups, GatedMatchesTheModel) {
     if (!vnni()) GTEST_SKIP() << "no AVX-512 VNNI";
     for (mm::matmul_gated_act_t act : {mm::matmul_gated_act_t::silu_and_mul,

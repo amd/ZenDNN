@@ -44,7 +44,13 @@
 #include <omp.h>
 #include <xmmintrin.h>
 
+#if defined(__linux__)
+#include <unistd.h>
+#include <sys/mman.h>
+#endif
+
 #include "gtest_utils.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/bf16/bf16_brgemm_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_brgemm_looper.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_int8_tile.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_partition.hpp"
@@ -56,6 +62,7 @@
 #include "lowoha_operators/matmul/matmul_native/common/native_epilogue.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_hw.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_weight_cache.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_weight_view.hpp"
 #include "lowoha_operators/matmul/matmul_native/native_layout_policy.hpp"
 #include "native_brgemm_test_utils.hpp"
 
@@ -904,8 +911,8 @@ TEST(NativeBrgemmHardeningTeam, FewerWorkersKeepTheCallersTeam) {
 // ── Bias read at the tile ────────────────────────────────────────────────
 
 // A bf16, f16, s8 or s32 bias read in its own type at the tile gives the bits
-// of the same values given as f32, for a plain pack and for the interleaved
-// pack of a gated call.
+// of the same values given as f32, for a plain call and for a gated call
+// over the same layout.
 TEST_F(NativeBrgemmHardeningEpilogue, BiasInItsOwnTypeKeepsTheBits) {
     const int M = 5, N = 96, K = 64;
     const nt::buffer_t src
@@ -942,7 +949,6 @@ TEST_F(NativeBrgemmHardeningEpilogue, BiasInItsOwnTypeKeepsTheBits) {
             ref.weight = wei.get();
             ref.pack_nr = 32;
             ref.weight_cache_mode = 0;
-            ref.interleave_split_halves = gated != gated_t::none;
             return nat::native_brgemm_execute(
                     d, ref, src.get(), dst, bias, params);
         };
@@ -962,6 +968,212 @@ TEST_F(NativeBrgemmHardeningEpilogue, BiasInItsOwnTypeKeepsTheBits) {
         }
     }
 }
+
+// ── Staged gated rows ────────────────────────────────────────────────────
+
+/// A bf16 call of M rows over a [N, K] weight (transB) into dst (bf16 for
+/// silu_and_mul, else the f32 pre-activation), at weight cache mode 0.
+nt::call_t staged_call(int M, int N, int K, const nt::buffer_t &src,
+        const nt::buffer_t &wei, void *dst, bool gated) {
+    nt::call_t c;
+    c.M = M;
+    c.N = N;
+    c.K = K;
+    c.transB = true;
+    c.src = src.get();
+    c.wei = wei.get();
+    c.dst = dst;
+    c.gated = gated ? zendnnl::lowoha::matmul::matmul_gated_act_t::silu_and_mul
+                    : zendnnl::lowoha::matmul::matmul_gated_act_t::none;
+    c.params.dtypes.src = kBf16;
+    c.params.dtypes.wei = kBf16;
+    c.params.dtypes.dst = gated ? kBf16 : data_type_t::f32;
+    c.params.weight_cache_type = 0;
+    return c;
+}
+
+// The staged rows of a gated call over halves that do not pair (N 4100):
+// a check of the call allocates none; the calling thread keeps rows of up
+// to kNativeThreadStagedFloats floats across its calls, grown to at least
+// twice their size; a call that stages more grows them to its rows, and the
+// thread's next call that fits the bound frees those.  Each call gives the
+// activation of the same call's f32 pre-activation.
+TEST_F(NativeBrgemmHardeningEpilogue,
+        StagedRowsAboveTheBoundLastUntilACallFits) {
+    const nt::algo_pin_t pin(matmul_algo_t::native_brgemm);
+    const int N = 4100, K = 64;
+    ASSERT_EQ(nat::native_paired_width(N, 32, 1, 32), 0);
+    const nt::buffer_t wei = nt::random_buffer(
+            kBf16, static_cast<size_t>(N) * K, 9100, -0.5f, 0.5f);
+    const auto matches = [&](int M) {
+        const nt::buffer_t src = nt::random_buffer(
+                kBf16, static_cast<size_t>(M) * K, 9101 + M, -1.0f, 1.0f);
+        std::vector<float> pre(static_cast<size_t>(M) * N);
+        EXPECT_EQ(nt::run_matmul(
+                          staged_call(M, N, K, src, wei, pre.data(), false)),
+                status_t::success);
+        std::vector<float> want(static_cast<size_t>(M) * N / 2);
+        nt::gated_act_ref(pre.data(), M, N,
+                zendnnl::lowoha::matmul::matmul_gated_act_t::silu_and_mul,
+                want.data());
+        nt::buffer_t dst = nt::make_buffer(want.size() * 2);
+        const nt::call_t c = staged_call(M, N, K, src, wei, dst.get(), true);
+        if (nt::refusal_of(c) != status_t::success
+                || nt::run_matmul(c) != status_t::success)
+            return false;
+        for (size_t i = 0; i < want.size(); ++i)
+            if (std::fabs(nt::load_f32(dst.get(), kBf16, i) - want[i])
+                    > 1e-3f + std::fabs(want[i]) * (1.0f / 128.0f))
+                return false;
+        return true;
+    };
+    const size_t bound = nat::kNativeThreadStagedFloats;
+    std::thread([&] {
+        const nt::buffer_t src = nt::random_buffer(
+                kBf16, static_cast<size_t>(4) * K, 9100, -1.0f, 1.0f);
+        nt::buffer_t dst = nt::make_buffer(static_cast<size_t>(4) * N);
+        EXPECT_EQ(
+                nt::refusal_of(staged_call(4, N, K, src, wei, dst.get(), true)),
+                status_t::success);
+        EXPECT_EQ(nat::native_thread_staged_floats(), 0u)
+                << "a check allocated staged rows";
+        EXPECT_TRUE(matches(4));
+        EXPECT_EQ(nat::native_thread_staged_floats(), size_t {4} * N);
+        EXPECT_TRUE(matches(5));
+        EXPECT_EQ(nat::native_thread_staged_floats(), size_t {8} * N);
+        EXPECT_TRUE(matches(128));
+        EXPECT_EQ(nat::native_thread_staged_floats(), size_t {128} * N);
+        EXPECT_TRUE(matches(129));
+        EXPECT_EQ(nat::native_thread_staged_floats(), bound);
+        ASSERT_GT(size_t {256} * N, bound);
+        EXPECT_TRUE(matches(256));
+        EXPECT_EQ(nat::native_thread_staged_floats(), size_t {256} * N);
+        EXPECT_TRUE(matches(4));
+        EXPECT_EQ(nat::native_thread_staged_floats(), size_t {4} * N)
+                << "a call that fits the bound kept the rows above it";
+    }).join();
+}
+
+// ── BF16 kernel addresses ────────────────────────────────────────────────
+
+#if defined(__linux__)
+/// A read-only mapping of bytes bytes that reads zero (MAP_NORESERVE) until
+/// a page of it is made writable.
+class sparse_map_t {
+public:
+    explicit sparse_map_t(size_t bytes) : bytes_(bytes) {
+        void *p = mmap(nullptr, bytes, PROT_READ,
+                MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        if (p != MAP_FAILED) map_ = static_cast<uint8_t *>(p);
+    }
+    ~sparse_map_t() {
+        if (map_ != nullptr) munmap(map_, bytes_);
+    }
+    sparse_map_t(const sparse_map_t &) = delete;
+    sparse_map_t &operator=(const sparse_map_t &) = delete;
+
+    uint8_t *get() const { return map_; }
+    /// Makes the pages that hold [at, at + n) writable.
+    bool writable(const void *at, size_t n) const {
+        const size_t page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+        const auto lo = reinterpret_cast<std::uintptr_t>(at) / page * page;
+        const auto hi = reinterpret_cast<std::uintptr_t>(at) + n;
+        return mprotect(reinterpret_cast<void *>(lo), hi - lo,
+                       PROT_READ | PROT_WRITE)
+                == 0;
+    }
+
+private:
+    uint8_t *map_ = nullptr;
+    size_t bytes_ = 0;
+};
+
+uint16_t bf16_of(float f) {
+    return static_cast<uint16_t>(bits_of(f) >> 16);
+}
+
+// The bf16 kernels offset the K pairs of a weight and the rows of a source
+// in an int.  The layout rule takes bf16 weights of K up to kMaxNativeBf16K
+// (2^26), whose last K pair lies 2^31 - 64 elements after the first, and
+// declines K 67108866, whose pair 33554432 would lie 2^31 after it.  A call
+// of more rows whose source rows (12 a kernel call) reach past the int range
+// is turned away before any work, a call of one row is not.  Over a sparse
+// mapping that reads zero elsewhere, a kernel call of K kMaxNativeBf16K sums
+// its last K pair where it lies.
+TEST(NativeBrgemmHardeningBf16Kernel, KAndSourceRowsWithinTheKernelsInt) {
+    if (!nat::detect_uarch().avx512bf16 || !nat::native_base_isa())
+        GTEST_SKIP() << "needs AVX512-BF16 and AVX-512 F / BW / VL / DQ";
+    const auto layout = [](int K) {
+        nat::native_layout_query_t q;
+        q.wei_dt = kBf16;
+        q.src_dt = kBf16;
+        q.K = K;
+        q.N = 32;
+        q.ldb = 32;
+        return nat::decide_native_layout(q);
+    };
+    EXPECT_EQ(nat::kMaxNativeBf16K, 1 << 26);
+    EXPECT_TRUE(layout(nat::kMaxNativeBf16K).native);
+    const nat::native_layout_decision_t past = layout(67108866);
+    EXPECT_FALSE(past.native);
+    EXPECT_STREQ(past.reason,
+            "a bf16 weight of K past the bf16 kernels' int offsets");
+
+    const int lda = 200000000;
+    alignas(64) uint16_t buf[64] = {};
+    for (const int M : {12, 1}) {
+        SCOPED_TRACE(::testing::Message() << "M " << M);
+        nt::call_t c;
+        c.M = M;
+        c.N = 32;
+        c.K = 64;
+        c.lda = lda;
+        c.src = buf;
+        c.wei = buf;
+        c.dst = buf;
+        c.params.dtypes.src = kBf16;
+        c.params.dtypes.wei = kBf16;
+        c.params.dtypes.dst = kBf16;
+        c.params.lowoha_algo = matmul_algo_t::native_brgemm;
+        std::string reason;
+        const status_t st = nt::refusal_of(c, &reason);
+        if (M == 1) {
+            EXPECT_EQ(st, status_t::success) << reason;
+        } else {
+            EXPECT_EQ(st, status_t::unimplemented);
+            EXPECT_EQ(reason,
+                    "a bf16 source of rows past the bf16 kernels' int "
+                    "offsets");
+        }
+    }
+
+    const int K = nat::kMaxNativeBf16K, b_stride = 64;
+    const size_t page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+    const size_t last = static_cast<size_t>(K / 2 - 1) * b_stride;
+    const sparse_map_t wmap((last + b_stride) * 2 + page);
+    const sparse_map_t amap(static_cast<size_t>(K) * 2 + page);
+    if (wmap.get() == nullptr || amap.get() == nullptr)
+        GTEST_SKIP() << "no address space for the weight";
+    uint16_t *const b = reinterpret_cast<uint16_t *>(wmap.get());
+    uint16_t *const a = reinterpret_cast<uint16_t *>(amap.get());
+    ASSERT_TRUE(wmap.writable(b + last, b_stride * 2));
+    ASSERT_TRUE(amap.writable(a + K - 2, 4));
+    a[K - 2] = bf16_of(2.0f);
+    for (int j = 0; j < 16; ++j) {
+        b[last + 2 * j] = bf16_of(static_cast<float>(j + 1));
+        b[last + 32 + 2 * j] = bf16_of(-static_cast<float>(j + 1));
+    }
+    std::vector<float> c(32, -1.0f);
+    nat::select_bf16_brgemm_kernel(1, 32)(a, K, b, b_stride, c.data(), 32, K, K,
+            0.0f, nullptr, nat::fused_postop_t::none, nullptr, 0);
+    int bad = 0;
+    for (int j = 0; j < 16; ++j) {
+        bad += c[j] != 2.0f * (j + 1);
+        bad += c[16 + j] != -2.0f * (j + 1);
+    }
+    EXPECT_EQ(bad, 0);
+}
+#endif
 
 // ── Instruction sets ─────────────────────────────────────────────────────
 

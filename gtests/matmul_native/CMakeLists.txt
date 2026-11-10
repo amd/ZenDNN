@@ -16,7 +16,8 @@
 
 # Native BRGEMM over native-layout weights: layout rule and route, layout
 # and weight view, INT8 (per-channel and per-group), s4 weights, FP32,
-# epilogue, route parity, refused calls, weights of any N, planner config
+# epilogue, route parity, refused calls, what matmul_direct's checks take for
+# it, weights of any N, gated calls over the plain layout, planner config
 # and tuning file, plan, cost model, partition and execution, hardening,
 # weight lifetime and group-matmul scope suites. Appended to the parent
 # `gtests` target.
@@ -33,7 +34,9 @@ target_sources(gtests
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_brgemm_epilogue.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_brgemm_parity.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_brgemm_refusal.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_native_brgemm_checks.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_brgemm_any_n.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_native_gated_pack.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_config.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_tuning_plan.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_cost_model.cpp

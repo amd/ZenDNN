@@ -20,22 +20,32 @@
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cstdint>
 #include <cstring>
 #include <immintrin.h>
+#include <utility>
+#include <type_traits>
 
 namespace zendnnl {
 namespace lowoha {
 namespace matmul {
 namespace native {
 
-template <int MR, int NV>
-ZENDNNL_TARGET_NOINLINE("avx512f,avx512bf16,fma")
-void bf16_brgemm_ukernel(const uint16_t *__restrict A, int lda,
-        const uint16_t *__restrict B_vnni, int b_stride, float *__restrict C,
-        int ldc, int K, int BK, float beta, const float *__restrict bias,
-        fused_postop_t fused_op, uint16_t *__restrict C_bf16, int ldc_bf16) {
+namespace {
+
+/// The kernel of bf16_brgemm_ukernel; with Paired the second 16 columns of
+/// B start b_second elements after B_vnni (else 16 * VNNI_PAIR).
+template <int MR, int NV, bool Paired>
+ZENDNNL_INLINE_TARGET("avx512f,avx512bf16,fma")
+inline void bf16_brgemm_body(const uint16_t *__restrict A, int lda,
+        const uint16_t *__restrict B_vnni, int b_stride, size_t b_second,
+        float *__restrict C, int ldc, int K, int BK, float beta,
+        const float *__restrict bias, fused_postop_t fused_op,
+        uint16_t *__restrict C_bf16, int ldc_bf16) {
+    const std::conditional_t<Paired, size_t, int> second
+            = Paired ? b_second : 16 * VNNI_PAIR;
 
     __m512 acc[MR][NV];
 
@@ -65,8 +75,7 @@ void bf16_brgemm_ukernel(const uint16_t *__restrict A, int lda,
                 const uint16_t *b_kp = b_off + (kk + u) * b_stride;
                 __m512bh bv[NV];
                 for (int v = 0; v < NV; ++v)
-                    bv[v] = (__m512bh)_mm512_loadu_si512(
-                            b_kp + v * 16 * VNNI_PAIR);
+                    bv[v] = (__m512bh)_mm512_loadu_si512(b_kp + v * second);
                 for (int m = 0; m < MR; ++m) {
                     uint32_t a_pair;
                     std::memcpy(&a_pair, &a_off[m * lda + 2 * (kk + u)],
@@ -82,7 +91,7 @@ void bf16_brgemm_ukernel(const uint16_t *__restrict A, int lda,
             const uint16_t *b_kp = b_off + kk * b_stride;
             __m512bh bv[NV];
             for (int v = 0; v < NV; ++v)
-                bv[v] = (__m512bh)_mm512_loadu_si512(b_kp + v * 16 * VNNI_PAIR);
+                bv[v] = (__m512bh)_mm512_loadu_si512(b_kp + v * second);
             for (int m = 0; m < MR; ++m) {
                 uint32_t a_pair;
                 std::memcpy(&a_pair, &a_off[m * lda + 2 * kk], sizeof(a_pair));
@@ -96,7 +105,7 @@ void bf16_brgemm_ukernel(const uint16_t *__restrict A, int lda,
             const uint16_t *b_kp = b_off + k_full_pairs * b_stride;
             __m512bh bv[NV];
             for (int v = 0; v < NV; ++v)
-                bv[v] = (__m512bh)_mm512_loadu_si512(b_kp + v * 16 * VNNI_PAIR);
+                bv[v] = (__m512bh)_mm512_loadu_si512(b_kp + v * second);
             for (int m = 0; m < MR; ++m) {
                 uint32_t a_pair = static_cast<uint32_t>(
                         a_off[m * lda + 2 * k_full_pairs]);
@@ -124,6 +133,46 @@ void bf16_brgemm_ukernel(const uint16_t *__restrict A, int lda,
             }
         }
     }
+}
+
+} // namespace
+
+template <int MR, int NV>
+ZENDNNL_TARGET_NOINLINE("avx512f,avx512bf16,fma")
+void bf16_brgemm_ukernel(const uint16_t *__restrict A, int lda,
+        const uint16_t *__restrict B_vnni, int b_stride, float *__restrict C,
+        int ldc, int K, int BK, float beta, const float *__restrict bias,
+        fused_postop_t fused_op, uint16_t *__restrict C_bf16, int ldc_bf16) {
+    bf16_brgemm_body<MR, NV, false>(A, lda, B_vnni, b_stride, 0, C, ldc, K, BK,
+            beta, bias, fused_op, C_bf16, ldc_bf16);
+}
+
+namespace {
+
+template <int MR>
+ZENDNNL_TARGET_NOINLINE("avx512f,avx512bf16,fma")
+void bf16_brgemm_paired_ukernel(const uint16_t *__restrict A, int lda,
+        const uint16_t *__restrict B_vnni, int b_stride, size_t b_second,
+        float *__restrict C, int ldc, int K, int BK, float beta,
+        const float *__restrict bias, fused_postop_t fused_op,
+        uint16_t *__restrict C_bf16, int ldc_bf16) {
+    bf16_brgemm_body<MR, 2, true>(A, lda, B_vnni, b_stride, b_second, C, ldc, K,
+            BK, beta, bias, fused_op, C_bf16, ldc_bf16);
+}
+
+template <int... I>
+constexpr std::array<bf16_brgemm_paired_fn_t, sizeof...(I) + 1>
+make_paired_table(std::integer_sequence<int, I...>) {
+    return {{nullptr, &bf16_brgemm_paired_ukernel<I + 1>...}};
+}
+
+constexpr auto kPaired
+        = make_paired_table(std::make_integer_sequence<int, 12> {});
+
+} // namespace
+
+const bf16_brgemm_paired_fn_t *bf16_brgemm_paired_table() {
+    return kPaired.data();
 }
 
 // ── Explicit instantiations ──────────────────────────────────────────────

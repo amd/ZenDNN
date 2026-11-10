@@ -818,13 +818,13 @@ bool row_groups_split(int M, int unit, const heuristic_params_t &hp) {
 /// cm_group_slab_pct percent of L2 and whose weights fit cm_group_l3_pct
 /// percent of the L3 of the domains the team spans; row groups of
 /// cm_short_rows rows per call split the rows by those calls unless
-/// row_unit pins another unit.  Where one
-/// core streams slower than its share of the domain's link, a single row
-/// block of a long weight stream then takes the long K pass or M blocks of
-/// tile_rows rows (below) at the rules' rows per call and row unit; the
-/// chosen row groups take it only where that unit splits the rows within
-/// the bounds above.  Fewer column tiles than threads are left to the
-/// narrowing, the narrow-N and the blocks rules.
+/// row_unit pins another unit.  A single row block of a long weight stream
+/// then takes M blocks of tile_rows rows, or, where one core streams
+/// slower than its share of the domain's link, the long K pass (below), at
+/// the rules' rows per call and row unit; the chosen row groups take it
+/// only where that unit splits the rows within the bounds above.  Fewer
+/// column tiles than threads are left to the narrowing, the narrow-N and
+/// the blocks rules.
 native_plan_t model_plan(const native_problem_t &p, const UarchParams &uarch,
         const heuristic_params_t &hp, const native_plan_t &q) {
     if (!p.bf16() || q.nr < kMaxTileCols || q.mr < 1 || q.n_tiles < q.threads)
@@ -898,20 +898,20 @@ native_plan_t model_plan(const native_problem_t &p, const UarchParams &uarch,
             if (consider(rules_plan(p, uarch, groups))) took_groups = true;
         }
     }
-    // Where one core streams slower than its share of the domain's link,
-    // the busiest worker of a long weight stream decides how the block
-    // takes K.  One that computes longer than it streams, over more than
-    // cm_drift_kib KiB of weights, runs out of step with the others (its
-    // stream runs ahead of its calls) and takes the long pass, which saves
-    // calls.  One of the slice that streams longer than it computes, over
-    // more than cm_block_kib KiB, takes M blocks of tile_rows rows: each
-    // tile streams its slab once over all of K, and the later blocks
+    // The busiest worker of a long weight stream decides how the block
+    // takes K.  Where one core streams slower than its share of the
+    // domain's link, one that computes longer than it streams, over more
+    // than cm_drift_kib KiB of weights, runs out of step with the others
+    // (its stream runs ahead of its calls) and takes the long pass, which
+    // saves calls.  One of the slice that streams longer than it computes,
+    // over more than cm_block_kib KiB, takes M blocks of tile_rows rows:
+    // each tile streams its slab once over all of K, and the later blocks
     // re-read it from L2.  The block keeps best's schedule (its column
     // groups, or the blocks schedule and its unit tiles) at the rules' rows
     // per call and row unit; row groups whose rows that unit does not split
     // within the bounds above keep best.
-    if ((long_pass || short_blocks) && native_plan_core_streams(uarch, hp)
-            && (!took_groups || split_rows)) {
+    const bool drift = long_pass && native_plan_core_streams(uarch, hp);
+    if ((drift || short_blocks) && (!took_groups || split_rows)) {
         const native_plan_cost_t c = native_plan_cost(best, p, uarch, hp);
         heuristic_params_t r = hp;
         if (best.unit_tiles > 0) {
@@ -920,7 +920,7 @@ native_plan_t model_plan(const native_problem_t &p, const UarchParams &uarch,
         } else {
             r.col_groups = best.col_groups;
         }
-        if (long_pass && c.core > c.stream && c.stream_kib > hp.cm_drift_kib)
+        if (drift && c.core > c.stream && c.stream_kib > hp.cm_drift_kib)
             r.kc = static_cast<int>(pass_k);
         else if (short_blocks && best.col_groups == 0 && best.unit_tiles == 0
                 && c.core <= c.stream && c.stream_kib > hp.cm_block_kib)
@@ -1030,13 +1030,36 @@ native_plan_t int4_model_plan(const native_problem_t &p,
     return best;
 }
 
+/// The cost model's pass budget for the s4 plan q of one group over K whose
+/// row blocks take K passes at its budget (the int4_l1_pct share of L1,
+/// native_int4_pass_quads at the widest call): the int8_l2_pct share of L2,
+/// one pass where the group's slab fits it.  Passes of the L1 share add row
+/// calls that cost more than they save once the weight is in cache, which
+/// the model cannot tell from a weight streamed from memory.
+native_plan_t int4_group_passes(const native_problem_t &p,
+        const UarchParams &uarch, const heuristic_params_t &hp,
+        const native_plan_t &q) {
+    if (p.wei_group_size < p.K) return q;
+    const int cw = native_int8_col_width(q, q.nr);
+    const int rows = native_int8_call_rows(q, cw / 16);
+    const int quads = ceil_div(p.K, 4);
+    if (rows < 1 || native_int4_pass_quads(q, quads, cw, q.mb, rows) >= quads)
+        return q;
+    native_plan_t one = q;
+    one.int8_pass_budget = std::max(q.int8_pass_budget,
+            static_cast<int64_t>(uarch.l2_bytes) * hp.int8_l2_pct / 100);
+    return one;
+}
+
 } // namespace
 
 native_plan_t heuristic_plan(const native_problem_t &p,
         const UarchParams &uarch, const heuristic_params_t &hp) {
     const native_plan_t q = rules_plan(p, uarch, hp);
     if (hp.cost_model == 0) return q;
-    if (p.int4()) return int4_model_plan(p, uarch, hp, q);
+    if (p.int4())
+        return int4_group_passes(
+                p, uarch, hp, int4_model_plan(p, uarch, hp, q));
     return p.int8() ? int8_model_plan(p, uarch, hp, q)
                     : model_plan(p, uarch, hp, q);
 }
@@ -1120,6 +1143,20 @@ int native_int8_pass_quads(
     const int64_t per = std::max<int64_t>(1, budget / quad_bytes);
     const int64_t passes = (k_quads + per - 1) / per;
     return static_cast<int>((k_quads + passes - 1) / passes);
+}
+
+int native_int4_pass_quads(
+        const native_plan_t &p, int group_quads, int cw, int rows, int max_mr) {
+    // A K quad is 2 bytes of each s4 weight column and 4 of each source row.
+    const int64_t quad_bytes = int64_t {2} * cw + int64_t {4} * max_mr;
+    const int64_t budget = p.int8_pass_budget;
+    if (rows <= max_mr || group_quads * quad_bytes <= budget)
+        return group_quads;
+    const int64_t per = std::max<int64_t>(2, budget / quad_bytes);
+    const int64_t passes = (group_quads + per - 1) / per;
+    const int64_t quads = (group_quads + passes - 1) / passes;
+    return static_cast<int>(
+            std::min<int64_t>(group_quads, (quads + 1) & ~int64_t {1}));
 }
 
 struct native_planner_t::cache_entry_t {

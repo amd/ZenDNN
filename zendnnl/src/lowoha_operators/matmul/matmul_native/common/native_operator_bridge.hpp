@@ -59,6 +59,13 @@ status_t aocl_prepack_unreorder(const void *aocl_packed, int K, int N, int ldb,
 /// Bytes of the aocl_dlp_blocked prepack of a K x N weight.
 size_t aocl_prepack_bytes(int K, int N, int ldb, bool transB, bool int8_u8s8);
 
+/// Bytes of the aocl_dlp_blocked prepack of a K x N weight of wei for a src
+/// source and weight scale groups of group values along K (0: one group),
+/// with the column sums the prepack of a u8 source carries after its image;
+/// 0 when no prepack of that format is made.
+size_t aocl_prepack_bytes(data_type_t src, data_type_t wei, int group, int K,
+        int N, int ldb, bool transB);
+
 // ── Buffers the custom kernel packed in place ───────────────────────────
 
 /// A custom-kernel pack rewrote the buffer at weight in place: its reader is

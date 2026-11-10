@@ -70,6 +70,9 @@ native_layout_decision_t decide_native_layout(const native_layout_query_t &q) {
     }
     if (q.N < 1) return declined("N < 1");
     if (q.K < 1) return declined("K < 1");
+    if (q.wei_dt == data_type_t::bf16 && q.K > kMaxNativeBf16K)
+        return declined(
+                "a bf16 weight of K past the bf16 kernels' int offsets");
     if (int8 && q.K > kMaxSafeInt8AccumK)
         return declined("K exceeds the int32 accumulation bound");
     if (int8 && q.wei_group_size != 0 && q.wei_group_size != q.K

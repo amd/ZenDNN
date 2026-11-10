@@ -31,8 +31,10 @@ void compute_int8_tile(const native_plan_t &plan,
         const native_int8_out_t *out) {
     assert(nr % 16 == 0
             && (w.wei_dt == data_type_t::s8 || w.wei_dt == data_type_t::s4));
-    // A direct store writes pack column n as output column n: a plain pack.
-    assert(out == nullptr || !w.interleaved);
+    // A direct store writes tile column t as output column n0 + t: a plain
+    // tile.  A paired tile holds runs of 16 columns of each half.
+    assert(out == nullptr || !w.paired);
+    assert(!w.paired || (n0 % 32 == 0 && nr % 32 == 0));
     if (w.wei_dt == data_type_t::s4) {
         compute_int4_group_tile<false>(
                 plan, call, w, m0, mr, n0, nr, C, ldc, out);

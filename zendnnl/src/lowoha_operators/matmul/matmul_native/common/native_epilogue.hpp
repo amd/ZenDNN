@@ -58,6 +58,15 @@ struct native_postop_t {
     native_operand_t operand; ///< binary_add / binary_mul
 };
 
+/// Whether a gated activation takes its gate and up columns as the [gate |
+/// up] halves of the weight (gate column i pairs with up column N / 2 + i);
+/// swiglu_oai_mul interleaves its pairs instead.
+inline bool native_gated_halves(matmul_gated_act_t gated) {
+    return gated == matmul_gated_act_t::silu_and_mul
+            || gated == matmul_gated_act_t::gelu_and_mul
+            || gated == matmul_gated_act_t::gelu_tanh_and_mul;
+}
+
 /// Everything after the accumulation of one call over a native-layout
 /// weight: alpha, beta, bias, post-ops, the gated activation and the store
 /// to dst (f32, bf16, f16, or u8 / s8 / s32 requantized).  A gated call
@@ -70,14 +79,19 @@ struct native_epilogue_t {
     int n_out = 0; ///< dst columns
     float alpha = 1.0f;
     float beta = 0.0f;
-    const float *bias = nullptr; ///< an f32 bias of a plain pack
-    /// Any other bias, read in its own type at the tile (an interleaved pack
-    /// reads gate column i at pack column 2i and up column i at 2i + 1).
+    const float *bias = nullptr; ///< an f32 bias
+    /// Any other bias, read in its own type at the tile.
     const void *bias_raw = nullptr;
     data_type_t bias_dt = data_type_t::none;
     int bias_esz = 0;
     matmul_gated_act_t gated = matmul_gated_act_t::none;
-    bool interleaved = false; ///< pack column 2i is gate i, 2i + 1 is up i
+    /// The tiles of a gated call over [gate | up] halves hold their gate
+    /// columns, then the up columns paired with them (native_weight_view_t).
+    bool paired = false;
+    /// Halves of a gated call without paired tiles: whole rows of the
+    /// pre-activation stage in staged, which pair_staged_halves pairs once
+    /// every tile is done.
+    bool staged_halves = false;
     void *dst = nullptr;
     data_type_t dst_dt = data_type_t::none;
     int dst_esz = 0;
@@ -94,10 +108,14 @@ struct native_epilogue_t {
     native_operand_t dst_zp;
 
     /// A softmax needs whole rows: ops up to softmax_at stage each tile in
-    /// rows, and the tile that completes a row finishes it.
+    /// rows, and the tile that completes a row finishes it (rows of n_out
+    /// columns).
     size_t softmax_at = 0;
     std::unique_ptr<float[]> rows;
     std::unique_ptr<std::atomic<int>[]> row_cols;
+    /// With staged_halves, M rows of N columns: the calling thread's buffer,
+    /// kept across its calls (kNativeThreadStagedFloats).
+    float *staged = nullptr;
 
     /// What beta reads in a gated call, rows beta_ld elements apart of the
     /// dst type: dst, or a copy of its N pre-activation columns when the
@@ -117,27 +135,49 @@ inline bool native_float_dt(data_type_t dt) {
 /// Fills ep for the call; unimplemented when the call needs something the
 /// epilogue cannot finish (a gated call with a softmax, or with beta over a
 /// dst of fewer than N columns), with *why (when why is not null) naming
-/// it.  The alpha and beta of an INT8 call with per-tensor or per-channel
+/// it.  paired: the call's tiles are paired (native_weight_view_t), for a
+/// gated activation over [gate | up] halves only; such a call without them
+/// stages its rows.  Either way the weight's layout is a plain one.  The alpha and beta of an INT8 call with per-tensor or per-channel
 /// weight scales act on the integer sum, so its tile applies them and desc
 /// carries alpha 1 and beta 0; those of a call with per-group weight scales
 /// (any call over an s4 weight) apply here, to the sum of the scaled groups.
 /// An INT8 call over an s8 or s4 weight with a dst scale stores the
 /// requantized value.  A gated call's post-op
-/// operands index its [M, N] pre-activation.  The CPU has AVX-512 F, BW, VL
-/// and DQ and FMA (native_base_isa).
+/// operands index its [M, N] pre-activation.  Without buffers (a check that
+/// runs no tile) the rows of a softmax and the staged halves are not
+/// allocated.  The CPU has AVX-512 F, BW, VL and DQ and FMA
+/// (native_base_isa).
 status_t prepare_epilogue(const GemmDescriptor &desc,
-        const matmul_params &params, const void *bias, void *dst,
-        bool interleaved, native_epilogue_t &ep, const char **why = nullptr);
+        const matmul_params &params, const void *bias, void *dst, bool paired,
+        native_epilogue_t &ep, const char **why = nullptr, bool buffers = true);
+
+/// The most floats of staged rows a calling thread keeps across calls that
+/// fit them (4 MiB).  Rows a call needs above that serve the thread's calls
+/// that need them, and its next staged call that fits the bound frees them.
+inline constexpr size_t kNativeThreadStagedFloats
+        = (size_t {4} << 20) / sizeof(float);
+
+/// The floats of staged rows the calling thread keeps.  A diagnostic; no
+/// call reads it.
+size_t native_thread_staged_floats();
 
 /// Finishes C[mr][nr] (f32 accumulators of rows m0 .. m0 + mr and pack
-/// columns n0 .. n0 + nr of one block) and stores them to dst.  A gated
-/// activation needs n0 and nr even.  C may be overwritten.  Tiles of a call
-/// are disjoint and cover the output once; with beta they read beta_src
-/// while other tiles store.  No column past n0 + nr of any operand or of
-/// dst is read or written: the last tile of a weight of padded columns
-/// passes only its columns below N.
+/// columns n0 .. n0 + nr, or with paired tiles the columns the tile at n0
+/// holds) and stores them to dst.  A gated activation needs n0 and nr even.
+/// C may be overwritten.  Tiles of a call are disjoint and cover the output
+/// once; with beta they read beta_src while other tiles store.  No column
+/// past n0 + nr of any operand or of dst is read or written: the last tile
+/// of a weight of padded columns passes only its columns below N.
 void apply_epilogue_tile(const native_epilogue_t &ep, float *C, int ldc_acc,
         int m0, int mr, int n0, int nr);
+
+/// With staged_halves, once every tile of the call is done: share i of n of
+/// the activation of the staged halves of its M rows, stored to dst.  The n
+/// shares cover every output once.
+void pair_staged_halves(const native_epilogue_t &ep, int M, int i, int n);
+
+/// The units pair_staged_halves deals over its shares for M rows.
+int64_t staged_pair_units(const native_epilogue_t &ep, int M);
 
 } // namespace native
 } // namespace matmul

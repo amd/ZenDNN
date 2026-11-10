@@ -2860,8 +2860,8 @@ thread_local bool native_refusal_explained = false;
 /// purpose: weight types it has no kernel for, sources of another type than
 /// the weight's (a u8 source with an s4 weight), GGML packs, batched calls
 /// that name it, column-major calls, reordered sources, weight zero points,
-/// source zero points with s4 weights, AOCL-DLP prepacks of s4 weights, an
-/// f32 call into another dst, and a
+/// source zero points with s4 weights or on a source the call quantizes to
+/// s8, AOCL-DLP prepacks of s4 weights, an f32 call into another dst, and a
 /// softmax after a gated activation.  Judged from the call's arguments
 /// alone, so a wrong refusal in the library is not explained by itself.
 bool refusal_explained(const std::string &reason, char layout,
@@ -2892,6 +2892,9 @@ bool refusal_explained(const std::string &reason, char layout,
         return wei == dt::s4 && params.quant_params.wei_zp.buff != nullptr;
     if (reason == "an s4 weight with a source zero point")
         return wei == dt::s4 && params.quant_params.src_zp.buff != nullptr;
+    if (reason == "a source the call quantizes to s8 with a source zero point")
+        return mul_src == dt::s8 && src != dt::s8
+                && params.quant_params.src_zp.buff != nullptr;
     // An AOCL-DLP prepack of an s4 weight has no inverse.
     if (reason == "an AOCL-DLP blocked weight without an unreorder")
         return wei == dt::s4 && params.mem_format_b == 'r';

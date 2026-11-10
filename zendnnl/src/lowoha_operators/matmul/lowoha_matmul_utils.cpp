@@ -168,8 +168,12 @@ status_t validate_w4a8_inputs(
         log_error("W4A8 static path requires quant_params.src_scale.buff");
         return status_t::failure;
     }
-    if (src_scale.dt != data_type_t::f32 && src_scale.dt != data_type_t::bf16) {
-        log_error("W4A8 source scale supports only f32 or bf16 data type");
+    if (src_scale.dt != data_type_t::f32 && src_scale.dt != data_type_t::bf16
+            && !(native && src_scale.dt == data_type_t::f16)) {
+        log_error(native ? "W4A8 source scale supports only f32, bf16 or f16 "
+                           "data type"
+                         : "W4A8 source scale supports only f32 or bf16 data "
+                           "type");
         return status_t::failure;
     }
     if (src_scale.dims.size() != 2) {
@@ -197,6 +201,16 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
         const void *dst, const int M, const int N, const int K,
         const int Batch_A, const int Batch_B, const matmul_params &params,
         const bool is_weights_const) {
+    return validate_matmul_direct_inputs(src, weight, dst, M, N, K, Batch_A,
+            Batch_B, params, is_weights_const,
+            native::native_brgemm_requested(
+                    params, std::max(Batch_A, Batch_B)));
+}
+
+status_t validate_matmul_direct_inputs(const void *src, const void *weight,
+        const void *dst, const int M, const int N, const int K,
+        const int Batch_A, const int Batch_B, const matmul_params &params,
+        const bool is_weights_const, const bool native) {
     // Check for null pointers
     if (!src || !weight || !dst) {
         log_error("Null pointer input to matmul_direct: src=",
@@ -227,9 +241,7 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
     const bool is_int8 = params.dtypes.wei == data_type_t::s8
             || params.packing.pack_format_b == 1;
 
-    // The native BRGEMM also takes f16 weight scales for W4A8.
-    const bool native = native::native_brgemm_requested(
-            params, std::max(Batch_A, Batch_B));
+    // The native BRGEMM also takes f16 weight and source scales for W4A8.
     if (validate_w4a8_inputs(params, M, N, K, native) != status_t::success) {
         return status_t::failure;
     }
@@ -284,8 +296,16 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
                     || params.dtypes.src == data_type_t::bf16
                     || params.dtypes.src == data_type_t::f32);
             bool is_symmetric = (!params.quant_params.src_zp.buff);
+            // The native BRGEMM also stores u8 / s8 / s32, which are not GGML
+            // packed.
+            const bool native_int_dst
+                    = native && params.packing.pack_format_b != 1;
             bool is_supported_dst = (params.dtypes.dst == data_type_t::f32
-                    || params.dtypes.dst == data_type_t::bf16);
+                    || params.dtypes.dst == data_type_t::bf16
+                    || (native_int_dst
+                            && (params.dtypes.dst == data_type_t::u8
+                                    || params.dtypes.dst == data_type_t::s8
+                                    || params.dtypes.dst == data_type_t::s32)));
             const int64_t src_groups = quant_count_src_groups(nelems, M, K);
             bool is_per_token = (src_groups == 1);
             bool is_per_group = (src_groups > 1);
@@ -294,7 +314,9 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
                 log_error(
                         "Source quant scale: per-token/per-group requires "
                         "s8/bf16/f32 src, "
-                        "symmetric quantization, and f32/bf16 output");
+                        "symmetric quantization, and ",
+                        native_int_dst ? "f32/bf16/u8/s8/s32" : "f32/bf16",
+                        " output");
                 return status_t::failure;
             }
             const int64_t wei_scale_nelems = params.quant_params.wei_scale.buff
@@ -475,12 +497,15 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
         // and lands on the same kernel, so it falls in the same bucket.  So do
         // GGML packed weights: a Q4_0 weight is still s4 here, so
         // is_sym_quant_config does not recognise it yet, but the unpack keeps
-        // packed s4 and the call runs on the s8×s4 sym_quant kernel.
+        // packed s4 and the call runs on the s8×s4 sym_quant kernel.  The
+        // native BRGEMM applies mish on the calls it serves, which are not
+        // GGML packed.
         else if (po.po_type == post_op_type_t::mish) {
             if (!dlp_int8_path_checked) {
-                dlp_int8_path = is_sym_quant_config(params)
-                        || is_dynamic_quant_config(params) || is_w4a8
-                        || params.packing.pack_format_b == 1;
+                dlp_int8_path = !(native && params.packing.pack_format_b != 1)
+                        && (is_sym_quant_config(params)
+                                || is_dynamic_quant_config(params) || is_w4a8
+                                || params.packing.pack_format_b == 1);
                 dlp_int8_path_checked = true;
             }
             if (dlp_int8_path) {
@@ -771,10 +796,15 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
                                   : matmul_config.get_bmm_algo())
                 : static_cast<int>(params.lowoha_algo);
     } else {
-        // Get regular matmul algo for single matrix multiplication
+        // Get regular matmul algo for single matrix multiplication.  The
+        // native BRGEMM runs its calls before kernel selection: a call it
+        // hands back takes the kernel of the algorithm unset.
         algo = params.lowoha_algo == matmul_algo_t::none
                 ? matmul_config.get_algo()
                 : static_cast<int>(params.lowoha_algo);
+        if (algo == static_cast<int>(matmul_algo_t::native_brgemm)) {
+            algo = static_cast<int>(matmul_algo_t::none);
+        }
     }
 
     // Default to AOCL DLP blocked kernel

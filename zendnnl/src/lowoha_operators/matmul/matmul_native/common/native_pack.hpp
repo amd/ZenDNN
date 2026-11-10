@@ -84,10 +84,9 @@ size_t native_packed_bytes(data_type_t wei_dt, int K, int N, int pack_nr);
 
 /// Writes weight -- [K, N] row-major ldb apart, or [N, K] when transB --
 /// into dst (native_packed_bytes) in the layout, splitting the blocks over up
-/// to num_threads threads (one inside a parallel region).  With
-/// interleave_split_halves (N even), pack column 2i holds column i and pack
-/// column 2i + 1 holds column N / 2 + i.  Odd K pads a pair, K % 4 != 0 a
-/// quad, K % 8 != 0 an s4 octet, with zeros (an f32 weight has no padding);
+/// to num_threads threads (one inside a parallel region).  Odd K pads a
+/// pair, K % 4 != 0 a quad, K % 8 != 0 an s4 octet, with zeros (an f32
+/// weight has no padding);
 /// s8 column sums cover the real K.  An s4 weight holds two's-complement
 /// nibbles at its linear element index (n * ldb + k with transB, else
 /// k * ldb + n, ldb in elements), the even index in the low nibble of its
@@ -95,18 +94,18 @@ size_t native_packed_bytes(data_type_t wei_dt, int K, int N, int pack_nr);
 /// s8 column sums included, and no byte of the weight past its N columns is
 /// read.  For a weight native_layout_fits takes, on a CPU with AVX-512 F, BW
 /// and VL (native_base_isa); failure for a null weight or dst, or an ldb
-/// below the row length.
+/// below the row length.  The layout depends on the weight alone: the
+/// gated tiles of the native BRGEMM pair the halves of a gated call
+/// (native_weight_view_t).
 status_t native_pack_weight(data_type_t wei_dt, const void *weight, int K,
-        int N, int ldb, int pack_nr, bool transB, bool interleave_split_halves,
-        void *dst, int num_threads);
+        int N, int ldb, int pack_nr, bool transB, void *dst, int num_threads);
 
 /// Inverse of native_pack_weight for bf16: writes every weight element the
 /// image packed back to weight (same arguments as the pack).  The padding of
 /// a padded ldb is not written.  For an image of N a multiple of pack_nr,
 /// the only images an in-place rewrite makes.
 void native_unpack_bf16(const void *packed, int K, int N, int ldb, int pack_nr,
-        bool transB, bool interleave_split_halves, void *weight,
-        int num_threads);
+        bool transB, void *weight, int num_threads);
 
 } // namespace native
 } // namespace matmul

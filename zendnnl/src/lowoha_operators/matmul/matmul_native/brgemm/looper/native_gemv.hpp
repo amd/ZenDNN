@@ -52,7 +52,8 @@ struct native_gemv_plan_t {
 };
 
 /// The GEMV plan choice of an M = 1 call that asks for the native BRGEMM, on
-/// its raw weight (none for any other call): for a call without a gated
+/// its raw weight (none for any other call, and for K above the layout
+/// rule's bound of a bf16 or s8 weight): for a call without a gated
 /// activation, alpha 0 or a Swish of alpha other than 1, the kernel of
 /// bf16_gemv_choice for a bf16 source and weight when the team of
 /// m1_gemv_cap_threads over desc.num_threads is one thread, or of

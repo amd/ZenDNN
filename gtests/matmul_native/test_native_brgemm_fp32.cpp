@@ -153,67 +153,57 @@ TEST(NativeBrgemmFp32Kernel, EveryRowCountWidthAndKTailMatchesTheModel) {
 
 // ── Layout ───────────────────────────────────────────────────────────────
 
-/// Weight column held at pack column p of N columns.
-int source_col(int p, int N, bool interleave) {
-    if (!interleave) return p;
-    return (p & 1) ? N / 2 + p / 2 : p / 2;
-}
-
 // Each element of an f32 weight at its place in the layout: block p / 32,
 // row k, column p % 32 for pack column p, from [K, N] or [N, K] storage,
-// with a padded ldb, the gate / up interleave, K past the tiled walk of a
-// [K, N] weight, more blocks than one tile and more than one thread.
+// with a padded ldb, K past the tiled walk of a [K, N] weight, more blocks
+// than one tile and more than one thread.
 TEST(NativeBrgemmFp32Layout, PackPlacesEveryElement) {
     SKIP_WITHOUT_FP32_ISA();
     int checked = 0;
     for (const int K : {1, 3, 64, 1024, 1031})
         for (const int N : {32, 96, 544})
             for (const bool transB : {false, true})
-                for (const bool interleave : {false, true})
-                    for (const int pad : {0, 5})
-                        for (const int threads : {1, 4}) {
-                            if (K == 1031 && N == 544 && threads == 1) continue;
-                            SCOPED_TRACE("K=" + std::to_string(K)
-                                    + " N=" + std::to_string(N) + " transB="
-                                    + std::to_string(transB) + " interleave="
-                                    + std::to_string(interleave)
-                                    + " pad=" + std::to_string(pad)
-                                    + " threads=" + std::to_string(threads));
-                            const int ldb = (transB ? K : N) + pad;
-                            std::vector<float> w(
-                                    static_cast<size_t>(transB ? N : K) * ldb);
-                            for (size_t i = 0; i < w.size(); ++i)
-                                w[i] = static_cast<float>(i % 100003);
-                            const size_t bytes
-                                    = nat::native_packed_bytes(kF32, K, N, kNr);
-                            ASSERT_EQ(bytes,
-                                    (static_cast<size_t>(K) * N * 4 + 63)
-                                            & ~size_t {63});
-                            ASSERT_EQ(nat::native_block_bytes(kF32, K, kNr),
-                                    static_cast<size_t>(K) * kNr * 4);
-                            std::vector<float> packed(bytes / 4, -1.0f);
-                            ASSERT_EQ(nat::native_pack_weight(kF32, w.data(), K,
-                                              N, ldb, kNr, transB, interleave,
-                                              packed.data(), threads),
-                                    status_t::success);
-                            int bad = 0;
-                            for (int p = 0; p < N; ++p) {
-                                const int c = source_col(p, N, interleave);
-                                for (int k = 0; k < K; ++k) {
-                                    const size_t from = transB
-                                            ? static_cast<size_t>(c) * ldb + k
-                                            : static_cast<size_t>(k) * ldb + c;
-                                    const size_t at
-                                            = static_cast<size_t>(p / kNr) * K
-                                                    * kNr
-                                            + static_cast<size_t>(k) * kNr
-                                            + p % kNr;
-                                    bad += packed[at] != w[from];
-                                }
+                for (const int pad : {0, 5})
+                    for (const int threads : {1, 4}) {
+                        if (K == 1031 && N == 544 && threads == 1) continue;
+                        SCOPED_TRACE("K=" + std::to_string(K)
+                                + " N=" + std::to_string(N)
+                                + " transB=" + std::to_string(transB)
+                                + " pad=" + std::to_string(pad)
+                                + " threads=" + std::to_string(threads));
+                        const int ldb = (transB ? K : N) + pad;
+                        std::vector<float> w(
+                                static_cast<size_t>(transB ? N : K) * ldb);
+                        for (size_t i = 0; i < w.size(); ++i)
+                            w[i] = static_cast<float>(i % 100003);
+                        const size_t bytes
+                                = nat::native_packed_bytes(kF32, K, N, kNr);
+                        ASSERT_EQ(bytes,
+                                (static_cast<size_t>(K) * N * 4 + 63)
+                                        & ~size_t {63});
+                        ASSERT_EQ(nat::native_block_bytes(kF32, K, kNr),
+                                static_cast<size_t>(K) * kNr * 4);
+                        std::vector<float> packed(bytes / 4, -1.0f);
+                        ASSERT_EQ(nat::native_pack_weight(kF32, w.data(), K, N,
+                                          ldb, kNr, transB, packed.data(),
+                                          threads),
+                                status_t::success);
+                        int bad = 0;
+                        for (int p = 0; p < N; ++p) {
+                            for (int k = 0; k < K; ++k) {
+                                const size_t from = transB
+                                        ? static_cast<size_t>(p) * ldb + k
+                                        : static_cast<size_t>(k) * ldb + p;
+                                const size_t at
+                                        = static_cast<size_t>(p / kNr) * K * kNr
+                                        + static_cast<size_t>(k) * kNr
+                                        + p % kNr;
+                                bad += packed[at] != w[from];
                             }
-                            EXPECT_EQ(bad, 0);
-                            ++checked;
                         }
+                        EXPECT_EQ(bad, 0);
+                        ++checked;
+                    }
     EXPECT_GT(checked, 0);
 }
 
@@ -606,7 +596,8 @@ TEST(NativeBrgemmFp32Route, Bf16DstRoundsTheF32Output) {
 
 // The native BRGEMM turns an FP32 call with a dst other than f32 / bf16
 // away before any work: unimplemented, and dst untouched, also through
-// matmul_direct for the s8, u8 and s32 dsts it takes with an f32 source.
+// matmul_direct, with lowoha_algo native_brgemm, for the s8, u8 and s32 dsts
+// it takes with an f32 source.
 TEST(NativeBrgemmFp32Route, OtherDstTypesAreTurnedAway) {
     SKIP_WITHOUT_FP32_ISA();
     fp32_call_t c;
@@ -635,7 +626,8 @@ TEST(NativeBrgemmFp32Route, OtherDstTypesAreTurnedAway) {
     for (const data_type_t dst :
             {data_type_t::s8, data_type_t::u8, data_type_t::s32}) {
         SCOPED_TRACE(zendnnl::common::dtype_info(dst));
-        const direct_t d = make_direct(c.M, c.N, c.K, dst, 43);
+        direct_t d = make_direct(c.M, c.N, c.K, dst, 43);
+        d.call.params.lowoha_algo = matmul_algo_t::native_brgemm;
         EXPECT_TRUE(nt::refused_with(d.call, status_t::unimplemented));
     }
 }
