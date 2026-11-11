@@ -1720,7 +1720,7 @@ TEST(PromptTileExecutor, AutoSingleExpertFollowsCkEpilogue) {
     SingleExpertCkPolicy on(1, 1, 1);
     {
         Case plain;
-        plain.M = {300};
+        plain.M.assign(1, 300);
         SCOPED_TRACE(describe(plain));
         const RunOut r = run_case(plain, 1, /*algo=*/0);
         EXPECT_NE(r.mode.find("ptile"), std::string::npos) << r.mode;
@@ -1729,7 +1729,7 @@ TEST(PromptTileExecutor, AutoSingleExpertFollowsCkEpilogue) {
     for (const auto act : {grp_matmul_gated_act_t::gelu_and_mul,
                  grp_matmul_gated_act_t::silu_and_mul}) {
         Case c;
-        c.M = {300};
+        c.M.assign(1, 300);
         c.act = act;
         SCOPED_TRACE(describe(c));
         const RunOut served = run_case(c, 1, /*algo=*/0);

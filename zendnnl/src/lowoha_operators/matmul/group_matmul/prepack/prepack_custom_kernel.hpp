@@ -30,6 +30,7 @@
 #ifndef ZENDNNL_GROUP_MATMUL_PREPACK_CUSTOM_KERNEL_HPP
 #define ZENDNNL_GROUP_MATMUL_PREPACK_CUSTOM_KERNEL_HPP
 
+#include <cstddef>
 #include <vector>
 
 #include "common/error_status.hpp"
@@ -178,7 +179,7 @@ status_t warm_pack_all_custom_kernel_experts(
         WarmDtypeFamily dtype_family = WarmDtypeFamily::kBF16,
         int group_size = 0, int32_t weight_cache_type = -1,
         bool in_place = false,
-        const std::vector<size_t> *wei_capacities = nullptr);
+        const std::vector<std::size_t> *wei_capacities = nullptr);
 
 } // namespace custom_kernel
 } // namespace group_matmul_prepack

@@ -11829,11 +11829,13 @@ static KblockProbe build_kblock_probe(int num_threads, int M, int N, int K,
         p.dst_bf16.assign(static_cast<size_t>(M) * p.ldc, bfloat16_t(-1.0f));
     }
 
-    p.srcs = {p.src.data()};
-    p.weis = {p.wei.data()};
-    p.biases = {with_bias ? static_cast<const void *>(p.bias.data()) : nullptr};
-    p.dsts = {f32_dst ? static_cast<void *>(p.dst_f32.data())
-                      : static_cast<void *>(p.dst_bf16.data())};
+    p.srcs.assign(1, p.src.data());
+    p.weis.assign(1, p.wei.data());
+    p.biases.assign(
+            1, with_bias ? static_cast<const void *>(p.bias.data()) : nullptr);
+    p.dsts.assign(1,
+            f32_dst ? static_cast<void *>(p.dst_f32.data())
+                    : static_cast<void *>(p.dst_bf16.data()));
 
     p.gv = moe_test_utils::GemmVecs::uniform(/*num_ops=*/1, M, N, K,
             /*a=*/1.0f, /*b=*/0.0f, /*wc=*/true, /*tA=*/false, /*tB=*/false);

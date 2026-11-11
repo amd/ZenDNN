@@ -1184,6 +1184,7 @@ TEST_F(NativeWeightLifetime, FirstLayoutsGoOnWhileARewriteWaitsForAGemv) {
              cached = status_t::failure;
     {
         joiner_t calls;
+        calls.threads.reserve(3);
         calls.threads.emplace_back([&] {
             gemv = nat::run_native_gemv(
                     plan, desc, src, wei, got.data(), nullptr, c.params, 1);

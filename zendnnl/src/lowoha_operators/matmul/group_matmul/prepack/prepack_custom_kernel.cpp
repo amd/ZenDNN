@@ -87,7 +87,7 @@ status_t warm_pack_all_custom_kernel_experts(
         const std::vector<bool> &is_weights_const, int total_count,
         PackProbeStats &stats, bool interleave_split_halves,
         WarmDtypeFamily dtype_family, int group_size, int32_t weight_cache_type,
-        bool in_place, const std::vector<size_t> *wei_capacities) {
+        bool in_place, const std::vector<std::size_t> *wei_capacities) {
 
     // Every exit reports: a silent bail is indistinguishable from
     // "warmed nothing" in the PREPACK summary, which is how a missing
