@@ -41,6 +41,7 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
   string(REGEX REPLACE "(^| )/WX( |$)" "\\1\\2" AU_C_FLAGS "${AU_C_FLAGS}")
   string(REGEX REPLACE "(^| )/WX( |$)" "\\1\\2" AU_CXX_FLAGS "${AU_CXX_FLAGS}")
 
+  set(AU_PATCH_ARGS "")
   if(WIN32)
     # Windows/MSVC: no -lpthread (a Linux-ism cl rejects); disable examples;
     # silence CRT deprecation warnings; forward the build type so the sub-build
@@ -63,6 +64,10 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
     # via BUILD_SHARED_LIBS (au_options.cmake force-syncs AU_BUILD_SHARED_LIBS
     # from it). ZenDNNL only whole-archives the static aocl-utils anyway.
     list(APPEND AU_CMAKE_ARGS "-DBUILD_SHARED_LIBS=OFF")
+    # AUD_API_EXPORT is dllexport in every Windows build, static or not, so
+    # strip it; otherwise any DLL linking ZenDNNL re-exports the AOCL-Utils API.
+    set(AU_PATCH_ARGS PATCH_COMMAND ${CMAKE_COMMAND} -DDEPENDENCY=aoclutils
+      -DSOURCE_DIR=<SOURCE_DIR> -P "${CMAKE_CURRENT_LIST_DIR}/StripAoclDllExport.cmake")
 
     list(APPEND AU_CMAKE_ARGS "-DCMAKE_CXX_FLAGS=${AU_CXX_FLAGS} /D_CRT_SECURE_NO_WARNINGS")
     list(APPEND AU_CMAKE_ARGS "-DCMAKE_C_FLAGS=${AU_C_FLAGS} /D_CRT_SECURE_NO_WARNINGS")
@@ -112,6 +117,7 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
       SOURCE_DIR "${AOCLUTILS_ROOT_DIR}"
       BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/aoclutils"
       INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/aoclutils"
+      ${AU_PATCH_ARGS}
       CMAKE_ARGS ${AU_CMAKE_ARGS}
       BUILD_COMMAND ${AU_BUILD_COMMAND}
       INSTALL_COMMAND cmake --build . --config Release --target install
@@ -127,6 +133,7 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
       GIT_REPOSITORY ${AOCLUTILS_GIT_REPO}
       GIT_TAG ${AOCLUTILS_GIT_TAG}
       GIT_PROGRESS ${AOCLUTILS_GIT_PROGRESS}
+      ${AU_PATCH_ARGS}
       CMAKE_ARGS ${AU_CMAKE_ARGS}
       BUILD_COMMAND ${AU_BUILD_COMMAND}
       INSTALL_COMMAND cmake --build . --config Release --target install

@@ -17,7 +17,7 @@
 cmake_minimum_required(VERSION 3.26)
 
 # project information
-project(ZENDNNL VERSION 6.1.3
+project(ZENDNNL VERSION 6.1.4
   DESCRIPTION "Accelerated Deep Learning Inference on AMD Zen Architecture"
   LANGUAGES C CXX)
 
@@ -34,9 +34,17 @@ message(STATUS "${ZENDNNL_MSG_PREFIX}CXX_COMPILER_ID=${CMAKE_CXX_COMPILER_ID}")
 message(STATUS "${ZENDNNL_MSG_PREFIX}CXX_COMPILER_VERSION=${CMAKE_CXX_COMPILER_VERSION}")
 message(STATUS "${ZENDNNL_MSG_PREFIX}CXX_COMPILER_PATH=${CMAKE_CXX_COMPILER}")
 
+# On Windows, ZenDNN builds only with MSVC (cl). MSVC is also set for
+# clang-cl, so test the compiler ID.
+if(WIN32 AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+  message(FATAL_ERROR
+    "${ZENDNNL_MSG_PREFIX}On Windows, ZenDNN requires MSVC >= 19.43 "
+    "(Visual Studio 2022 17.13); other compilers, such as clang-cl or "
+    "MinGW, are not supported. Found ${CMAKE_CXX_COMPILER_ID} "
+    "${CMAKE_CXX_COMPILER_VERSION}.")
+endif()
+
 # minimum msvc version
-# MSVC_VERSION tracks the MSVC toolset for both cl and clang-cl, whereas
-# CMAKE_CXX_COMPILER_VERSION reports the Clang version under clang-cl.
 if(MSVC AND MSVC_VERSION LESS 1943)
   message(FATAL_ERROR
     "${ZENDNNL_MSG_PREFIX}MSVC >= 19.43 (Visual Studio 2022 17.13) is "

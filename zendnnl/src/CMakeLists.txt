@@ -287,7 +287,8 @@ endif()
 # Shared library "DLL mode": ZENDNNL_DLL selects the export/import decoration
 # in common/zendnnl_api.hpp, and ZENDNNL_DLL_EXPORTS marks THIS target as the
 # producer (so ZENDNNL_API => __declspec(dllexport) on Windows). Both are
-# PRIVATE: consumers that link the DLL define only ZENDNNL_DLL themselves.
+# PRIVATE; consumers that link the DLL need only ZENDNNL_DLL, which on Windows
+# they get from this target.
 # No-op on GCC/Clang (maps to default ELF visibility).
 if(ZENDNNL_LIB_BUILD_SHARED)
   target_compile_definitions(zendnnl PRIVATE ZENDNNL_DLL ZENDNNL_DLL_EXPORTS)
@@ -295,6 +296,8 @@ if(ZENDNNL_LIB_BUILD_SHARED)
   # Windows DLL would not export otherwise (data still needs ZENDNNL_API).
   if(WIN32)
     set_target_properties(zendnnl PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+    # Consumers can read the DLL's data only through dllimport.
+    target_compile_definitions(zendnnl INTERFACE ZENDNNL_DLL)
   endif()
 endif()
 

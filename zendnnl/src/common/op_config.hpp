@@ -334,7 +334,7 @@ private:
 
     int32_t matmul_algo; /**< Matmul runtime algorithm. */
     /** matmul_algo == native_brgemm. */
-    static std::atomic<bool> matmul_algo_native_brgemm;
+    ZENDNNL_API static std::atomic<bool> matmul_algo_native_brgemm;
     int32_t bmm_algo; /**< Batched Matmul algorithm. */
     data_type_t
             matmul_accum_type; /**< Accumulation type for reference kernel. */

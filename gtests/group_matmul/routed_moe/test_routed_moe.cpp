@@ -395,10 +395,8 @@ struct routed_moe_isa_test : public routed_moe_test {
 #if ZENDNNL_ROUTED_MOE_KERNELS_COMPILED
 /// Run the routed gate/up epilogue activation over `n` (a multiple of 16)
 /// lanes.
-__attribute__((
-        target("avx512f,avx512bw,avx512dq,avx512vl,avx512vnni,"
-               "avx512bf16,fma"))) void
-routed_epilogue_act(
+ZENDNNL_TARGET("avx512f,avx512bw,avx512dq,avx512vl,avx512vnni,avx512bf16,fma")
+void routed_epilogue_act(
         routed_moe_activation_t act, const float *x, float *y, int64_t n) {
     namespace rm = zendnnl::lowoha::matmul::routed_moe;
     for (int64_t i = 0; i < n; i += 16) {

@@ -18,6 +18,7 @@ set(AOCLDLP_LIB_ROOT "${AOCLDLP_INSTALL_DIR}/lib")
 if(WIN32)
   # Windows/MSVC install names: the DLL's import library is aocl-dlp.lib (in
   # lib/, DLL itself in bin/) and the static archive is aocl-dlp_static.lib.
+  # ZenDNNL's Windows build installs only the static archive.
   # find_library adds the .lib suffix, so pass the base names.
   find_library(AOCLDLP_LIB
     NAMES aocl-dlp
@@ -47,7 +48,7 @@ find_path(AOCLDLP_INCLUDE_DIR
   NO_DEFAULT_PATH)
 
 include(FindPackageHandleStandardArgs)
-if(AOCLDLP_LIB-NOTFOUND)
+if(NOT AOCLDLP_LIB)
   find_package_handle_standard_args(AOCLDLP
     DEFAULT_MSG
     AOCLDLP_ARCHIVE_LIB
@@ -61,7 +62,7 @@ else()
 endif()
 
 if(AOCLDLP_FOUND)
-  if(AOCLDLP_LIB-NOTFOUND)
+  if(NOT AOCLDLP_LIB)
     message(STATUS "aocl-dlp shared library not found.")
   else()
     add_library(aocldlp::aocl_dlp SHARED IMPORTED GLOBAL)

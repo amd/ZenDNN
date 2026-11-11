@@ -130,6 +130,13 @@ if(ZENDNNL_BUILD_GTEST)
     # relative RUNPATH instead of relying on LD_LIBRARY_PATH.
     set_target_properties(gtests PROPERTIES
       INSTALL_RPATH "$ORIGIN/../zendnnl/lib")
+    if(WIN32 AND ZENDNNL_DEPENDS_AOCLDLP)
+      # Tests call AOCL-DLP directly, which zendnnl.dll does not export, and
+      # it registers its kernels in static initializers, so link all of it.
+      target_link_libraries(gtests PRIVATE
+        "$<LINK_LIBRARY:WHOLE_ARCHIVE,aocldlp::aocl_dlp_static>")
+      set(gtests_aocldlp_linked ON)
+    endif()
   else()
     message(FATAL_ERROR "No zendnnl library target found for gtests!")
   endif()
@@ -138,7 +145,9 @@ if(ZENDNNL_BUILD_GTEST)
   # link dependencies explicitly. In standalone builds the archive is
   # self-contained via WHOLE_ARCHIVE — no extra link needed.
   if(ZENDNNL_FWK_BUILD)
-    if(ZENDNNL_DEPENDS_AOCLDLP AND TARGET aocldlp::aocl_dlp_static)
+    # CMake rejects a plain link next to the whole-archive one above.
+    if(ZENDNNL_DEPENDS_AOCLDLP AND TARGET aocldlp::aocl_dlp_static
+       AND NOT gtests_aocldlp_linked)
       target_link_libraries(gtests PRIVATE aocldlp::aocl_dlp_static)
     endif()
     if(ZENDNNL_DEPENDS_ONEDNN AND TARGET DNNL::dnnl)

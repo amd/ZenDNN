@@ -241,11 +241,24 @@ if(NOT EXISTS ${ZENDNNL_LIBRARY_INC_DIR})
   file(MAKE_DIRECTORY ${ZENDNNL_LIBRARY_INC_DIR})
 endif()
 
+# The AOCL static archives are not prefix/suffix swaps of the Unix names on
+# Windows (they add _static, and libaoclutils keeps its lib prefix), so list
+# them per platform.
+if(WIN32)
+  set(_znl_aoclutils_file "libaoclutils_static.lib")
+  set(_znl_aucpuid_file "au_cpuid_static.lib")
+  set(_znl_aocldlp_file "aocl-dlp_static.lib")
+else()
+  set(_znl_aoclutils_file "libaoclutils.a")
+  set(_znl_aucpuid_file "libau_cpuid.a")
+  set(_znl_aocldlp_file "libaocl-dlp.a")
+endif()
+
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
   add_library(zendnnl_library STATIC IMPORTED GLOBAL)
   set_target_properties(zendnnl_library
     PROPERTIES
-    IMPORTED_LOCATION "${ZENDNNL_LIBRARY_LIB_DIR}/libzendnnl_archive.a"
+    IMPORTED_LOCATION "${ZENDNNL_LIBRARY_LIB_DIR}/${CMAKE_STATIC_LIBRARY_PREFIX}zendnnl_archive${CMAKE_STATIC_LIBRARY_SUFFIX}"
     INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR}"
     INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR}")
 
@@ -257,7 +270,7 @@ if(ZENDNNL_LIB_BUILD_ARCHIVE)
 
   add_library(zendnnl::zendnnl_archive ALIAS zendnnl_library)
 
-  list(APPEND ZNL_BYPRODUCTS "${ZENDNNL_LIBRARY_LIB_DIR}/libzendnnl_archive.a")
+  list(APPEND ZNL_BYPRODUCTS "${ZENDNNL_LIBRARY_LIB_DIR}/${CMAKE_STATIC_LIBRARY_PREFIX}zendnnl_archive${CMAKE_STATIC_LIBRARY_SUFFIX}")
 endif()
 
 if(ZENDNNL_LIB_BUILD_SHARED)
@@ -274,6 +287,17 @@ if(ZENDNNL_LIB_BUILD_SHARED)
   add_library(zendnnl::zendnnl ALIAS zendnnl_shared_library)
 
   list(APPEND ZNL_BYPRODUCTS "${ZENDNNL_LIBRARY_LIB_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}zendnnl${CMAKE_SHARED_LIBRARY_SUFFIX}")
+
+  # Windows links against the DLL's import library, not the DLL itself, and
+  # consumers can read the DLL's data only through dllimport.
+  if(WIN32)
+    set(_znl_implib "${ZENDNNL_LIBRARY_LIB_DIR}/${CMAKE_IMPORT_LIBRARY_PREFIX}zendnnl${CMAKE_IMPORT_LIBRARY_SUFFIX}")
+    set_target_properties(zendnnl_shared_library
+      PROPERTIES
+      IMPORTED_IMPLIB "${_znl_implib}")
+    target_compile_definitions(zendnnl_shared_library INTERFACE ZENDNNL_DLL)
+    list(APPEND ZNL_BYPRODUCTS "${_znl_implib}")
+  endif()
 endif()
 
 if(NOT ZENDNNL_LIB_BUILD_ARCHIVE AND NOT ZENDNNL_LIB_BUILD_SHARED)
@@ -300,7 +324,7 @@ endif()
 # always under lib/ (including on RHEL and manylinux).
 zendnnl_add_dependency(NAME aoclutils
   PATH "${ZENDNNL_INSTALL_PREFIX}/deps/aoclutils"
-  ARCHIVE_FILE "libaoclutils.a"
+  ARCHIVE_FILE "${_znl_aoclutils_file}"
   ALIAS "au::aoclutils")
 
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
@@ -312,7 +336,7 @@ endif()
 
 zendnnl_add_dependency(NAME aucpuid
   PATH "${ZENDNNL_INSTALL_PREFIX}/deps/aoclutils"
-  ARCHIVE_FILE "libau_cpuid.a"
+  ARCHIVE_FILE "${_znl_aucpuid_file}"
   ALIAS "au::au_cpuid")
 
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
@@ -325,7 +349,7 @@ endif()
 if(ZENDNNL_DEPENDS_AOCLDLP)
   zendnnl_add_dependency(NAME aocldlp
     PATH "${ZENDNNL_INSTALL_PREFIX}/deps/aocldlp"
-    ARCHIVE_FILE "libaocl-dlp.a"
+    ARCHIVE_FILE "${_znl_aocldlp_file}"
     ALIAS "aocldlp::aocl_dlp_static")
 
   if(ZENDNNL_LIB_BUILD_ARCHIVE)
@@ -341,12 +365,12 @@ if(ZENDNNL_DEPENDS_ONEDNN)
     zendnnl_add_dependency(NAME onednn
       PATH "${ZENDNNL_INSTALL_PREFIX}/deps/onednn"
       LIB_SUFFIX lib64
-      ARCHIVE_FILE "libdnnl.a"
+      ARCHIVE_FILE "${CMAKE_STATIC_LIBRARY_PREFIX}dnnl${CMAKE_STATIC_LIBRARY_SUFFIX}"
       ALIAS "DNNL::dnnl")
   else()
     zendnnl_add_dependency(NAME onednn
       PATH "${ZENDNNL_INSTALL_PREFIX}/deps/onednn"
-      ARCHIVE_FILE "libdnnl.a"
+      ARCHIVE_FILE "${CMAKE_STATIC_LIBRARY_PREFIX}dnnl${CMAKE_STATIC_LIBRARY_SUFFIX}"
       ALIAS "DNNL::dnnl")
   endif()
 
@@ -361,7 +385,7 @@ endif()
 if(ZENDNNL_DEPENDS_LIBXSMM)
   zendnnl_add_dependency(NAME libxsmm
     PATH "${ZENDNNL_INSTALL_PREFIX}/deps/libxsmm"
-    ARCHIVE_FILE "libxsmm.a"
+    ARCHIVE_FILE "${CMAKE_STATIC_LIBRARY_PREFIX}xsmm${CMAKE_STATIC_LIBRARY_SUFFIX}"
     ALIAS "libxsmm::libxsmm_archive")
 
   if(ZENDNNL_LIB_BUILD_ARCHIVE)
@@ -391,30 +415,30 @@ if(ZENDNNL_DEPENDS_FBGEMM)
     zendnnl_add_dependency(NAME asmjit
       PATH "${ZENDNNL_INSTALL_PREFIX}/deps/fbgemm"
       LIB_SUFFIX lib64
-      ARCHIVE_FILE "libasmjit.a"
+      ARCHIVE_FILE "${CMAKE_STATIC_LIBRARY_PREFIX}asmjit${CMAKE_STATIC_LIBRARY_SUFFIX}"
       ALIAS "fbgemm::asmjit")
     zendnnl_add_dependency(NAME cpuinfo
       PATH "${ZENDNNL_INSTALL_PREFIX}/deps/fbgemm"
       LIB_SUFFIX lib64
-      ARCHIVE_FILE "libcpuinfo.a"
+      ARCHIVE_FILE "${CMAKE_STATIC_LIBRARY_PREFIX}cpuinfo${CMAKE_STATIC_LIBRARY_SUFFIX}"
       ALIAS "fbgemm::cpuinfo")
     zendnnl_add_dependency(NAME fbgemm
       PATH "${ZENDNNL_INSTALL_PREFIX}/deps/fbgemm"
       LIB_SUFFIX lib64
-      ARCHIVE_FILE "libfbgemm.a"
+      ARCHIVE_FILE "${CMAKE_STATIC_LIBRARY_PREFIX}fbgemm${CMAKE_STATIC_LIBRARY_SUFFIX}"
       ALIAS "fbgemm::fbgemm_archive")
   else()
     zendnnl_add_dependency(NAME asmjit
       PATH "${ZENDNNL_INSTALL_PREFIX}/deps/fbgemm"
-      ARCHIVE_FILE "libasmjit.a"
+      ARCHIVE_FILE "${CMAKE_STATIC_LIBRARY_PREFIX}asmjit${CMAKE_STATIC_LIBRARY_SUFFIX}"
       ALIAS "fbgemm::asmjit")
     zendnnl_add_dependency(NAME cpuinfo
       PATH "${ZENDNNL_INSTALL_PREFIX}/deps/fbgemm"
-      ARCHIVE_FILE "libcpuinfo.a"
+      ARCHIVE_FILE "${CMAKE_STATIC_LIBRARY_PREFIX}cpuinfo${CMAKE_STATIC_LIBRARY_SUFFIX}"
       ALIAS "fbgemm::cpuinfo")
     zendnnl_add_dependency(NAME fbgemm
       PATH "${ZENDNNL_INSTALL_PREFIX}/deps/fbgemm"
-      ARCHIVE_FILE "libfbgemm.a"
+      ARCHIVE_FILE "${CMAKE_STATIC_LIBRARY_PREFIX}fbgemm${CMAKE_STATIC_LIBRARY_SUFFIX}"
       ALIAS "fbgemm::fbgemm_archive")
   endif()
 

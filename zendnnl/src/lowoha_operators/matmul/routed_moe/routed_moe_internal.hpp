@@ -45,7 +45,7 @@ namespace routed_moe {
 // status_t::isa_unsupported.
 #ifndef ZENDNNL_ROUTED_MOE_KERNELS_COMPILED
 #if (defined(__x86_64__) || defined(_M_X64)) \
-        && (defined(__GNUC__) || defined(__clang__))
+        && (defined(__GNUC__) || defined(__clang__) || defined(_MSC_VER))
 #define ZENDNNL_ROUTED_MOE_KERNELS_COMPILED 1
 #else
 #define ZENDNNL_ROUTED_MOE_KERNELS_COMPILED 0

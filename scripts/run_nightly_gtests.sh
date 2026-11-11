@@ -56,15 +56,17 @@
 #                       chosen to match the UTC ISO-8601 stamps used in logs)
 #   --ops LIST          Comma-separated subset of ops to run; default =
 #                       full nightly sweep (everything except batchmatmul).
-#                       Valid names: matmul, group_matmul, group_matmul_unit,
-#                                    custom_kernel, reorder, softmax,
-#                                    sdpa, normalization, embedding,
+#                       Valid names: matmul, matmul_native, matmul_aocl_dlp,
+#                                    group_matmul, group_matmul_unit,
+#                                    custom_kernel, reorder, softmax, sdpa,
+#                                    hstu_attention, normalization, embedding,
 #                                    embedding_bag, group_embedding,
 #                                    group_embag, static_quant_prepack,
-#                                    weight_cache_inplace,
+#                                    quant_layout, weight_cache_inplace,
 #                                    lru_cache, postop_cache, omp_api,
 #                                    matmul_ai_lowoha, embag_ai_lowoha,
 #                                    gemv_ai_lowoha, batchmatmul_ai_lowoha,
+#                                    others (every test no other op selects),
 #                                    batchmatmul (opt-in only; ~38h)
 #                       (*_ai_* ops pin --ai_test_mode postsub. There is no
 #                        primitive twin: AI fixtures GTEST_SKIP on
@@ -155,18 +157,22 @@ log_error()  { _log ERROR "$@"; }
 # ------------------------------------------------------------------------------
 OP_NAMES=(
   matmul
+  matmul_native
+  matmul_aocl_dlp
   group_matmul
   group_matmul_unit
   custom_kernel
   reorder
   softmax
   sdpa
+  hstu_attention
   normalization
   embedding
   embedding_bag
   group_embedding
   group_embag
   static_quant_prepack
+  quant_layout
   weight_cache_inplace
   lru_cache
   postop_cache
@@ -175,35 +181,48 @@ OP_NAMES=(
   embag_ai_lowoha
   gemv_ai_lowoha
   batchmatmul_ai_lowoha
+  others
 )
 declare -A OP_FILTER=(
-  [matmul]='Matmul/*'
+  # W4A8Direct is a plain TEST in test_matmul.cpp, outside the Matmul/
+  # instantiation.
+  [matmul]='Matmul/*:W4A8Direct*'
+  # Native backend suites. '*/Native*' catches the parameterized ones, whose
+  # instantiation prefixes (Bf16, Bias, EveryN, ...) do not begin with
+  # 'Native'.
+  [matmul_native]='Native*:*/Native*'
+  [matmul_aocl_dlp]='AoclDlp*'
   [batchmatmul]='BatchMatmul/*'
   [group_matmul]='GroupMatmul*'
   # TEST_F (non-parameterized) group_matmul suites. These carry no
   # instantiation prefix, so the 'GroupMatmul*' pattern above cannot reach
   # them and they need their own op. Listed as explicit prefixes rather than
   # a broad 'Test*' glob so they do not also re-run the postop_cache suites.
-  [group_matmul_unit]='W8A8MoE*:Ggml*:FusedMoE*:GrpMatmulEnv*:GroupPerChannelQuant*:GroupPerGroupQuant*:TestGroupMatmul*:TestGroupDynamicQuant*:TestFusedMoE*:TestPrepack*:TestSingleExpertParallelRouting*:TestDispatcherActiveTotalNegative*:TestReorderQuantBuffers*'
+  [group_matmul_unit]='W8A8MoE*:Ggml*:FusedMoE*:GrpMatmulEnv*:GroupPerChannelQuant*:GroupPerGroupQuant*:TestGroupMatmul*:TestGroupDynamicQuant*:TestFusedMoE*:TestPrepack*:TestSingleExpert*:TestDispatcherActiveTotalNegative*:TestReorderQuantBuffers*:TestAlignedNSplitSingleExpertScope*:TestChunkedPostPasses*:TestSymQuantScaleShapePredicates*:Int8InPlaceWarm*:MatmulDirectGatedAct*:MoeAlgo3Quant*:PromptTile*:RoutedMoE*:WeiBufferCapacity*'
   # Custom-kernel suites, split out from group_matmul_unit for log
   # granularity. 'Ck*' catches the TEST_F suites; '*/Ck*' catches the
   # parameterized ones, whose instantiation prefixes (Defaults, ShapeMatrix,
   # SymAndAsym, Override64, GatingMatrix, All{Supported,Rejected}Tuples) do
-  # not begin with 'Ck'.
-  [custom_kernel]='Ck*:*/Ck*'
-  [reorder]='Reorder*:GroupReorder*'
+  # not begin with 'Ck'. TestMatmulUnreorderRoute and QwenBf16Decode* are
+  # custom-kernel suites without the prefix.
+  [custom_kernel]='Ck*:*/Ck*:TestMatmulUnreorderRoute*:QwenBf16Decode*'
+  [reorder]='Reorder*:GroupReorder*:AoclUnreorderGuard*:TestAoclDerivedCkWeightCache*'
   [softmax]='Softmax/*'
-  [sdpa]='Sdpa*'
-  [normalization]='Normalization*'
+  # '*/Sdpa*' and '*/HstuAttention*' catch the parameterized suites
+  # (Shapes/SdpaCk*, Cases/HstuAttention*).
+  [sdpa]='Sdpa*:*/Sdpa*'
+  [hstu_attention]='HstuAttention*:*/HstuAttention*'
+  [normalization]='Normalization*:GatedLayerNorm*'
   [embedding]='Embedding/*'
-  [embedding_bag]='EmbeddingBag/*'
+  [embedding_bag]='EmbeddingBag/*:EmbagIsa*'
   [group_embedding]='GroupEmbedding*'
   [group_embag]='GroupEmbag*'
   # Fast, deterministic unit/utility suites (no randomized data). Included in
   # the default sweep; each finishes within a few seconds.
   [static_quant_prepack]='StaticQuantPrepack*'
-  [weight_cache_inplace]='TestWeightCacheInplace*'
-  [lru_cache]='LruCacheTryGet.*'
+  [quant_layout]='QuantLayout*'
+  [weight_cache_inplace]='TestWeightCacheInplace*:TestOnednnWeightCacheInplace*'
+  [lru_cache]='LruCache*'
   [postop_cache]='*PostopCache*'
   [omp_api]='OmpApiTest.*'
   [matmul_ai_lowoha]='AITests/TestMatmul*'
@@ -211,6 +230,15 @@ declare -A OP_FILTER=(
   [gemv_ai_lowoha]='AIGemvTests*'
   [batchmatmul_ai_lowoha]='AITests/TestBatchMatmulAI*'
 )
+# others: every test that no op above selects, so a suite added later still
+# runs before it is given an op. It negates every filter, batchmatmul
+# included, so no filter in the table may have a '-' part of its own.
+_others=""
+for _op in "${!OP_FILTER[@]}"; do
+  _others+="${_others:+:}${OP_FILTER[$_op]}"
+done
+OP_FILTER[others]="-${_others}"
+unset _op _others
 # Per-op extra flags. Appended AFTER the global --seed/--num-threads/--lowoha
 # /--extra so they win on conflict (the gtests parser uses last-write-wins via
 # its umap, see gtest_utils.cpp::Parser::operator()).

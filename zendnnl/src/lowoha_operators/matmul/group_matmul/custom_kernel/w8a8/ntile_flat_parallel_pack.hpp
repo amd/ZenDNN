@@ -35,7 +35,7 @@
 // library still compiles and behaves identically to before this feature.
 #ifndef ZENDNNL_NTILE_FLAT_PARALLEL_KERNELS_COMPILED
 #if (defined(__x86_64__) || defined(_M_X64)) \
-        && (defined(__GNUC__) || defined(__clang__))
+        && (defined(__GNUC__) || defined(__clang__) || defined(_MSC_VER))
 #define ZENDNNL_NTILE_FLAT_PARALLEL_KERNELS_COMPILED 1
 #else
 #define ZENDNNL_NTILE_FLAT_PARALLEL_KERNELS_COMPILED 0

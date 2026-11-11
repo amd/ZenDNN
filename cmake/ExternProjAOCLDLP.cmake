@@ -61,6 +61,16 @@ if(ZENDNNL_DEPENDS_AOCLDLP)
     else()
       set(AD_BUILD_COMMAND cmake --build . --config Release --target all -- -j${NPROC})
     endif()
+
+    # AOCL-DLP's static library keeps its classic API dllexport, so any DLL
+    # linking ZenDNNL would re-export it. On Windows, strip that, skip
+    # AOCL-DLP's DLL, which ZenDNNL does not use, and make AOCL-DLP's package
+    # config offer only the static library.
+    set(AD_PATCH_ARGS "")
+    if(WIN32)
+      set(AD_PATCH_ARGS PATCH_COMMAND ${CMAKE_COMMAND} -DDEPENDENCY=aocldlp
+        -DSOURCE_DIR=<SOURCE_DIR> -P "${CMAKE_CURRENT_LIST_DIR}/StripAoclDllExport.cmake")
+    endif()
     if (ZENDNNL_LOCAL_AOCLDLP)
       message(WARNING "${ZENDNNL_MSG_PREFIX}AOCL-DLP will be built from local source at ${AOCLDLP_ROOT_DIR}. This version may not be fully compatible with ZenDNN. If unsure, it is recommended to use the standard ZenDNN build.")
       message(DEBUG "${ZENDNNL_MSG_PREFIX}Will use local AOCL-DLP from ${AOCLDLP_ROOT_DIR}")
@@ -85,6 +95,7 @@ if(ZENDNNL_DEPENDS_AOCLDLP)
         SOURCE_DIR "${AOCLDLP_ROOT_DIR}"
         BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/aocldlp"
         INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/aocldlp"
+        ${AD_PATCH_ARGS}
         CMAKE_ARGS ${AD_CMAKE_ARGS}
         BUILD_COMMAND ${AD_BUILD_COMMAND}
         INSTALL_COMMAND cmake --build . --config Release --target install)
@@ -97,6 +108,7 @@ if(ZENDNNL_DEPENDS_AOCLDLP)
         GIT_REPOSITORY ${AOCLDLP_GIT_REPO}
         GIT_TAG ${AOCLDLP_GIT_TAG}
         GIT_PROGRESS ${AOCLDLP_GIT_PROGRESS}
+        ${AD_PATCH_ARGS}
         CMAKE_ARGS ${AD_CMAKE_ARGS}
         BUILD_COMMAND ${AD_BUILD_COMMAND}
         INSTALL_COMMAND cmake --build . --config Release --target install

@@ -83,7 +83,9 @@ inline int64_t packed_row_bytes(int64_t in_channels) {
 
 // Compile-time unrolled `for (i = 0; i < n; ++i) f(i, args...)`, so `i` stays a
 // constant expression and the register indices in the micro-kernels resolve at
-// compile time.
+// compile time.  The constants combined with `i` are static members of the
+// micro-kernel structs, not locals of apply(): MSVC does not treat a local
+// constexpr named inside a generic lambda as a constant (C2131).
 template <int n>
 struct unroll_t {
     template <typename Func, typename... Args>
@@ -363,7 +365,14 @@ inline void pack_weight_block(int8_t *ZENDNNL_ROUTED_RESTRICT dst,
 // end bound.  One broadcast of 4 packed activation bytes per row and one
 // 64-byte B load per stream per column feed the vpdpbusd; the int32 sums over
 // k are exact, so the results match any other loop schedule.
+// MSVC has no x64 inline asm, so the pin is dropped there.
 // ---------------------------------------------------------------------------
+#if defined(_MSC_VER) && !defined(__clang__)
+#define ZENDNNL_RMOE_PIN(...)
+#else
+#define ZENDNNL_RMOE_PIN(...) asm("" : __VA_ARGS__)
+#endif
+
 template <int ROWS>
 ZENDNNL_ALWAYS_INLINE inline void gate_up_k_loop(
         const int32_t *ZENDNNL_ROUTED_RESTRICT a_ptr,
@@ -394,7 +403,8 @@ ZENDNNL_ALWAYS_INLINE inline void gate_up_k_loop(
         g##r##1 = _mm512_dpbusd_epi32(g##r##1, va, x1); \
         u##r##0 = _mm512_dpbusd_epi32(u##r##0, va, y0); \
         u##r##1 = _mm512_dpbusd_epi32(u##r##1, va, y1); \
-        asm("" : "+v"(g##r##0), "+v"(g##r##1), "+v"(u##r##0), "+v"(u##r##1)); \
+        ZENDNNL_RMOE_PIN( \
+                "+v"(g##r##0), "+v"(g##r##1), "+v"(u##r##0), "+v"(u##r##1)); \
     }
         ZENDNNL_RMOE_ROW(0)
         ZENDNNL_RMOE_ROW(1)
@@ -441,7 +451,7 @@ ZENDNNL_ALWAYS_INLINE inline void down_k_loop(
         const __m512i va = _mm512_set1_epi32(a_ptr[r * lda4 + k]); \
         c##r##0 = _mm512_dpbusd_epi32(c##r##0, va, b0); \
         c##r##1 = _mm512_dpbusd_epi32(c##r##1, va, b1); \
-        asm("" : "+v"(c##r##0), "+v"(c##r##1)); \
+        ZENDNNL_RMOE_PIN("+v"(c##r##0), "+v"(c##r##1)); \
     }
         ZENDNNL_RMOE_ROW(0)
         ZENDNNL_RMOE_ROW(1)
@@ -469,6 +479,8 @@ ZENDNNL_ALWAYS_INLINE inline void down_k_loop(
 #undef ZENDNNL_RMOE_OUT
 }
 
+#undef ZENDNNL_RMOE_PIN
+
 // ---------------------------------------------------------------------------
 // Gate/up micro-kernel: two independent int32 accumulator sets over a shared A
 // operand, with act(gate) * up folded into the epilogue so the intermediate
@@ -480,6 +492,10 @@ ZENDNNL_ALWAYS_INLINE inline void down_k_loop(
 // ---------------------------------------------------------------------------
 template <int BLOCK_M, int BLOCK_N, routed_moe_activation_t ACT>
 struct tiny_gemm_gate_up {
+    static constexpr int ROWS = BLOCK_M;
+    static constexpr int COLS = BLOCK_N / 16;
+    static_assert(COLS == 2, "gate_up_k_loop is written for BLOCK_N == 32");
+
     static inline void apply(const uint8_t *ZENDNNL_ROUTED_RESTRICT A,
             const int8_t *ZENDNNL_ROUTED_RESTRICT B0,
             const int8_t *ZENDNNL_ROUTED_RESTRICT B1,
@@ -490,10 +506,6 @@ struct tiny_gemm_gate_up {
             const int32_t *ZENDNNL_ROUTED_RESTRICT Bcomp0,
             const int32_t *ZENDNNL_ROUTED_RESTRICT Bcomp1, int64_t K,
             int64_t lda, int64_t ldb, int64_t ldc) {
-        constexpr int ROWS = BLOCK_M;
-        constexpr int COLS = BLOCK_N / 16;
-        static_assert(COLS == 2, "gate_up_k_loop is written for BLOCK_N == 32");
-
         alignas(64) __m512i vc0[ROWS * COLS];
         alignas(64) __m512i vc1[ROWS * COLS];
         alignas(64) __m512i vcomp0[COLS];
@@ -560,6 +572,10 @@ struct tiny_gemm_gate_up {
 // ---------------------------------------------------------------------------
 template <int BLOCK_M, int BLOCK_N>
 struct tiny_gemm_down {
+    static constexpr int ROWS = BLOCK_M;
+    static constexpr int COLS = BLOCK_N / 16;
+    static_assert(COLS == 2, "down_k_loop is written for BLOCK_N == 32");
+
     static inline void apply(const uint8_t *ZENDNNL_ROUTED_RESTRICT A,
             const int8_t *ZENDNNL_ROUTED_RESTRICT B,
             float *ZENDNNL_ROUTED_RESTRICT C,
@@ -567,10 +583,6 @@ struct tiny_gemm_down {
             const float *ZENDNNL_ROUTED_RESTRICT Bs,
             const int32_t *ZENDNNL_ROUTED_RESTRICT Bcomp, int64_t K,
             int64_t lda, int64_t ldb, int64_t ldc) {
-        constexpr int ROWS = BLOCK_M;
-        constexpr int COLS = BLOCK_N / 16;
-        static_assert(COLS == 2, "down_k_loop is written for BLOCK_N == 32");
-
         alignas(64) __m512i vc[ROWS * COLS];
         alignas(64) __m512i vcomp[COLS];
         __m512 vas;

@@ -69,7 +69,9 @@ inline int64_t div_up(int64_t a, int64_t b) {
 
 // Compile-time unrolled `for (i = 0; i < n; ++i) f(i, args...)`, so `i` stays
 // a constant expression and the register indices in the micro-kernels resolve
-// at compile time.
+// at compile time. The constants combined with `i` are static members of the
+// micro-kernel structs, not locals of apply(): MSVC does not treat a local
+// constexpr named inside a generic lambda as a constant (C2131).
 template <int n>
 struct unroll_t {
     template <typename Func, typename... Args>
@@ -160,6 +162,10 @@ inline void quantize_row_u8(uint8_t *ZENDNNL_NTILE_FLAT_PARALLEL_RESTRICT Aq,
 // ---------------------------------------------------------------------------
 template <int BLOCK_M, int BLOCK_N, bool SignedA = false>
 struct int8_gate_up_ukernel_t {
+    static constexpr int ROWS = BLOCK_M;
+    static constexpr int COLS = BLOCK_N / 16;
+    static_assert(COLS % 2 == 0, "BLOCK_N must be a multiple of 32");
+
     ZENDNNL_INLINE_TARGET(ZENDNNL_NTILE_FLAT_PARALLEL_TARGET_ISA)
     static inline void apply(
             const uint8_t *ZENDNNL_NTILE_FLAT_PARALLEL_RESTRICT A,
@@ -172,10 +178,6 @@ struct int8_gate_up_ukernel_t {
             const int32_t *ZENDNNL_NTILE_FLAT_PARALLEL_RESTRICT Bcomp0,
             const int32_t *ZENDNNL_NTILE_FLAT_PARALLEL_RESTRICT Bcomp1,
             int64_t K, int64_t lda, int64_t ldb, int64_t ldc) {
-        constexpr int ROWS = BLOCK_M;
-        constexpr int COLS = BLOCK_N / 16;
-        static_assert(COLS % 2 == 0, "BLOCK_N must be a multiple of 32");
-
         __m512i va;
         alignas(64) __m512i vb0[COLS];
         alignas(64) __m512i vb1[COLS];
@@ -302,6 +304,10 @@ struct int8_gate_up_ukernel_t {
 // ---------------------------------------------------------------------------
 template <int BLOCK_M, int BLOCK_N>
 struct int8_down_ukernel_t {
+    static constexpr int ROWS = BLOCK_M;
+    static constexpr int COLS = BLOCK_N / 16;
+    static_assert(COLS % 2 == 0, "BLOCK_N must be a multiple of 32");
+
     ZENDNNL_INLINE_TARGET(ZENDNNL_NTILE_FLAT_PARALLEL_TARGET_ISA)
     static inline void apply(
             const uint8_t *ZENDNNL_NTILE_FLAT_PARALLEL_RESTRICT A,
@@ -311,10 +317,6 @@ struct int8_down_ukernel_t {
             const float *ZENDNNL_NTILE_FLAT_PARALLEL_RESTRICT Bs,
             const int32_t *ZENDNNL_NTILE_FLAT_PARALLEL_RESTRICT Bcomp,
             int64_t K, int64_t lda, int64_t ldb, int64_t ldc) {
-        constexpr int ROWS = BLOCK_M;
-        constexpr int COLS = BLOCK_N / 16;
-        static_assert(COLS % 2 == 0, "BLOCK_N must be a multiple of 32");
-
         __m512i va;
         alignas(64) __m512i vb[COLS];
         alignas(64) __m512i vc[ROWS * COLS];
