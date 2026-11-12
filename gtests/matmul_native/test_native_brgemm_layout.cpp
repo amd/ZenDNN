@@ -1798,4 +1798,23 @@ TEST_F(NativeBrgemmLayoutTest, RowGroupScheduleMatchesSingleThread) {
     }, "the row-group schedule");
 }
 
+// The tiled pack of a bf16, f32 or f16 weight stored [K, N] counts its tiles
+// in an int: a weight whose count passes it (an f16 weight of K 1073741824
+// and N 8192 passes the layout bounds with 2^31 tiles) packs block by block,
+// and every count an int holds keeps its tiles.
+TEST(NativeBrgemmLayout, PackTilesPastTheIntRangePackBlockByBlock) {
+    EXPECT_EQ(nv::native_pack_tiles(128, 4096), 8 * 512);
+    EXPECT_EQ(nv::native_pack_tiles(129, 4096), 9 * 512);
+    EXPECT_EQ(nv::native_pack_tiles(0, 4096), 0);
+    // 8 groups of 268435455 chunks of 8 K groups: 2147483640 tiles.
+    EXPECT_EQ(nv::native_pack_tiles(128, 2147483640), 2147483640);
+    EXPECT_EQ(nv::native_pack_tiles(129, 2147483640), 0);
+    // f16 or f32 rows: K 1073741824 at N 8192, and at N 7680.
+    EXPECT_EQ(nv::native_pack_tiles(256, 1073741824), 0);
+    EXPECT_EQ(nv::native_pack_tiles(240, 1073741824), 15 * 134217728);
+    // bf16 pairs: K 67108864 at N 262144, and at N 261632.
+    EXPECT_EQ(nv::native_pack_tiles(8192, 33554432), 0);
+    EXPECT_EQ(nv::native_pack_tiles(8176, 33554432), 511 * 4194304);
+}
+
 } // namespace

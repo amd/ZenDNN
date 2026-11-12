@@ -14,10 +14,12 @@
  * limitations under the License.
  ******************************************************************************/
 
-// The GEMV plan choices of the native BRGEMM read the operands of each call:
-// calls at M = 1 on one weight that carry other values than earlier calls
-// (in other buffers or in the same ones) get the result of their own
-// operands, as on the native tiles.
+// The GEMV kernels, run directly on their plan choice (no call of
+// matmul_direct runs them), read the operands of each call: calls at M = 1
+// on one weight that carry other values than earlier calls (in other
+// buffers or in the same ones) get the result of their own operands, as on
+// the native tiles; and every M = 1 call of matmul_direct runs on the
+// native tiles.
 
 #include <algorithm>
 #include <atomic>
@@ -67,10 +69,49 @@ bool gemv_isa() {
     return u.avx512bf16 && u.avx512vnni && u.avx512f;
 }
 
-/// An M = 1 call on one thread that asks for the native BRGEMM
-/// (lowoha_algo native_brgemm) on a constant [K, N] weight (or [N, K] with
-/// transB), at weight cache mode 1: a GEMV kernel serves a call only below
-/// mode 2.  The weight stays allocated until the process exits, so that no
+/// The descriptor of c, as native_layout_matmul builds it.
+nat::GemmDescriptor descriptor_of(const nt::call_t &c) {
+    nat::GemmDescriptor d;
+    d.M = c.M;
+    d.N = c.N;
+    d.K = c.K;
+    d.lda = c.lda_or_tight();
+    d.ldb = c.ldb_or_tight();
+    d.ldc = c.ldc_or_tight();
+    d.transA = c.transA;
+    d.transB = c.transB;
+    d.alpha = c.alpha;
+    d.beta = c.beta;
+    d.src_dt = c.params.dtypes.src;
+    d.wei_dt = c.params.dtypes.wei;
+    d.dst_dt = c.params.dtypes.dst;
+    d.bias_dt = c.params.dtypes.bias;
+    d.bias = c.bias;
+    d.is_weights_const = c.is_weights_const;
+    d.num_threads = c.params.num_threads;
+    d.gated_act = c.gated;
+    return d;
+}
+
+/// c on its GEMV plan choice (decide_native_gemv), run directly
+/// (run_native_gemv) under the weight cache mode of c: the lower of the
+/// process's and c's, 0 for a weight that is not constant; unimplemented
+/// when no GEMV kernel takes c.
+status_t run_gemv(const nt::call_t &c) {
+    const nat::GemmDescriptor d = descriptor_of(c);
+    const nat::native_gemv_plan_t plan = nat::decide_native_gemv(d, c.params);
+    if (plan.kernel == nat::native_gemv_t::none) return status_t::unimplemented;
+    const int32_t mode = c.is_weights_const
+            ? mm::effective_weight_cache_type(c.params.weight_cache_type)
+            : 0;
+    return nat::run_native_gemv(
+            plan, d, c.src, c.wei, c.dst, c.bias, c.params, mode);
+}
+
+/// An M = 1 call on one thread on a constant [K, N] weight (or [N, K] with
+/// transB), at weight cache mode 1, run on its GEMV plan choice (run_gemv);
+/// through matmul_direct (lowoha_algo native_brgemm) it runs on the native
+/// tiles.  The weight stays allocated until the process exits, so that no
 /// later weight takes its address in the pointer-keyed caches of the GEMV
 /// packs.  INT8: a per-tensor f32 source scale (and an s32 zero point for a
 /// u8 source) and f32 weight scales per column.
@@ -130,16 +171,22 @@ struct gemv_call_t {
         c.params.dtypes.bias = bias == nullptr ? data_type_t::none : dt;
     }
 
-    /// The GEMV kernel matmul_direct runs the call on.
-    nat::native_gemv_t kernel() const { return nt::gemv_kernel(c); }
+    /// The GEMV kernel of the call's plan choice.
+    nat::native_gemv_t kernel() const {
+        return nat::decide_native_gemv(descriptor_of(c), c.params).kernel;
+    }
 
-    /// matmul_direct, then its result against the reference algorithm on the
-    /// weight as it is now, within the band of the call's data types.
+    /// The call on its GEMV kernel (run_gemv).
+    status_t run() const { return run_gemv(c); }
+
+    /// The call on its GEMV kernel, then its result against the reference
+    /// algorithm on the weight as it is now, within the band of the call's
+    /// data types.
     ::testing::AssertionResult runs_to_reference() const {
-        const status_t st = nt::run_matmul(c);
+        const status_t st = run();
         if (st != status_t::success)
             return ::testing::AssertionFailure()
-                    << "matmul_direct status " << static_cast<int>(st);
+                    << "GEMV run status " << static_cast<int>(st);
         if (nt::run_reference(c, c.wei, ref.get()) != status_t::success)
             return ::testing::AssertionFailure() << "no reference result";
         const bool int8 = c.params.dtypes.wei == kS8;
@@ -380,11 +427,10 @@ TEST(NativeGemvOperands, GemvCallsPastTheCacheCapacityPackForTheCall) {
 }
 
 // A constant weight whose buffer takes a new weight between calls, at
-// weight cache mode 1 per call, with lowoha_algo native_brgemm and under
-// ZENDNNL_MATMUL_ALGO=10 (a GEMV choice is made only below mode 2): the
-// M = 1 calls on the BF16 and INT8 BKC kernels get the new weight's result,
-// on the calling thread and on another one, as the calls of M > 1 on the
-// native tiles do.
+// weight cache mode 1 per call: the M = 1 runs on the BF16 and INT8 BKC
+// kernels get the new weight's result, on the calling thread and on another
+// one, as the calls of M > 1 on the native tiles do (with lowoha_algo
+// native_brgemm and under ZENDNNL_MATMUL_ALGO=10).
 TEST(NativeGemvOperands, GemvPacksFollowNewBytesOfTheirWeight) {
     if (!gemv_isa()) GTEST_SKIP() << "needs AVX512-BF16 and AVX512-VNNI";
     const config_restore_t restore;
@@ -461,11 +507,10 @@ TEST(NativeGemvOperands, GemvPacksFollowNewBytesOfTheirWeight) {
 // the zero first source element multiplies, and runs an M = 1 call after
 // each change, which packs the weight again and replaces its cached pack,
 // while other threads keep running M = 1 calls on the weight: on the BF16
-// and INT8 BKC kernels, at weight cache mode 1 per call, with lowoha_algo
-// native_brgemm and under ZENDNNL_MATMUL_ALGO=10.  No call reads a pack
-// after it is freed (AddressSanitizer reports such a read), and every call
-// gets the bits of the first call, which match the reference algorithm.
-// The caches are cleared between rounds, when no call runs.
+// and INT8 BKC kernels, at weight cache mode 1 per call.  No call reads a
+// pack after it is freed (AddressSanitizer reports such a read), and every
+// call gets the bits of the first call, which match the reference
+// algorithm.  The caches are cleared between rounds, when no call runs.
 TEST(NativeGemvOperands, ReplacedGemvPacksOutliveTheCallsReadingThem) {
     if (!gemv_isa()) GTEST_SKIP() << "needs AVX512-BF16 and AVX512-VNNI";
     const config_restore_t restore;
@@ -477,93 +522,60 @@ TEST(NativeGemvOperands, ReplacedGemvPacksOutliveTheCallsReadingThem) {
     constexpr size_t kHead = 64;
     const int N = 256, K = 512, kReaders = 4, kRounds = 4, kChanges = 48;
     uint32_t seed = 8700;
-    for (const bool algo10 : {false, true})
-        for (const auto &cs : cases) {
-            SCOPED_TRACE(std::string(nat::native_gemv_name(cs.kernel))
-                    + (algo10 ? ", ZENDNNL_MATMUL_ALGO=10"
-                              : ", lowoha_algo native_brgemm"));
-            restore.cfg.set_weight_cache(2);
-            std::unique_ptr<nt::algo_pin_t> pin;
-            gemv_call_t call(cs.src, cs.wei, kF32, N, K, seed += 8);
-            if (algo10) {
-                call.c.params.lowoha_algo = matmul_algo_t::none;
-                pin.reset(new nt::algo_pin_t(matmul_algo_t::native_brgemm));
-            }
-            ASSERT_EQ(static_cast<int>(call.kernel()),
-                    static_cast<int>(cs.kernel));
-            nt::store_f32(call.src.get(), cs.src, 0, 0.0f);
-            const bool int8 = cs.wei == kS8;
-            const nt::buffer_t other
-                    = nt::random_buffer(cs.wei, kHead / nt::dt_bytes(cs.wei),
-                            seed + 4, int8 ? -8.0f : -1.0f, int8 ? 8.0f : 1.0f);
-            uint8_t heads[2][kHead];
-            std::memcpy(heads[0], call.wei.get(), kHead);
-            std::memcpy(heads[1], other.get(), kHead);
-            ASSERT_TRUE(call.runs_to_reference());
-            const std::vector<uint8_t> want(call.dst.as<uint8_t>(),
-                    call.dst.as<uint8_t>() + call.dst.bytes);
+    for (const auto &cs : cases) {
+        SCOPED_TRACE(nat::native_gemv_name(cs.kernel));
+        restore.cfg.set_weight_cache(2);
+        gemv_call_t call(cs.src, cs.wei, kF32, N, K, seed += 8);
+        ASSERT_EQ(static_cast<int>(call.kernel()), static_cast<int>(cs.kernel));
+        nt::store_f32(call.src.get(), cs.src, 0, 0.0f);
+        const bool int8 = cs.wei == kS8;
+        const nt::buffer_t other
+                = nt::random_buffer(cs.wei, kHead / nt::dt_bytes(cs.wei),
+                        seed + 4, int8 ? -8.0f : -1.0f, int8 ? 8.0f : 1.0f);
+        uint8_t heads[2][kHead];
+        std::memcpy(heads[0], call.wei.get(), kHead);
+        std::memcpy(heads[1], other.get(), kHead);
+        ASSERT_TRUE(call.runs_to_reference());
+        const std::vector<uint8_t> want(call.dst.as<uint8_t>(),
+                call.dst.as<uint8_t>() + call.dst.bytes);
 
-            for (int round = 0; round < kRounds; ++round) {
-                SCOPED_TRACE("round " + std::to_string(round));
-                std::atomic<bool> stop {false};
-                std::atomic<int> started {0}, bad {0};
-                // One M = 1 call on the weight into a dst of its own.
-                const auto run_one = [&](const nt::buffer_t &dst) {
-                    nt::call_t c = call.c;
-                    c.dst = dst.get();
-                    if (nt::run_matmul(c) != status_t::success
-                            || std::memcmp(dst.get(), want.data(), want.size())
-                                    != 0)
-                        bad.fetch_add(1);
-                };
-                std::vector<std::thread> readers;
-                for (int r = 0; r < kReaders; ++r)
-                    readers.emplace_back([&] {
-                        const nt::buffer_t dst = nt::make_buffer(want.size());
-                        run_one(dst);
-                        started.fetch_add(1);
-                        while (!stop.load())
-                            run_one(dst);
-                    });
-                while (started.load() < kReaders)
-                    std::this_thread::yield();
-                const nt::buffer_t dst = nt::make_buffer(want.size());
-                for (int i = 1; i <= kChanges; ++i) {
-                    std::memcpy(call.wei.get(), heads[i % 2], kHead);
+        for (int round = 0; round < kRounds; ++round) {
+            SCOPED_TRACE("round " + std::to_string(round));
+            std::atomic<bool> stop {false};
+            std::atomic<int> started {0}, bad {0};
+            // One M = 1 call on the weight into a dst of its own.
+            const auto run_one = [&](const nt::buffer_t &dst) {
+                nt::call_t c = call.c;
+                c.dst = dst.get();
+                if (run_gemv(c) != status_t::success
+                        || std::memcmp(dst.get(), want.data(), want.size())
+                                != 0)
+                    bad.fetch_add(1);
+            };
+            std::vector<std::thread> readers;
+            for (int r = 0; r < kReaders; ++r)
+                readers.emplace_back([&] {
+                    const nt::buffer_t dst = nt::make_buffer(want.size());
                     run_one(dst);
-                }
-                stop.store(true);
-                for (std::thread &t : readers)
-                    t.join();
-                std::memcpy(call.wei.get(), heads[0], kHead);
-                EXPECT_EQ(bad.load(), 0) << "calls with another result";
-                ::reset_grp_matmul_caches();
+                    started.fetch_add(1);
+                    while (!stop.load())
+                        run_one(dst);
+                });
+            while (started.load() < kReaders)
+                std::this_thread::yield();
+            const nt::buffer_t dst = nt::make_buffer(want.size());
+            for (int i = 1; i <= kChanges; ++i) {
+                std::memcpy(call.wei.get(), heads[i % 2], kHead);
+                run_one(dst);
             }
+            stop.store(true);
+            for (std::thread &t : readers)
+                t.join();
+            std::memcpy(call.wei.get(), heads[0], kHead);
+            EXPECT_EQ(bad.load(), 0) << "calls with another result";
+            ::reset_grp_matmul_caches();
         }
-}
-
-/// The descriptor native_layout_matmul builds for c.
-nat::GemmDescriptor descriptor_of(const nt::call_t &c) {
-    nat::GemmDescriptor d;
-    d.M = c.M;
-    d.N = c.N;
-    d.K = c.K;
-    d.lda = c.lda_or_tight();
-    d.ldb = c.ldb_or_tight();
-    d.ldc = c.ldc_or_tight();
-    d.transA = c.transA;
-    d.transB = c.transB;
-    d.alpha = c.alpha;
-    d.beta = c.beta;
-    d.src_dt = c.params.dtypes.src;
-    d.wei_dt = c.params.dtypes.wei;
-    d.dst_dt = c.params.dtypes.dst;
-    d.bias_dt = c.params.dtypes.bias;
-    d.bias = c.bias;
-    d.is_weights_const = c.is_weights_const;
-    d.num_threads = c.params.num_threads;
-    d.gated_act = c.gated;
-    return d;
+    }
 }
 
 /// A call of rows rows on the weight of g, with its own source (of g's
@@ -605,26 +617,21 @@ struct in_place_mode_t {
     in_place_mode_t() { restore.cfg.set_weight_cache(2); }
 };
 
-// The worst order of a bf16_bkc call (at weight cache mode 1: a GEMV choice
-// is made only below mode 2) and the first call of the tiles on its weight
-// at mode 2: the GEMV call finds the raw weight, then the tiles' first call
-// rewrites the buffer in place, then the GEMV call runs.  It is served from
-// the image, with the weight's result, and the buffer keeps the image.
-TEST(NativeGemvOperands, GemvCallAfterAnInPlaceRewriteRunsOnTheImage) {
+// A bf16_bkc run (run_native_gemv at weight cache mode 1) that finds its
+// buffer rewritten in place by a first call of the tiles at mode 2 is
+// turned away, as only the tiles read the image: unimplemented, dst
+// untouched; an M = 1 call of matmul_direct on the buffer gets the
+// weight's result from the image, and the buffer keeps the image.
+TEST(NativeGemvOperands, GemvRunsOnAnInPlaceImageAreTurnedAway) {
     if (!gemv_isa()) GTEST_SKIP() << "needs AVX512-BF16 and AVX512-VNNI";
     const in_place_mode_t mode;
     gemv_call_t call(kBf16, kBf16, kF32, 64, 256, 8300);
     call.c.params.lowoha_algo = matmul_algo_t::none;
-    // What native_layout_matmul hands native_brgemm_execute when it finds
-    // the raw weight.
     const nat::GemmDescriptor desc = descriptor_of(call.c);
     const nat::native_gemv_plan_t gemv
             = nat::decide_native_gemv(desc, call.c.params);
     ASSERT_EQ(static_cast<int>(gemv.kernel),
             static_cast<int>(nat::native_gemv_t::bf16_bkc));
-    nat::native_weight_ref_t ref;
-    ref.weight = call.c.wei;
-    ref.weight_cache_mode = 1;
     const nt::buffer_t raw = nt::make_buffer(call.wei.bytes);
     std::memcpy(raw.get(), call.wei.get(), call.wei.bytes);
 
@@ -635,9 +642,15 @@ TEST(NativeGemvOperands, GemvCallAfterAnInPlaceRewriteRunsOnTheImage) {
             << "the first call of the tiles did not rewrite the buffer";
     EXPECT_TRUE(first.matches(raw.get()));
 
-    ASSERT_EQ(nat::native_brgemm_execute(desc, ref, call.c.src, call.dst.get(),
-                      nullptr, call.c.params, gemv),
-            status_t::success);
+    std::memset(call.dst.get(), 0x5a, call.dst.bytes);
+    const std::vector<uint8_t> prior(
+            call.dst.as<uint8_t>(), call.dst.as<uint8_t>() + call.dst.bytes);
+    EXPECT_EQ(nat::run_native_gemv(gemv, desc, call.c.src, call.c.wei,
+                      call.dst.get(), nullptr, call.c.params, 1),
+            status_t::unimplemented);
+    EXPECT_EQ(std::memcmp(call.dst.get(), prior.data(), prior.size()), 0)
+            << "the GEMV run wrote dst";
+    ASSERT_EQ(nt::run_matmul(call.c), status_t::success);
     ASSERT_EQ(nt::run_reference(call.c, raw.get(), call.ref.get()),
             status_t::success);
     EXPECT_TRUE(nt::within_band(call.dst.get(), 64, call.ref.get(), 64, kF32, 1,
@@ -648,13 +661,14 @@ TEST(NativeGemvOperands, GemvCallAfterAnInPlaceRewriteRunsOnTheImage) {
             << "the buffer no longer holds the image";
 }
 
-// GEMV calls at weight cache mode 1 racing the first call of the tiles on
+// GEMV runs at weight cache mode 1 racing the first call of the tiles on
 // their weight at mode 2, which rewrites a bf16 buffer in place (an s8
 // weight's layout, with its column sums, is cached out of place, and its
-// buffer keeps its bytes): on fresh weights, an M = 1 call on one thread
-// and an M = 8 call on eight start together, and each gets the weight's
-// result whatever the order, on bf16_bkc and on int8_bkc with u8 and s8
-// sources.
+// buffer keeps its bytes): on fresh weights, an M = 1 GEMV run on one
+// thread and an M = 8 call on eight start together.  The M = 8 call gets
+// the weight's result whatever the order; the GEMV run gets it too, or on a
+// bf16 buffer that already holds the image is turned away (unimplemented,
+// dst untouched); on bf16_bkc and on int8_bkc with u8 and s8 sources.
 TEST(NativeGemvOperands, GemvCallsRacingAnInPlaceRewriteGetTheWeightsResult) {
     if (!gemv_isa()) GTEST_SKIP() << "needs AVX512-BF16 and AVX512-VNNI";
     const in_place_mode_t mode;
@@ -680,13 +694,16 @@ TEST(NativeGemvOperands, GemvCallsRacingAnInPlaceRewriteGetTheWeightsResult) {
         std::memcpy(raw.get(), one.wei.get(), one.wei.bytes);
         rows_call_t eight(one, 8, 8, 8502 + 8 * run);
         eight.c.params.weight_cache_type = 2;
+        std::memset(one.dst.get(), 0x5a, one.dst.bytes);
+        const std::vector<uint8_t> prior(
+                one.dst.as<uint8_t>(), one.dst.as<uint8_t>() + one.dst.bytes);
         std::atomic<int> ready {0};
         status_t st_one = status_t::failure, st_eight = status_t::failure;
         {
             std::thread a([&] {
                 ready.fetch_add(1);
                 while (ready.load() < 2) {}
-                st_one = nt::run_matmul(one.c);
+                st_one = one.run();
             });
             std::thread b([&] {
                 ready.fetch_add(1);
@@ -696,16 +713,23 @@ TEST(NativeGemvOperands, GemvCallsRacingAnInPlaceRewriteGetTheWeightsResult) {
             a.join();
             b.join();
         }
-        ASSERT_EQ(st_one, status_t::success);
         ASSERT_EQ(st_eight, status_t::success);
+        EXPECT_TRUE(eight.matches(raw.get())) << "the M = 8 call";
+        if (st_one == status_t::unimplemented && cs.wei == kBf16) {
+            EXPECT_TRUE(nat::native_weight_packed_in_place(
+                    one.wei.get(), one.wei.bytes));
+            EXPECT_EQ(std::memcmp(one.dst.get(), prior.data(), prior.size()), 0)
+                    << "the turned-away GEMV run wrote dst";
+            continue;
+        }
+        ASSERT_EQ(st_one, status_t::success);
         ASSERT_EQ(nt::run_reference(one.c, raw.get(), one.ref.get()),
                 status_t::success);
         EXPECT_TRUE(nt::within_band(one.dst.get(), N, one.ref.get(), N, kF32, 1,
                 N, rtol_bf16,
                 nt::comparison_abs_bound(K, epsilon_bf16, 1.0f, 0.0f, true,
                         cs.wei == kS8, false)))
-                << "the M = 1 call";
-        EXPECT_TRUE(eight.matches(raw.get())) << "the M = 8 call";
+                << "the M = 1 GEMV run";
         if (cs.wei == kS8) {
             EXPECT_EQ(std::memcmp(one.wei.get(), raw.get(), raw.bytes), 0)
                     << "the buffer of an s8 weight was rewritten";
@@ -806,46 +830,105 @@ std::string mode_two_name(const mode_two_case_t &cs) {
             + (cs.src == kU8 ? ", u8 source" : "");
 }
 
-// At weight cache mode 2 (a constant weight under ZENDNNL_MATMUL_ALGO=10) a
-// weight has one layout, the tiles', which serves its M = 1 calls: an M = 1
-// call of a kind that takes a GEMV kernel at mode 1 runs on the tiles; the
-// first one rewrites a bf16 weight of whole column blocks in place (and
-// caches the layout of the other weights out of place); no GEMV pack of the
-// weight exists afterwards; and the first and the next call get the f64
-// model's result.
-TEST(NativeGemvOperands, AtWeightCacheModeTwoAnM1CallMakesTheTilesLayout) {
+/// A call of g's kind, at weight cache mode wc, with lowoha_algo
+/// native_brgemm or (algo10) without lowoha_algo, for a process at
+/// ZENDNNL_MATMUL_ALGO=10 then.
+void set_route(gemv_call_t &g, int32_t wc, bool algo10) {
+    g.c.params.weight_cache_type = wc;
+    if (algo10) g.c.params.lowoha_algo = matmul_algo_t::none;
+}
+
+// No call of matmul_direct runs a GEMV kernel or makes a GEMV pack: M = 1
+// calls of each kind a GEMV kernel takes (decide_native_gemv), at weight
+// cache modes 0, 1 and 2, with lowoha_algo native_brgemm and under
+// ZENDNNL_MATMUL_ALGO=10, run on the native tiles.  The first and the next
+// call get the f64 model's result; no GEMV pack of the weight exists; the
+// weight has one native layout (none at mode 0), an image in place only for
+// a bf16 weight of whole column blocks at mode 2 under
+// ZENDNNL_MATMUL_ALGO=10, and its buffer keeps its bytes otherwise.
+TEST(NativeGemvOperands, NoCallOfMatmulDirectRunsAGemvKernel) {
     if (!gemv_isa()) GTEST_SKIP() << "needs AVX512-BF16 and AVX512-VNNI";
-    const in_place_mode_t mode;
+    const config_restore_t restore;
+    restore.cfg.set_weight_cache(2);
     const int K = 256;
     uint32_t seed = 9500;
-    for (const mode_two_case_t &cs : kModeTwoCases) {
-        SCOPED_TRACE(mode_two_name(cs));
-        gemv_call_t call(cs.src, cs.src == kBf16 ? kBf16 : kS8, kF32, cs.N, K,
-                seed += 4);
-        call.c.params.lowoha_algo = matmul_algo_t::none;
-        ASSERT_EQ(static_cast<int>(call.kernel()), static_cast<int>(cs.kernel))
-                << "at weight cache mode 1";
-        call.c.params.weight_cache_type = 2;
-        EXPECT_EQ(static_cast<int>(call.kernel()),
-                static_cast<int>(nat::native_gemv_t::none));
-        const nt::buffer_t raw = nt::make_buffer(call.wei.bytes);
-        std::memcpy(raw.get(), call.wei.get(), call.wei.bytes);
-        for (const char *which : {"the first call", "the next call"}) {
-            ASSERT_EQ(nt::run_matmul(call.c), status_t::success) << which;
-            EXPECT_TRUE(matches_model(call.c, raw.get())) << which;
+    for (const bool algo10 : {false, true})
+        for (const int32_t wc : {0, 1, 2})
+            for (const mode_two_case_t &cs : kModeTwoCases) {
+                SCOPED_TRACE(mode_two_name(cs)
+                        + (algo10 ? ", ZENDNNL_MATMUL_ALGO=10"
+                                  : ", lowoha_algo native_brgemm")
+                        + ", weight cache mode " + std::to_string(wc));
+                const nt::algo_pin_t pin(algo10 ? matmul_algo_t::native_brgemm
+                                                : matmul_algo_t::none);
+                gemv_call_t call(cs.src, cs.src == kBf16 ? kBf16 : kS8, kF32,
+                        cs.N, K, seed += 4);
+                set_route(call, wc, algo10);
+                ASSERT_EQ(static_cast<int>(call.kernel()),
+                        static_cast<int>(cs.kernel));
+                const nt::buffer_t raw = nt::make_buffer(call.wei.bytes);
+                std::memcpy(raw.get(), call.wei.get(), call.wei.bytes);
+                for (const char *which : {"the first call", "the next call"}) {
+                    ASSERT_EQ(nt::run_matmul(call.c), status_t::success)
+                            << which;
+                    EXPECT_TRUE(matches_model(call.c, raw.get())) << which;
+                }
+                const bool in_place = cs.in_place && algo10 && wc == 2;
+                EXPECT_EQ(
+                        std::memcmp(call.wei.get(), raw.get(), raw.bytes) != 0,
+                        in_place);
+                EXPECT_EQ(nat::native_weight_packed_in_place(
+                                  call.wei.get(), call.wei.bytes),
+                        in_place);
+                EXPECT_EQ(
+                        nt::native_layouts(call.wei.get()), wc == 0 ? 0u : 1u);
+                const nat::PrepackedWeightKey key {
+                        call.wei.get(), K, cs.N, cs.N, false};
+                EXPECT_EQ(
+                        nat::BF16BKCWeightCache::instance().find(key), nullptr);
+                EXPECT_EQ(nat::INT8KContiguousWeightCache::instance().find(key),
+                        nullptr);
+            }
+}
+
+// The calls of NoCallOfMatmulDirectRunsAGemvKernel log no line of a GEMV
+// kernel at the info level, and each logs matmul_direct's line of the
+// native BRGEMM on the native layout.
+TEST(NativeGemvOperands, MatmulDirectCallsLogNoGemvKernel) {
+    if (!gemv_isa()) GTEST_SKIP() << "needs AVX512-BF16 and AVX512-VNNI";
+    nt::expect_in_child({{"ZENDNNL_API_LOG_LEVEL", "3"}}, [] {
+        int bad = 0;
+        size_t calls = 0;
+        const config_restore_t restore;
+        restore.cfg.set_weight_cache(2);
+        uint32_t seed = 9600;
+        const std::string log = stdout_of([&] {
+            for (const bool algo10 : {false, true})
+                for (const int32_t wc : {0, 1, 2})
+                    for (const mode_two_case_t &cs : kModeTwoCases) {
+                        const nt::algo_pin_t pin(algo10
+                                        ? matmul_algo_t::native_brgemm
+                                        : matmul_algo_t::none);
+                        gemv_call_t call(cs.src, cs.src == kBf16 ? kBf16 : kS8,
+                                kF32, cs.N, 256, seed += 4);
+                        set_route(call, wc, algo10);
+                        for (int i = 0; i < 2; ++i, ++calls)
+                            if (nt::run_matmul(call.c) != status_t::success)
+                                ++bad;
+                    }
+        });
+        const size_t gemv_lines = count_of(log, "GEMV: M=1");
+        const size_t native_lines
+                = count_of(log, "kernel=native_brgemm, layout=native_nr");
+        if (gemv_lines != 0 || native_lines != calls) {
+            std::fprintf(stderr,
+                    "%zu GEMV kernel lines (0 expected), %zu native lines "
+                    "(%zu expected)\n",
+                    gemv_lines, native_lines, calls);
+            ++bad;
         }
-        EXPECT_EQ(std::memcmp(call.wei.get(), raw.get(), raw.bytes) != 0,
-                cs.in_place);
-        EXPECT_EQ(nat::native_weight_packed_in_place(
-                          call.wei.get(), call.wei.bytes),
-                cs.in_place);
-        EXPECT_EQ(nt::native_layouts(call.wei.get()), 1u);
-        const nat::PrepackedWeightKey key {
-                call.wei.get(), K, cs.N, cs.N, false};
-        EXPECT_EQ(nat::BF16BKCWeightCache::instance().find(key), nullptr);
-        EXPECT_EQ(
-                nat::INT8KContiguousWeightCache::instance().find(key), nullptr);
-    }
+        return bad;
+    }, "ZENDNNL_API_LOG_LEVEL=3");
 }
 
 // At weight cache mode 2, M = 1 calls run on the tiles' layout whichever
@@ -930,91 +1013,51 @@ TEST(NativeGemvOperands, AtWeightCacheModeTwoM1CallsGetTheModelsResult) {
             }
 }
 
-// An M = 1 call on a GEMV choice with a null src, weight or dst, or a bf16
-// source of lda below K, is turned away as the native tiles turn away the
-// same call at M = 2: native_brgemm_execute returns failure with the reason
-// of their check, and leaves dst untouched.  matmul_direct passes such calls
-// on to it with ZENDNNL_DIAGNOSTICS_ENABLE=0.
-TEST(NativeGemvOperands, GemvChoicesTurnAwayWhatTheTilesTurnAway) {
+// The INT8 GEMV kernel reads an f32 or bf16 bias: the GEMV plan choice of
+// an M = 1 call with one is the kernel, which gives the f64 model's result
+// run directly, and of a call with a bias of another type the native
+// BRGEMM takes (f16, s32, s8 or u8) none.  matmul_direct runs each call on
+// the tiles, with the f64 model's result.
+TEST(NativeGemvOperands, Int8GemvTakesOnlyTheBiasTypesItsKernelReads) {
     if (!gemv_isa()) GTEST_SKIP() << "needs AVX512-BF16 and AVX512-VNNI";
-    using g = nat::native_gemv_t;
     const struct {
-        data_type_t src, wei;
-        int N;
-        g kernel;
-    } cases[] = {{kBf16, kBf16, 64, g::bf16_bkc},
-            {kBf16, kBf16, 4, g::bf16_narrow}, {kU8, kS8, 64, g::int8_bkc}};
-    const struct {
-        const char *name, *reason;
-    } faults[] = {{"a null src", "a null src, weight or dst"},
-            {"a null weight", "a null src, weight or dst"},
-            {"a null dst", "a null src, weight or dst"},
-            {"lda K - 1", "a bad shape or leading dimension"}};
-    const int K = 128, rows = 2;
-    uint32_t seed = 8900;
-    for (const auto &cs : cases)
-        for (int f = 0; f < 4; ++f) {
-            // The INT8 check takes any lda.
-            if (f == 3 && cs.src != kBf16) continue;
-            SCOPED_TRACE(std::string(nat::native_gemv_name(cs.kernel)) + ", "
-                    + faults[f].name);
-            gemv_call_t call(cs.src, cs.wei, kF32, cs.N, K, seed += 4);
-            nt::call_t c = call.c;
-            if (f == 0) c.src = nullptr;
-            if (f == 1) c.wei = nullptr;
-            if (f == 2) c.dst = nullptr;
-            if (f == 3) c.lda = K - 1;
-            const nat::GemmDescriptor desc = descriptor_of(c);
-            const nat::native_gemv_plan_t gemv
-                    = nat::decide_native_gemv(desc, c.params);
-            ASSERT_EQ(
-                    static_cast<int>(gemv.kernel), static_cast<int>(cs.kernel));
-            nat::native_weight_ref_t ref;
-            ref.weight = c.wei;
-            ref.weight_cache_mode = 1;
-            const auto expect_turned_away
-                    = [&](const nt::call_t &x, const nt::buffer_t &out,
-                              const nat::native_gemv_plan_t &p, int pack_nr) {
-                std::memset(out.get(), 0x5a, out.bytes);
-                const std::vector<uint8_t> prior(
-                        out.as<uint8_t>(), out.as<uint8_t>() + out.bytes);
-                nat::native_weight_ref_t r = ref;
-                r.pack_nr = pack_nr;
-                const char *why = nullptr;
-                EXPECT_EQ(nat::native_brgemm_execute(descriptor_of(x), r, x.src,
-                                  x.dst, nullptr, x.params, p, &why),
-                        status_t::failure);
-                EXPECT_STREQ(why, faults[f].reason);
-                EXPECT_EQ(
-                        std::memcmp(out.get(), prior.data(), prior.size()), 0);
-            };
-            expect_turned_away(c, call.dst, gemv, 0);
-
-            // The same call at M = 2, on the tiles.
-            nt::call_t tiles = c;
-            tiles.M = rows;
-            const nt::buffer_t src = nt::random_buffer(cs.src,
-                    static_cast<size_t>(rows) * K, seed + 1,
-                    cs.src == kU8 ? 0.0f : -1.0f, cs.src == kU8 ? 15.0f : 1.0f);
-            const nt::buffer_t dst
-                    = nt::make_buffer(static_cast<size_t>(rows) * cs.N * 4);
-            if (tiles.src != nullptr) tiles.src = src.get();
-            if (tiles.dst != nullptr) tiles.dst = dst.get();
-            ASSERT_EQ(static_cast<int>(nt::gemv_kernel(tiles)),
-                    static_cast<int>(g::none));
-            SCOPED_TRACE("M = " + std::to_string(rows));
-            expect_turned_away(tiles, dst, nat::native_gemv_plan_t {},
-                    nat::kNativeLayoutPackNr);
+        data_type_t dt;
+        const char *name;
+        const char *kernel;
+    } biases[] = {{kF32, "f32", "int8_bkc"}, {kBf16, "bf16", "int8_bkc"},
+            {data_type_t::f16, "f16", "none"},
+            {data_type_t::s32, "s32", "none"}, {kS8, "s8", "none"},
+            {kU8, "u8", "none"}};
+    const int N = 64, K = 96;
+    uint32_t seed = 9900;
+    for (const auto &b : biases) {
+        SCOPED_TRACE(std::string("a bias of ") + b.name);
+        gemv_call_t call(kU8, kS8, kF32, N, K, seed += 4);
+        call.src_zp = 3;
+        const nt::buffer_t bias
+                = nt::random_buffer(b.dt, static_cast<size_t>(N), seed + 2,
+                        b.dt == kU8 ? 0.0f : -16.0f, 16.0f);
+        call.set_bias(bias.get(), b.dt);
+        EXPECT_STREQ(nat::native_gemv_name(call.kernel()), b.kernel);
+        if (call.kernel() != nat::native_gemv_t::none) {
+            EXPECT_EQ(call.run(), status_t::success);
+            EXPECT_TRUE(matches_model(call.c, call.wei.get()))
+                    << "the INT8 GEMV kernel";
         }
+        const status_t st = nt::run_matmul(call.c);
+        EXPECT_EQ(st, status_t::success);
+        if (st == status_t::success) {
+            EXPECT_TRUE(matches_model(call.c, call.wei.get()))
+                    << "matmul_direct";
+        }
+    }
 }
 
-// An M = 1 call on a GEMV choice whose weight rows are ldb apart with ldb
-// below the row length (N - 1 for a [K, N] weight, K - 1 for [N, K]) is
-// turned away as the same call at M = 2 is: native_brgemm_refusal and
-// matmul_direct return unimplemented and leave dst untouched, and
-// native_brgemm_execute, given the GEMV choice, returns unimplemented with
-// the layout rule's reason.
-TEST(NativeGemvOperands, GemvChoicesTurnAwayAnLdbBelowTheWeightRow) {
+// An M = 1 call of a kind a GEMV kernel takes whose weight rows are ldb
+// apart with ldb below the row length (N - 1 for a [K, N] weight, K - 1 for
+// [N, K]) is turned away as the same call at M = 2 is: native_brgemm_refusal
+// and matmul_direct return unimplemented and leave dst untouched.
+TEST(NativeGemvOperands, OneRowCallsTurnAwayAnLdbBelowTheWeightRow) {
     if (!gemv_isa()) GTEST_SKIP() << "needs AVX512-BF16 and AVX512-VNNI";
     using g = nat::native_gemv_t;
     const struct {
@@ -1035,10 +1078,10 @@ TEST(NativeGemvOperands, GemvChoicesTurnAwayAnLdbBelowTheWeightRow) {
         gemv_call_t call(cs.src, cs.wei, kF32, cs.N, K, seed += 4, cs.transB);
         nt::call_t c = call.c;
         c.ldb = (cs.transB ? K : cs.N) - 1;
-        const nat::GemmDescriptor desc = descriptor_of(c);
-        const nat::native_gemv_plan_t gemv
-                = nat::decide_native_gemv(desc, c.params);
-        ASSERT_EQ(static_cast<int>(gemv.kernel), static_cast<int>(cs.kernel));
+        ASSERT_EQ(static_cast<int>(
+                          nat::decide_native_gemv(descriptor_of(c), c.params)
+                                  .kernel),
+                static_cast<int>(cs.kernel));
         const auto untouched = [](const nt::buffer_t &out,
                                        const std::vector<uint8_t> &prior) {
             return std::memcmp(out.get(), prior.data(), prior.size()) == 0;
@@ -1047,15 +1090,6 @@ TEST(NativeGemvOperands, GemvChoicesTurnAwayAnLdbBelowTheWeightRow) {
         std::memset(call.dst.get(), 0x5a, call.dst.bytes);
         const std::vector<uint8_t> prior(call.dst.as<uint8_t>(),
                 call.dst.as<uint8_t>() + call.dst.bytes);
-        nat::native_weight_ref_t ref;
-        ref.weight = c.wei;
-        ref.weight_cache_mode = 1;
-        const char *why = nullptr;
-        EXPECT_EQ(nat::native_brgemm_execute(desc, ref, c.src, c.dst, nullptr,
-                          c.params, gemv, &why),
-                status_t::unimplemented);
-        EXPECT_STREQ(why, "ldb below the weight row length");
-        EXPECT_TRUE(untouched(call.dst, prior));
         EXPECT_EQ(nt::run_matmul(c), status_t::unimplemented) << "M = 1";
         EXPECT_TRUE(untouched(call.dst, prior));
         EXPECT_TRUE(nt::refused_with(c, status_t::unimplemented)) << "M = 1";
@@ -1104,8 +1138,8 @@ TEST(NativeGemvOperands, GemvBuffersGoWithTheirThread) {
     ASSERT_EQ(static_cast<int>(bf16.kernel()), static_cast<int>(g::bf16_bkc));
     ASSERT_EQ(static_cast<int>(int8.kernel()), static_cast<int>(g::int8_bkc));
     const auto run_both = [&] {
-        return nt::run_matmul(bf16.c) == status_t::success
-                && nt::run_matmul(int8.c) == status_t::success;
+        return bf16.run() == status_t::success
+                && int8.run() == status_t::success;
     };
     ASSERT_TRUE(run_both());
     const auto in_use = [] {

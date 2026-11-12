@@ -226,9 +226,12 @@ protected:
         ::reset_grp_matmul_caches();
     }
     /// The process-wide ALGO 10, under which weight cache mode 2 rewrites a
-    /// bf16 buffer in place.
+    /// bf16 buffer in place, until the test ends (the first pin restores
+    /// the algorithm the test began with).
     void pin_native() {
-        algo_ = std::make_unique<nt::algo_pin_t>(matmul_algo_t::native_brgemm);
+        if (!algo_)
+            algo_ = std::make_unique<nt::algo_pin_t>(
+                    matmul_algo_t::native_brgemm);
     }
 
 private:
@@ -652,11 +655,10 @@ nt::buffer_t copy_of(const nt::buffer_t &b) {
 // for itself while a first call on the buffer at mode 2 rewrites it in
 // place: the rewrite waits until the packs in flight have read the bytes it
 // writes, and a mode 0 call that comes after it reads the image.  So every
-// mode 0 call, on a bf16 or an s4 weight, through the tiles or through the
-// GEMV kernel of a one-row call (which the tiles replace once the buffer
-// holds an image), gives the bits of the same call on the raw weight or on
-// the image, never of a weight read in part from each; the mode 2 call
-// gives its bits on the raw weight.
+// mode 0 call, on a bf16 or an s4 weight, of four rows or of one, gives the
+// bits of the same call on the raw weight or on the image, never of a
+// weight read in part from each; the mode 2 call gives its bits on the raw
+// weight.
 TEST_F(NativeWeightLifetime, ModeZeroPacksAndARewriteDoNotOverlap) {
     pin_native();
     // Weights of 32 MiB, which one thread packs for longer than the rewrite
@@ -666,21 +668,13 @@ TEST_F(NativeWeightLifetime, ModeZeroPacksAndARewriteDoNotOverlap) {
         int M, K, N;
         const char *name;
     } readers[] = {{kBf16, 4, 4096, 4096, "bf16 tiles"},
-            {kBf16, 1, 4096, 4096, "bf16 GEMV"},
+            {kBf16, 1, 4096, 4096, "bf16 one row"},
             {kS4, 4, 8192, 8192, "s4 tiles"}};
     using clock_t = std::chrono::steady_clock;
     for (const auto &rd : readers) {
         SCOPED_TRACE(rd.name);
         const nk_call_t reader(rd.dt, rd.M, rd.K, rd.N),
                 writer(rd.dt, 4, rd.K, rd.N);
-        {
-            float dst[1], scale[4];
-            const nt::buffer_t probe = reader.make_weight(800);
-            EXPECT_EQ(
-                    nt::gemv_kernel(reader.call(probe.get(), 0, 1, dst, scale))
-                            != nat::native_gemv_t::none,
-                    rd.M == 1);
-        }
         int overlapped = 0;
         for (int race = 0; race < kRaces; ++race) {
             SCOPED_TRACE("race " + std::to_string(race));
@@ -1028,14 +1022,14 @@ nat::GemmDescriptor gemv_descriptor(const nt::call_t &c) {
     return d;
 }
 
-// A one-row bf16 call on its GEMV kernel that found its weight raw before a
-// first call at weight cache mode 2 reserved the rewrite of the buffer in
-// place: the BKC kernel's thread-local hit check and the narrow kernel (the
-// first 4 columns, ldb N) read the raw weight without holding it, so they
-// wait until the rewrite ends, and the call is then left to the tiles,
-// which serve it from the image.  A raw read of the buffer's first bytes,
-// held through native_weight_read_raw, keeps the rewrite from writing
-// meanwhile.
+// A one-row bf16 GEMV kernel run (run_native_gemv) that found its weight
+// raw before a first call at weight cache mode 2 reserved the rewrite of
+// the buffer in place: the BKC kernel's thread-local hit check and the
+// narrow kernel (the first 4 columns, ldb N) read the raw weight without
+// holding it, so they wait until the rewrite ends, and the run is then
+// turned away, as only the tiles read the image.  A raw read of the
+// buffer's first bytes, held through native_weight_read_raw, keeps the
+// rewrite from writing meanwhile.
 TEST_F(NativeWeightLifetime, GemvReadsOfAWeightWaitForItsRewrite) {
     const int K = 256, N = 128;
     for (const int n : {N, 4}) {
@@ -1060,7 +1054,6 @@ TEST_F(NativeWeightLifetime, GemvReadsOfAWeightWaitForItsRewrite) {
         c.params.num_threads = 1;
         c.params.weight_cache_type = 1;
         c.params.lowoha_algo = matmul_algo_t::native_brgemm;
-        ASSERT_EQ(nt::gemv_kernel(c), kernel);
         const nat::GemmDescriptor desc = gemv_descriptor(c);
         const nat::native_gemv_plan_t plan
                 = nat::decide_native_gemv(desc, c.params);
@@ -1073,7 +1066,8 @@ TEST_F(NativeWeightLifetime, GemvReadsOfAWeightWaitForItsRewrite) {
         {
             joiner_t calls;
             calls.threads.emplace_back([&] {
-                warmed = nt::run_matmul(c);
+                warmed = nat::run_native_gemv(plan, desc, src.get(), buf.get(),
+                        warm.data(), nullptr, c.params, 1);
                 again = nat::run_native_gemv(plan, desc, src.get(), buf.get(),
                         got.data(), nullptr, c.params, 1);
                 found.store(true);
@@ -1117,7 +1111,7 @@ TEST_F(NativeWeightLifetime, GemvReadsOfAWeightWaitForItsRewrite) {
         EXPECT_EQ(rewrite, status_t::success);
         EXPECT_TRUE(nat::native_weight_packed_in_place(buf.get(), buf.bytes));
         EXPECT_EQ(gemv, status_t::unimplemented)
-                << "the buffer holds the image, which the tiles serve";
+                << "the buffer holds the image, which only the tiles read";
         EXPECT_TRUE(std::all_of(got.begin(), got.end(), [](float v) {
             return v == -777.0f;
         })) << "the GEMV wrote dst";

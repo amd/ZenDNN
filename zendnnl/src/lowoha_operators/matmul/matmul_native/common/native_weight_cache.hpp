@@ -88,9 +88,10 @@ struct native_image_check_t {
 ///      on another thread may still read it.  New bytes equal to the old
 ///      ones at both ends are served the old layout until
 ///      clear_native_weight_caches drops it;
-///   2: as 1, except that a bf16 or s4 weight whose layout fits its buffer
-///      (contiguous ldb, wei_inplace_fits with capacity_bytes; an s4 layout
-///      is the raw weight's size when K is a multiple of 8) is rewritten in
+///   2: as 1, except that a bf16, f16 or s4 weight whose layout fits its
+///      buffer (contiguous ldb, wei_inplace_fits with capacity_bytes; an f16
+///      layout is the raw weight's size, an s4 layout when K is a multiple
+///      of 8) is rewritten in
 ///      place and recorded, and so is an aocl_blocked weight with a
 ///      contiguous ldb whose layout fits capacity_bytes (0: the size of its
 ///      AOCL prepack).  Other s8 weights, f32 weights and weights of N not a
@@ -103,11 +104,11 @@ struct native_image_check_t {
 /// the bytes this lookup checks.
 /// A buffer rewritten in place is never read as a raw or AOCL weight again
 /// while it holds the image: the same layout is served from it, another
-/// layout is packed from the raw weight rebuilt out of a bf16 image (an s8
-/// or s4 image serves its own layout only) when the caller's buffer covers the
-/// whole image, and a request that starts inside it, reads past it, reads
-/// into it from below or cannot cover it for a rebuild fails.  A record whose
-/// buffer no longer holds the image (digests of its two ends,
+/// layout is packed from the raw weight rebuilt out of a bf16 or f16 image
+/// (an s8 or s4 image serves its own layout only) when the caller's buffer
+/// covers the whole image, and a request that starts inside it, reads past
+/// it, reads into it from below or cannot cover it for a rebuild fails.  A
+/// record whose buffer no longer holds the image (digests of its two ends,
 /// native_weight_ends.hpp: the buffer was overwritten, or freed and reused)
 /// is forgotten, and the buffer is read as the raw weight it now holds.
 /// These checks read only the caller's buffer, the bytes the request reads

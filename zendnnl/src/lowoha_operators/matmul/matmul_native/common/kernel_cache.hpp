@@ -388,7 +388,8 @@ private:
     std::mutex mutex_;
 };
 
-/// Clear all weight caches. Must only be called when no thread is using
+/// Clear all weight caches, and the kept buffers of widened F16 sources
+/// (release_native_f16_sources). Must only be called when no thread is using
 /// any previously returned pointer (e.g., between test cases or model swap).
 /// Defined in kernel_cache.cpp.
 void clear_all_weight_caches();

@@ -21,10 +21,8 @@
 #include <cstring>
 #include <exception>
 #include <mutex>
-#include <new>
 #include <sstream>
 #include <string>
-#include <type_traits>
 
 #include "common/data_types.hpp"
 #include "common/zendnnl_compat.hpp"
@@ -32,7 +30,6 @@
 #include "lowoha_operators/common/omp_thread_control.hpp"
 #include "lowoha_operators/matmul/lowoha_quant_layout.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_brgemm_looper.hpp"
-#include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_gemv.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/gemm_descriptor.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_operator_bridge.hpp"
@@ -335,15 +332,16 @@ enum class native_source_t : uint8_t {
 };
 
 /// The bytes at weight a call of layout vouches for as its weight buffer:
-/// what it reads from a bf16 / s8 / s4 / f32 weight (an AOCL prepack this
-/// route unreorders, or the span of a plain weight as the caller lays it
-/// out), or the capacity it states when larger; 0 when neither is known.
+/// what it reads from a bf16 / s8 / s4 / f32 / f16 weight (an AOCL prepack
+/// this route unreorders, or the span of a plain weight as the caller lays
+/// it out), or the capacity it states when larger; 0 when neither is known.
 ZENDNNL_ALWAYS_INLINE inline size_t weight_buffer_bytes(char layout,
         const matmul_params &params, int K, int N, int ldb, bool transB) {
     size_t reads = 0;
     const data_type_t wdt = params.dtypes.wei;
     if ((wdt == data_type_t::bf16 || wdt == data_type_t::s8
-                || wdt == data_type_t::s4 || wdt == data_type_t::f32)
+                || wdt == data_type_t::s4 || wdt == data_type_t::f32
+                || wdt == data_type_t::f16)
             && K > 0 && N > 0 && ldb > 0 && params.packing.pack_format_b == 0) {
         // A column-major weight spans as the row-major one of the other
         // transB.
@@ -400,13 +398,12 @@ ZENDNNL_NOINLINE size_t handed_back_weight_bytes(char layout,
 /// a call on a buffer an earlier native call rewrote in place, which no
 /// other route reads: its reason is set when it cannot read the image.
 /// requested is native_brgemm_requested of the call, owned its
-/// weight_buffer_bytes; image is what its check for an in-place image found.  With gemv (the call runs on a GEMV kernel over its
-/// raw weight) the layout rule does not apply and pack_nr stays 0.
+/// weight_buffer_bytes; image is what its check for an in-place image found.
 ZENDNNL_ALWAYS_INLINE inline native_source_t classify_source(
         const matmul_params &params, const void *weight, int K, int N, int ldb,
         bool transB, int batch_count, bool requested, bool process_native,
-        bool gemv, size_t owned, int &pack_nr, const char *&reason,
-        status_t &status, native_image_check_t &image) {
+        size_t owned, int &pack_nr, const char *&reason, status_t &status,
+        native_image_check_t &image) {
     // A native in-place image has this route as its only reader, whatever
     // algorithm the call selects.
     if (native_weight_find_image(weight, owned, image)) {
@@ -448,15 +445,12 @@ ZENDNNL_ALWAYS_INLINE inline native_source_t classify_source(
         return refuse("a batched call", status_t::unimplemented);
     if (params.packing.pack_format_b != 0)
         return refuse("a GGML pack format", status_t::unimplemented);
-    if (!gemv) {
-        const native_layout_decision_t rule = decide_native_layout(
-                native_layout_query_for(params, K, N, ldb, transB));
-        if (!rule.native)
-            return refuse(rule.reason,
-                    rule.isa ? status_t::isa_unsupported
-                             : status_t::unimplemented);
-        pack_nr = rule.pack_nr;
-    }
+    const native_layout_decision_t rule = decide_native_layout(
+            native_layout_query_for(params, K, N, ldb, transB));
+    if (!rule.native)
+        return refuse(rule.reason,
+                rule.isa ? status_t::isa_unsupported : status_t::unimplemented);
+    pack_nr = rule.pack_nr;
     if (aocl)
         return aocl_prepack_unreorderable(params)
                 ? native_source_t::aocl_prepacked
@@ -480,41 +474,8 @@ ZENDNNL_ALWAYS_INLINE inline bool take_call(char layout, bool transA,
         matmul_gated_act_t gated_act, const matmul_params &params,
         zendnnl::profile::profiler_t *profiler, status_t &status,
         const char *&reason, const matmul_batch_params_t *batch) {
-    // The call's descriptor, made once for the GEMV choice and the run, in
-    // place: it is never destroyed.
-    static_assert(std::is_trivially_destructible<GemmDescriptor>::value,
-            "the call's descriptor is never destroyed");
-    alignas(GemmDescriptor) unsigned char call_storage[sizeof(GemmDescriptor)];
-    GemmDescriptor *call = nullptr;
-    const auto call_desc = [&]() -> const GemmDescriptor & {
-        if (call == nullptr) {
-            call = ::new (call_storage) GemmDescriptor(
-                    make_desc(transA, transB, M, N, K, alpha, beta, lda, ldb,
-                            ldc, is_weights_const, num_threads, params));
-            call->bias = bias;
-            call->gated_act = gated_act;
-        }
-        return *call;
-    };
     const bool requested = native_brgemm_requested(params, batch_count);
     const bool process_native = matmul_config_t::is_native_brgemm_algo();
-    // A buffer rewritten in place must have no other reader, which only the
-    // process-wide ALGO 10 guarantees (every call then reaches the image
-    // check of classify_source); a call that selects the native BRGEMM by
-    // itself caches the layout out of place instead.
-    const auto weight_cache_mode = [&]() -> int32_t {
-        if (!is_weights_const) return 0;
-        const int32_t mode
-                = effective_weight_cache_type(params.weight_cache_type);
-        return mode == 2 && !process_native ? 1 : mode;
-    };
-    // An M = 1 call on its raw weight may run on a GEMV kernel instead of
-    // the tiles, except at weight cache mode 2, where the layout of the
-    // tiles is the weight's only one and serves its M = 1 calls too.
-    native_gemv_plan_t gemv;
-    if (M == 1 && batch_count == 1 && params.mem_format_b == 'n' && requested
-            && weight_cache_mode() != 2)
-        gemv = decide_native_gemv(call_desc(), params);
     // A call that ZENDNNL_MATMUL_ALGO=10 alone brings here goes to the
     // default route when the native BRGEMM does not implement what it
     // carries, unless its shape or ldb describe no matmul or the default
@@ -553,9 +514,8 @@ ZENDNNL_ALWAYS_INLINE inline bool take_call(char layout, bool transA,
     const size_t owned = weight_buffer_bytes(layout, params, K, N, ldb, transB);
     native_weight_ref_t ref;
     const native_source_t source = classify_source(params, weight, K, N, ldb,
-            transB, batch_count, requested, process_native,
-            gemv.kernel != native_gemv_t::none, owned, pack_nr, reason, status,
-            ref.image);
+            transB, batch_count, requested, process_native, owned, pack_nr,
+            reason, status, ref.image);
     if (source == native_source_t::none) {
         // ZENDNNL_MATMUL_ALGO=10 does not select the kernel of a batched call.
         if (!CheckOnly && process_native
@@ -564,8 +524,6 @@ ZENDNNL_ALWAYS_INLINE inline bool take_call(char layout, bool transA,
         return false;
     }
     bool in_place = source == native_source_t::in_place;
-    // An image holds the layout, not the raw weight the GEMV kernels read.
-    if (in_place) gemv = native_gemv_plan_t {};
     status_t refusal = in_place ? status_t::failure : status_t::unimplemented;
     // The layout rule bounds ldb for a row-major weight: a column-major call
     // it refuses, of an ldb that spans a row of the caller's layout, is
@@ -595,7 +553,16 @@ ZENDNNL_ALWAYS_INLINE inline bool take_call(char layout, bool transA,
     ref.pack_nr = pack_nr;
     ref.aocl_blocked = source == native_source_t::aocl_prepacked
             || (in_place && aocl_prepacked_weight(params));
-    ref.weight_cache_mode = weight_cache_mode();
+    // A buffer rewritten in place must have no other reader, which only the
+    // process-wide ALGO 10 guarantees (every call then reaches the image
+    // check of classify_source); a call that selects the native BRGEMM by
+    // itself caches the layout out of place instead.
+    ref.weight_cache_mode = 0;
+    if (is_weights_const) {
+        const int32_t mode
+                = effective_weight_cache_type(params.weight_cache_type);
+        ref.weight_cache_mode = mode == 2 && !process_native ? 1 : mode;
+    }
     ref.capacity_bytes = params.wei_buffer_capacity_bytes;
 
     // A concurrent first call may have rewritten the buffer since it was
@@ -617,16 +584,19 @@ ZENDNNL_ALWAYS_INLINE inline bool take_call(char layout, bool transA,
     }
     std::string error_text;
     if (reason == nullptr) {
-        const GemmDescriptor &desc = call_desc();
+        GemmDescriptor desc = make_desc(transA, transB, M, N, K, alpha, beta,
+                lda, ldb, ldc, is_weights_const, num_threads, params);
+        desc.bias = bias;
+        desc.gated_act = gated_act;
         const thread_guard tg(num_threads, thread_guard::max_threads());
         const char *why = nullptr;
         // Nothing may throw out of matmul_direct (allocations of the call's
         // buffers, an executor).
         try {
             status = CheckOnly ? native_brgemm_check(desc, ref, src, dst, bias,
-                                         params, gemv, &why)
+                                         params, &why)
                                : native_brgemm_execute(desc, ref, src, dst,
-                                         bias, params, gemv, &why);
+                                         bias, params, &why);
         } catch (const std::exception &e) {
             // The text of the exception lives until the line names it.
             if (!CheckOnly) error_text = e.what();
@@ -675,12 +645,8 @@ ZENDNNL_ALWAYS_INLINE inline bool take_call(char layout, bool transA,
            << ", Batch_B=" << (batch ? batch->Batch_B : batch_count)
            << ", plugin_op=" << params.plugin_op
            << ", dynamic_quant=" << (params.dynamic_quant ? "true" : "false")
-           << ", kernel=native_brgemm, layout=";
-        if (gemv.kernel != native_gemv_t::none)
-            ss << "raw";
-        else
-            ss << "native_nr" << pack_nr;
-        ss << ", weight_cache=";
+           << ", kernel=native_brgemm, layout=native_nr" << pack_nr
+           << ", weight_cache=";
         if (in_place)
             ss << "inplace";
         else

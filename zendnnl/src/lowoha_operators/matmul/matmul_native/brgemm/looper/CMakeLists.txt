@@ -1,4 +1,4 @@
-# BRGEMM loopers (tile loops + OMP) and GEMV fast path
+# BRGEMM loopers (tile loops + OMP) and the loopers of the GEMV kernels
 set(sources
   bf16_gemv_direct.cpp
   int8_gemv_direct.cpp

@@ -64,6 +64,46 @@ rather than silently treating it as passed.
 - ASan/Valgrind inputs actually reach the changed lifetime branch; report ISA
   or instrumentation limitations.
 
+### Caches and kept state
+
+Apply these to any state that outlives a call: caches, pools, image records,
+plans, per-thread buffers and values read once. An operator file with a
+section of the same name adds that operator's state and test matrix, which
+runs on every PR of that operator.
+
+- List the state the PR adds:
+  `rg -n '\bstatic\b|thread_local' <changed files>`, minus `static_cast`,
+  `static_assert` and `constexpr`. For each one, record what it holds, its
+  key, its entry and byte bounds, who frees it, which public clear reaches it,
+  its locking, and what happens at exit and in a forked child.
+- The key holds every input the cached value reads, or the value provably
+  does not depend on it. Inputs to check include dtypes, leading dimensions,
+  transposes, quantization parameters, the thread count, the ISA, env vars
+  and tuning files.
+- A pointer-keyed cache is tested with a weight refilled at the same address
+  and shape, once with the bytes its change check reads changed and once with
+  only other bytes changed, against the result at a fresh address. Its docs
+  state what the check detects and nothing more.
+- Every public clear frees what its header, the operator doc and the env docs
+  say it frees, and nothing a running call may still read: the quiescence
+  contract or a generation counter covers each such read. A test fills the
+  new state, clears it, checks that the kept bytes are zero, and checks the
+  next call against an independent reference.
+- Every kept buffer has an entry and a byte bound, says what happens when the
+  bound is reached, and says how large a per-thread buffer grows and when it
+  shrinks.
+- Process-wide state that a call or a clear can reach at exit is never
+  destroyed (allocated with `new` and kept). A test runs the clear from an
+  exit hook, and `exit()` while a call runs.
+- A new mutex is a fork hazard: a child forked after the caches filled is
+  tested, and the docs say when a fork is safe.
+- A value read once is documented as read once. Tests change it in a child
+  process or through a pin that restores it, never with `setenv` after the
+  first call.
+- The suites that touch cached state pass with `--gtest_shuffle` for three
+  seeds and with `--gtest_repeat=2`. A test that needs cold caches clears
+  them at its start, or keeps its buffers until exit.
+
 ### Concurrency and OpenMP
 
 - Requested OpenMP team size is not assumed to be the actual team size.

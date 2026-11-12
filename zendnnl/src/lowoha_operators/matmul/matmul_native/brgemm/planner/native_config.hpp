@@ -46,9 +46,10 @@ inline constexpr uint8_t kNativeInt8CwAll = 3;
 /// built-in plan.
 struct heuristic_params_t {
     // Tile grid and schedule.
-    /// pin; 0: pack_nr, at most 32, halved while tiles < team and one row
-    /// block, or 64 / 128 by bf16_narrow_n.  64 and 128 are BF16 only:
-    /// tiles of 32-column slabs.
+    /// pin; 0: pack_nr, at most 32 (64 for F16_PH by f16_wide_min_m),
+    /// halved while tiles < team and one row block, or 64 / 128 by
+    /// bf16_narrow_n.  64 and 128 are BF16 tiles of 32-column slabs; 64 is
+    /// also an F16_PH tile of two pack blocks.
     int nr = 0;
     /// pin; 0: tall_rows for a BF16 tile of 32 columns or more, else
     /// tile_rows
@@ -147,6 +148,10 @@ struct heuristic_params_t {
     /// its grid.
     int bf16_narrow_n = 1;
     int bf16_narrow_n_min_m = 1024;
+    /// F16_PH tiles of 64 columns, two pack blocks of 32 under one source
+    /// broadcast, from f16_wide_min_m rows where N is whole tiles of 64;
+    /// tiles of 32 below.  Narrowing for the threads applies to both.
+    int f16_wide_min_m = 192;
     /// The blocks schedule, on a team of more than one L3 domain, from
     /// bf16_blocks_min_m rows (BF16) or int8_blocks_min_m rows (INT8) when
     /// the rows of a full L3 domain's share of the source (M * domain_threads
@@ -290,6 +295,7 @@ struct native_config_t {
     std::optional<int> traffic_groups;
     std::optional<int> bf16_alias, bf16_alias_mr;
     std::optional<int> bf16_narrow_n, bf16_narrow_n_min_m;
+    std::optional<int> f16_wide_min_m;
     std::optional<int> blocks, bf16_blocks_min_m, int8_blocks_min_m;
     std::optional<int> cost_model, cm_gain_pct, cm_short_rows, cm_fma_pipes;
     std::optional<int> cm_fma_lat, cm_call_cycles, cm_tall_pct;

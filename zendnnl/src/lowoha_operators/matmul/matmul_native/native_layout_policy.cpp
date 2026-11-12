@@ -65,14 +65,22 @@ native_layout_decision_t decide_native_layout(const native_layout_query_t &q) {
     } else if (q.wei_dt == data_type_t::f32) {
         if (q.src_dt != data_type_t::f32)
             return declined("f32 weight with a non-f32 source");
+    } else if (q.wei_dt == data_type_t::f16) {
+        if (q.src_dt != data_type_t::f16)
+            return declined("f16 weight with a non-f16 source");
     } else {
-        return declined("weight type other than bf16 / s8 / s4 / f32");
+        return declined("weight type other than bf16 / s8 / s4 / f32 / f16");
     }
     if (q.N < 1) return declined("N < 1");
+    if (q.N > kMaxNativeN)
+        return declined(
+                "a weight of N whose whole blocks of 32 columns exceed int");
     if (q.K < 1) return declined("K < 1");
     if (q.wei_dt == data_type_t::bf16 && q.K > kMaxNativeBf16K)
         return declined(
                 "a bf16 weight of K past the bf16 kernels' int offsets");
+    if (q.wei_dt == data_type_t::f16 && q.K > kMaxNativeF16K)
+        return declined("an f16 weight of K whose steps of 16 exceed int");
     if (int8 && q.K > kMaxSafeInt8AccumK)
         return declined("K exceeds the int32 accumulation bound");
     if (int8 && q.wei_group_size != 0 && q.wei_group_size != q.K

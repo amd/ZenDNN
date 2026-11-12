@@ -320,6 +320,8 @@ const key_doc_t kKeyDocs[] = {
                 &field_value<int, &hp_t::bf16_narrow_n>},
         {"bf16_narrow_n_min_m", "bf16", true, false, "1024",
                 &field_value<int, &hp_t::bf16_narrow_n_min_m>},
+        {"f16_wide_min_m", "bf16", true, false, "192",
+                &field_value<int, &hp_t::f16_wide_min_m>},
         {"blocks", "both", true, false, "1", &field_value<int, &hp_t::blocks>},
         {"bf16_blocks_min_m", "bf16", true, false, "1024",
                 &field_value<int, &hp_t::bf16_blocks_min_m>},
@@ -496,6 +498,7 @@ TEST(NativeConfigText, RejectsBadTokensAndRanges) {
                  "bf16_alias=2", "bf16_alias=-1", "bf16_alias_mr=0",
                  "bf16_alias_mr=13", "bf16_narrow_n=2", "bf16_narrow_n=-1",
                  "bf16_narrow_n_min_m=0", "bf16_narrow_n_min_m=1073741825",
+                 "f16_wide_min_m=0", "f16_wide_min_m=1073741825",
                  "unit_tiles=0", "unit_tiles=4097", "blocks=2", "blocks=-1",
                  "bf16_blocks_min_m=0", "int8_blocks_min_m=1073741825"}) {
         EXPECT_FALSE(parses(bad)) << bad;
@@ -565,8 +568,8 @@ TEST(NativeConfigText, RuleSwitchesSetOff) {
     const heuristic_params_t tuned = apply_native_config(heuristic_params_t {},
             config("min_gain_pct=0,idle_pct=100,decode_m=0,l1_pct=1000,"
                    "l1_pass_max_mb=8192,bf16_alias_mr=12,"
-                   "bf16_narrow_n_min_m=1,bf16_blocks_min_m=1,"
-                   "int8_blocks_min_m=1073741824"));
+                   "bf16_narrow_n_min_m=1,f16_wide_min_m=1,"
+                   "bf16_blocks_min_m=1,int8_blocks_min_m=1073741824"));
     EXPECT_EQ(tuned.makespan, 1);
     EXPECT_EQ(tuned.min_gain_pct, 0);
     EXPECT_EQ(tuned.idle_pct, 100);
@@ -575,6 +578,7 @@ TEST(NativeConfigText, RuleSwitchesSetOff) {
     EXPECT_EQ(tuned.l1_pass_max_mb, 8192);
     EXPECT_EQ(tuned.bf16_alias_mr, 12);
     EXPECT_EQ(tuned.bf16_narrow_n_min_m, 1);
+    EXPECT_EQ(tuned.f16_wide_min_m, 1);
     EXPECT_EQ(tuned.bf16_blocks_min_m, 1);
     EXPECT_EQ(tuned.int8_blocks_min_m, 1073741824);
 }
@@ -2511,9 +2515,9 @@ TEST(NativeConfigSchema, SchemaDump) {
     for (const auto &[name, value] : std::vector<std::pair<const char *, int>> {
                  {"min_gain_pct", 5}, {"idle_pct", 10}, {"decode_m", 128},
                  {"l1_pct", 100}, {"l1_pass_max_mb", 64}, {"bf16_alias_mr", 8},
-                 {"bf16_narrow_n_min_m", 1024}, {"bf16_blocks_min_m", 1024},
-                 {"int8_blocks_min_m", 3072}, {"cm_gain_pct", 5},
-                 {"cm_short_rows", 8}, {"cm_fma_lat", 6},
+                 {"bf16_narrow_n_min_m", 1024}, {"f16_wide_min_m", 192},
+                 {"bf16_blocks_min_m", 1024}, {"int8_blocks_min_m", 3072},
+                 {"cm_gain_pct", 5}, {"cm_short_rows", 8}, {"cm_fma_lat", 6},
                  {"cm_call_cycles", 800}, {"cm_l2_bytes", 16},
                  {"cm_l3_cycles", 10}, {"cm_prefetch_kib", 4},
                  {"cm_overlap_pct", 20}, {"cm_reuse_pct", 50},
@@ -2618,7 +2622,7 @@ TEST(NativeConfigSchema, SchemaDump) {
     EXPECT_EQ(doc.at("match_keys").size(), 13u);
     EXPECT_EQ(doc.at("match_keys").at("group"), "range");
     EXPECT_EQ(doc.at("match_keys").at("dtype"),
-            json::array({"bf16", "s8", "f32", "s4"}));
+            json::array({"bf16", "s8", "f32", "s4", "f16"}));
     EXPECT_EQ(doc.at("features").size(), 27u);
     EXPECT_EQ(doc.at("features").back(), "group");
     EXPECT_EQ(

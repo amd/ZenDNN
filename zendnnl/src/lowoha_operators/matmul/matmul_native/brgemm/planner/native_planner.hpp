@@ -24,6 +24,7 @@
 #include <string>
 
 #include "lowoha_operators/matmul/lowoha_common.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/native_kernel_registry.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_config.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/gemm_descriptor.hpp"
@@ -50,9 +51,9 @@ struct native_problem_t {
     int pack_nr = 0; ///< native_weight_ref_t::pack_nr
     /// 1 inside a parallel region, else max(1, desc.num_threads).
     int threads = 1;
-    /// bf16, u8, s8, f32, or bf16 / f32 quantized in the call.
+    /// bf16, u8, s8, f32, f16, or bf16 / f32 quantized in the call.
     data_type_t src_dt = data_type_t::none;
-    data_type_t wei_dt = data_type_t::none; ///< bf16, s8, s4 or f32
+    data_type_t wei_dt = data_type_t::none; ///< bf16, s8, s4, f32 or f16
     data_type_t dst_dt = data_type_t::none;
     bool trans_a = false;
     bool dynamic_quant = false; ///< the call quantizes a bf16 / f32 source
@@ -71,6 +72,9 @@ struct native_problem_t {
 
     bool bf16() const { return wei_dt == data_type_t::bf16; }
     bool f32() const { return wei_dt == data_type_t::f32; }
+    /// An f16 weight: the F16 kernels, whose source rows are widened to f32,
+    /// or the F16_PH kernels over the source rows (native_plan_t::kind).
+    bool f16() const { return wei_dt == data_type_t::f16; }
     /// An s8 or s4 weight: the INT8 tile and its plan fields.
     bool int8() const {
         return wei_dt == data_type_t::s8 || wei_dt == data_type_t::s4;
@@ -101,15 +105,19 @@ struct native_plan_t {
     // Tile grid and schedule.
     /// Tile width: 16 or 32, dividing pack_nr; BF16 also 64 or 128:
     /// 32-column slabs, each inside one pack block, of whole blocks or of
-    /// one block.
+    /// one block; F16_PH also 64, two pack blocks of 32.
     int nr = 0;
     /// BF16 and FP32 rows per call; rows of the row-split rounding
     int mr = 0;
     int mb = 0; ///< rows per M block
     int m_blocks = 0;
     int n_tiles = 0;
-    /// BF16 and FP32 K per pass; BF16 even unless it covers K
+    /// BF16 and FP32 K per pass; BF16 even and F16_PH whole blocks of
+    /// kNativeF16AccumBlockK unless it covers K
     int kc = 0;
+    /// The kernels of the tiles, by the weight's type; for an f16 weight the
+    /// registry's f16_kind(): F16_PH where it has them, else F16.
+    native_kernel_kind_t kind = native_kernel_kind_t::bf16;
     int threads = 1; ///< compute team
     int col_groups = 0; ///< 0: slice schedule; > 0: row-group schedule
     /// > 0: the blocks schedule (col_groups 0): units of a row block by

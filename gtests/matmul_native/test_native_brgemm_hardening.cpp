@@ -28,6 +28,8 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -61,6 +63,7 @@
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_epilogue.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_hw.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_pack.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_weight_cache.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_weight_view.hpp"
 #include "lowoha_operators/matmul/matmul_native/native_layout_policy.hpp"
@@ -906,6 +909,99 @@ TEST(NativeBrgemmHardeningTeam, FewerWorkersKeepTheCallersTeam) {
             EXPECT_LE(*tids.rbegin(), workers - 1);
         }
     }
+}
+
+// An M = 1 call on a layout of at most a quarter of the L2 runs its units on
+// the calling thread, whatever its plan's threads: its plan line says
+// team=1.  The same call on a larger layout, and on the small one at M = 2,
+// opens a region of the call's team.  bf16 x bf16 and u8 x s8 calls on 8
+// threads, constant weights at weight cache mode 1.
+TEST(NativeBrgemmHardeningTeam,
+        OneRowCallsOfASmallLayoutRunOnTheCallingThread) {
+    const nat::UarchParams &u = nat::detect_uarch();
+    if (!u.avx512bf16 || !u.avx512vnni || !nat::native_base_isa())
+        GTEST_SKIP() << "needs AVX512-BF16, AVX512-VNNI and AVX-512";
+    nt::expect_in_child({{"ZENDNNL_API_LOG_LEVEL", "4"}}, [] {
+        const size_t quarter
+                = static_cast<size_t>(nat::detect_uarch().l2_bytes) / 4;
+        const int N = 64;
+        int bad = 0;
+        uint32_t seed = 4700;
+        for (const data_type_t wei : {data_type_t::bf16, data_type_t::s8}) {
+            const bool int8 = wei == data_type_t::s8;
+            const data_type_t src_dt = int8 ? data_type_t::u8 : wei;
+            // K of a layout of a quarter of the L2, and of four quarters.
+            const int small_k
+                    = static_cast<int>(quarter
+                              / (static_cast<size_t>(N) * nt::dt_bytes(wei)))
+                    - 64;
+            const int big_k = 4 * (small_k + 64);
+            for (const auto &shape :
+                    {std::make_pair(1, small_k), std::make_pair(2, small_k),
+                            std::make_pair(1, big_k)}) {
+                const int M = shape.first, K = shape.second;
+                const bool alone = M == 1 && K == small_k;
+                if ((K == small_k)
+                        != (nat::native_packed_bytes(wei, K, N, 32)
+                                <= quarter)) {
+                    std::fprintf(stderr, "K %d: layout of %zu bytes\n", K,
+                            nat::native_packed_bytes(wei, K, N, 32));
+                    ++bad;
+                    continue;
+                }
+                const nt::buffer_t src = nt::random_buffer(src_dt,
+                        static_cast<size_t>(M) * K, seed++, int8 ? 0.0f : -1.0f,
+                        int8 ? 15.0f : 1.0f);
+                const nt::buffer_t w = nt::kept_until_exit(nt::random_buffer(
+                        wei, static_cast<size_t>(K) * N, seed++,
+                        int8 ? -8.0f : -1.0f, int8 ? 8.0f : 1.0f));
+                const nt::buffer_t dst
+                        = nt::make_buffer(static_cast<size_t>(M) * N * 4);
+                float src_scale = 0.5f, wei_scale = 0.25f;
+                nt::call_t c;
+                c.M = M;
+                c.N = N;
+                c.K = K;
+                c.src = src.get();
+                c.wei = w.get();
+                c.dst = dst.get();
+                c.params.dtypes.src = src_dt;
+                c.params.dtypes.wei = wei;
+                c.params.dtypes.dst = data_type_t::f32;
+                c.params.num_threads = 8;
+                c.params.weight_cache_type = 1;
+                c.params.lowoha_algo
+                        = zendnnl::common::matmul_algo_t::native_brgemm;
+                if (int8) {
+                    auto &q = c.params.quant_params;
+                    q.src_scale.buff = &src_scale;
+                    q.src_scale.dt = data_type_t::f32;
+                    q.src_scale.dims = {1, 1};
+                    q.wei_scale.buff = &wei_scale;
+                    q.wei_scale.dt = data_type_t::f32;
+                    q.wei_scale.dims = {1, 1};
+                }
+                ::testing::internal::CaptureStdout();
+                const status_t st = nt::run_matmul(c);
+                const std::string log
+                        = ::testing::internal::GetCapturedStdout();
+                const size_t at = log.find("[MATMUL.NATIVE_BRGEMM] M=");
+                const size_t team = log.find(" team=", at);
+                const int region
+                        = at == std::string::npos || team == std::string::npos
+                        ? -1
+                        : std::atoi(log.c_str() + team + 6);
+                if (st != status_t::success || region != (alone ? 1 : 8)) {
+                    std::fprintf(stderr,
+                            "%s M %d K %d: status %d, team %d (%d expected)\n",
+                            int8 ? "u8 x s8" : "bf16", M, K,
+                            static_cast<int>(st), region, alone ? 1 : 8);
+                    ++bad;
+                }
+            }
+        }
+        return bad;
+    }, "ZENDNNL_API_LOG_LEVEL=4");
 }
 
 // ── Bias read at the tile ────────────────────────────────────────────────

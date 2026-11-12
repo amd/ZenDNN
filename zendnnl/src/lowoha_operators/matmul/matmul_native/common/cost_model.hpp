@@ -37,10 +37,11 @@ struct UarchParams {
     bool avx512f;
     bool avx512bf16;
     bool avx512vnni;
-    /// Cores per L3 domain that the M=1 GEMV slice permutation assumes, and
-    /// the native BRGEMM plan's L3 domain when l3_domain_cores is 0: a fixed
-    /// count of physical cores (not SMT siblings), 8 on the CPU families
-    /// detect_uarch() recognizes, else 1 (column slices in linear tid order).
+    bool avx512fp16;
+    /// Cores per L3 domain that the group matmul's prompt tiles assume where
+    /// the OS does not describe the domains, and the native BRGEMM plan's L3
+    /// domain when l3_domain_cores is 0: a fixed count of physical cores (not
+    /// SMT siblings), 8 on the CPU families detect_uarch() recognizes, else 1.
     int family_l3_cores;
     /// Physical cores sharing one L3; 0 when unknown.  detect_uarch() leaves
     /// it 0: only the native BRGEMM plan reads it (native_plan_uarch).
@@ -63,6 +64,7 @@ struct UarchParams {
         , avx512f(false)
         , avx512bf16(false)
         , avx512vnni(false)
+        , avx512fp16(false)
         , family_l3_cores(1)
         , l3_domain_cores(0)
         , l1d_detected(true)

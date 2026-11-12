@@ -42,25 +42,26 @@ using zendnnl::error_handling::status_t;
 ///         its high nibble, padded with w = 0 (nibble 8): the low nibbles of
 ///         an octet are K quad 2o, the high nibbles K quad 2o + 1.
 ///   f32:  [K][pack_nr] f32.
+///   f16:  [K][pack_nr] f16.
 /// Pack column n holds weight column n, whatever the call: the layout
 /// depends on the weight alone.  The blocks hold native_padded_n(N, pack_nr)
 /// pack columns: the N of the weight, then zero columns (column sums zero)
-/// up to whole blocks.  Every type takes 4 bytes per column in a K group.
-/// A view with paired serves a gated call over [gate | up] halves of N a
-/// multiple of 32: the tile of pack columns n0 .. n0 + nr (nr a multiple of
-/// 32) computes the gate columns n0 / 2 .. n0 / 2 + nr / 2 in its first nr /
-/// 2 columns and the up columns N / 2 + n0 / 2 on in the others, so that its
-/// column t < nr / 2 and column nr / 2 + t pair up.  Every run of 16 tile
-/// columns from a multiple of 16 lies inside one block; a kernel call of 32
-/// columns takes its second 16 from wherever they lie (the up run of a tile
-/// of 32).
+/// up to whole blocks.  Every type but f16 takes 4 bytes per column in a K
+/// group, f16 2.  A view with paired serves a gated call over [gate | up]
+/// halves of N a multiple of 32: the tile of pack columns n0 .. n0 + nr (nr
+/// a multiple of 32) computes the gate columns n0 / 2 .. n0 / 2 + nr / 2 in
+/// its first nr / 2 columns and the up columns N / 2 + n0 / 2 on in the
+/// others, so that its column t < nr / 2 and column nr / 2 + t pair up.
+/// Every run of 16 tile columns from a multiple of 16 lies inside one block;
+/// a kernel call of 32 columns takes its second 16 from wherever they lie
+/// (the up run of a tile of 32).
 struct native_weight_view_t {
     const uint8_t *base = nullptr;
     data_type_t wei_dt = data_type_t::none;
     int K = 0;
     int N = 0;
     int pack_nr = 0;
-    /// K pairs (bf16), K quads (s8), K octets (s4) or K rows (f32)
+    /// K pairs (bf16), K quads (s8), K octets (s4) or K rows (f32, f16)
     int k_groups = 0;
     size_t block_bytes = 0; ///< one block, column sums included
     bool paired = false;
@@ -78,7 +79,8 @@ struct native_weight_view_t {
     /// Elements of wei_dt (bytes of an s4 weight) between consecutive K
     /// groups of one column.
     int group_stride() const {
-        if (wei_dt == data_type_t::f32) return pack_nr;
+        if (wei_dt == data_type_t::f32 || wei_dt == data_type_t::f16)
+            return pack_nr;
         return pack_nr * (wei_dt == data_type_t::bf16 ? 2 : 4);
     }
 
@@ -136,7 +138,7 @@ struct native_weight_ref_t {
     int pack_nr = 0;
     /// Effective weight cache mode (see get_native_layout): 0 packs for this
     /// call only, 1 uses the native layout cache, 2 rewrites the buffer in
-    /// place when the image fits it (a bf16 or s4 raw weight, or an AOCL
+    /// place when the image fits it (a bf16, f16 or s4 raw weight, or an AOCL
     /// prepack), else as 1 (an s8 or f32 raw weight, or a weight of padded
     /// columns).
     int32_t weight_cache_mode = 1;

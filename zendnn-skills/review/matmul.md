@@ -85,20 +85,25 @@ Current pairing:
   BRGEMM section of
   `docs/operator/low_overhead_operator/lowoha_matmul_operator.md`: bf16
   times bf16, u8 or s8 times s8 (a bf16 or f32 source it quantizes
-  included), and f32 times f32; per-tensor, per-row, or `{M, G}` source
-  scales and per-tensor, per-column, or per-group weight scales; and every
+  included), s8 times symmetric s4, f32 times f32, and f16 times f16;
+  per-tensor, per-row, or `{M, G}` source scales and per-tensor,
+  per-column, or per-group weight scales; and every
   post-op and gated activation of `matmul_direct` except a softmax with a
   gated activation. Its epilogue (`native_epilogue.cpp`) applies them, mish
   included. A call outside that list returns an error status, or under
   `ZENDNNL_MATMUL_ALGO=10` without `lowoha_algo` goes back to the default
-  route (see Native matmul below). At M = 1 a GEMV kernel takes the call
-  only when `decide_native_gemv` chooses one (its post-ops among the ones
-  that kernel fuses), and the native tiles serve every other call. Check
-  the kernel that runs, not only `native_epilogue.cpp`.
+  route (see Native matmul below). Every call, M = 1 included, runs on
+  the native tiles over the weight's one layout; the GEMV kernels
+  (`decide_native_gemv`, `run_native_gemv`) are called only by their
+  tests. Check the kernel that runs, not only `native_epilogue.cpp`.
 
 Binary post-op leading dimension `-1` still becomes N. An f16 binary post-op
-still requires AVX512-FP16. Bias dtype, scale dtype, and zero-point dtype
-travel with the same path as the activation and weight. A chain is applied
+requires AVX512-FP16 on every route but the native BRGEMM: a call that asks
+for the native BRGEMM takes f16 operands without it (it widens them to f32
+with AVX-512 F), while a call ZENDNNL_MATMUL_ALGO=10 hands back to the
+default route still needs it and gets `isa_unsupported` without it. Bias
+dtype, scale dtype, and zero-point dtype travel with the same path as the
+activation and weight. A chain is applied
 in order. Dropping or reordering one entry changes the result.
 
 ## Hot-path overhead
@@ -222,6 +227,96 @@ it. `native_brgemm_selected` is `lowoha_algo == native_brgemm` or
   line does not say why it is not handed back.
 - Do not call native code from the `aocl_dlp_blocked`, oneDNN, libxsmm, BMM,
   or reference paths.
+
+## Caches and kept state
+
+Run this section on every matmul PR, whatever its diff touches. A change to
+routing, a dtype, a layout, a kernel, a post-op or a test can make a cached
+value stale, read another route's image as raw bytes, or keep memory that no
+clear frees, and each of these returns success with wrong values. Apply the
+generic checks in [common](common/SUBSKILL.md) too.
+
+What a matmul call keeps across calls (extend this list when a PR adds state):
+
+- Native layouts (`matmul_native/common/native_weight_cache.cpp`), keyed on
+  the weight pointer, K, N, ldb, pack_nr, transB, the weight type and whether
+  the buffer is an AOCL-DLP prepack. At weight cache mode 2 under
+  `ZENDNNL_MATMUL_ALGO=10`, the layout replaces a bf16, f16 or s4 weight (or
+  an AOCL-DLP prepack) in the caller's buffer, and an image record remembers
+  it. Change detection reads the two 64-byte ends only, and a dropped layout
+  stays until a clear.
+- The GEMV caches of `matmul_native/common/kernel_cache.cpp`, read by tests
+  only.
+- The widened f16 sources (`matmul_native/brgemm/looper/`), at most 32
+  buffers and 512 MiB, and the per-thread staged rows of gated calls
+  (`matmul_native/common/native_epilogue.cpp`), kept up to 4 MiB a thread.
+- Native plans (`matmul_native/brgemm/planner/`) and the values read once at
+  the first native call: CPU features, `ZENDNNL_MATMUL_WEIGHT_CACHE`,
+  `ZENDNNL_MATMUL_NATIVE_CONFIG`, `ZENDNNL_MATMUL_NATIVE_TUNING_FILE` and
+  `ZENDNNL_MATMUL_NATIVE_F16_ACCUM`.
+- The default route's AOCL-DLP and oneDNN weight caches, keyed on pointer and
+  shape with no check of the bytes. Calls the native BRGEMM hands back fill
+  them too.
+
+Checks:
+
+- A native layout depends on the weight alone. Flag a layout or image that
+  starts to depend on M, the post-op, the source type, the thread count or
+  the weight cache mode.
+- A native plan may depend on all of those, and its cache key holds every
+  input it reads: flag a new field a plan reads that `native_problem_t`, its
+  `operator==` and its hash do not hold.
+- Under `ZENDNNL_MATMUL_ALGO=10`, every reader of a weight buffer checks for
+  an in-place image or holds the bytes before it reads, and caps its own cache
+  at mode 1 when native calls may read the buffer later. This covers a new
+  route, a hand-back, group matmul, the reorder API and an explicit
+  `lowoha_algo` call. Flag a path that reads a buffer another route rewrote in
+  place as raw bytes, in either direction.
+- A change that rewrites more weights in place, or widens mode 2, says in the
+  API header, the operator doc and `docs/runtime_env.md` what a framework may
+  no longer do with that buffer: read it, save it, update it, or share it with
+  another tensor.
+- A clear at mode 2 is process-wide: it forgets the image records of every
+  model in the process. Flag a doc or test that treats a clear as safe while
+  in-place weights stay loaded.
+- `clear_matmul_native_weight_caches()` reaches only the native state.
+  Handed-back calls keep the default route's caches, which only
+  `clear_matmul_weight_caches()` clears. A doc that names a clear for reloaded
+  weights under `ZENDNNL_MATMUL_ALGO=10` names the one that reaches both.
+- New native state is freed by `clear_all_weight_caches()`, and
+  `benchdnn/matmul/matmul_lowoha.cpp`'s clear between lines reaches it.
+
+For a change to a cache, an image, a clear or a route, test each scenario
+below against an independent reference. Each must give the right result or a
+documented, loud failure, never success with wrong values:
+
+- a clear while in-place weights stay loaded, another model's weights
+  included;
+- a weight allocated inside a freed image, as in a model swap without a
+  clear;
+- a framework that reads or updates a weight after its first mode-2 call: a
+  tied embedding, a checkpoint save, a LoRA merge;
+- a handed-back constant weight refilled in place, then each clear;
+- another route's in-place image under each `ZENDNNL_MATMUL_ALGO` setting;
+- a clear from an exit hook, and `exit()` while a call runs;
+- a forked child after the caches filled, at modes 1 and 2.
+
+Test matrix for every matmul PR, on its head. Compare each failure with the
+merge base, and name a failure the base also shows as pre-existing:
+
+1. `--gtest_filter='Native*:*/Native*:Int8InPlaceWarm.*:*/Int8InPlaceWarm.*:AIGemvTests*:*/AIGemvTests*'`,
+   under `ZENDNNL_MATMUL_ALGO=10` and unset, each in its own process under
+   `ZENDNNL_MATMUL_WEIGHT_CACHE` 0, 1 and 2. A test that asserts a cached
+   layout, an image or a pack count pins the mode it needs
+   (`WeightCacheGuard`), so the mode-0 run fails only on outputs. Flag a new
+   test that relies on the process default instead.
+2. The same filter with `--gtest_shuffle` for three seeds. The cache suites
+   (`NativeWeightLifetime*`, `NativeCacheModes*`, `NativeOneLayout*`,
+   `NativeLayoutRuleRoute*`, `NativeBrgemmRefusal*`) also run with
+   `--gtest_repeat=2`.
+3. When the PR touches a retire, free or clear path: an ASan build of
+   `NativeWeightLifetime*` and `NativeBrgemmRefusal*`, and RSS measured over
+   many refills of one weight and over many distinct weights.
 
 ## Tests and validation quality
 

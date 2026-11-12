@@ -33,8 +33,14 @@ namespace {
 /// Bytes of a BF16 element.
 constexpr double kBf16Bytes = 2.0;
 
+/// Bytes of an F16 source element the kernels read: widened to f32.
+constexpr double kF16WidenedBytes = 4.0;
+
 /// Columns of one vector of f32 accumulators.
 constexpr int kVectorCols = 16;
+
+/// Columns of one vector of f16 accumulators.
+constexpr int kF16PhVectorCols = 32;
 
 /// What one tile of rows rows costs: its core cycles and, when the worker
 /// streams its weights, the cycles its stream idles.
@@ -95,7 +101,10 @@ public:
                         <= static_cast<double>(l1_bytes_);
             }
         } else {
-            slab_cols_ = native_bf16_slab_cols(q.nr);
+            // An F16_PH call covers its tile's columns, two blocks at 64.
+            slab_cols_ = q.kind == native_kernel_kind_t::f16_ph
+                    ? q.nr
+                    : native_bf16_slab_cols(q.nr);
             mr_ = q.mr;
             kc_ = std::min(std::max(1, q.kc), p.K);
             passes_ = ceil_div(p.K, kc_);
@@ -108,9 +117,24 @@ public:
                     <= static_cast<int64_t>(uarch.l1d_bytes) * hp.l1_pct;
             l2_share_ = static_cast<double>(uarch.l2_bytes) * hp.bf16_l2_pct
                     / 100.0;
+            // An F16 kernel takes one FMA a K row of two-byte weights, over
+            // source rows widened to f32; an F16_PH kernel one FMA a K row
+            // of 32 two-byte weights, over its two-byte source rows.
+            if (p.f16()) {
+                k_steps_ = p.K;
+                step_bytes_ = kBf16Bytes;
+            }
+            if (p.f16() && q.kind != native_kernel_kind_t::f16_ph) {
+                src_bytes_ = kF16WidenedBytes;
+                l1_fit_ = (q.nr * kBf16Bytes + q.mr * kF16WidenedBytes) * kc_
+                                * 100
+                        <= static_cast<double>(uarch.l1d_bytes) * hp.l1_pct;
+            }
         }
         slabs_ = std::max(1, q.nr / std::max(1, slab_cols_));
-        vectors_ = static_cast<double>(slab_cols_) / kVectorCols;
+        vectors_ = static_cast<double>(slab_cols_)
+                / (q.kind == native_kernel_kind_t::f16_ph ? kF16PhVectorCols
+                                                          : kVectorCols);
         mem_cycles_ = native_plan_mem_cycles(uarch, hp);
         tall_ = 1.0 + native_plan_tall_pct(uarch, hp) / 100.0;
         link_bound_ = mem_cycles_ > hp.cm_stream_cycles;
@@ -281,7 +305,7 @@ native_plan_cost_t native_plan_cost(const native_plan_t &q,
         const heuristic_params_t &hp) {
     native_plan_cost_t out;
     const bool int8 = native_plan_cost_int8(p) || p.int4();
-    if ((!p.bf16() && !int8) || q.nr < 1 || q.mr < 1 || q.mb < 1
+    if ((!p.bf16() && !p.f16() && !int8) || q.nr < 1 || q.mr < 1 || q.mb < 1
             || q.threads < 1 || q.n_tiles < 1 || q.m_blocks < 1)
         return out;
     if (int8

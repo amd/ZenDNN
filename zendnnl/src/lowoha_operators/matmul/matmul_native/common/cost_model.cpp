@@ -112,11 +112,11 @@ static UarchParams do_detect() {
 
     zendnnl_cpuid_count(7, 0, eax, ebx, ecx, edx);
     p.avx512vnni = p.avx512f && (ecx & (1u << 11));
+    p.avx512fp16 = p.avx512f && (edx & (1u << 23));
     zendnnl_cpuid_count(7, 1, eax, ebx, ecx, edx);
     p.avx512bf16 = p.avx512f && (eax & (1u << 5));
 
-    // L3 domain width for parallel GEMV column scheduling (spread slice indices
-    // across L3 domains when OpenMP tid order matches consecutive CPU ids).
+    // Cores per L3 domain of the CPU families recognized here.
     if (is_amd && (cpu_family == 0x19 || cpu_family == 0x1A))
         p.family_l3_cores = 8;
     else

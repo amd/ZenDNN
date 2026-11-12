@@ -31,9 +31,21 @@ namespace native {
 /// layout.
 inline constexpr int kNativeLayoutPackNr = 32;
 
+/// Largest N of a weight whose columns, rounded up to whole blocks
+/// (native_padded_n: the width the planner, the packers and the tiles run
+/// on), an int holds.
+inline constexpr int kMaxNativeN = std::numeric_limits<int32_t>::max()
+        / kNativeLayoutPackNr * kNativeLayoutPackNr;
+
 /// Largest K of a bf16 weight whose K pairs the bf16 kernels offset in an
 /// int: each pair of a block lies 64 elements after the one before.
 inline constexpr int kMaxNativeBf16K = 1 << 26;
+
+/// Largest K of an f16 weight whose source rows a call on the F16 kernels
+/// widens in steps of 16 elements, and whose K pairs the [N, K] pack counts,
+/// in an int.
+inline constexpr int kMaxNativeF16K
+        = std::numeric_limits<int32_t>::max() / 16 * 16;
 
 /// The weight-only facts the layout rule decides on.  Execution-only fields
 /// (M, threads, alpha / beta, bias, post-ops, dst type) must not enter the
@@ -43,7 +55,7 @@ struct native_layout_query_t {
     data_type_t wei_dt = data_type_t::none;
     /// Source type the kernel multiplies with: bf16 for BF16, u8 / s8 for
     /// INT8 (s8 or s4 weights), including a bf16 or f32 source the call
-    /// quantizes dynamically, f32 for FP32.
+    /// quantizes dynamically, f32 for FP32, f16 for F16.
     data_type_t src_dt = data_type_t::none;
     int K = 0;
     int N = 0;
@@ -65,12 +77,15 @@ struct native_layout_decision_t {
 /// columns per block, read only by the native BRGEMM.  Native when all hold:
 ///   * a CPU with AVX-512 F, BW, VL and DQ and FMA (native_base_isa);
 ///   * wei bf16 with src bf16 on a CPU with AVX512-BF16, wei s8 with src
-///     u8 / s8 or wei s4 with src s8 on a CPU with AVX512-VNNI, or wei f32
-///     with src f32;
-///   * N >= 1 (a weight of N not a multiple of 32 is held padded with zero
+///     u8 / s8 or wei s4 with src s8 on a CPU with AVX512-VNNI, wei f32
+///     with src f32, or wei f16 with src f16 (on AVX-512 F; the kernels
+///     of a CPU with AVX512-FP16 read the same layout);
+///   * N from 1 to kMaxNativeN, whose whole blocks of 32 columns an int
+///     holds (a weight of N not a multiple of 32 is held padded with zero
 ///     columns to whole blocks), K >= 1, ldb >= (transB ? K : N);
 ///   * bf16: K at most kMaxNativeBf16K, whose pairs the kernels offset in an
 ///     int;
+///   * f16: K at most kMaxNativeF16K, whose steps of 16 an int holds;
 ///   * s8: K <= INT32_MAX / (255 * 128), the bound that keeps the int32
 ///     accumulation exact, and per-group weight scales only over groups of
 ///     whole K quads (a group size that divides K and is a multiple of 4);

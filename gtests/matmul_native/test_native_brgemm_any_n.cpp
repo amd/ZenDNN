@@ -379,7 +379,7 @@ nt::call_t make_call(const ncase_t &c, const operands_t &o) {
 }
 
 /// The call through native_brgemm_execute with the descriptor and weight
-/// reference native_layout_matmul builds for it (no GEMV choice: the tiles).
+/// reference native_layout_matmul builds for it.
 status_t run_execute(const nt::call_t &c) {
     nat::GemmDescriptor d;
     d.M = c.M;
@@ -590,8 +590,6 @@ TEST_P(NativeBrgemmAnyN, MatchesTheReferenceAndStaysInItsBuffers) {
     std::unique_ptr<nt::algo_pin_t> pin;
     if (c.route == route_t::algo10)
         pin.reset(new nt::algo_pin_t(matmul_algo_t::native_brgemm));
-    const bool on_gemv = c.route != route_t::execute
-            && nt::gemv_kernel(call) != nat::native_gemv_t::none;
 
     // The destination: the initial values, which beta reads (over a gated
     // call's N pre-activation columns), and sentinels in the columns past
@@ -629,12 +627,12 @@ TEST_P(NativeBrgemmAnyN, MatchesTheReferenceAndStaysInItsBuffers) {
     // process-wide algorithm, or through native_brgemm_execute, is rewritten
     // in place; a weight of padded columns never is.
     const bool in_place = c.N % nat::kNativeLayoutPackNr == 0 && c.wc == 2
-            && c.q == q_t::bf16 && c.route != route_t::per_call && !on_gemv;
+            && c.q == q_t::bf16 && c.route != route_t::per_call;
     if (!in_place) {
         EXPECT_EQ(std::memcmp(wei->get(), o.wei.get(), o.wei.bytes), 0)
                 << "the weight was rewritten";
     }
-    if (c.wc != 0 && !on_gemv) {
+    if (c.wc != 0) {
         EXPECT_EQ(nt::native_layouts(wei->get()), 1u)
                 << "one layout (an image in place, else packed out of place)";
     }

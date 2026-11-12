@@ -14,19 +14,97 @@
 # * limitations under the License.
 # *******************************************************************************/
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <vector>
 #include "common/bfloat16.hpp"
+#include "common/float16.hpp"
+#include "common/platform_info.hpp"
 #include "gtest_utils.hpp"
 #include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
 #include "lowoha_operators/matmul/ggml_weight_unpack.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/native_kernel_registry.hpp"
 #include <gtest/gtest.h>
 #if !defined(_WIN32)
 #include <sys/resource.h>
 #endif
+
+namespace {
+
+/// The epsilon of the comparison of an f16 call of K steps on algo whose
+/// products lie within max_ab of zero: epsilon, but on the native BRGEMM's
+/// F16_PH kernels, which add the products of each block of
+/// kNativeF16AccumBlockK steps in f16 (unit roundoff 2^-11).  There the
+/// partial sums of a block of b steps of products of random sign stay near
+/// sqrt(b) * max_ab, and their rounding errors, of random sign too, leave
+/// an output within 4 * 2^-11 * sqrt(b * K) * max_ab of the exact sum (the
+/// bound gamma(b, 2^-11) * sum |a b| holds for any signs); the comparison
+/// takes K * epsilon for that term.
+float f16_epsilon(matmul_algo_t algo, uint64_t K, float max_ab, float epsilon) {
+    namespace nat = zendnnl::lowoha::matmul::native;
+    if (algo != matmul_algo_t::native_brgemm
+            || nat::native_kernel_registry().f16_kind()
+                    != nat::native_kernel_kind_t::f16_ph)
+        return epsilon;
+    const double b = std::min<double>(
+            static_cast<double>(K), nat::kNativeF16AccumBlockK);
+    return epsilon
+            + static_cast<float>(4.0 * 0x1p-11
+                    * std::sqrt(b / static_cast<double>(K)) * max_ab);
+}
+
+/// The values of t, an f16 tensor, widened to f32 into like, an f32 tensor
+/// of its size, order and strides; any other tensor as it is.
+tensor_t widened_to_f32(tensor_t t, tensor_t like) {
+    if (t.get_data_type() != data_type_t::f16) return t;
+    const uint16_t *from
+            = static_cast<const uint16_t *>(t.get_raw_handle_unsafe());
+    float *to = static_cast<float *>(like.get_raw_handle_unsafe());
+    const uint64_t n = t.get_buffer_sz_bytes() / sizeof(uint16_t);
+    for (uint64_t i = 0; i < n; ++i)
+        to[i] = zendnnl::common::float16_t::f16_to_f32_val(from[i]);
+    return like;
+}
+
+/// The reference of an f16 call on a CPU without AVX512-FP16, where the
+/// reference route takes no f16 operand: the reference over f32 copies of
+/// the call's f16 operands (input32, weight32 and out32 f32 tensors of the
+/// input's, the weight's and the output's geometry), its output rounded to
+/// f16 into an f16 output.
+status_t f16_reference_in_f32(tensor_factory_t &factory, tensor_t &input,
+        tensor_t input32, tensor_t &weight, tensor_t weight32, tensor_t &bias,
+        tensor_t &output, tensor_t out32,
+        const std::vector<post_op_type_t> &po_types,
+        const std::vector<tensor_t> &binary_tensors, bool use_LOWOHA,
+        matmul_algo_t algo, float alpha, float beta) {
+    tensor_t in = widened_to_f32(input, input32);
+    tensor_t wei = widened_to_f32(weight, weight32);
+    tensor_t b = widened_to_f32(bias,
+            factory.uniform_dist_tensor(
+                    bias.get_size(), data_type_t::f32, 1.0));
+    std::vector<tensor_t> bin;
+    for (const tensor_t &t : binary_tensors)
+        bin.push_back(widened_to_f32(t,
+                factory.uniform_dist_tensor(
+                        t.get_size(), data_type_t::f32, 1.0)));
+    tensor_t out = widened_to_f32(output, out32);
+    const status_t st = matmul_kernel_test(in, wei, b, out, po_types, bin,
+            use_LOWOHA, algo, alpha, beta, true);
+    if (st == status_t::success && output.get_data_type() == data_type_t::f16) {
+        const float *from
+                = static_cast<const float *>(out.get_raw_handle_unsafe());
+        uint16_t *to = static_cast<uint16_t *>(output.get_raw_handle_unsafe());
+        const uint64_t n = output.get_buffer_sz_bytes() / sizeof(uint16_t);
+        for (uint64_t i = 0; i < n; ++i)
+            to[i] = zendnnl::common::float16_t::f32_to_f16_val(from[i]);
+    }
+    return st;
+}
+
+} // namespace
 
 /** @brief TestMatmul is a test class to handle parameters */
 class TestMatmul : public ::testing::TestWithParam<MatmulType> {
@@ -920,6 +998,18 @@ TEST_P(TestMatmul, F16_F16) {
     status_t ref_status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor_ref, po_types, binary_tensors,
             use_LOWOHA, algo, alpha, beta, true);
+    if (ref_status == status_t::isa_unsupported
+            && !zendnnl_platform_info().get_avx512_f16_status())
+        ref_status = f16_reference_in_f32(tensor_factory, input_tensor,
+                tensor_factory.uniform_dist_tensor(
+                        {m, k}, data_type_t::f32, 1.0, transA),
+                weight_tensor,
+                tensor_factory.uniform_dist_tensor(
+                        {k, n}, data_type_t::f32, 1.0, transB),
+                bias_tensor, output_tensor_ref,
+                tensor_factory.uniform_dist_tensor(
+                        {m, n}, data_type_t::f32, 1.0),
+                po_types, binary_tensors, use_LOWOHA, algo, alpha, beta);
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, alpha, beta);
@@ -931,9 +1021,10 @@ TEST_P(TestMatmul, F16_F16) {
             = (status == status_t::success && ref_status == status_t::success);
 
     if (is_test_successful) {
+        // Products of values within 2 of zero.
         compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, k,
-                rtol_bf16, epsilon_bf16, is_test_successful, false, alpha,
-                false, beta);
+                rtol_bf16, f16_epsilon(algo, k, 4.0f, epsilon_bf16),
+                is_test_successful, false, alpha, false, beta);
     }
 
     EXPECT_TRUE(is_test_successful);
@@ -968,6 +1059,16 @@ TEST_P(TestMatmul, F16_F32) {
     status_t ref_status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor_ref, po_types, binary_tensors,
             use_LOWOHA, algo, alpha, beta, true);
+    if (ref_status == status_t::isa_unsupported
+            && !zendnnl_platform_info().get_avx512_f16_status())
+        ref_status = f16_reference_in_f32(tensor_factory, input_tensor,
+                tensor_factory.uniform_dist_tensor(
+                        {m, k}, data_type_t::f32, 1.0, transA),
+                weight_tensor,
+                tensor_factory.uniform_dist_tensor(
+                        {k, n}, data_type_t::f32, 1.0, transB),
+                bias_tensor, output_tensor_ref, output_tensor_ref, po_types,
+                binary_tensors, use_LOWOHA, algo, alpha, beta);
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, alpha, beta);
@@ -1244,6 +1345,18 @@ TEST_P(TestMatmul, F16_F16_Stride) {
     status_t ref_status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor_ref, po_types, binary_tensors,
             use_LOWOHA, algo, alpha, beta, true);
+    if (ref_status == status_t::isa_unsupported
+            && !zendnnl_platform_info().get_avx512_f16_status())
+        ref_status = f16_reference_in_f32(tensor_factory, input_tensor,
+                tensor_factory.uniform_dist_strided_tensor(
+                        {m, k}, stride_in, data_type_t::f32, 1.0, transA),
+                weight_tensor,
+                tensor_factory.uniform_dist_strided_tensor(
+                        {k, n}, stride_wt, data_type_t::f32, 1.0, transB),
+                bias_tensor, output_tensor_ref,
+                tensor_factory.uniform_dist_strided_tensor(
+                        {m, n}, stride_dst, data_type_t::f32, 1.0),
+                po_types, binary_tensors, use_LOWOHA, algo, alpha, beta);
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, alpha, beta);
@@ -1256,9 +1369,10 @@ TEST_P(TestMatmul, F16_F16_Stride) {
             = (status == status_t::success && ref_status == status_t::success);
 
     if (is_test_successful) {
+        // Products of values within 2 of zero.
         compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, k,
-                rtol_bf16, epsilon_bf16, is_test_successful, false, alpha,
-                false, beta);
+                rtol_bf16, f16_epsilon(algo, k, 4.0f, epsilon_bf16),
+                is_test_successful, false, alpha, false, beta);
     }
 
     EXPECT_TRUE(is_test_successful);

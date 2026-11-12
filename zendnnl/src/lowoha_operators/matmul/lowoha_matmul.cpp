@@ -362,7 +362,20 @@ struct direct_call_t {
     /// A post-op the AOCL-DLP chain does not take (aocl_dlp_maps_post_op).
     bool aocl_unmapped_post_op = false;
     bool pooling_post_op = false; ///< and one of them is pooling
+    /// An f16 operand on a CPU without AVX512-FP16 admitted for the native
+    /// BRGEMM alone (native_takes_f16).
+    bool f16_isa_deferred = false;
 };
+
+/// For a call with an f16 operand on a CPU without AVX512-FP16: whether the
+/// call asks for the native BRGEMM, which widens and rounds f16 values with
+/// AVX-512 F and checks that ISA itself; call notes it.
+ZENDNNL_ALWAYS_INLINE inline bool native_takes_f16(const matmul_params &params,
+        const matmul_batch_params_t &batch_params, direct_call_t &call) {
+    call.f16_isa_deferred = native::native_brgemm_requested(
+            params, std::max(batch_params.Batch_A, batch_params.Batch_B));
+    return call.f16_isa_deferred;
+}
 
 /// matmul_direct's checks of a call and its normalization of call.params,
 /// the call's copy of params: the status it returns before any route runs,
@@ -377,12 +390,14 @@ ZENDNNL_ALWAYS_INLINE inline status_t prepare_direct_call(const int M,
     // Prevents undefined behavior on platforms without AVX512-FP16 support.
     // Covers every F16-bearing operand: src / wei / dst, bias, and any binary
     // post-op buffer. Anything else slips through to a kernel that touches
-    // F16 storage and produces wrong results on non-FP16 hardware.
+    // F16 storage and produces wrong results on non-FP16 hardware.  A call
+    // that asks for the native BRGEMM takes its requirement instead.
     const bool is_f16 = (params.dtypes.src == data_type_t::f16
             || params.dtypes.wei == data_type_t::f16
             || params.dtypes.dst == data_type_t::f16
             || params.dtypes.bias == data_type_t::f16);
-    if (is_f16 && !zendnnl_platform_info().get_avx512_f16_status()) {
+    if (is_f16 && !zendnnl_platform_info().get_avx512_f16_status()
+            && !native_takes_f16(params, batch_params, call)) {
         log_error(
                 "F16 data type is not supported on this platform "
                 "(requires AVX512-FP16).");
@@ -420,7 +435,8 @@ ZENDNNL_ALWAYS_INLINE inline status_t prepare_direct_call(const int M,
                 || po.po_type == post_op_type_t::binary_mul) {
             if (po.leading_dim == -1) { po.leading_dim = N; }
             if (po.dtype == data_type_t::f16
-                    && !zendnnl_platform_info().get_avx512_f16_status()) {
+                    && !zendnnl_platform_info().get_avx512_f16_status()
+                    && !native_takes_f16(params, batch_params, call)) {
                 log_error(
                         "F16 binary post-op tensor is not supported on this "
                         "platform "
@@ -561,6 +577,13 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
                     exec_params, is_profile ? &profiler : nullptr,
                     native_status, &exec_batch_params)) {
             return native_status;
+        }
+        // The other routes read f16 operands only with AVX512-FP16.
+        if (call.f16_isa_deferred) {
+            log_error(
+                    "F16 data type is not supported on this platform "
+                    "(requires AVX512-FP16).");
+            return status_t::isa_unsupported;
         }
         // A call without lowoha_algo runs on the default route, through its
         // checks: those of a single call took what only the native BRGEMM

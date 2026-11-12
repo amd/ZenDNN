@@ -146,38 +146,6 @@ status_t run_matmul(const call_t &c) {
             c.gated == mm::matmul_gated_act_t::none ? nullptr : &gated);
 }
 
-zendnnl::lowoha::matmul::native::native_gemv_t gemv_kernel(const call_t &c) {
-    namespace nat = zendnnl::lowoha::matmul::native;
-    if (c.M != 1 || c.params.mem_format_b != 'n'
-            || !nat::native_brgemm_requested(c.params, 1))
-        return nat::native_gemv_t::none;
-    if (c.is_weights_const
-            && zendnnl::common::matmul_config_t::is_native_brgemm_algo()
-            && mm::effective_weight_cache_type(c.params.weight_cache_type) == 2)
-        return nat::native_gemv_t::none;
-    nat::GemmDescriptor d;
-    d.M = c.M;
-    d.N = c.N;
-    d.K = c.K;
-    d.lda = c.lda_or_tight();
-    d.ldb = c.ldb_or_tight();
-    d.ldc = c.ldc_or_tight();
-    d.transA = c.transA;
-    d.transB = c.transB;
-    d.alpha = c.alpha;
-    d.beta = c.beta;
-    d.src_dt = c.params.dtypes.src;
-    d.wei_dt = c.params.dtypes.wei;
-    d.dst_dt = c.params.dtypes.dst;
-    d.bias_dt = c.params.dtypes.bias;
-    d.bias = c.bias;
-    d.is_weights_const = c.is_weights_const;
-    d.num_threads = zendnnl::lowoha::resolve_num_threads(
-            c.params.num_threads, zendnnl::lowoha::thread_guard::max_threads());
-    d.gated_act = c.gated;
-    return nat::decide_native_gemv(d, c.params).kernel;
-}
-
 status_t refusal_of(const call_t &c, std::string *reason) {
     mm::matmul_batch_params_t batch;
     mm::matmul_gated_act_params gated;

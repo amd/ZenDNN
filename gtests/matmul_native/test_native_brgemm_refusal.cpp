@@ -174,8 +174,8 @@ std::vector<std::unique_ptr<refused_t>> refused_cases() {
             "s4 weight with a source other than s8", bf16, s4, bf16, 4, 64, 64,
             seed += 4));
     v.push_back(make_case("bf16 x u4",
-            "weight type other than bf16 / s8 / s4 / f32", bf16, u4, bf16, 4,
-            64, 64, seed += 4));
+            "weight type other than bf16 / s8 / s4 / f32 / f16", bf16, u4, bf16,
+            4, 64, 64, seed += 4));
     {
         refused_t &r = *v.back();
         r.c.params.quant_params.wei_zp.buff = &r.zp;
@@ -473,7 +473,7 @@ TEST(NativeBrgemmRefusal, TheDefaultRouteIsLoggedOncePerReason) {
         int bad = 0;
         std::vector<const char *> reasons {"weight zero points",
                 "s4 weight with a source other than s8",
-                "weight type other than bf16 / s8 / s4 / f32",
+                "weight type other than bf16 / s8 / s4 / f32 / f16",
                 "K exceeds the int32 accumulation bound", "a batched call"};
         if (ZENDNNL_DEPENDS_AOCLDLP) {
             reasons.push_back("a GGML pack format");
@@ -1937,8 +1937,8 @@ std::vector<std::unique_ptr<refused_t>> kept_cases() {
     per_group(*v.back());
     v.back()->kept = w4a16;
     v.push_back(make_case("bf16 x u4 per group with zero points",
-            "weight type other than bf16 / s8 / s4 / f32", bf16, u4, bf16, M, N,
-            K, seed += 4));
+            "weight type other than bf16 / s8 / s4 / f32 / f16", bf16, u4, bf16,
+            M, N, K, seed += 4));
     {
         refused_t &r = *v.back();
         per_group(r);
@@ -2580,9 +2580,9 @@ TEST(NativeBrgemmRefusal, WhatTheReferenceKernelDoesNotComputeKeepsItsError) {
     }
 }
 
-// A per-group INT8 call into an f16 dst, which matmul_direct passes on only
-// on a CPU with AVX512-FP16: the INT8 tile's check turns it away and names
-// the class.
+// A per-group INT8 call into an f16 dst, which matmul_direct passes on to
+// the native BRGEMM (on a CPU without AVX512-FP16 too, for a call that asks
+// for it): the INT8 tile's check turns it away and names the class.
 TEST(NativeBrgemmRefusal, PerGroupF16OutputIsUnimplemented) {
     const int M = 4, N = 64, K = 128, G = 4;
     std::vector<float> wei_scales(static_cast<size_t>(G) * N, 0.5f);

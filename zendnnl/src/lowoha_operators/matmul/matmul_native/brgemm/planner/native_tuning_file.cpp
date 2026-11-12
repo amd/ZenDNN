@@ -74,11 +74,14 @@ static_assert(std::size(kMatchKeys) == kNumericKeys + kNamedKeys + kFlagKeys,
         "every match key has a kind");
 
 constexpr auto &kDtypeNames = kNativeDtypeNames;
-const data_type_t kDtypeTypes[] = {
-        data_type_t::bf16, data_type_t::s8, data_type_t::f32, data_type_t::s4};
+const data_type_t kDtypeTypes[] = {data_type_t::bf16, data_type_t::s8,
+        data_type_t::f32, data_type_t::s4, data_type_t::f16};
+/// Dtypes of the table index (index_key holds two bits of dtype): the first
+/// four.
+constexpr int kIndexedDtypes = 4;
 constexpr auto &kSrcNames = kNativeSrcNames;
-const data_type_t kSrcTypes[] = {
-        data_type_t::bf16, data_type_t::f32, data_type_t::u8, data_type_t::s8};
+const data_type_t kSrcTypes[] = {data_type_t::bf16, data_type_t::f32,
+        data_type_t::u8, data_type_t::s8, data_type_t::f16};
 constexpr auto &kDstNames = kNativeDstNames;
 const data_type_t kDstTypes[] = {data_type_t::f32, data_type_t::bf16,
         data_type_t::f16, data_type_t::u8, data_type_t::s8, data_type_t::s32};
@@ -849,7 +852,7 @@ public:
             const native_problem_t &p) const noexcept override {
         const std::vector<uint32_t> *bucket = nullptr;
         const int d = type_index(kDtypeTypes, p.wei_dt);
-        if (d >= 0 && !indexed_.empty()) {
+        if (d >= 0 && d < kIndexedDtypes && !indexed_.empty()) {
             const auto it = indexed_.find(index_key(d, p.N, p.K));
             if (it != indexed_.end()) bucket = &it->second;
         }
@@ -867,7 +870,8 @@ public:
         return nullptr;
     }
 
-    /// Entries with one dtype and an exact n and k are indexed by them.
+    /// Entries with one dtype of the index and an exact n and k are indexed
+    /// by them.
     void add(std::unique_ptr<matched_entry_t> e) {
         const problem_match_t &m = e->match;
         const auto exact = [](const std::vector<range_t> &v, int64_t &x) {
@@ -955,7 +959,7 @@ struct feature_hw_t {
 
 void problem_features(
         const native_problem_t &p, const feature_hw_t &hw, double *f) {
-    const double src_esz = p.f32() ? 4.0 : (p.bf16() ? 2.0 : 1.0);
+    const double src_esz = p.f32() ? 4.0 : (p.bf16() || p.f16() ? 2.0 : 1.0);
     const double esz = p.int4() ? 0.5 : src_esz;
     const double m = p.M, n = p.N, k = p.K;
     const double threads = p.threads, pack_nr = p.pack_nr;

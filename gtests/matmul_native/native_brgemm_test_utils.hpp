@@ -30,7 +30,6 @@
 #include "common/op_config.hpp"
 #include "lowoha_operators/matmul/group_matmul/group_matmul_direct.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
-#include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_gemv.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_planner.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_tuning_keys.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_hw.hpp"
@@ -95,12 +94,6 @@ struct call_t {
 };
 
 status_t run_matmul(const call_t &c);
-
-/// The GEMV kernel native_layout_matmul runs c on: decide_native_gemv's
-/// choice over the descriptor it builds for c (none for the native tiles,
-/// for a call that does not ask for the native BRGEMM, and at weight cache
-/// mode 2, a constant weight under ZENDNNL_MATMUL_ALGO=10).
-zendnnl::lowoha::matmul::native::native_gemv_t gemv_kernel(const call_t &c);
 
 /// The status native_brgemm_refusal gives c (success when the native BRGEMM
 /// serves it or does not take it), with reason its reason.

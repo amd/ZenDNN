@@ -93,9 +93,12 @@ bool native_plan_groups_fit_l3(const native_problem_t &p,
 bool native_plan_slice_skewed(
         const native_plan_t &q, const heuristic_params_t &hp);
 
-/// The modeled time of plan q of a BF16 problem p, of an INT8 one that
-/// native_plan_cost_int8 accepts, or of an s4 one, on uarch with the cost
-/// inputs of hp; zero for another.  An INT8 call takes K in quads at the
+/// The modeled time of plan q of a BF16 or F16 problem p, of an INT8 one
+/// that native_plan_cost_int8 accepts, or of an s4 one, on uarch with the
+/// cost inputs of hp; zero for another.  An F16 call takes one FMA step a K
+/// row of two-byte weights, over source rows widened to f32 (four bytes an
+/// element); on the F16_PH kernels (q.kind) one FMA a K row of 32 weights,
+/// over its two-byte source rows.  An INT8 call takes K in quads at the
 /// plan's call width and rows per call, a weight element is one byte, and
 /// the K pass follows the tile's rows (native_int8_pass_quads).  An s4 call
 /// is priced on its per-group tile: the INT8 call over all of K, weight

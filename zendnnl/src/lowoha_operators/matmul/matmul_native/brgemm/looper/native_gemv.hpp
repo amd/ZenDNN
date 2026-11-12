@@ -31,17 +31,20 @@ namespace native {
 
 using zendnnl::error_handling::status_t;
 
-/// The kernels native_brgemm_execute runs a call on: the native tiles over
-/// the native layout, or a GEMV kernel on one thread over the call's raw
-/// weight.
+// No call of matmul_direct runs a GEMV kernel or makes a GEMV pack: every
+// call of the native BRGEMM, M = 1 included, runs on the native tiles over
+// the weight's one layout.
+
+/// The GEMV kernels of an M = 1 call: a GEMV kernel on one thread over the
+/// call's raw weight, or none.
 enum class native_gemv_t : uint8_t {
-    none, ///< the native tiles
+    none, ///< no GEMV kernel
     bf16_narrow, ///< bf16_gemv_narrow, no pack
     bf16_bkc, ///< bf16_gemv_bkc over the BKC pack
     int8_bkc, ///< int8_gemv_bkc over the INT8 BKC pack
 };
 
-/// The name of kernel in the [MATMUL.NATIVE_BRGEMM] line.
+/// The name of kernel.
 const char *native_gemv_name(native_gemv_t kernel);
 
 /// The GEMV choice of a call: the kernel and the post-op it fuses into its
@@ -51,9 +54,9 @@ struct native_gemv_plan_t {
     fused_postop_t fused = fused_postop_t::none;
 };
 
-/// The GEMV plan choice of an M = 1 call that asks for the native BRGEMM, on
-/// its raw weight (none for any other call, and for K above the layout
-/// rule's bound of a bf16 or s8 weight): for a call without a gated
+/// The GEMV plan choice of an M = 1 call on its raw weight (none for any
+/// other call, and for K above the layout rule's bound of a bf16 or s8
+/// weight): for a call without a gated
 /// activation, alpha 0 or a Swish of alpha other than 1, the kernel of
 /// bf16_gemv_choice for a bf16 source and weight when the team of
 /// m1_gemv_cap_threads over desc.num_threads is one thread, or of
@@ -69,17 +72,17 @@ native_gemv_plan_t decide_native_gemv(
         const GemmDescriptor &desc, const matmul_params &params);
 
 /// Runs plan (kernel not none, decide_native_gemv's for desc and params) on
-/// the raw weight on the calling thread, under the call's effective weight
-/// cache mode (native_weight_ref_t::weight_cache_mode): at 1 or 2 the BKC
-/// kernels read the pack cached for the weight pointer and the request,
-/// packed again when the two ends of the weight's bytes no longer hold the
-/// words the pack read (the bytes whose digests get_native_layout checks),
-/// at 0 (and past ZENDNNL_LRU_CACHE_CAPACITY cached packs) a pack made for
-/// this call.
+/// the raw weight on the calling thread, under weight_cache_mode: at 1 or 2
+/// the BKC kernels read the pack cached for the weight pointer and the
+/// request, packed again when the two ends of the weight's bytes no longer
+/// hold the words the pack read (the bytes whose digests get_native_layout
+/// checks), at 0 (and past ZENDNNL_LRU_CACHE_CAPACITY cached packs) a pack
+/// made for this call.  The operands must be valid for the call (non-null,
+/// leading dimensions that span its rows).
 /// Returns success; failure, with dst untouched, when a buffer cannot
 /// be allocated before the kernel starts; unimplemented, with dst untouched,
-/// when a bf16 kernel finds the buffer rewritten in place since the call
-/// found its raw weight (the native tiles serve the call from the image).
+/// when a bf16 kernel finds the buffer rewritten in place by the native
+/// BRGEMM (only the native tiles read the image).
 status_t run_native_gemv(const native_gemv_plan_t &plan,
         const GemmDescriptor &desc, const void *src, const void *weight,
         void *dst, const void *bias, const matmul_params &params,

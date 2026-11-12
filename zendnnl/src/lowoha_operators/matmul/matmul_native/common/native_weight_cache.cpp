@@ -394,7 +394,8 @@ status_t pack_from_source(const native_raw_weight_t &w,
     }
     const native_raw_weight_t &img = image->layout;
     const size_t extent = static_cast<size_t>(img.K) * img.N;
-    if (img.wei_dt != data_type_t::bf16 || w.wei_dt != img.wei_dt
+    const bool f16 = img.wei_dt == data_type_t::f16;
+    if ((img.wei_dt != data_type_t::bf16 && !f16) || w.wei_dt != img.wei_dt
             || native_raw_weight_bytes(w.wei_dt, w.K, w.N, w.ldb, w.transB)
                     > extent * sizeof(uint16_t)
             || image->bytes > owned) {
@@ -414,8 +415,8 @@ status_t pack_from_source(const native_raw_weight_t &w,
                 extent * sizeof(uint16_t), " bytes)");
         return status_t::failure;
     }
-    native_unpack_bf16(image->layout.weight, img.K, img.N, img.ldb, img.pack_nr,
-            img.transB, raw.get(), num_threads);
+    (f16 ? native_unpack_f16 : native_unpack_bf16)(image->layout.weight, img.K,
+            img.N, img.ldb, img.pack_nr, img.transB, raw.get(), num_threads);
     return native_pack_weight(w.wei_dt, raw.get(), w.K, w.N, w.ldb, w.pack_nr,
             w.transB, dst, num_threads);
 }
@@ -693,7 +694,7 @@ void wait_for_memo_checks() {
 }
 
 /// Rewrites w's buffer in place into the used bytes of its layout, from its
-/// AOCL prepack (aocl) or from the raw bf16 or s4 weight.  Entered and left
+/// AOCL prepack (aocl) or from the raw weight.  Entered and left
 /// with the mutex held exclusively; the pack and the write-back run outside
 /// it, with the buffer in packing and its image record reserved, so calls on
 /// the buffer wait and the other calls go on, and once no read of other
@@ -1132,9 +1133,10 @@ lookup_t find_layout_exclusive(const layout_request_t &r, native_image_t &image,
 }
 
 /// Weight cache mode 2 on a buffer with no image: rewrites it in place when
-/// its layout fits it (an AOCL prepack, or a contiguous bf16 or s4 weight).
-/// done is set when the buffer is rewritten; a failed AOCL rewrite returns
-/// its status, a failed bf16 or s4 one leaves r to the out-of-place pack.  A
+/// its layout fits it (an AOCL prepack, or a contiguous bf16, f16 or s4
+/// weight).  done is set when the buffer is rewritten; a failed AOCL rewrite
+/// returns its status, a failed bf16, f16 or s4 one leaves r to the
+/// out-of-place pack.  A
 /// layout of padded columns (N not a multiple of pack_nr) is never written in
 /// place.  With the mutex held exclusively (rewrite_in_place).
 status_t rewrite_if_fits(exclusive_lock_t &lock, const layout_request_t &r,
@@ -1152,7 +1154,8 @@ status_t rewrite_if_fits(exclusive_lock_t &lock, const layout_request_t &r,
                 lock, w, used, r.owned, r.bytes, true, r.num_threads);
         if (st != status_t::success) return st;
     } else {
-        if ((w.wei_dt != data_type_t::bf16 && w.wei_dt != data_type_t::s4)
+        if ((w.wei_dt != data_type_t::bf16 && w.wei_dt != data_type_t::s4
+                    && w.wei_dt != data_type_t::f16)
                 || !contiguous)
             return status_t::success;
         const size_t plain

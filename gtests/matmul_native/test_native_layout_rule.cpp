@@ -28,6 +28,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <random>
 #include <string>
 #include <vector>
@@ -112,7 +113,8 @@ native::native_layout_query_t query(data_type_t wei, data_type_t src, int K,
 }
 
 bool isa_for(data_type_t wei) {
-    if (wei == data_type_t::f32) return native::native_base_isa();
+    if (wei == data_type_t::f32 || wei == data_type_t::f16)
+        return native::native_base_isa();
     return wei == data_type_t::bf16 ? has_bf16() : has_vnni();
 }
 
@@ -169,8 +171,16 @@ TEST(NativeLayoutRule, F32WeightNeedsF32Source) {
     }
 }
 
+TEST(NativeLayoutRule, F16WeightNeedsF16Source) {
+    expect_native(query(data_type_t::f16, data_type_t::f16, 64, 64));
+    expect_native(query(data_type_t::f16, data_type_t::f16, 7, 33));
+    for (data_type_t src : {data_type_t::bf16, data_type_t::f32,
+                 data_type_t::s8, data_type_t::u8, data_type_t::none}) {
+        expect_aocl(query(data_type_t::f16, src, 64, 64));
+    }
+}
+
 TEST(NativeLayoutRule, OtherWeightTypesStayOnAocl) {
-    expect_aocl(query(data_type_t::f16, data_type_t::f16, 64, 64));
     expect_aocl(query(data_type_t::s4, data_type_t::bf16, 64, 64));
     expect_aocl(query(data_type_t::s4, data_type_t::u8, 64, 64));
     expect_aocl(query(data_type_t::u4, data_type_t::bf16, 64, 64));
@@ -217,6 +227,77 @@ TEST(NativeLayoutRule, KIsPositiveAndS8KIsBounded) {
     expect_aocl(query(data_type_t::s8, data_type_t::u8, kBound + 1, 64));
     expect_native(query(data_type_t::bf16, data_type_t::bf16, kBound + 1, 64));
     expect_native(query(data_type_t::f32, data_type_t::f32, kBound + 1, 64));
+}
+
+// N up to 2147483616, the largest multiple of 32 an int holds: the layout
+// holds a weight's N rounded up to whole blocks of 32 columns, the width the
+// planner, the packers and the tiles run on.  The layout rule refuses a
+// larger N for every weight type, and the native BRGEMM turns a call of it
+// away before any work (no buffer is read).
+TEST(NativeLayoutRule, NWhoseBlocksExceedAnInt) {
+    constexpr int kBound = native::kMaxNativeN;
+    EXPECT_EQ(kBound, 2147483616);
+    EXPECT_EQ(native::native_padded_n(kBound, kNr), kBound);
+    const char *const reason
+            = "a weight of N whose whole blocks of 32 columns exceed int";
+    struct types_t {
+        data_type_t wei, src;
+    };
+    const types_t types[] = {{data_type_t::bf16, data_type_t::bf16},
+            {data_type_t::s8, data_type_t::u8},
+            {data_type_t::s8, data_type_t::s8},
+            {data_type_t::s4, data_type_t::s8},
+            {data_type_t::f32, data_type_t::f32},
+            {data_type_t::f16, data_type_t::f16}};
+    for (const types_t t : types) {
+        SCOPED_TRACE(::testing::Message()
+                << "wei " << static_cast<int>(t.wei) << " src "
+                << static_cast<int>(t.src));
+        const bool isa = native::native_base_isa() && isa_for(t.wei);
+        for (const bool transB : {false, true}) {
+            expect_native(query(t.wei, t.src, 64, kBound, 0, transB));
+            EXPECT_TRUE(native::native_layout_fits(t.wei, 64, kBound, kNr));
+            for (const int N :
+                    {kBound + 1, std::numeric_limits<int32_t>::max()}) {
+                const native::native_layout_query_t q
+                        = query(t.wei, t.src, 64, N, 0, transB);
+                expect_aocl(q);
+                EXPECT_FALSE(native::native_layout_fits(t.wei, 64, N, kNr))
+                        << N;
+                if (isa) {
+                    EXPECT_STREQ(native::decide_native_layout(q).reason, reason)
+                            << N;
+                }
+            }
+        }
+    }
+
+    // M = K = 1 and N = ldb = ldc = kBound + 1 over buffers of 128 bytes.
+    if (!native::native_base_isa())
+        GTEST_SKIP() << "needs AVX-512 F, BW, VL and DQ and FMA";
+    mm::clear_matmul_weight_caches();
+    const int N = kBound + 1;
+    alignas(64) uint16_t buf[64] = {};
+    for (const types_t t : types) {
+        if (!isa_for(t.wei)) continue;
+        SCOPED_TRACE(::testing::Message()
+                << "wei " << static_cast<int>(t.wei) << " src "
+                << static_cast<int>(t.src));
+        matmul_params p;
+        p.dtypes.src = t.src;
+        p.dtypes.wei = t.wei;
+        p.dtypes.dst = t.wei == data_type_t::s8 || t.wei == data_type_t::s4
+                ? data_type_t::f32
+                : t.wei;
+        p.lowoha_algo = matmul_algo_t::native_brgemm;
+        status_t status = status_t::success;
+        const char *why = nullptr;
+        EXPECT_TRUE(native::native_layout_check('r', false, false, 1, N, 1,
+                1.0f, buf, 1, buf, N, nullptr, 0.0f, buf, N, true, 1, 1,
+                matmul_gated_act_t::none, p, status, why));
+        EXPECT_EQ(status, status_t::unimplemented);
+        EXPECT_STREQ(why != nullptr ? why : "", reason);
+    }
 }
 
 // A bf16 weight of K up to 67108864 (2^26): the bf16 kernels offset its K
@@ -1629,11 +1710,13 @@ TEST_F(NativeLayoutRuleRoute, CustomKernelImageIsNotTaken) {
 }
 
 // A bf16 call with an f16 dst, run end to end on the native BRGEMM, holds the
-// reference product.
+// reference product, on a CPU without AVX512-FP16 too.  The same call
+// column-major on a weight that changes, which the native BRGEMM does not
+// serve, keeps the native error, with lowoha_algo native_brgemm and under
+// ZENDNNL_MATMUL_ALGO=10 alike: the default route has no kernel of a bf16
+// source into an f16 dst.  dst stays untouched.
 TEST_F(NativeLayoutRuleRoute, F16DstIsServedEndToEnd) {
     if (!has_bf16()) GTEST_SKIP() << "needs AVX512-BF16";
-    if (!zendnnl::common::zendnnl_platform_info().get_avx512_f16_status())
-        GTEST_SKIP() << "matmul_direct takes an f16 dst only with AVX512-FP16";
     for (bool per_call : {true, false}) {
         SCOPED_TRACE(per_call ? "lowoha_algo=native_brgemm"
                               : "ZENDNNL_MATMUL_ALGO=10");
@@ -1654,6 +1737,20 @@ TEST_F(NativeLayoutRuleRoute, F16DstIsServedEndToEnd) {
         for (size_t i = 0; i < dst.size(); ++i)
             got[i] = static_cast<float>(dst[i]);
         expect_matches_reference(c, got, c.N, 2e-3);
+
+        // Column-major: src [K, M] M apart, the weight [K, N] K apart, dst
+        // [N, M] M apart.
+        std::vector<bfloat16_t> w2 = c.wei;
+        const std::vector<zendnnl::common::float16_t> before = dst;
+        mm::matmul_batch_params_t bp;
+        const status_t st = mm::matmul_direct('c', false, false, c.M, c.N, c.K,
+                1.0f, c.src.data(), c.M, w2.data(), c.K, nullptr, 0.0f,
+                dst.data(), c.M, false, bp, p, nullptr);
+        EXPECT_EQ(st, status_t::unimplemented);
+        EXPECT_EQ(std::memcmp(dst.data(), before.data(),
+                          dst.size() * sizeof(dst[0])),
+                0);
+        EXPECT_EQ(native::native_weight_layouts(w2.data()), 0u);
     }
 }
 

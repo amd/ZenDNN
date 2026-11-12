@@ -29,12 +29,12 @@ namespace native {
 
 /// The INT8 GEMV kernel of an M = 1 call (none for any other call): a u8 /
 /// s8 source and an s8 weight to a bf16 / f32 dst on a CPU with
-/// AVX512-VNNI, one thread, no transposed source, ldc == N, the BKC pack of
-/// the weight (K in quads, N in BKC_NR_PAD columns) within the L2, at most
-/// one post-op that the kernel fuses (scan_gemv_postops), a per-tensor f32
-/// source scale and s32 / s8 / u8 zero point, f32 weight scales per tensor
-/// or per column, no weight zero point, dst scale or dst zero point, and
-/// alpha 1 and beta 0.
+/// AVX512-VNNI, no bias or a bf16 / f32 one, one thread, no transposed
+/// source, ldc == N, the BKC pack of the weight (K in quads, N in
+/// BKC_NR_PAD columns) within the L2, at most one post-op that the kernel
+/// fuses (scan_gemv_postops), a per-tensor f32 source scale and s32 / s8 /
+/// u8 zero point, f32 weight scales per tensor or per column, no weight
+/// zero point, dst scale or dst zero point, and alpha 1 and beta 0.
 /// int8_bkc then: K-contiguous VNNI packing with vpdpbusd, the pack and its
 /// column sums cached globally at a weight cache mode other than 0 (else
 /// made for the call), and the dequantization per column (combined scale

@@ -452,7 +452,10 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
         return status_t::failure;
     }
 
-    if (is_bf16_src && is_f16_out) {
+    // The native BRGEMM also rounds a bf16 x bf16 call's results to f16.
+    if (is_bf16_src && is_f16_out
+            && !(native && params.dtypes.wei == data_type_t::bf16
+                    && !params.dynamic_quant)) {
         log_error(
                 "Unsupported GEMM configuration: BF16 source with F16 "
                 "destination");

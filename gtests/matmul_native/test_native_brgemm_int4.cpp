@@ -1147,7 +1147,8 @@ std::vector<case_t> call_cases() {
         }
     // Bias, post-ops and the epilogue of either order; into an f32 dst too,
     // which keeps the rounding of the source scale's product before the
-    // bias.  matmul_direct takes an f16 bias only on a CPU with AVX512-FP16.
+    // bias.  The f16-bias cases call the native BRGEMM directly, on any CPU
+    // of its instruction sets.
     for (data_type_t b : {kF32, kBf16, kF16})
         for (gran_t gran : {gran_t::token, gran_t::group}) {
             case_t c;
@@ -1615,7 +1616,8 @@ TEST(NativeBrgemmInt4LayoutRule, TakesAndDeclines) {
             "an s4 weight group above the int32 accumulation bound");
     nat::native_layout_query_t u4 = q;
     u4.wei_dt = data_type_t::u4;
-    EXPECT_EQ(declined(u4), "weight type other than bf16 / s8 / s4 / f32");
+    EXPECT_EQ(
+            declined(u4), "weight type other than bf16 / s8 / s4 / f32 / f16");
 }
 
 // matmul_direct's checks take f16 weight scales of a DA8W4 call only when

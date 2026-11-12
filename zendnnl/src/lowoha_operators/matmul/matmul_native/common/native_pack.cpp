@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <limits>
 
 #include <immintrin.h>
 #include <omp.h>
@@ -125,13 +126,34 @@ inline __m512i s4_octets(__m512i v) {
     return _mm512_xor_si512(v, _mm512_set1_epi8(static_cast<char>(0x88)));
 }
 
+/// Bytes of a K row of a block of an f16 weight: 32 columns of 2 bytes.
+constexpr size_t kF16RowBytes = kBlockCols * sizeof(uint16_t);
+
+/// The word permutes of 32 pack columns of K pairs of 16-bit values (lo
+/// columns 0 .. 15, hi 16 .. 31) into their two K rows, built at compile
+/// time: v[0] makes the first row of the pair, v[1] the second.
+struct f16_row_idx_t {
+    alignas(64) uint16_t v[2][32] {};
+    constexpr f16_row_idx_t() {
+        for (int j = 0; j < 32; ++j) {
+            v[0][j] = static_cast<uint16_t>(2 * j);
+            v[1][j] = static_cast<uint16_t>(2 * j + 1);
+        }
+    }
+};
+
+inline constexpr f16_row_idx_t kF16RowIdx {};
+
 /// The block of pack columns p0 .. p0 + 31 of a weight stored [N, K]
 /// (transB): each pack column is a row of the buffer, row_bytes apart, of
 /// which k_bytes are the weight's; groups K groups of 4 bytes.  Sums: the s8
 /// column sums follow the groups.  S4: each group of 4 bytes is an s4 octet,
-/// stored as s4_octets makes it.  Tail: only the first cols pack columns
-/// hold weight columns; the others are zero and their rows are not read.
-template <bool Sums, bool Tail, bool S4 = false>
+/// stored as s4_octets makes it.  F16Rows: each group of 4 bytes is a K pair
+/// of an f16 column, stored as the two K rows of 32 columns the pair holds
+/// (none past the k_bytes / 2 rows of the weight).  Tail: only the first
+/// cols pack columns hold weight columns; the others are zero and their rows
+/// are not read.
+template <bool Sums, bool Tail, bool S4 = false, bool F16Rows = false>
 ZENDNNL_TARGET("avx512f,avx512bw")
 void pack_block_rows_of_n(const uint8_t *w, size_t row_bytes, size_t k_bytes,
         int groups, int p0, uint8_t *blk, int cols) {
@@ -158,6 +180,18 @@ void pack_block_rows_of_n(const uint8_t *w, size_t row_bytes, size_t k_bytes,
             if constexpr (S4) {
                 lo = s4_octets(lo);
                 hi = s4_octets(hi);
+            }
+            if constexpr (F16Rows) {
+                const size_t k = 2 * static_cast<size_t>(g0 + q);
+                uint8_t *d = blk + k * kF16RowBytes;
+                _mm512_storeu_si512(d,
+                        _mm512_permutex2var_epi16(
+                                lo, _mm512_load_si512(kF16RowIdx.v[0]), hi));
+                if (k + 1 < k_bytes / sizeof(uint16_t))
+                    _mm512_storeu_si512(d + kF16RowBytes,
+                            _mm512_permutex2var_epi16(lo,
+                                    _mm512_load_si512(kF16RowIdx.v[1]), hi));
+                continue;
             }
             uint8_t *d = blk + static_cast<size_t>(g0 + q) * kGroupRowBytes;
             _mm512_storeu_si512(d, lo);
@@ -335,6 +369,55 @@ void pack_f32_tile_rows_of_k(const float *w, size_t ldb, int k0, int k1,
     }
 }
 
+/// Pack columns p0 .. p0 + 31 of a row of an f16 weight stored [K, N], at
+/// d.  Tail: only the first cols pack columns (cols below 32) hold weight
+/// columns; the others are zero.
+template <bool Tail>
+ZENDNNL_TARGET("avx512f,avx512bw")
+inline void pack_f16_row(const uint16_t *row, int p0, uint16_t *d, int cols) {
+    if constexpr (Tail) {
+        _mm512_storeu_si512(d,
+                _mm512_maskz_loadu_epi16(
+                        (__mmask32 {1} << cols) - 1, row + p0));
+    } else {
+        (void)cols;
+        _mm512_storeu_si512(d, _mm512_loadu_si512(row + p0));
+    }
+}
+
+/// The block of pack columns p0 .. p0 + 31 of an f16 weight stored [K, N];
+/// Tail as pack_f16_row.
+template <bool Tail>
+ZENDNNL_TARGET("avx512f,avx512bw")
+void pack_f16_block_rows_of_k(
+        const uint16_t *w, int K, size_t ldb, int p0, uint16_t *blk, int cols) {
+    for (int k = 0; k < K; ++k)
+        pack_f16_row<Tail>(w + static_cast<size_t>(k) * ldb, p0,
+                blk + static_cast<size_t>(k) * kBlockCols, cols);
+}
+
+/// Rows k0 .. k1 (at most kTileGroups) of blocks nb0 .. nb1 (at most
+/// kTileBlocks) of an f16 weight stored [K, N] into the layout at out, whose
+/// blocks are block_bytes long.
+ZENDNNL_TARGET("avx512f,avx512bw")
+void pack_f16_tile_rows_of_k(const uint16_t *w, size_t ldb, int k0, int k1,
+        int nb0, int nb1, size_t block_bytes, uint8_t *out) {
+    alignas(64) uint16_t tile[kTileBlocks][kTileGroups * kBlockCols];
+    for (int k = k0; k < k1; ++k)
+        for (int nb = nb0; nb < nb1; ++nb)
+            pack_f16_row<false>(w + static_cast<size_t>(k) * ldb,
+                    nb * kBlockCols, tile[nb - nb0] + (k - k0) * kBlockCols,
+                    kBlockCols);
+    const size_t part = static_cast<size_t>(k1 - k0) * kF16RowBytes;
+    for (int nb = nb0; nb < nb1; ++nb) {
+        const uint8_t *s = reinterpret_cast<const uint8_t *>(tile[nb - nb0]);
+        uint8_t *d = out + static_cast<size_t>(nb) * block_bytes
+                + static_cast<size_t>(k0) * kF16RowBytes;
+        for (size_t i = 0; i < part; i += 64)
+            _mm512_storeu_si512(d + i, _mm512_load_si512(s + i));
+    }
+}
+
 /// Pack columns p0 .. p0 + 31 of a row of an s8 weight stored [K, N].
 /// Tail: only the first cols pack columns (cols below 32) hold weight
 /// columns; the others read as zero.
@@ -491,6 +574,39 @@ void pack_f32_block(const float *w, int K, int N, size_t ldb, int pack_nr,
         pack_f32_block_rows_of_k<Tail>(w, K, ldb, p0, blk, cols);
 }
 
+/// The block nb of an f16 weight; Tail as pack_bf16_block.  Stored [N, K],
+/// its K pairs are read as the groups of 4 bytes of a bf16 weight.
+template <bool TransB, bool Tail>
+void pack_f16_block(const uint16_t *w, int K, int N, size_t ldb, int pack_nr,
+        int nb, uint16_t *blk) {
+    const int p0 = nb * pack_nr;
+    const int cols = N - p0;
+    if constexpr (TransB)
+        pack_block_rows_of_n<false, Tail, false, true>(
+                reinterpret_cast<const uint8_t *>(w), ldb * sizeof(uint16_t),
+                static_cast<size_t>(K) * sizeof(uint16_t),
+                native_k_groups(data_type_t::bf16, K), p0,
+                reinterpret_cast<uint8_t *>(blk), cols);
+    else
+        pack_f16_block_rows_of_k<Tail>(w, K, ldb, p0, blk, cols);
+}
+
+template <bool TransB>
+void unpack_f16_block(const uint16_t *blk, int K, size_t ldb, int pack_nr,
+        int nb, uint16_t *w) {
+    const int p0 = nb * pack_nr;
+    for (int k = 0; k < K; ++k) {
+        const uint16_t *d = blk + static_cast<size_t>(k) * pack_nr;
+        for (int j = 0; j < pack_nr; ++j) {
+            const size_t c = static_cast<size_t>(p0 + j);
+            if constexpr (TransB)
+                w[c * ldb + k] = d[j];
+            else
+                w[static_cast<size_t>(k) * ldb + c] = d[j];
+        }
+    }
+}
+
 template <bool TransB>
 void unpack_bf16_block(const uint16_t *blk, int K, size_t ldb, int pack_nr,
         int nb, uint16_t *w) {
@@ -560,13 +676,15 @@ void pack_typed(data_type_t wei_dt, const void *weight, int K, int N,
                     w, K, N, ldb, pack_nr, n_blocks, tail_blk);
         return;
     }
+    const int tiles = !TransB && K >= kTileMinK
+            ? native_pack_tiles(n_blocks, native_k_groups(wei_dt, K))
+            : 0;
     if (wei_dt == data_type_t::f32) {
         const float *w = static_cast<const float *>(weight);
-        if (!TransB && K >= kTileMinK) {
+        if (tiles > 0) {
             const int groups = ceil_div(n_blocks, kTileBlocks);
-            const int chunks = ceil_div(K, kTileGroups);
             // Row chunks outer: the tiles of a thread take its rows in order.
-            for_each_part(groups * chunks, num_threads, [=](int t) {
+            for_each_part(tiles, num_threads, [=](int t) {
                 const int g = t % groups;
                 const int c = t / groups;
                 pack_f32_tile_rows_of_k(w, ldb, c * kTileGroups,
@@ -585,13 +703,36 @@ void pack_typed(data_type_t wei_dt, const void *weight, int K, int N,
                     reinterpret_cast<float *>(tail_blk));
         return;
     }
+    if (wei_dt == data_type_t::f16) {
+        const uint16_t *w = static_cast<const uint16_t *>(weight);
+        if (tiles > 0) {
+            const int groups = ceil_div(n_blocks, kTileBlocks);
+            // Row chunks outer: the tiles of a thread take its rows in order.
+            for_each_part(tiles, num_threads, [=](int t) {
+                const int g = t % groups;
+                const int c = t / groups;
+                pack_f16_tile_rows_of_k(w, ldb, c * kTileGroups,
+                        std::min(K, (c + 1) * kTileGroups), g * kTileBlocks,
+                        std::min(n_blocks, (g + 1) * kTileBlocks), block_bytes,
+                        out);
+            });
+        } else {
+            for_each_part(n_blocks, num_threads, [=](int nb) {
+                pack_f16_block<TransB, false>(w, K, N, ldb, pack_nr, nb,
+                        reinterpret_cast<uint16_t *>(out + nb * block_bytes));
+            });
+        }
+        if (tail)
+            pack_f16_block<TransB, true>(w, K, N, ldb, pack_nr, n_blocks,
+                    reinterpret_cast<uint16_t *>(tail_blk));
+        return;
+    }
     const uint16_t *w = static_cast<const uint16_t *>(weight);
-    if (!TransB && K >= kTileMinK) {
+    if (tiles > 0) {
         const int k_pairs = native_k_groups(data_type_t::bf16, K);
         const int groups = ceil_div(n_blocks, kTileBlocks);
-        const int chunks = ceil_div(k_pairs, kTileGroups);
         // K pair chunks outer: the tiles of a thread take its rows in order.
-        for_each_part(groups * chunks, num_threads, [=](int t) {
+        for_each_part(tiles, num_threads, [=](int t) {
             const int g = t % groups;
             const int c = t / groups;
             pack_bf16_tile_rows_of_k(w, K, ldb, c * kTileGroups,
@@ -624,7 +765,27 @@ void unpack_typed(const void *packed, int K, int N, size_t ldb, int pack_nr,
     });
 }
 
+template <bool TransB>
+void unpack_f16_typed(const void *packed, int K, int N, size_t ldb, int pack_nr,
+        void *weight, int num_threads) {
+    const size_t block_bytes = native_block_bytes(data_type_t::f16, K, pack_nr);
+    const uint8_t *in = static_cast<const uint8_t *>(packed);
+    uint16_t *w = static_cast<uint16_t *>(weight);
+    for_each_part(N / pack_nr, num_threads, [=](int nb) {
+        unpack_f16_block<TransB>(
+                reinterpret_cast<const uint16_t *>(in + nb * block_bytes), K,
+                ldb, pack_nr, nb, w);
+    });
+}
+
 } // namespace
+
+int native_pack_tiles(int n_blocks, int k_groups) {
+    const int64_t tiles = int64_t {ceil_div(n_blocks, kTileBlocks)}
+            * ceil_div(k_groups, kTileGroups);
+    return tiles <= std::numeric_limits<int>::max() ? static_cast<int>(tiles)
+                                                    : 0;
+}
 
 size_t native_packed_bytes(data_type_t wei_dt, int K, int N, int pack_nr) {
     assert(native_layout_fits(wei_dt, K, N, pack_nr));
@@ -658,6 +819,15 @@ void native_unpack_bf16(const void *packed, int K, int N, int ldb, int pack_nr,
         unpack_typed<true>(packed, K, N, ld, pack_nr, weight, num_threads);
     else
         unpack_typed<false>(packed, K, N, ld, pack_nr, weight, num_threads);
+}
+
+void native_unpack_f16(const void *packed, int K, int N, int ldb, int pack_nr,
+        bool transB, void *weight, int num_threads) {
+    const size_t ld = static_cast<size_t>(ldb);
+    if (transB)
+        unpack_f16_typed<true>(packed, K, N, ld, pack_nr, weight, num_threads);
+    else
+        unpack_f16_typed<false>(packed, K, N, ld, pack_nr, weight, num_threads);
 }
 
 } // namespace native

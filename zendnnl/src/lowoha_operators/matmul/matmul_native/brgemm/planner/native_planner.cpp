@@ -106,17 +106,30 @@ int call_rows(const heuristic_params_t &hp, bool int8, int nr) {
     return !int8 && nr >= 32 ? hp.tall_rows : hp.tile_rows;
 }
 
-/// The kernels of p's tile: BF16 and FP32 run one kernel per row call and
-/// K pass, INT8 its own tile.
+/// The kernels of p's tile: BF16, FP32, F16 and F16_PH run one kernel per
+/// row call and K pass, INT8 its own tile.
 native_kernel_kind_t kernel_kind(const native_problem_t &p) {
     if (p.int8()) return native_kernel_kind_t::int8;
+    if (p.f16()) return native_kernel_registry().f16_kind();
     return p.f32() ? native_kernel_kind_t::f32 : native_kernel_kind_t::bf16;
 }
 
-/// Bytes of a source element the kernels read (of a weight element too, but
-/// for an s4 weight): the L1, L2 and L3 rules weigh rows and slabs by it.
+/// The widest tile of p's plans without a pinned nr: kMaxTileCols columns,
+/// or on the F16_PH kernels from f16_wide_min_m rows, whose tile of two
+/// blocks shares each source broadcast, two blocks of kMaxTileCols where N
+/// is whole tiles of them.
+int widest_tile(const native_problem_t &p, native_kernel_kind_t kind,
+        const heuristic_params_t &hp) {
+    if (kind == native_kernel_kind_t::f16_ph && p.M >= hp.f16_wide_min_m
+            && p.pack_nr == kMaxTileCols && p.N % (2 * kMaxTileCols) == 0)
+        return 2 * kMaxTileCols;
+    return std::min(p.pack_nr, kMaxTileCols);
+}
+
+/// Bytes of a source element of the call (of a weight element too, but for
+/// an s4 weight): the L1, L2 and L3 rules weigh rows and slabs by it.
 int elem_bytes(const native_problem_t &p) {
-    return p.f32() ? 4 : (p.bf16() ? 2 : 1);
+    return p.f32() ? 4 : (p.bf16() || p.f16() ? 2 : 1);
 }
 
 /// Bytes of a weight element: elem_bytes, half a byte for an s4 weight.
@@ -132,6 +145,7 @@ int row_byte_units(const native_problem_t &p) {
 }
 
 const char *dtype_name(const native_problem_t &p) {
+    if (p.f16()) return "f16";
     return p.f32() ? "f32" : (p.bf16() ? "bf16" : (p.int4() ? "s4" : "s8"));
 }
 
@@ -275,7 +289,7 @@ grid_t makespan_grid(const native_problem_t &p, const heuristic_params_t &hp,
     // No grid gives its busiest worker less than an even share of the least
     // total work: the widest tiles in one row block for bytes, every column
     // of the widest tiles times M for flops.
-    const int widest = hp.nr > 0 ? hp.nr : std::min(p.pack_nr, kMaxTileCols);
+    const int widest = hp.nr > 0 ? hp.nr : widest_tile(p, kernel_kind(p), hp);
     if (widest <= 0) return base;
     const int64_t tiles = N / widest;
     const int64_t least = bytes != 0
@@ -537,7 +551,9 @@ native_plan_t rules_plan(const native_problem_t &p, const UarchParams &uarch,
     // Every division below has a positive divisor for any input, so a pin
     // that cannot serve the problem reaches validate_native_plan.
     native_plan_t q;
-    q.nr = hp.nr > 0 ? hp.nr : std::min(p.pack_nr, kMaxTileCols);
+    q.kind = p.int4() ? native_kernel_kind_t::int4 : kernel_kind(p);
+    const bool f16_ph = q.kind == native_kernel_kind_t::f16_ph;
+    q.nr = hp.nr > 0 ? hp.nr : widest_tile(p, q.kind, hp);
     q.mb = std::max(1, std::min(M, hp.mb > 0 ? hp.mb : hp.block_rows));
     auto count = [&q, M, N]() {
         q.m_blocks = ceil_div(M, q.mb);
@@ -576,10 +592,12 @@ native_plan_t rules_plan(const native_problem_t &p, const UarchParams &uarch,
     // call map to one L1 set, so a block of more than bf16_alias_mr rows
     // takes at most bf16_alias_mr rows per call (a block of 9 to 12 rows
     // then takes two calls).  A row-major source counts as rows K apart (the
-    // problem carries no row stride).
+    // problem carries no row stride).  The widened rows of an f16 source
+    // the F16 kernels read are never a multiple of 4 KiB apart.
     constexpr int kAliasBytes = 4096;
-    if (!int8 && on.bf16_alias && hp.mr == 0 && K % (kAliasBytes / esz) == 0
-            && M > hp.decode_m && q.nr >= 32 && q.mb > hp.bf16_alias_mr)
+    if (!int8 && q.kind != native_kernel_kind_t::f16 && on.bf16_alias
+            && hp.mr == 0 && K % (kAliasBytes / esz) == 0 && M > hp.decode_m
+            && q.nr >= 32 && q.mb > hp.bf16_alias_mr)
         q.mr = std::min(q.mr, hp.bf16_alias_mr);
     q.threads = std::max(1,
             std::min(
@@ -613,6 +631,12 @@ native_plan_t rules_plan(const native_problem_t &p, const UarchParams &uarch,
             }
         }
     }
+    // The F16_PH kernels accumulate blocks of kNativeF16AccumBlockK steps
+    // from the start of each call's K: K passes of whole blocks keep every
+    // block at the same K whatever the plan.
+    if (f16_ph && q.kc < K)
+        q.kc = std::max(kNativeF16AccumBlockK,
+                q.kc / kNativeF16AccumBlockK * kNativeF16AccumBlockK);
 
     // Unless every thread takes whole columns, the slices of the tile order
     // start at different row blocks.  When the source and the B slabs of one
@@ -807,8 +831,8 @@ bool row_groups_split(int M, int unit, const heuristic_params_t &hp) {
             <= static_cast<int64_t>(M) * hp.cm_group_rows_pct;
 }
 
-/// The cost model's plan for the rules' BF16 plan q of tiles of 32 columns
-/// or more and at least as many column tiles as threads: q, unless a
+/// The cost model's plan for the rules' BF16 or F16 plan q of tiles of 32
+/// columns or more and at least as many column tiles as threads: q, unless a
 /// variant of the rules or a pair of variants is modeled more than
 /// cm_gain_pct percent faster; then the fastest, the earlier on a tie.  The
 /// variants vary only what hp leaves to the rules: cm_short_rows rows per
@@ -827,7 +851,8 @@ bool row_groups_split(int M, int unit, const heuristic_params_t &hp) {
 /// the blocks rules.
 native_plan_t model_plan(const native_problem_t &p, const UarchParams &uarch,
         const heuristic_params_t &hp, const native_plan_t &q) {
-    if (!p.bf16() || q.nr < kMaxTileCols || q.mr < 1 || q.n_tiles < q.threads)
+    if ((!p.bf16() && !p.f16()) || q.nr < kMaxTileCols || q.mr < 1
+            || q.n_tiles < q.threads)
         return q;
     // Shorter calls change only blocks taller than them, and past one row
     // block they gain only through the price of taller calls.  Two row
@@ -1070,8 +1095,11 @@ const char *validate_native_plan(
     const bool bf16 = p.bf16();
     const bool narrow = (q.nr == 16 || q.nr == 32) && q.nr <= p.pack_nr
             && p.pack_nr % q.nr == 0;
-    if (!narrow && !(bf16 && bf16_wide_width(q.nr, p.pack_nr)))
-        return "nr is not 16 or 32 dividing pack_nr, or for BF16 64 or 128";
+    const bool f16_ph_wide = q.kind == native_kernel_kind_t::f16_ph
+            && p.pack_nr == kMaxTileCols && q.nr == 2 * kMaxTileCols;
+    if (!narrow && !(bf16 && bf16_wide_width(q.nr, p.pack_nr)) && !f16_ph_wide)
+        return "nr is not 16 or 32 dividing pack_nr, or for BF16 64 or 128, "
+               "or for F16_PH two blocks";
     if (q.mb < 1 || q.mb > p.M || q.m_blocks != ceil_div(p.M, q.mb)
             || q.n_tiles < 1 || p.N % q.nr != 0 || q.n_tiles != p.N / q.nr)
         return "the tile grid does not match M, N, mb and nr";
@@ -1083,7 +1111,18 @@ const char *validate_native_plan(
         return "kc is below K and not an even number of at least 2";
     if (p.f32() && !kernels.covers(native_kernel_kind_t::f32, q.mr, q.nr))
         return "no FP32 kernel for every row count 1 .. mr at nr";
-    if (p.f32() && q.kc < 1) return "kc is below 1";
+    const bool f16_ph = q.kind == native_kernel_kind_t::f16_ph;
+    if (p.f16() && !f16_ph
+            && !kernels.covers(native_kernel_kind_t::f16, q.mr, q.nr))
+        return "no F16 kernel for every row count 1 .. mr at nr";
+    if (f16_ph
+            && (!p.f16()
+                    || !kernels.covers(
+                            native_kernel_kind_t::f16_ph, q.mr, q.nr)))
+        return "no F16_PH kernel for every row count 1 .. mr at nr";
+    if ((p.f32() || p.f16()) && q.kc < 1) return "kc is below 1";
+    if (f16_ph && q.kc < p.K && q.kc % kNativeF16AccumBlockK != 0)
+        return "kc is below K and not a whole number of F16_PH blocks";
     if (q.threads < 1 || q.threads > p.threads)
         return "threads is outside 1 .. the requested team";
     if (q.col_groups < 0

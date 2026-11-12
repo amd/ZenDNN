@@ -18,6 +18,8 @@
 #include "gtest_utils.hpp"
 #include "gtest_utils_gemv_ai.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_gemv.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/gemm_descriptor.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 #include <gtest/gtest.h>
 
@@ -240,16 +242,12 @@ protected:
                     }
                     mp.num_threads = std::max(1, gemv_nt);
                 }
-                // Algo 10 (native_brgemm) for the three paths.  A constant
-                // weight (paths 2 and 3) runs on a GEMV kernel, which caches
-                // its pack, only where decide_native_gemv takes the call, and
-                // elsewhere on the native tiles from the cached layout; a
-                // weight that is not constant (path 1) runs on the tiles from
-                // a per-call pack, unless the narrow BF16 GEMV kernel takes
-                // the call, which then serves all three paths.  So the
-                // cross-check compares the GEMV kernel with the tiles where
-                // decide_native_gemv takes the constant weight, and the
-                // tiles' per-call pack with the cached layout elsewhere.
+                // Algo 10 (native_brgemm) for the three paths, which run on
+                // the native tiles: a constant weight (paths 2 and 3) from
+                // the cached layout, a weight that is not constant (path 1)
+                // from a per-call pack.  So the cross-check compares the
+                // tiles' per-call pack with the cached layout, and then the
+                // GEMV kernel of the call (path 4) with the tiles.
                 mp.lowoha_algo = matmul_algo_t::native_brgemm;
 
                 for (size_t i = 0; i < params.post_op_config.post_ops.size();
@@ -360,6 +358,46 @@ protected:
                         gc_cold_out, output, params.k, out_dt, is_int8))
                         << "global_cache_cold vs global_cache_warm mismatch: "
                         << params.test_name;
+
+                // Path 4: the GEMV kernel of the call's plan choice, run
+                // directly (no call of matmul_direct runs it), at weight
+                // cache mode 1 on the constant weight, against the tiles.
+                GemmDescriptor desc;
+                desc.M = M;
+                desc.N = N;
+                desc.K = K;
+                desc.lda = lda;
+                desc.ldb = ldb;
+                desc.ldc = ldc;
+                desc.transB = params.trans_b;
+                desc.alpha = test_alpha;
+                desc.beta = test_beta;
+                desc.src_dt = dtypes.src;
+                desc.wei_dt = dtypes.wei;
+                desc.dst_dt = dtypes.dst;
+                desc.bias_dt = dtypes.bias;
+                desc.bias = bias.get_raw_handle_unsafe();
+                desc.is_weights_const = true;
+                desc.num_threads = mp.num_threads;
+                const native_gemv_plan_t plan = decide_native_gemv(desc, mp);
+                if (plan.kernel != native_gemv_t::none) {
+                    auto gemv_out = AITensorFactory::create_zero_tensor(
+                            {params.m, params.n}, out_dt, "gemv_kernel");
+                    seed_output(gemv_out);
+                    EXPECT_EQ(run_native_gemv(plan, desc,
+                                      input.get_raw_handle_unsafe(),
+                                      weights.get_raw_handle_unsafe(),
+                                      gemv_out.get_raw_handle_unsafe(),
+                                      bias.get_raw_handle_unsafe(), mp, 1),
+                            status_t::success)
+                            << native_gemv_name(plan.kernel) << ": "
+                            << params.test_name;
+                    EXPECT_TRUE(compare_gemv_output(
+                            gemv_out, output, params.k, out_dt, is_int8))
+                            << native_gemv_name(plan.kernel)
+                            << " vs global_cache_warm mismatch: "
+                            << params.test_name;
+                }
 
                 // Evict this test's cache entry so the next test with a reused
                 // weight pointer won't find stale packed data.

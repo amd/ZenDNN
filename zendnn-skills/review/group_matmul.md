@@ -4,6 +4,11 @@ Checks for a change to group matmul and fused MoE, under
 `zendnnl/src/lowoha_operators/matmul/group_matmul/`. Apply them after
 [common](common/SUBSKILL.md) and the platform file.
 
+The grouped route shares weight buffers and their caches with scalar matmul:
+custom-kernel images, AOCL-DLP in-place reorders, and buffers the native
+BRGEMM rewrites in place. Run the `Caches and kept state` section of
+[matmul](matmul.md) and its test matrix on every group matmul PR too.
+
 ## Functional correctness
 
 - Empty groups, zero-M experts, sparse experts, leading inactive experts,

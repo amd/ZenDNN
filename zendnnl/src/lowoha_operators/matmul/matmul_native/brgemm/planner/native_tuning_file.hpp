@@ -49,17 +49,19 @@ inline constexpr const char *kNativeMatchKeys[]
 inline constexpr int kNativeNumericMatchKeys = 6;
 inline constexpr int kNativeNamedMatchKeys = 4;
 /// The names the named match keys dtype, src, dst and epilogue take.
-inline constexpr const char *kNativeDtypeNames[] = {"bf16", "s8", "f32", "s4"};
-inline constexpr const char *kNativeSrcNames[] = {"bf16", "f32", "u8", "s8"};
+inline constexpr const char *kNativeDtypeNames[]
+        = {"bf16", "s8", "f32", "s4", "f16"};
+inline constexpr const char *kNativeSrcNames[]
+        = {"bf16", "f32", "u8", "s8", "f16"};
 inline constexpr const char *kNativeDstNames[]
         = {"f32", "bf16", "f16", "u8", "s8", "s32"};
 inline constexpr const char *kNativeEpilogueNames[]
         = {"store", "bias", "postops", "gated"};
 
 /// The problem features rules compare, and their comparisons.  esz is the
-/// bytes of a weight element (0.5 for s4); a_bytes counts the source's
-/// elements in their own bytes (1 for an s8 source), b_bytes and slab_l2 the
-/// weight's at esz; group is the match key's.
+/// bytes of a weight element (0.5 for s4, 2 for f16); a_bytes counts the
+/// source's elements in their own bytes (1 for an s8 source, 2 for an f16
+/// one), b_bytes and slab_l2 the weight's at esz; group is the match key's.
 inline constexpr const char *kNativeRuleFeatures[] = {"m", "n", "k", "threads",
         "pack_nr", "bf16", "dynamic", "trans_a", "has_bias", "epilogue",
         "dst_bytes", "esz", "a_bytes", "b_bytes", "col_tiles", "m_per_thread",

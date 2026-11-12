@@ -17,19 +17,25 @@
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_brgemm_looper.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cassert>
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #include "common/zendnnl_compat.hpp"
 #include "common/zendnnl_global.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/bf16/bf16_brgemm_ukernel.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/f16/native_f16_ph_ukernel.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/f16/native_f16_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/fp32/native_fp32_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/native_kernel_registry.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_int8_tile.hpp"
@@ -79,8 +85,77 @@ void copy_transposed(const T *src, int lda, int M, int K, T *dst, int side,
     }
 }
 
-/// The source rows of a BF16 or FP32 call, elements of T, and the kernels of
-/// its plan.
+/// The lanes below lanes (0 .. 16) of a 16-lane mask.
+inline __mmask16 f16_lanes(int lanes) {
+    return lanes >= 16 ? static_cast<__mmask16>(0xFFFF)
+                       : static_cast<__mmask16>((1u << lanes) - 1u);
+}
+
+/// Elements below which the calling thread widens an f16 source alone: it
+/// takes less time than opening the team.
+constexpr int64_t kF16WidenParMin = int64_t {1} << 18;
+
+} // namespace
+
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
+void native_widen_f16_block(const uint16_t *src, int lda, bool trans, int M,
+        int K, float *dst, int ld, int rows, int side, int b) {
+    // The block, and a transposed source's step of 16 lanes, end at their
+    // start plus what is left: the start plus rows or 16 may pass the int
+    // bound.
+    const int m0 = b * rows;
+    const int m_end = m0 + std::min(rows, M - m0);
+    if (!trans) {
+        for (int m = m0; m < m_end; ++m) {
+            const uint16_t *s = src + static_cast<size_t>(m) * lda;
+            float *d = dst + static_cast<size_t>(m) * ld;
+            for (int k = 0; k < K; k += 16) {
+                const __mmask16 lanes = f16_lanes(K - k);
+                _mm512_mask_storeu_ps(d + k, lanes,
+                        _mm512_cvtph_ps(
+                                _mm256_maskz_loadu_epi16(lanes, s + k)));
+            }
+        }
+        return;
+    }
+    alignas(64) float v[16];
+    for (int k0 = 0, k_end = 0; k0 < K; k0 = k_end) {
+        k_end = k0 + std::min(side, K - k0);
+        for (int k = k0; k < k_end; ++k) {
+            const uint16_t *s = src + static_cast<size_t>(k) * lda;
+            for (int m = m0, lanes = 0; m < m_end; m += lanes) {
+                lanes = std::min(16, m_end - m);
+                _mm512_store_ps(v,
+                        _mm512_cvtph_ps(_mm256_maskz_loadu_epi16(
+                                f16_lanes(lanes), s + m)));
+                for (int i = 0; i < lanes; ++i)
+                    dst[static_cast<size_t>(m + i) * ld + k] = v[i];
+            }
+        }
+    }
+}
+
+namespace {
+
+/// dst[m][k], rows ld apart, = element (m, k) of the f16 source widened to
+/// f32 (native_widen_f16_block): in blocks of at most side rows, one block
+/// per thread, on threads threads when M * K is at least par_min and
+/// kF16WidenParMin.
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
+void widen_f16_rows(const uint16_t *src, int lda, bool trans, int M, int K,
+        float *dst, int ld, int side, int threads, int64_t par_min) {
+    const int64_t elems = static_cast<int64_t>(M) * K;
+    const bool parallel = threads > 1 && M > 1
+            && elems >= std::max(par_min, kF16WidenParMin);
+    const int rows = parallel ? std::min(side, ceil_div(M, threads)) : side;
+    const int m_blocks = ceil_div(M, rows);
+#pragma omp parallel for num_threads(threads) schedule(static) if (parallel)
+    for (int mbk = 0; mbk < m_blocks; ++mbk)
+        native_widen_f16_block(src, lda, trans, M, K, dst, ld, rows, side, mbk);
+}
+
+/// The source rows of a BF16, FP32 or F16_PH call, elements of T, and the
+/// kernels of its plan.
 template <typename T, typename Kernel>
 struct row_operands_t {
     const T *A = nullptr;
@@ -101,6 +176,62 @@ struct bf16_operands_t : row_operands_t<uint16_t, bf16_brgemm_fn_t> {
 /// an f32 dst), the kernels accumulate into the destination itself, rows
 /// ldc apart.
 struct f32_operands_t : row_operands_t<float, native_fp32_ukernel_fn_t> {
+    float *dst = nullptr;
+    int ldc = 0;
+};
+
+/// Bytes of the buffers of widened F16 sources that no call holds which the
+/// process keeps for later calls, over all its threads.
+constexpr size_t kF16KeptSourceBytes = size_t {512} << 20;
+
+/// The buffers of widened F16 sources that no call holds, kept so that a
+/// call does not map, fault in and unmap the pages of a large source; a
+/// release drops them, and a buffer a call held across a release.  They
+/// fill the first used slots: a buffer goes back without allocating.
+struct f16_source_pool_t {
+    std::mutex mutex;
+    /// the buffers of the first used slots, and their bytes
+    std::array<std::pair<float *, size_t>, kNativeF16KeptSourceSlots> free {};
+    int used = 0;
+    size_t kept = 0; ///< bytes in free
+    uint64_t generation = 0; ///< releases so far
+};
+
+f16_source_pool_t &f16_source_pool() {
+    // Never destroyed: a thread may still return a buffer after main.
+    static f16_source_pool_t *pool = new f16_source_pool_t;
+    return *pool;
+}
+
+/// The slot of the smallest kept buffer; the pool holds one.  Under the
+/// pool's mutex.
+int smallest_kept(const f16_source_pool_t &pool) {
+    int s = 0;
+    for (int i = 1; i < pool.used; ++i)
+        if (pool.free[i].second < pool.free[s].second) s = i;
+    return s;
+}
+
+/// Takes the buffer of slot i out of the pool.  Under the pool's mutex.
+std::pair<float *, size_t> take_slot(f16_source_pool_t &pool, int i) {
+    const std::pair<float *, size_t> b = pool.free[i];
+    pool.kept -= b.second;
+    pool.free[i] = pool.free[--pool.used];
+    return b;
+}
+
+/// The F16 operands: A the call's source rows widened to f32 into rows, and
+/// dst as for f32_operands_t.
+struct f16_operands_t : row_operands_t<float, native_f16_ukernel_fn_t> {
+    float *dst = nullptr;
+    int ldc = 0;
+    native_f16_source_lease_t widened;
+};
+
+/// The F16_PH operands: A the call's f16 source rows, and dst as for
+/// f32_operands_t.
+struct f16_ph_operands_t
+    : row_operands_t<uint16_t, native_f16_ph_ukernel_fn_t> {
     float *dst = nullptr;
     int ldc = 0;
 };
@@ -242,6 +373,93 @@ void f32_block(const native_plan_t &p, const f32_operands_t &op,
     }
 }
 
+/// f32_block over an f16 weight, from the widened source rows; its K
+/// passes step without passing K.
+template <bool Tail>
+void f16_block(const native_plan_t &p, const f16_operands_t &op,
+        const native_weight_view_t &w, const native_epilogue_t &ep, int mb,
+        int K, int m0, int n0, int tiles, float *acc) {
+    const int b_stride = w.group_stride();
+    const bool one_pass = p.kc >= K;
+    for (int k0 = 0, kl = 0; k0 < K; k0 += kl) {
+        kl = std::min(p.kc, K - k0);
+        const float beta = k0 == 0 ? 0.0f : 1.0f;
+        const size_t k_off = static_cast<size_t>(k0) * b_stride;
+        for (int t = 0; t < tiles; ++t) {
+            const int n = n0 + t * p.nr;
+            const int cols = Tail ? std::min(p.nr, w.N - n) : p.nr;
+            if (Tail && cols <= 0) continue;
+            const uint16_t *b
+                    = reinterpret_cast<const uint16_t *>(w.block(n / w.pack_nr))
+                    + n % w.pack_nr + k_off;
+            float *tile_acc
+                    = one_pass ? acc : acc + static_cast<size_t>(t) * mb * p.nr;
+            for (int ir = 0; ir < mb; ir += p.mr) {
+                const int mr = std::min(p.mr, mb - ir);
+                const float *a
+                        = op.A + static_cast<size_t>(m0 + ir) * op.lda + k0;
+                if (op.dst != nullptr && (!Tail || cols == p.nr)) {
+                    op.kern[mr](a, op.lda, b, b_stride,
+                            op.dst + static_cast<size_t>(m0 + ir) * op.ldc + n,
+                            op.ldc, kl, kl, beta);
+                    continue;
+                }
+                float *c = one_pass ? tile_acc
+                                    : tile_acc + static_cast<size_t>(ir) * p.nr;
+                op.kern[mr](a, op.lda, b, b_stride, c, p.nr, kl, kl, beta);
+                if (k0 + kl == K)
+                    apply_epilogue_tile(
+                            ep, c, p.nr, m0 + ir, mr, n, Tail ? cols : p.nr);
+            }
+        }
+    }
+}
+
+/// f16_block on the F16_PH kernels, from the call's f16 source rows: the
+/// plan's K passes are whole blocks of the kernels' f16 accumulation, so
+/// each block covers the same K whatever the plan.  A tile of 64 columns
+/// reads its second 32 columns from the next pack block.
+template <bool Tail>
+void f16_ph_block(const native_plan_t &p, const f16_ph_operands_t &op,
+        const native_weight_view_t &w, const native_epilogue_t &ep, int mb,
+        int K, int m0, int n0, int tiles, float *acc) {
+    const int b_stride = w.group_stride();
+    const size_t b_next = w.block_bytes / sizeof(uint16_t);
+    const bool one_pass = p.kc >= K;
+    for (int k0 = 0, kl = 0; k0 < K; k0 += kl) {
+        kl = std::min(p.kc, K - k0);
+        const float beta = k0 == 0 ? 0.0f : 1.0f;
+        const size_t k_off = static_cast<size_t>(k0) * b_stride;
+        for (int t = 0; t < tiles; ++t) {
+            const int n = n0 + t * p.nr;
+            const int cols = Tail ? std::min(p.nr, w.N - n) : p.nr;
+            if (Tail && cols <= 0) continue;
+            const uint16_t *b
+                    = reinterpret_cast<const uint16_t *>(w.block(n / w.pack_nr))
+                    + n % w.pack_nr + k_off;
+            float *tile_acc
+                    = one_pass ? acc : acc + static_cast<size_t>(t) * mb * p.nr;
+            for (int ir = 0; ir < mb; ir += p.mr) {
+                const int mr = std::min(p.mr, mb - ir);
+                const uint16_t *a
+                        = op.A + static_cast<size_t>(m0 + ir) * op.lda + k0;
+                if (op.dst != nullptr && (!Tail || cols == p.nr)) {
+                    op.kern[mr](a, op.lda, b, b_stride, b_next,
+                            op.dst + static_cast<size_t>(m0 + ir) * op.ldc + n,
+                            op.ldc, kl, beta);
+                    continue;
+                }
+                float *c = one_pass ? tile_acc
+                                    : tile_acc + static_cast<size_t>(ir) * p.nr;
+                op.kern[mr](a, op.lda, b, b_stride, b_next, c, p.nr, kl, beta);
+                if (k0 + kl == K)
+                    apply_epilogue_tile(
+                            ep, c, p.nr, m0 + ir, mr, n, Tail ? cols : p.nr);
+            }
+        }
+    }
+}
+
 /// The INT8 tiles of tiles column tiles from n0, each over all of K, stored
 /// by the epilogue unless direct stores them.  Tail as bf16_block; a tile of
 /// fewer columns than nr computes them into acc (compute_int8_tail_tile) and
@@ -285,6 +503,7 @@ struct execute_call_t {
     bool bf16;
     bool int8;
     bool f32;
+    bool f16;
 };
 
 ZENDNNL_ALWAYS_INLINE inline execute_call_t make_call(
@@ -302,7 +521,9 @@ ZENDNNL_ALWAYS_INLINE inline execute_call_t make_call(
                     || dynamic_src);
     const bool f32 = desc.src_dt == data_type_t::f32
             && desc.wei_dt == data_type_t::f32;
-    return {desc, weight, src, dst, bias, params, bf16, int8, f32};
+    const bool f16 = desc.src_dt == data_type_t::f16
+            && desc.wei_dt == data_type_t::f16;
+    return {desc, weight, src, dst, bias, params, bf16, int8, f32, f16};
 }
 
 /// The shape, the leading dimensions and the buffers of the call.
@@ -313,7 +534,7 @@ ZENDNNL_ALWAYS_INLINE inline status_t check_call_operands(
     const int n_out = desc.gated_act != matmul_gated_act_t::none ? N / 2 : N;
     const int min_lda = desc.transA ? M : K;
     if (M < 0 || N < 1 || K < 1 || desc.ldc < n_out
-            || ((c.bf16 || c.f32) && desc.lda < min_lda))
+            || ((c.bf16 || c.f32 || c.f16) && desc.lda < min_lda))
         return turned_away(
                 status_t::failure, "a bad shape or leading dimension", why);
     if (M > 0
@@ -335,26 +556,30 @@ ZENDNNL_ALWAYS_INLINE inline status_t check_call_operands(
 ZENDNNL_ALWAYS_INLINE inline status_t check_call(
         const execute_call_t &c, const char **why) {
     const GemmDescriptor &desc = c.desc;
-    if (!c.bf16 && !c.int8 && !c.f32)
+    if (!c.bf16 && !c.int8 && !c.f32 && !c.f16)
         return turned_away(status_t::unimplemented,
-                "data types other than bf16 x bf16, u8 / s8 x s8, s8 x s4 and "
-                "f32 x f32",
+                "data types other than bf16 x bf16, u8 / s8 x s8, s8 x s4, "
+                "f32 x f32 and f16 x f16",
                 why);
     const UarchParams &uarch = detect_uarch();
     const bool kernel_isa
-            = c.f32 || (c.bf16 ? uarch.avx512bf16 : uarch.avx512vnni);
+            = c.f32 || c.f16 || (c.bf16 ? uarch.avx512bf16 : uarch.avx512vnni);
     if (!kernel_isa || !native_base_isa())
         return turned_away(status_t::isa_unsupported,
-                c.f32 ? "no AVX-512 F / BW / VL / DQ or FMA"
-                      : (c.bf16 ? "no AVX512-BF16 or AVX-512 F / BW / VL / "
-                                  "DQ or FMA"
-                                : "no AVX512-VNNI or AVX-512 F / BW / VL / "
-                                  "DQ or FMA"),
+                c.f32 || c.f16 ? "no AVX-512 F / BW / VL / DQ or FMA"
+                               : (c.bf16 ? "no AVX512-BF16 or AVX-512 F / BW / "
+                                           "VL / DQ or FMA"
+                                         : "no AVX512-VNNI or AVX-512 F / BW / "
+                                           "VL / DQ or FMA"),
                 why);
     if (c.f32 && desc.dst_dt != data_type_t::f32
             && desc.dst_dt != data_type_t::bf16)
         return turned_away(status_t::unimplemented,
                 "an f32 call into a dst other than f32 or bf16", why);
+    if (c.f16 && desc.dst_dt != data_type_t::f16
+            && desc.dst_dt != data_type_t::f32)
+        return turned_away(status_t::unimplemented,
+                "an f16 call into a dst other than f16 or f32", why);
     return check_call_operands(c, why);
 }
 
@@ -417,8 +642,8 @@ status_t prepare_int8_operands(const execute_call_t &c,
     return status_t::success;
 }
 
-/// The source rows of a BF16 or FP32 call, a transposed source copied once
-/// into rows K apart on threads threads.
+/// The source rows of a BF16, FP32 or F16_PH call, a transposed source
+/// copied once into rows K apart on threads threads.
 template <typename T, typename Kernel>
 status_t prepare_source_rows(const execute_call_t &c, const native_plan_t &p,
         int threads, row_operands_t<T, Kernel> &op) {
@@ -482,6 +707,62 @@ status_t prepare_f32_operands(const execute_call_t &c, const native_plan_t &p,
     return status_t::success;
 }
 
+/// The F16 source rows widened to f32 once for the call (transposed for a
+/// transposed source) into a buffer of the call (native_f16_source_lease_t) on
+/// threads threads, rows K apart, or K + 16 when K floats are a multiple of
+/// 4 KiB (rows that far apart map to one L1 set); then the kernels and the
+/// destination as prepare_f32_operands.
+status_t prepare_f16_operands(const execute_call_t &c, const native_plan_t &p,
+        int threads, const native_epilogue_t &ep, f16_operands_t &op) {
+    const GemmDescriptor &desc = c.desc;
+    const int M = desc.M, K = desc.K;
+    const native_kernel_registry_t &kernels = native_kernel_registry();
+    if (!kernels.covers(native_kernel_kind_t::f16, p.mr, p.nr)) {
+        log_error("native BRGEMM: no f16 kernels for 1 .. ", p.mr,
+                " rows at nr ", p.nr);
+        return status_t::failure;
+    }
+    op.kern = kernels.f16_table(p.nr);
+    const int ld = K % 1024 == 0 ? K + 16 : K;
+    const size_t bytes = static_cast<size_t>(M) * ld * sizeof(float);
+    float *rows = op.widened.take(bytes);
+    if (rows == nullptr) {
+        log_error("native BRGEMM: no buffer for the widened f16 source (",
+                bytes, " bytes)");
+        return status_t::failure;
+    }
+    widen_f16_rows(static_cast<const uint16_t *>(c.src), desc.lda, desc.transA,
+            M, K, rows, ld, p.copy_block, threads, p.copy_par_min);
+    op.A = rows;
+    op.lda = ld;
+    if (ep.store_only && desc.dst_dt == data_type_t::f32) {
+        op.dst = static_cast<float *>(c.dst);
+        op.ldc = desc.ldc;
+    }
+    return status_t::success;
+}
+
+/// The F16 source rows as the call holds them (prepare_source_rows), then
+/// the F16_PH kernels and the destination as prepare_f32_operands.
+status_t prepare_f16_ph_operands(const execute_call_t &c,
+        const native_plan_t &p, int threads, const native_epilogue_t &ep,
+        f16_ph_operands_t &op) {
+    const status_t st = prepare_source_rows(c, p, threads, op);
+    if (st != status_t::success) return st;
+    const native_kernel_registry_t &kernels = native_kernel_registry();
+    if (!kernels.covers(native_kernel_kind_t::f16_ph, p.mr, p.nr)) {
+        log_error("native BRGEMM: no f16_ph kernels for 1 .. ", p.mr,
+                " rows at nr ", p.nr);
+        return status_t::failure;
+    }
+    op.kern = kernels.f16_ph_table(p.nr);
+    if (ep.store_only && c.desc.dst_dt == data_type_t::f32) {
+        op.dst = static_cast<float *>(c.dst);
+        op.ldc = c.desc.ldc;
+    }
+    return status_t::success;
+}
+
 /// copy = the N pre-activation columns of the call's dst, rows N apart, in
 /// blocks of the plan's copy_block rows, on threads threads when M * N >=
 /// its copy_par_min.
@@ -523,10 +804,13 @@ template <bool Tail>
 status_t run_units(const execute_call_t &c, const native_plan_t &p, int threads,
         const native_weight_view_t &view, const native_epilogue_t &ep,
         const bf16_operands_t &bf16_op, const int8_operands_t *int8_op,
-        const f32_operands_t &f32_op, int &team) {
+        const f32_operands_t &f32_op, const f16_operands_t &f16_op,
+        const f16_ph_operands_t &f16_ph_op, int &team) {
     const int K = c.desc.K;
     const bool bf16 = c.bf16;
     const bool f32 = c.f32;
+    const bool f16_ph = c.f16 && p.kind == native_kernel_kind_t::f16_ph;
+    const bool f16 = c.f16 && !f16_ph;
     const native_int8_out_t *direct
             = int8_op != nullptr && int8_op->direct ? &int8_op->store : nullptr;
     // Every unit covers all of K and tiles column tiles of nr columns.
@@ -537,6 +821,12 @@ status_t run_units(const execute_call_t &c, const native_plan_t &p, int threads,
         else if (f32)
             f32_block<Tail>(
                     p, f32_op, view, ep, u.rows, K, u.m0, u.n0, u.tiles, acc);
+        else if (f16_ph)
+            f16_ph_block<Tail>(p, f16_ph_op, view, ep, u.rows, K, u.m0, u.n0,
+                    u.tiles, acc);
+        else if (f16)
+            f16_block<Tail>(
+                    p, f16_op, view, ep, u.rows, K, u.m0, u.n0, u.tiles, acc);
         else
             int8_block<Tail>(p, int8_op->call, view, ep, direct, u.rows, u.m0,
                     u.n0, u.tiles, acc);
@@ -555,8 +845,17 @@ status_t run_units(const execute_call_t &c, const native_plan_t &p, int threads,
     const bool pair_in_team = ep.staged_halves
             && staged_pair_units(ep, c.desc.M)
                     >= 4 * static_cast<int64_t>(threads);
+    // An M = 1 call on a layout of at most a quarter of the L2 runs its
+    // units on the calling thread: one core reads that layout in less time
+    // than a region of the call's team takes to open, and a region of fewer
+    // threads would make the runtime end and start the others again.
+    const bool one_thread = c.desc.M == 1
+            && native_packed_bytes(view.wei_dt, view.K, view.N, view.pack_nr)
+                    <= static_cast<size_t>(detect_uarch().l2_bytes) / 4;
     const status_t st = native_run_cpu_team(part,
-            static_cast<int>(std::min<int64_t>(p.threads, part.units())),
+            one_thread ? 1
+                       : static_cast<int>(
+                                 std::min<int64_t>(p.threads, part.units())),
             threads, p.scratch_floats, tile, &team,
             pair_in_team ? &pair : nullptr);
     // After work no status may let the call fall back to another route.
@@ -575,12 +874,13 @@ status_t run_units(const execute_call_t &c, const native_plan_t &p, int threads,
 status_t run_team(const execute_call_t &c, const native_plan_t &p, int threads,
         const native_weight_view_t &view, const native_epilogue_t &ep,
         const bf16_operands_t &bf16_op, const int8_operands_t *int8_op,
-        const f32_operands_t &f32_op, int &team) {
+        const f32_operands_t &f32_op, const f16_operands_t &f16_op,
+        const f16_ph_operands_t &f16_ph_op, int &team) {
     if (view.N % kNativeLayoutPackNr != 0)
-        return run_units<true>(
-                c, p, threads, view, ep, bf16_op, int8_op, f32_op, team);
-    return run_units<false>(
-            c, p, threads, view, ep, bf16_op, int8_op, f32_op, team);
+        return run_units<true>(c, p, threads, view, ep, bf16_op, int8_op,
+                f32_op, f16_op, f16_ph_op, team);
+    return run_units<false>(c, p, threads, view, ep, bf16_op, int8_op, f32_op,
+            f16_op, f16_ph_op, team);
 }
 
 /// The plan the paired tiles of a gated call over [gate | up] halves run
@@ -623,12 +923,17 @@ void log_plan_line(const execute_call_t &c, const native_plan_t &p,
         const native_int8_decision_t &decision, bool bias_in_dequant,
         bool direct, int pack_nr, int team, bool paired) {
     const GemmDescriptor &desc = c.desc;
-    // A BF16 or FP32 call has a K pass; an INT8 call has call shapes and,
-    // unless its weight scales are per group, a K pass, a direct store and a
-    // bias placement; a per-group call has its scheme and its direct store,
-    // and over an s4 weight its group size and order.
+    // A BF16, FP32 or F16 call has a K pass; an INT8 call has call shapes
+    // and, unless its weight scales are per group, a K pass, a direct store
+    // and a bias placement; a per-group call has its scheme and its direct
+    // store, and over an s4 weight its group size and order.
     const std::string kc_field
-            = c.bf16 || c.f32 ? " kc=" + std::to_string(p.kc) : "";
+            = c.bf16 || c.f32 || c.f16 ? " kc=" + std::to_string(p.kc) : "";
+    // An F16 call names its kernels: the widening F16 ones or F16_PH.
+    const std::string kernels_field = c.f16 ? std::string(" kernels=")
+                    + (p.kind == native_kernel_kind_t::f16_ph ? "f16_ph"
+                                                              : "f16")
+                                            : std::string();
     // The blocks schedule names the two fields its deal reads: the unit
     // width and the threads of a domain.
     const std::string blocks_field = p.unit_tiles > 0
@@ -673,10 +978,9 @@ void log_plan_line(const execute_call_t &c, const native_plan_t &p,
             : std::string();
     apilog_verbose("[MATMUL.NATIVE_BRGEMM] M=", desc.M, " N=", desc.N,
             " K=", desc.K, " pack_nr=", pack_nr, " nr=", p.nr, " mb=", p.mb,
-            kc_field, " tiles=", p.tiles(), " threads=", p.threads,
-            " col_groups=", p.col_groups, blocks_field,
-            " transA=", desc.transA ? 1 : 0,
-            " gemv=", native_gemv_name(native_gemv_t::none), " mr=", p.mr,
+            kc_field, kernels_field, " tiles=", p.tiles(),
+            " threads=", p.threads, " col_groups=", p.col_groups, blocks_field,
+            " transA=", desc.transA ? 1 : 0, " gemv=none mr=", p.mr,
             " row_unit=", p.row_unit, " traversal=",
             p.traversal == native_traversal_t::m_inner ? "m_inner" : "n_inner",
             int8_fields, " copy_block=", p.copy_block,
@@ -714,7 +1018,8 @@ status_t run_tiles(const GemmDescriptor &desc,
     // The gate and up halves of a gated weight pair up in the tiles of the
     // BF16 and INT8 kernels, from the weight's plain layout, in whole blocks
     // or in runs of 16 columns.
-    const int paired_width = native_gated_halves(desc.gated_act) && !c.f32
+    const int paired_width
+            = native_gated_halves(desc.gated_act) && !c.f32 && !c.f16
             ? native_paired_width(desc.N, p.nr, p.m_blocks, p.threads)
             : 0;
     const bool paired = paired_width > 0;
@@ -741,6 +1046,15 @@ status_t run_tiles(const GemmDescriptor &desc,
     f32_operands_t f32_op;
     if (c.f32) {
         st = prepare_f32_operands(c, p, problem.threads, ep, f32_op);
+        if (st != status_t::success) return st;
+    }
+    f16_operands_t f16_op;
+    f16_ph_operands_t f16_ph_op;
+    if (c.f16 && p.kind == native_kernel_kind_t::f16_ph) {
+        st = prepare_f16_ph_operands(c, p, problem.threads, ep, f16_ph_op);
+        if (st != status_t::success) return st;
+    } else if (c.f16) {
+        st = prepare_f16_operands(c, p, problem.threads, ep, f16_op);
         if (st != status_t::success) return st;
     }
     // A swiglu output column i takes the place of pre-activation column i,
@@ -770,7 +1084,7 @@ status_t run_tiles(const GemmDescriptor &desc,
 
     int team = 1;
     st = run_team(c, p, problem.threads, view, ep, bf16_op,
-            int8_op ? &*int8_op : nullptr, f32_op, team);
+            int8_op ? &*int8_op : nullptr, f32_op, f16_op, f16_ph_op, team);
     if (st != status_t::success) return st;
 
     if (s_log)
@@ -779,70 +1093,92 @@ status_t run_tiles(const GemmDescriptor &desc,
     return status_t::success;
 }
 
-/// native_brgemm_execute, or with CheckOnly native_brgemm_check: the call on
-/// its GEMV choice, which turns away what the tiles' check_call and the
-/// layout rule's ldb bound turn away, else on the native tiles (run_tiles).
-template <bool CheckOnly>
-ZENDNNL_ALWAYS_INLINE inline status_t run_call(const GemmDescriptor &desc,
-        const native_weight_ref_t &weight, const void *src, void *dst,
-        const void *bias, const matmul_params &params,
-        const native_gemv_plan_t &gemv, const char **why) {
-    if (gemv.kernel == native_gemv_t::none)
-        return run_tiles<CheckOnly>(desc, weight, src, dst, bias, params, why);
-    // decide_native_gemv chooses a kernel only for data types check_call
-    // accepts, on a CPU with the instruction set of that kernel.
-    const status_t checked = check_call_operands(
-            make_call(desc, weight, src, dst, bias, params), why);
-    if (checked != status_t::success) return checked;
-    // Weight rows ldb apart, at least a row long, as the layout rule takes
-    // them for the tiles.
-    if (desc.ldb < (desc.transB ? desc.K : desc.N))
-        return turned_away(status_t::unimplemented,
-                "ldb below the weight row length", why);
-    if (CheckOnly) return status_t::success;
-    static const bool s_log = apilog_verbose_enabled();
-    const status_t gst = run_native_gemv(gemv, desc, src, weight.weight, dst,
-            bias, params, weight.weight_cache_mode);
-    if (gst != status_t::unimplemented) {
-        if (gst == status_t::success && s_log)
-            apilog_verbose("[MATMUL.NATIVE_BRGEMM] M=", desc.M, " N=", desc.N,
-                    " K=", desc.K, " threads=1 transA=", desc.transA ? 1 : 0,
-                    " gemv=", native_gemv_name(gemv.kernel),
-                    " transB=", desc.transB ? 1 : 0);
-        return gst;
+} // namespace
+
+native_f16_source_lease_t::~native_f16_source_lease_t() {
+    if (buf_ == nullptr) return;
+    // At most every kept buffer, and this one.
+    std::array<float *, kNativeF16KeptSourceSlots + 1> drop;
+    int dropped = 0;
+    f16_source_pool_t &pool = f16_source_pool();
+    {
+        const std::lock_guard<std::mutex> lock(pool.mutex);
+        if (generation_ == pool.generation && bytes_ <= kF16KeptSourceBytes) {
+            if (pool.used == kNativeF16KeptSourceSlots) {
+                const int s = smallest_kept(pool);
+                if (pool.free[s].second < bytes_)
+                    drop[dropped++] = take_slot(pool, s).first;
+            }
+            if (pool.used < kNativeF16KeptSourceSlots) {
+                pool.free[pool.used++] = {buf_, bytes_};
+                pool.kept += bytes_;
+                buf_ = nullptr;
+            }
+            while (pool.kept > kF16KeptSourceBytes)
+                drop[dropped++] = take_slot(pool, smallest_kept(pool)).first;
+        }
     }
-    // A first call rewrote the buffer in place after this call found its
-    // raw weight: the tiles serve the call from the image, as they serve
-    // every call that meets one.
-    native_layout_query_t q;
-    q.wei_dt = desc.wei_dt;
-    q.src_dt = desc.src_dt;
-    q.K = desc.K;
-    q.N = desc.N;
-    q.ldb = desc.ldb;
-    q.transB = desc.transB;
-    const native_layout_decision_t rule = decide_native_layout(q);
-    if (!rule.native) return turned_away(status_t::failure, rule.reason, why);
-    native_weight_ref_t image = weight;
-    image.pack_nr = rule.pack_nr;
-    image.image = native_image_check_t {};
-    return run_tiles<false>(desc, image, src, dst, bias, params, why);
+    if (buf_ != nullptr) drop[dropped++] = buf_;
+    for (int i = 0; i < dropped; ++i)
+        zendnnl_aligned_free(drop[i]);
 }
 
-} // namespace
+float *native_f16_source_lease_t::take(size_t bytes) {
+    bytes = (bytes + 63) & ~size_t {63};
+    f16_source_pool_t &pool = f16_source_pool();
+    {
+        const std::lock_guard<std::mutex> lock(pool.mutex);
+        generation_ = pool.generation;
+        int best = -1;
+        for (int i = 0; i < pool.used; ++i)
+            if (pool.free[i].second >= bytes
+                    && (best < 0
+                            || pool.free[i].second < pool.free[best].second))
+                best = i;
+        if (best >= 0) {
+            const std::pair<float *, size_t> b = take_slot(pool, best);
+            buf_ = b.first;
+            bytes_ = b.second;
+            return buf_;
+        }
+    }
+    buf_ = static_cast<float *>(zendnnl_aligned_alloc(64, bytes));
+    bytes_ = buf_ != nullptr ? bytes : 0;
+    return buf_;
+}
+
+void release_native_f16_sources() {
+    std::array<std::pair<float *, size_t>, kNativeF16KeptSourceSlots> drop;
+    int dropped = 0;
+    f16_source_pool_t &pool = f16_source_pool();
+    {
+        const std::lock_guard<std::mutex> lock(pool.mutex);
+        drop = pool.free;
+        dropped = pool.used;
+        pool.used = 0;
+        pool.kept = 0;
+        ++pool.generation;
+    }
+    for (int i = 0; i < dropped; ++i)
+        zendnnl_aligned_free(drop[i].first);
+}
+
+size_t native_f16_kept_source_bytes() {
+    f16_source_pool_t &pool = f16_source_pool();
+    const std::lock_guard<std::mutex> lock(pool.mutex);
+    return pool.kept;
+}
 
 status_t native_brgemm_execute(const GemmDescriptor &desc,
         const native_weight_ref_t &weight, const void *src, void *dst,
-        const void *bias, const matmul_params &params,
-        const native_gemv_plan_t &gemv, const char **why) {
-    return run_call<false>(desc, weight, src, dst, bias, params, gemv, why);
+        const void *bias, const matmul_params &params, const char **why) {
+    return run_tiles<false>(desc, weight, src, dst, bias, params, why);
 }
 
 status_t native_brgemm_check(const GemmDescriptor &desc,
         const native_weight_ref_t &weight, const void *src, void *dst,
-        const void *bias, const matmul_params &params,
-        const native_gemv_plan_t &gemv, const char **why) {
-    return run_call<true>(desc, weight, src, dst, bias, params, gemv, why);
+        const void *bias, const matmul_params &params, const char **why) {
+    return run_tiles<true>(desc, weight, src, dst, bias, params, why);
 }
 
 } // namespace native

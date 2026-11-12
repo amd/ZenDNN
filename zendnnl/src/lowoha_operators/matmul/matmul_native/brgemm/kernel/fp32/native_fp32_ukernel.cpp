@@ -68,8 +68,10 @@ void native_fp32_ukernel(const float *__restrict A, int lda,
                 acc[m][v] = _mm512_setzero_ps();
     }
 
-    for (int pc = 0; pc < K; pc += BK) {
-        const int kb = std::min(BK, K - pc);
+    // A block ends at its start plus what is left: the start plus a block
+    // may pass the int bound.
+    for (int pc = 0, kb = 0; pc < K; pc += kb) {
+        kb = std::min(BK, K - pc);
         const float *a_off = A + pc;
         const float *b_off = B + static_cast<size_t>(pc) * b_stride;
         int kk = 0;

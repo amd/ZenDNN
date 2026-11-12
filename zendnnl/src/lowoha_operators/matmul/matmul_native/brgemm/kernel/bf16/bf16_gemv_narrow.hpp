@@ -16,8 +16,10 @@
 
 /// BF16 narrow-N GEMV (M=1, N ∈ {1..4}) — pack-free, row-major streamer.
 ///
-/// Companion to `bf16_gemv_bkc` for the extreme-narrow tail of the M=1
-/// decode dispatch.  When N ≤ 4 the BKC kernel's pack layout pads N
+/// Companion to `bf16_gemv_bkc` for the narrowest M = 1 calls of
+/// bf16_gemv_choice, which only the tests run: no call of matmul_direct
+/// runs a GEMV kernel (native_gemv.hpp).
+/// When N ≤ 4 the BKC kernel's pack layout pads N
 /// up to `BKC_NR_PAD = 16`, wasting 75–94% of the VDPBF16PS compute
 /// and 4–16× the pack footprint — catastrophic for narrow-N decode
 /// shapes (e.g. K~6000, N=3).  This kernel instead

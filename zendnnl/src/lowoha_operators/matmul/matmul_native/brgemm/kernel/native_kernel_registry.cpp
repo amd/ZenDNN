@@ -16,6 +16,11 @@
 
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/native_kernel_registry.hpp"
 
+#include <cctype>
+#include <cstdlib>
+#include <string>
+
+#include "common/zendnnl_global.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/native_int4_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/native_int8_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
@@ -25,12 +30,31 @@ namespace lowoha {
 namespace matmul {
 namespace native {
 
+using zendnnl::error_handling::apilog_warning;
+
 namespace {
+
+/// Whether ZENDNNL_MATMUL_NATIVE_F16_ACCUM lets f16 calls accumulate in f16
+/// blocks: unset, empty or f16 (any case) yes, f32 no; any other value keeps
+/// the default with one warning.
+bool f16_accum_in_f16() {
+    const char *v = std::getenv("ZENDNNL_MATMUL_NATIVE_F16_ACCUM");
+    if (v == nullptr || *v == '\0') return true;
+    std::string s(v);
+    for (char &ch : s)
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    if (s == "f16") return true;
+    if (s == "f32") return false;
+    apilog_warning("ZENDNNL_MATMUL_NATIVE_F16_ACCUM=", v,
+            " is neither f16 nor f32; the default, f16, applies");
+    return true;
+}
 
 int width_index(int nr) {
     switch (nr) {
         case 16: return 0;
         case 32: return 1;
+        case 64: return 2;
         default: return -1;
     }
 }
@@ -46,7 +70,7 @@ int full_rows(uint32_t mask) {
 } // namespace
 
 native_kernel_registry_t::native_kernel_registry_t(
-        bool bf16_isa, bool int8_isa, bool f32_isa) {
+        bool bf16_isa, bool int8_isa, bool f32_isa, bool f16_ph_isa) {
     for (int w = 0; bf16_isa && w < kWidths; ++w) {
         native_kernel_caps_t c;
         c.kind = native_kernel_kind_t::bf16;
@@ -143,6 +167,30 @@ native_kernel_registry_t::native_kernel_registry_t(
         c.max_mr = full_rows(mask);
         if (c.max_mr > 0) all_.push_back(c);
     }
+    for (int w = 0; f32_isa && w < kWidths; ++w) {
+        native_kernel_caps_t c;
+        c.kind = native_kernel_kind_t::f16;
+        c.nr = 16 << w;
+        uint32_t mask = 0;
+        for (int mr = 1; mr <= kMaxRows; ++mr) {
+            f16_[w][mr] = select_native_f16_ukernel(mr, c.nr / 16);
+            if (f16_[w][mr] != nullptr) mask |= 1u << (mr - 1);
+        }
+        c.max_mr = full_rows(mask);
+        if (c.max_mr > 0) all_.push_back(c);
+    }
+    for (int w = 0; f16_ph_isa && w < kF16PhWidths; ++w) {
+        native_kernel_caps_t c;
+        c.kind = native_kernel_kind_t::f16_ph;
+        c.nr = 16 << w;
+        uint32_t mask = 0;
+        for (int mr = 1; mr <= kMaxRows; ++mr) {
+            f16_ph_[w][mr] = select_native_f16_ph_ukernel(mr, c.nr / 16);
+            if (f16_ph_[w][mr] != nullptr) mask |= 1u << (mr - 1);
+        }
+        c.max_mr = full_rows(mask);
+        if (c.max_mr > 0) all_.push_back(c);
+    }
 }
 
 const native_kernel_caps_t *native_kernel_registry_t::caps(
@@ -187,12 +235,35 @@ const native_fp32_ukernel_fn_t *native_kernel_registry_t::f32_table(
     return f32_[width_index(nr)];
 }
 
+const native_f16_ukernel_fn_t *native_kernel_registry_t::f16_table(
+        int nr) const noexcept {
+    if (caps(native_kernel_kind_t::f16, nr) == nullptr) return nullptr;
+    return f16_[width_index(nr)];
+}
+
+const native_f16_ph_ukernel_fn_t *native_kernel_registry_t::f16_ph_table(
+        int nr) const noexcept {
+    if (caps(native_kernel_kind_t::f16_ph, nr) == nullptr) return nullptr;
+    return f16_ph_[width_index(nr)];
+}
+
+native_kernel_kind_t native_kernel_registry_t::f16_kind() const noexcept {
+    for (const native_kernel_caps_t &c : all_) {
+        if (c.kind == native_kernel_kind_t::f16_ph)
+            return native_kernel_kind_t::f16_ph;
+    }
+    return native_kernel_kind_t::f16;
+}
+
 const native_kernel_registry_t &native_kernel_registry() {
     // Never destroyed: calls may still plan while static objects are
     // destroyed.
-    static const native_kernel_registry_t *const registry
-            = new native_kernel_registry_t(detect_uarch().avx512bf16,
-                    detect_uarch().avx512vnni, detect_uarch().avx512f);
+    static const native_kernel_registry_t *const registry = [] {
+        const UarchParams &u = detect_uarch();
+        const bool f16_accum = f16_accum_in_f16();
+        return new native_kernel_registry_t(u.avx512bf16, u.avx512vnni,
+                u.avx512f, u.avx512fp16 && f16_accum);
+    }();
     return *registry;
 }
 

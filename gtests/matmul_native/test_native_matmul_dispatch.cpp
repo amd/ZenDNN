@@ -34,6 +34,7 @@
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/int8_gemv_direct.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_gemv.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_utils.hpp"
 #include "lowoha_operators/matmul/matmul_native/native_matmul.hpp"
 #include "native_brgemm_test_utils.hpp"
@@ -162,6 +163,31 @@ struct route_call_t {
     ::testing::AssertionResult same_bits() const {
         return nt::within_steps(dst.get(), c.N, ref.get(), c.N,
                 c.params.dtypes.dst, c.M, c.N, 0);
+    }
+
+    /// No pack of a GEMV kernel exists for the call's weight.
+    bool no_gemv_pack() const {
+        const nat::PrepackedWeightKey key {
+                c.wei, c.K, c.N, c.ldb_or_tight(), c.transB};
+        return nat::BF16BKCWeightCache::instance().find(key) == nullptr
+                && nat::INT8KContiguousWeightCache::instance().find(key)
+                == nullptr;
+    }
+
+    /// out against the reference algorithm over the call's weight, within
+    /// the band of its data types; out and ref start from prior (which beta
+    /// reads), and the reference result goes to ref.
+    ::testing::AssertionResult near_reference(
+            const void *out, const nt::buffer_t &prior) const {
+        std::memcpy(ref.get(), prior.get(), ref.bytes);
+        if (nt::run_reference(c, c.wei, ref.get()) != status_t::success)
+            return ::testing::AssertionFailure() << "no reference result";
+        const data_type_t dt = c.params.dtypes.dst;
+        const bool int8 = c.params.dtypes.wei == data_type_t::s8;
+        return nt::within_band(out, c.N, ref.get(), c.N, dt, c.M, c.N,
+                rtol_bf16,
+                nt::comparison_abs_bound(
+                        c.K, epsilon_bf16, 1.0f, c.beta, true, int8, false));
     }
 };
 
@@ -326,9 +352,9 @@ TEST(NativeMatmulDispatch, GemvKernelGatesFollowTheGemvRules) {
     }
 }
 
-// The GEMV plan choice of a call that asks for the native BRGEMM at M = 1:
-// the narrow kernel for N <= 4 on a [K, N] weight, the only native kernel
-// for those widths, at any team; none with a gated activation, alpha 0 or a
+// The GEMV plan choice (decide_native_gemv, which no call of matmul_direct
+// runs) of an M = 1 call: the narrow kernel for N <= 4 on a [K, N] weight,
+// at any team; none with a gated activation, alpha 0 or a
 // Swish of alpha other than 1, which the GEMV kernels do not apply, and
 // none at M > 1.  The BKC kernels take N a multiple of 32 and a constant
 // weight within the rule's bounds: bf16_bkc on one thread, or on a team of
@@ -415,12 +441,36 @@ TEST(NativeMatmulDispatch, GemvPlanChoiceOfRequestedCalls) {
     }
 }
 
+/// The call of r on the native BRGEMM (matmul_direct) and on its GEMV plan
+/// choice (run_native_gemv at weight cache mode 1), from the dst it holds:
+/// the first on the native tiles, with a layout of its weight and no GEMV
+/// pack, each within the band of the reference.
+void expect_tiles_then_gemv(route_call_t &r, nat::native_gemv_t kernel) {
+    // The layout check needs a cached layout whatever the process's mode.
+    const WeightCacheGuard cache(2);
+    const nat::native_gemv_plan_t plan = r.gemv();
+    ASSERT_EQ(static_cast<int>(plan.kernel), static_cast<int>(kernel));
+    const nt::buffer_t prior = nt::make_buffer(r.dst.bytes);
+    std::memcpy(prior.get(), r.dst.get(), r.dst.bytes);
+    ASSERT_EQ(nt::run_matmul(r.c), status_t::success);
+    EXPECT_GE(nt::native_layouts(r.c.wei), 1u);
+    EXPECT_TRUE(r.no_gemv_pack());
+    EXPECT_TRUE(r.near_reference(r.dst.get(), prior)) << "matmul_direct";
+    const nt::buffer_t gemv = nt::make_buffer(r.dst.bytes);
+    std::memcpy(gemv.get(), prior.get(), prior.bytes);
+    ASSERT_EQ(nat::run_native_gemv(plan, r.descriptor(), r.c.src, r.c.wei,
+                      gemv.get(), r.c.bias, r.c.params, 1),
+            status_t::success);
+    EXPECT_TRUE(r.near_reference(gemv.get(), prior))
+            << "the GEMV kernel run directly";
+}
+
 // A call that asks for the native BRGEMM at M = 1 with N <= 4 on a [K, N]
-// weight at weight cache mode 1 (a GEMV kernel serves a call only below
-// mode 2) runs on the narrow kernel, per call and under
-// ZENDNNL_MATMUL_ALGO=10: the bits of the kernel run directly, and no native
-// layout of the weight.
-TEST(NativeMatmulDispatch, RequestedNarrowCallsTakeTheNarrowKernel) {
+// weight, whose GEMV plan choice is the narrow kernel, runs on the native
+// tiles at weight cache mode 1, per call and under ZENDNNL_MATMUL_ALGO=10:
+// a layout of its weight and no GEMV pack, within the band of the
+// reference, as the narrow kernel run directly.
+TEST(NativeMatmulDispatch, RequestedNarrowCallsRunOnTheTiles) {
     if (!gemv_isa()) GTEST_SKIP() << "needs AVX512-BF16 and AVX512-VNNI";
     const data_type_t bf16 = data_type_t::bf16, f32 = data_type_t::f32;
     struct case_t {
@@ -467,25 +517,15 @@ TEST(NativeMatmulDispatch, RequestedNarrowCallsTakeTheNarrowKernel) {
                 std::memcpy(r.dst.get(), prior.get(), r.dst.bytes);
             }
             if (per_call) r.c.params.lowoha_algo = matmul_algo_t::native_brgemm;
-            const nat::native_gemv_plan_t plan = r.gemv();
-            ASSERT_EQ(static_cast<int>(plan.kernel),
-                    static_cast<int>(nat::native_gemv_t::bf16_narrow));
-            std::memcpy(r.ref.get(), r.dst.get(), r.dst.bytes);
-            ASSERT_EQ(nt::run_matmul(r.c), status_t::success);
-            ASSERT_EQ(nat::run_native_gemv(plan, r.descriptor(), r.c.src,
-                              r.c.wei, r.ref.get(), r.c.bias, r.c.params, 1),
-                    status_t::success);
-            EXPECT_TRUE(r.same_bits());
-            EXPECT_EQ(nt::native_layouts(r.c.wei), 0u);
+            expect_tiles_then_gemv(r, nat::native_gemv_t::bf16_narrow);
         }
 }
 
 // A call that asks for the native BRGEMM at M = 1 whose GEMV plan choice is a
-// BKC kernel, at weight cache mode 1 (a GEMV kernel serves a call only below
-// mode 2), runs on it, per call and under ZENDNNL_MATMUL_ALGO=10: the bits
-// of the kernel run directly, within the band of the reference, and no
-// native layout of the weight.
-TEST(NativeMatmulDispatch, RequestedBkcCallsTakeTheBkcKernels) {
+// BKC kernel runs on the native tiles at weight cache mode 1, per call and
+// under ZENDNNL_MATMUL_ALGO=10: a layout of its weight and no GEMV pack,
+// within the band of the reference, as the BKC kernel run directly.
+TEST(NativeMatmulDispatch, RequestedBkcCallsRunOnTheTiles) {
     if (!gemv_isa()) GTEST_SKIP() << "needs AVX512-BF16 and AVX512-VNNI";
     using g = nat::native_gemv_t;
     const data_type_t bf16 = data_type_t::bf16, f32 = data_type_t::f32,
@@ -530,21 +570,7 @@ TEST(NativeMatmulDispatch, RequestedBkcCallsTakeTheBkcKernels) {
                 r.c.params.postop_ = {relu};
             }
             if (per_call) r.c.params.lowoha_algo = matmul_algo_t::native_brgemm;
-            const nat::native_gemv_plan_t plan = r.gemv();
-            ASSERT_EQ(
-                    static_cast<int>(plan.kernel), static_cast<int>(cs.kernel));
-            ASSERT_EQ(nt::run_matmul(r.c), status_t::success);
-            ASSERT_EQ(nat::run_native_gemv(plan, r.descriptor(), r.c.src,
-                              r.c.wei, r.ref.get(), r.c.bias, r.c.params, 1),
-                    status_t::success);
-            EXPECT_TRUE(r.same_bits());
-            EXPECT_EQ(nt::native_layouts(r.c.wei), 0u);
-            ASSERT_EQ(nt::run_reference(r.c, r.c.wei, r.ref.get()),
-                    status_t::success);
-            EXPECT_TRUE(nt::within_band(r.dst.get(), cs.N, r.ref.get(), cs.N,
-                    cs.dst, 1, cs.N, rtol_bf16,
-                    nt::comparison_abs_bound(cs.K, epsilon_bf16, 1.0f, 0.0f,
-                            true, int8, false)));
+            expect_tiles_then_gemv(r, cs.kernel);
         }
 }
 

@@ -268,6 +268,13 @@ concurrency, planner math, performance, tests, code quality, and
 documentation. Record any item that cannot be validated rather than silently
 treating it as passed.
 
+When the operator file has a `Caches and kept state` section (today
+[matmul](../matmul.md)), run that section and its test matrix on every PR of
+that operator, at any risk tier, together with the cache checks in
+[common](../common/SUBSKILL.md). A cache bug returns success with wrong
+values, so a diff that looks unrelated to caching still runs the matrix.
+Record the matrix's results in the review's validation section.
+
 ## Phase 6: Validation strategy
 
 Read the risk-tier, functionality-matrix, and BenchDNN sections in

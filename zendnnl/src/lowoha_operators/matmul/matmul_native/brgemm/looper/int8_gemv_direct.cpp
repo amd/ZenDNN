@@ -83,6 +83,9 @@ native_gemv_plan_t int8_gemv_choice(const GemmDescriptor &desc,
     if (desc.wei_dt != data_type_t::s8) return plan;
     if (desc.dst_dt != data_type_t::bf16 && desc.dst_dt != data_type_t::f32)
         return plan;
+    if (desc.bias != nullptr && desc.bias_dt != data_type_t::bf16
+            && desc.bias_dt != data_type_t::f32)
+        return plan;
     if (N <= 0 || desc.num_threads > 1 || desc.ldc != N) return plan;
     // The kernel scales the dequantized value, with its bias and zero-point
     // term, by alpha and adds beta * C after the scales; the reference order

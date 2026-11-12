@@ -2861,7 +2861,8 @@ thread_local bool native_refusal_explained = false;
 /// the weight's (a u8 source with an s4 weight), GGML packs, batched calls
 /// that name it, column-major calls, reordered sources, weight zero points,
 /// source zero points with s4 weights or on a source the call quantizes to
-/// s8, AOCL-DLP prepacks of s4 weights, an f32 call into another dst, and a
+/// s8, AOCL-DLP prepacks of s4 and f16 weights, an f32 or f16 call into
+/// another dst, and a
 /// softmax after a gated activation.  Judged from the call's arguments
 /// alone, so a wrong refusal in the library is not explained by itself.
 bool refusal_explained(const std::string &reason, char layout,
@@ -2877,9 +2878,9 @@ bool refusal_explained(const std::string &reason, char layout,
                     && (compute == dt::u8 || compute == dt::s8)
             ? compute
             : src;
-    if (reason == "weight type other than bf16 / s8 / s4 / f32")
+    if (reason == "weight type other than bf16 / s8 / s4 / f32 / f16")
         return wei != dt::bf16 && wei != dt::s8 && wei != dt::s4
-                && wei != dt::f32;
+                && wei != dt::f32 && wei != dt::f16;
     if (reason == "bf16 weight with a non-bf16 source")
         return wei == dt::bf16 && src != dt::bf16;
     if (reason == "s8 weight with a source other than u8 / s8")
@@ -2895,14 +2896,19 @@ bool refusal_explained(const std::string &reason, char layout,
     if (reason == "a source the call quantizes to s8 with a source zero point")
         return mul_src == dt::s8 && src != dt::s8
                 && params.quant_params.src_zp.buff != nullptr;
-    // An AOCL-DLP prepack of an s4 weight has no inverse.
+    // An AOCL-DLP prepack of an s4 or f16 weight has no inverse.
     if (reason == "an AOCL-DLP blocked weight without an unreorder")
-        return wei == dt::s4 && params.mem_format_b == 'r';
+        return (wei == dt::s4 || wei == dt::f16) && params.mem_format_b == 'r';
     if (reason == "f32 weight with a non-f32 source")
         return wei == dt::f32 && src != dt::f32;
     if (reason == "an f32 call into a dst other than f32 or bf16")
         return src == dt::f32 && wei == dt::f32 && dst != dt::f32
                 && dst != dt::bf16;
+    if (reason == "f16 weight with a non-f16 source")
+        return wei == dt::f16 && src != dt::f16;
+    if (reason == "an f16 call into a dst other than f16 or f32")
+        return src == dt::f16 && wei == dt::f16 && dst != dt::f16
+                && dst != dt::f32;
     if (reason == "a GGML pack format")
         return params.packing.pack_format_b != 0;
     if (reason == "a batched call")

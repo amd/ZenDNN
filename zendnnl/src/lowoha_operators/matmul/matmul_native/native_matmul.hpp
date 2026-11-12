@@ -74,12 +74,9 @@ inline bool native_brgemm_requested(
 /// status the call's status.  The native BRGEMM serves a call whose weight
 /// decide_native_layout places on the layout (a raw ('n') weight, the
 /// prepack's raw weight, or the image), single and row-major, with a plain
-/// source, that uses only what the native BRGEMM implements; an M = 1 call
-/// on its raw weight runs on the GEMV kernel decide_native_gemv chooses for
-/// it, if any, over the raw weight, and the layout rule does not apply to
-/// it (an ldb below the weight row length is turned away with
-/// unimplemented, as from the tiles).  Any other call it takes is not
-/// served: status is unimplemented
+/// source, that uses only what the native BRGEMM implements, on the native
+/// tiles over the weight's layout at every M.  Any other call it takes is
+/// not served: status is unimplemented
 /// (isa_unsupported on a CPU without the instruction set its data types
 /// need; failure for a buffer rewritten in place, which no other route
 /// reads, or for bad arguments), checked before any work, with dst and the

@@ -17,10 +17,10 @@
 #ifndef MATMUL_NATIVE_BRGEMM_LOOPER_NATIVE_BRGEMM_LOOPER_HPP
 #define MATMUL_NATIVE_BRGEMM_LOOPER_NATIVE_BRGEMM_LOOPER_HPP
 
+#include <cstddef>
 #include <cstdint>
 
 #include "lowoha_operators/matmul/lowoha_common.hpp"
-#include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_gemv.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/gemm_descriptor.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_weight_view.hpp"
 
@@ -30,25 +30,18 @@ namespace matmul {
 namespace native {
 
 /// Native BRGEMM over a native-layout weight: bf16 x bf16, u8 / s8 (or a
-/// bf16 / f32 source quantized dynamically) x s8, and f32 x f32 to an f32 or
-/// bf16 dst.  A call it turns away before any work returns unimplemented or
-/// isa_unsupported (failure for bad arguments), with *why (when why is not
-/// null) naming the reason, and leaves dst and the weight as they were;
-/// once work started, every error is failure.  desc.K, desc.N and
-/// weight.pack_nr must satisfy native_layout_fits (the layout rule's shape);
-/// a release build does not check them.  With a GEMV choice (gemv.kernel
-/// not none, decide_native_gemv's for the call) the call runs on that GEMV
-/// kernel over weight.weight, its raw weight, instead (run_native_gemv); the
-/// layout rule and pack_nr do not apply to it (an ldb below the weight row
-/// length is turned away with unimplemented, as from the tiles), unless an
-/// in-place rewrite of the buffer replaced the raw weight before the
-/// kernel's pack read it: the call then runs on the native tiles from the
-/// image, under the layout rule (failure when it does not take the call,
-/// which no other route can run).
+/// bf16 / f32 source quantized dynamically) x s8, s8 (or a bf16 / f32
+/// source quantized dynamically) x s4, f32 x f32 and f16 x f16, into the
+/// dst types its checks take.  A call it turns away before any work returns
+/// unimplemented or isa_unsupported (failure for bad arguments), with *why
+/// (when why is not null) naming the reason, and leaves dst and the weight
+/// as they were; once work started, every error is failure.  desc.K,
+/// desc.N and weight.pack_nr must satisfy native_layout_fits (the layout
+/// rule's shape); a release build does not check them.  Every M, 1
+/// included, runs on the native tiles over the weight's layout.
 status_t native_brgemm_execute(const GemmDescriptor &desc,
         const native_weight_ref_t &weight, const void *src, void *dst,
         const void *bias, const matmul_params &params,
-        const native_gemv_plan_t &gemv = native_gemv_plan_t {},
         const char **why = nullptr);
 
 /// The status native_brgemm_execute would turn the call away with (success
@@ -59,8 +52,51 @@ status_t native_brgemm_execute(const GemmDescriptor &desc,
 /// makes into the buffers of params.
 status_t native_brgemm_check(const GemmDescriptor &desc,
         const native_weight_ref_t &weight, const void *src, void *dst,
-        const void *bias, const matmul_params &params,
-        const native_gemv_plan_t &gemv, const char **why);
+        const void *bias, const matmul_params &params, const char **why);
+
+/// Block b of the widening of an f16 source of M rows into f32 rows ld
+/// apart in dst: element (m, k), src[m * lda + k] or with trans
+/// src[k * lda + m], for every k below K (side at a time with trans) and
+/// the block's rows m, from b * rows to that plus what is left, at most
+/// rows (b below ceil_div(M, rows)).  No row index passes M, at any M an
+/// int holds.  Needs AVX-512 F, BW and VL.
+void native_widen_f16_block(const uint16_t *src, int lda, bool trans, int M,
+        int K, float *dst, int ld, int rows, int side, int b);
+
+/// Buffers of widened F16 sources the process keeps for later calls at
+/// most.
+constexpr int kNativeF16KeptSourceSlots = 32;
+
+/// The buffer of a call's widened F16 source, 64-byte aligned, of at least
+/// the bytes take asks for: the smallest kept buffer large enough, else a
+/// new one (nullptr when none can be allocated).  At scope exit it goes
+/// back to the kept buffers, the smallest dropped first beyond 512 MiB, or
+/// is freed: when it is larger than that, after a release, or when every
+/// slot holds a buffer at least as large.  Giving it back allocates
+/// nothing.
+class native_f16_source_lease_t {
+public:
+    native_f16_source_lease_t() = default;
+    native_f16_source_lease_t(const native_f16_source_lease_t &) = delete;
+    native_f16_source_lease_t &operator=(const native_f16_source_lease_t &)
+            = delete;
+    ~native_f16_source_lease_t();
+
+    /// The buffer, taken once per lease.
+    float *take(size_t bytes);
+
+private:
+    float *buf_ = nullptr;
+    size_t bytes_ = 0;
+    uint64_t generation_ = 0;
+};
+
+/// Frees the buffers of widened F16 sources kept for later calls, and those
+/// that calls running now hold once they return.
+void release_native_f16_sources();
+
+/// Bytes of the buffers of widened F16 sources kept for later calls.
+size_t native_f16_kept_source_bytes();
 
 } // namespace native
 } // namespace matmul

@@ -334,16 +334,14 @@ buffer_t copy_of(const buffer_t &b) {
     return c;
 }
 
-/// True when matmul_direct takes the call on this CPU: an f16 bias needs
-/// AVX512-FP16.  The case lists hold only calls it takes on some CPU: no
-/// per-token source scale of an asymmetric source (an asymmetric dynamic
-/// quantization of more than one row included), of a destination other than
-/// f32 / bf16 or with per-tensor weight scales, and no mish on a dynamically
-/// quantized source (which it takes for the native BRGEMM alone, not for the
-/// reference algorithm the comparison runs).
-bool direct_accepts(const pcase_t &c) {
-    return c.bias != kF16 || zendnnl_platform_info().get_avx512_f16_status();
-}
+// matmul_direct takes every call of the case lists for the native BRGEMM,
+// whose f16 biases need no AVX512-FP16, on any CPU of the native BRGEMM's
+// instruction sets: the lists hold no per-token source scale of an
+// asymmetric source (an asymmetric dynamic quantization of more than one
+// row included), of a destination other than f32 / bf16 or with per-tensor
+// weight scales, and no mish on a dynamically quantized source (which it
+// takes for the native BRGEMM alone, not for the reference algorithm the
+// comparison runs).
 
 /// True when the single-expert custom-kernel route admits the call and
 /// matmul_direct accepts it on the default route.
@@ -379,7 +377,6 @@ class NativeBrgemmParity : public ::testing::TestWithParam<pcase_t> {};
 
 TEST_P(NativeBrgemmParity, Matches) {
     const pcase_t &c = GetParam();
-    if (!direct_accepts(c)) GTEST_SKIP() << "matmul_direct refuses the call";
     ::reset_grp_matmul_caches();
     WeightCacheGuard global_cache(2);
     const operands_t o = make_operands(c);
@@ -425,15 +422,11 @@ TEST_P(NativeBrgemmParity, Matches) {
         std::unique_ptr<nt::algo_pin_t> pin;
         if (!c.per_call)
             pin.reset(new nt::algo_pin_t(matmul_algo_t::native_brgemm));
-        const bool on_gemv = nt::gemv_kernel(call) != nat::native_gemv_t::none;
         for (int i = 0; i < c.calls; ++i) {
             std::memcpy(dst.get(), init.get(), init.bytes);
             ASSERT_EQ(nt::run_matmul(call), status_t::success)
                     << "ALGO 10 call " << i;
-            if (c.wc != 0 && on_gemv) {
-                EXPECT_EQ(nt::native_layouts(o.wei.get()), 0u)
-                        << "ALGO 10 call " << i << " on a GEMV kernel";
-            } else if (c.wc != 0) {
+            if (c.wc != 0) {
                 ASSERT_GE(nt::native_layouts(o.wei.get()), 1u)
                         << "ALGO 10 call " << i
                         << " was not served by the native BRGEMM over the "
