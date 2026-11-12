@@ -76,6 +76,7 @@ add_subdirectory(embag)
 add_subdirectory(normalization)
 add_subdirectory(grp_matmul)
 add_subdirectory(sdpa)
+add_subdirectory(gdn)
 add_subdirectory(utils)
 
 add_executable(benchdnn ${benchdnn_sources})
@@ -89,6 +90,7 @@ target_link_libraries(benchdnn
   normalization_benchdnn
   grp_matmul_benchdnn
   sdpa_benchdnn
+  gdn_benchdnn
   benchdnn_utils
   tensor_helper)
 

@@ -65,6 +65,7 @@ struct TimingStats {
 
 // Include the main benchmarking interfaces
 #include "embag/embag_benchdnn.hpp"
+#include "gdn/gdn_benchdnn.hpp"
 #include "grp_matmul/grp_matmul_benchdnn.hpp"
 #include "matmul/matmul_benchdnn.hpp"
 #include "normalization/normalization_benchdnn.hpp"

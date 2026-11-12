@@ -347,6 +347,15 @@ dispatcher.
 
 ---
 
+## GDN Configuration
+
+| Variable | Description | Default | Valid Values |
+|----------|-------------|---------|--------------|
+| `ZENDNNL_GDN_KERNEL` | Kernel of `gdn_direct` (decodes and prefills alike), overriding `gdn_params::kernel`. Without it the native AVX-512 kernels run when they support the call (AVX512F, AVX512-BW/VL and AVX512-BF16; `head_k_dim` and `head_v_dim` multiples of 16 up to 256; `conv_width` up to 8; the rule `gdn_native_supported` reports, which does not read this variable) and the reference kernel otherwise. Forcing `native` on an unsupported call falls back to the reference kernel with a warning. Cached on first read. | unset (automatic) | `native`, `reference`; other values are ignored with a warning (then `gdn_params::kernel` applies) |
+| `ZENDNNL_GDN_PREFILL` | Prefill algorithm of the native `gdn_direct` kernel for the prefill sequences of a call, overriding `gdn_params::prefill_algo`. Without it the chunked delta rule runs once the prefills of the call average at least 16 tokens with bf16 sources, 32 with f16 and 24 with f32 (the decodes of a mixed batch do not count), and the token-recurrent kernel otherwise. The chunked form rounds its GEMM operands to the source type (bf16, f16 or f32; FP32 accumulation and state) and needs head dims that are multiples of 32 (and, with a fused norm, `round_core_out`); calls that do not qualify run the recurrent kernel, with a warning if `chunked` was forced. Cached on first read. | unset (automatic) | `recurrent`, `chunked`; other values are ignored with a warning (then `gdn_params::prefill_algo` applies) |
+
+---
+
 ## Logging Configuration
 
 Log levels control the verbosity of messages for different modules.

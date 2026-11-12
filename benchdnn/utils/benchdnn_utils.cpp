@@ -817,6 +817,32 @@ int parseCLArgs(benchdnn::global_options &options, std::string arg) {
             return NOT_OK;
         }
         options.qkv_layout = val;
+    } else if (arg.find("--src_dt=") == 0) {
+        std::string val = arg.substr(9);
+        if (val.empty()) {
+            commonlog_error(
+                    "src_dt cannot be empty. Use 'none', 'f32', 'bf16' or "
+                    "'f16'.");
+            return NOT_OK;
+        }
+        data_type_t src_dt = data_type_t::none;
+        if (!tryParseOptionalDatatype(val, "--src_dt", src_dt)) {
+            return NOT_OK;
+        }
+        options.gdn_src_dt = src_dt;
+    } else if (arg.find("--state_dt=") == 0) {
+        std::string val = arg.substr(11);
+        if (val.empty()) {
+            commonlog_error(
+                    "state_dt cannot be empty. Use 'none', 'f32', 'bf16' or "
+                    "'f16'.");
+            return NOT_OK;
+        }
+        data_type_t state_dt = data_type_t::none;
+        if (!tryParseOptionalDatatype(val, "--state_dt", state_dt)) {
+            return NOT_OK;
+        }
+        options.gdn_state_dt = state_dt;
     } else if (arg.find("--dynamic_quant=") == 0) {
         if (arg.substr(16).empty()) {
             commonlog_error(

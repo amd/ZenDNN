@@ -125,6 +125,11 @@ struct global_options {
                                independent of SDPA-specific enums; converted to
                                `qkv_layout_t` once at config-build time. */
 
+    // GDN-specific options (used by --op=gdn): the data types of input lines
+    // that leave the field empty. `none` -> bf16 activations, f32 SSM state.
+    data_type_t gdn_src_dt; /**< GDN: activation type (--src_dt). */
+    data_type_t gdn_state_dt; /**< GDN: SSM state type (--state_dt). */
+
     global_options()
         : bs(0)
         , m(0)
@@ -169,7 +174,9 @@ struct global_options {
         , scale(0.0)
         , num_threads(0)
         , out_dt(data_type_t::none)
-        , qkv_layout("bhsd") {}
+        , qkv_layout("bhsd")
+        , gdn_src_dt(data_type_t::none)
+        , gdn_state_dt(data_type_t::none) {}
 };
 
 /**

@@ -1,0 +1,88 @@
+# GDN (Gated DeltaNet) model shapes for --op=gdn.
+# Used with: ./benchdnn --op=gdn --input_file=<this_file> [--iters=N]
+#            [--warmup_iters=N] [--num_threads=N] [--cache_mode=hot]
+#
+# Format per line (CSV, '#' comments and blank lines ignored):
+#   model, num_k_heads, num_v_heads, head_k_dim, head_v_dim, conv_width,
+#   num_decodes, num_prefills, prefill_len
+#   [, iters, warmup_iters, src_dt, state_dt, has_initial_state,
+#      state_layout, fused_norm, prefill_algo, kernel, num_threads]
+#
+# Each line is one gdn_direct call over a vLLM batch: num_decodes
+# single-token decodes first, then num_prefills prefills of prefill_len
+# tokens. Defaults: bf16 activations, f32 SSM state (mamba_ssm_dtype), kv
+# state layout, prefills continuing from their slots, no fused norm,
+# automatic prefill algorithm and kernel, all OpenMP threads.
+# --src_dt=<f32|bf16|f16> and --state_dt=<...> change the types of lines
+# that leave src_dt / state_dt empty, e.g. --src_dt=f16 runs every model
+# row with fp16 activations.
+#
+# Shapes are linear_num_key_heads, linear_num_value_heads,
+# linear_key_head_dim, linear_value_head_dim and linear_conv_kernel_dim from
+# each model's config.json (text_config). Timing is cold-cache by default.
+
+# ----------------------------------------------------------------------------
+# Qwen3.5-9B: 16 key heads, 32 value heads, head dims 128, conv width 4
+# (also Qwen3.5-4B and Qwen3.5-35B-A3B)
+# ----------------------------------------------------------------------------
+Qwen3.5-9B,  16, 32, 128, 128, 4,  1, 0,    0, 50
+Qwen3.5-9B,  16, 32, 128, 128, 4,  8, 0,    0, 50
+Qwen3.5-9B,  16, 32, 128, 128, 4, 16, 0,    0, 50
+Qwen3.5-9B,  16, 32, 128, 128, 4, 32, 0,    0, 50
+Qwen3.5-9B,  16, 32, 128, 128, 4, 64, 0,    0, 50
+Qwen3.5-9B,  16, 32, 128, 128, 4,  0, 1,  128, 50
+Qwen3.5-9B,  16, 32, 128, 128, 4,  0, 1, 1024, 20
+Qwen3.5-9B,  16, 32, 128, 128, 4,  0, 1, 4096, 10
+# Mixed: decodes with one long prefill chunk (chunked) and with short
+# prefills (recurrent).
+Qwen3.5-9B,  16, 32, 128, 128, 4,  8, 1, 1024, 20
+Qwen3.5-9B,  16, 32, 128, 128, 4, 16, 8,    8, 50
+
+# ----------------------------------------------------------------------------
+# Qwen3.6-35B-A3B: 16 key heads, 32 value heads, head dims 128, conv width 4
+# ----------------------------------------------------------------------------
+Qwen3.6-35B-A3B, 16, 32, 128, 128, 4,  1, 0,    0, 50
+Qwen3.6-35B-A3B, 16, 32, 128, 128, 4,  8, 0,    0, 50
+Qwen3.6-35B-A3B, 16, 32, 128, 128, 4, 16, 0,    0, 50
+Qwen3.6-35B-A3B, 16, 32, 128, 128, 4, 32, 0,    0, 50
+Qwen3.6-35B-A3B, 16, 32, 128, 128, 4, 64, 0,    0, 50
+Qwen3.6-35B-A3B, 16, 32, 128, 128, 4,  0, 1,  128, 50
+Qwen3.6-35B-A3B, 16, 32, 128, 128, 4,  0, 1, 1024, 20
+Qwen3.6-35B-A3B, 16, 32, 128, 128, 4,  0, 1, 4096, 10
+Qwen3.6-35B-A3B, 16, 32, 128, 128, 4,  8, 1, 1024, 20
+Qwen3.6-35B-A3B, 16, 32, 128, 128, 4, 16, 8,    8, 50
+
+# ----------------------------------------------------------------------------
+# Qwen3.6-35B-A3B in fp16 (vLLM --dtype float16): f16 activations with the
+# default f32 SSM state, then an f16 state (--mamba-ssm-cache-dtype float16)
+# and the fused gated RMSNorm.
+# ----------------------------------------------------------------------------
+Qwen3.6-35B-A3B, 16, 32, 128, 128, 4,  1, 0,    0, 50, , f16, f32
+Qwen3.6-35B-A3B, 16, 32, 128, 128, 4,  8, 0,    0, 50, , f16, f32
+Qwen3.6-35B-A3B, 16, 32, 128, 128, 4, 16, 0,    0, 50, , f16, f32
+Qwen3.6-35B-A3B, 16, 32, 128, 128, 4, 32, 0,    0, 50, , f16, f32
+Qwen3.6-35B-A3B, 16, 32, 128, 128, 4, 64, 0,    0, 50, , f16, f32
+Qwen3.6-35B-A3B, 16, 32, 128, 128, 4,  0, 1,  128, 50, , f16, f32
+Qwen3.6-35B-A3B, 16, 32, 128, 128, 4,  0, 1, 1024, 20, , f16, f32
+Qwen3.6-35B-A3B, 16, 32, 128, 128, 4,  0, 1, 4096, 10, , f16, f32
+Qwen3.6-35B-A3B, 16, 32, 128, 128, 4,  8, 1, 1024, 20, , f16, f32
+Qwen3.6-35B-A3B, 16, 32, 128, 128, 4, 16, 8,    8, 50, , f16, f32
+Qwen3.6-35B-A3B, 16, 32, 128, 128, 4, 32, 0,    0, 50, , f16, f16
+Qwen3.6-35B-A3B, 16, 32, 128, 128, 4,  0, 1, 1024, 20, , f16, f16
+Qwen3.6-35B-A3B, 16, 32, 128, 128, 4,  8, 0,    0, 50, , f16, f32, , , true
+Qwen3.6-35B-A3B, 16, 32, 128, 128, 4,  8, 1, 1024, 20, , f16, f32, , , true
+
+# ----------------------------------------------------------------------------
+# Qwen3.8-27B: 16 key heads, 48 value heads, head dims 128, conv width 4
+# (also Qwen3.5-27B)
+# ----------------------------------------------------------------------------
+Qwen3.8-27B, 16, 48, 128, 128, 4,  1, 0,    0, 50
+Qwen3.8-27B, 16, 48, 128, 128, 4,  8, 0,    0, 50
+Qwen3.8-27B, 16, 48, 128, 128, 4, 16, 0,    0, 50
+Qwen3.8-27B, 16, 48, 128, 128, 4, 32, 0,    0, 50
+Qwen3.8-27B, 16, 48, 128, 128, 4, 64, 0,    0, 50
+Qwen3.8-27B, 16, 48, 128, 128, 4,  0, 1,  128, 50
+Qwen3.8-27B, 16, 48, 128, 128, 4,  0, 1, 1024, 20
+Qwen3.8-27B, 16, 48, 128, 128, 4,  0, 1, 4096, 10
+Qwen3.8-27B, 16, 48, 128, 128, 4,  8, 1, 1024, 20
+Qwen3.8-27B, 16, 48, 128, 128, 4, 16, 8,    8, 50

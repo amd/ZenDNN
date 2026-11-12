@@ -47,6 +47,7 @@ int main(int argc, char **argv) {
     benchdnn::global_options options;
     options.ndims = 2;
     bool isLOWOHA = true;
+    bool cache_mode_given = false;
     benchdnn::InputMode inputMode = benchdnn::InputMode::COMMAND_LINE;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -95,6 +96,7 @@ int main(int argc, char **argv) {
                 return NOT_OK;
             }
         } else {
+            if (arg.find("--cache_mode=") == 0) { cache_mode_given = true; }
             int status = benchdnn::parseCLArgs(options, arg);
             if (status != OK) { return NOT_OK; }
         }
@@ -103,9 +105,15 @@ int main(int argc, char **argv) {
     // Validate required arguments
     if (op.empty()) {
         commonlog_error("Usage: ", argv[0],
-                " --op=<matmul|reorder|embag|normalization|grp_matmul|sdpa> "
-                "...");
+                " --op=<matmul|reorder|embag|normalization|grp_matmul|sdpa|"
+                "gdn> ...");
         return NOT_OK;
+    }
+
+    // A GDN call streams its whole state pool, which back-to-back calls would
+    // keep in cache; GDN therefore times cold unless asked otherwise.
+    if (op == "gdn" && !cache_mode_given) {
+        options.cache_mode = benchdnn::CacheMode::COLD;
     }
 
     if (options.cache_mode == benchdnn::CacheMode::WARM && op != "matmul") {
@@ -183,11 +191,14 @@ int main(int argc, char **argv) {
     } else if (op == "sdpa") {
         return benchdnn::sdpa::bench(in_filename, out_filename, inputMode,
                 options, isLOWOHA, cache_size);
+    } else if (op == "gdn") {
+        return benchdnn::gdn::bench(in_filename, out_filename, inputMode,
+                options, isLOWOHA, cache_size);
     } else {
         commonlog_error("Unsupported operator: ", op);
         commonlog_error(
                 "Supported operators: matmul, reorder, embag, normalization, "
-                "grp_matmul, sdpa");
+                "grp_matmul, sdpa, gdn");
         return NOT_OK;
     }
 }
