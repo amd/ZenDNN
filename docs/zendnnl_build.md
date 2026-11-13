@@ -125,7 +125,7 @@ In order to configure the build according to dependencies, components, and stand
 
 Dependency injection allows ZenDNN to use a pre-built installation of a dependency instead of downloading and building it from source. This works in both standalone and framework builds, and is selected by setting `ZENDNNL_<DEPENDENCY>_INJECT_DIR` to the install prefix of that dependency.
 
-When an `INJECT_DIR` path is provided, ZenDNN creates a symlink under `${ZENDNNL_INSTALL_PREFIX}/deps/<dependency>` to the specified install directory and uses it directly. The install directory is expected to have `lib/` or `lib64/`, plus `include/`, subdirectories.
+When an `INJECT_DIR` path is provided, ZenDNN creates a symlink under `${ZENDNNL_INSTALL_PREFIX}/deps/<dependency>` to the specified install directory and uses it directly. The install directory is expected to have `lib/` and `include/` subdirectories.
 
 In **standalone** builds, injected dependencies are linked with `WHOLE_ARCHIVE` so the resulting `libzendnnl_archive.a` is self-contained. In **framework** builds (`ZENDNNL_FWK_BUILD=ON`), injected dependencies on the archive target use `COMPILE_ONLY` linking, so the framework is responsible for linking those dependencies at the final binary stage. The shared library target links the injected dependency targets normally.
 
@@ -133,7 +133,7 @@ In **standalone** builds, injected dependencies are linked with `WHOLE_ARCHIVE` 
 |--------|-------------|------|---------|
 | ZENDNNL_FWK_BUILD | Build ZenDNN as a part of framework build. If ON, `ZENDNNL_STANDALONE_BUILD` is disabled and injected archive dependencies use `COMPILE_ONLY` linking. If OFF (default), dependencies are linked with `WHOLE_ARCHIVE` for a self-contained archive. | BOOL | OFF |
 | ZENDNNL_STANDALONE_BUILD | Standalone build mode. This is ON by default and is automatically OFF when `ZENDNNL_FWK_BUILD=ON`. | BOOL | ON |
-| ZENDNNL_AOCLDLP_INJECT_DIR | Path to a pre-built AOCL-DLP install directory. If provided, ZenDNN skips building AOCL-DLP and uses this installation. The directory must contain `include/` and `lib/` or `lib64/` subdirectories. | PATH | (empty) |
+| ZENDNNL_AOCLDLP_INJECT_DIR | Path to a pre-built AOCL-DLP install directory. If provided, ZenDNN skips building AOCL-DLP and uses this installation. The directory must contain `include/` and `lib/` subdirectories. | PATH | (empty) |
 | ZENDNNL_ONEDNN_INJECT_DIR | Same as ZENDNNL_AOCLDLP_INJECT_DIR but for oneDNN. | PATH | (empty) |
 | ZENDNNL_LIBXSMM_INJECT_DIR | Same as ZENDNNL_AOCLDLP_INJECT_DIR but for LIBXSMM. | PATH | (empty) |
 | ZENDNNL_PARLOOPER_INJECT_DIR | Same as ZENDNNL_AOCLDLP_INJECT_DIR but for PARLOOPER. | PATH | (empty) |
@@ -247,7 +247,7 @@ cmake .. -DZENDNNL_LOCAL_AOCLDLP=ON -DAOCLDLP_ROOT_DIR=/path/to/aocl-dlp
 
 ##### Dependency Injection (pre-built install)
 
-Uses a pre-built installation of a dependency without any compilation. Provide the install prefix path (containing `include/` and `lib/` or `lib64/` subdirectories):
+Uses a pre-built installation of a dependency without any compilation. Provide the install prefix path (containing `include/` and `lib/` subdirectories):
 
 ```bash
 cmake .. -DZENDNNL_AOCLDLP_INJECT_DIR=<path-to-aocldlp-install>
@@ -427,7 +427,7 @@ It is possible that a few of the ZenDNN dependencies are being built by the fram
 ```text
 dependency_install_directory
 |
-|- lib or lib64 : contains all the dependency library files.
+|- lib : contains all the dependency library files.
 |  |- cmake/CMake (optional): provides cmake config files needed by find_package tool of CMake.
 |- include : contains all include files of the dependency.
 |

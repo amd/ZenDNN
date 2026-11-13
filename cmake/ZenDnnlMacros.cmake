@@ -43,10 +43,10 @@ macro(find_build_dependencies  _install_prefix)
     # bumped to a release shipping the AoclUtils:: package on all platforms
     # (verify that release's installed config name/namespace before removing).
     find_package(aocl-utils QUIET GLOBAL CONFIG
-      PATH_SUFFIXES "lib" "lib/CMake" "lib64" "lib64/CMake")
+      PATH_SUFFIXES "lib" "lib/CMake")
     if(NOT aocl-utils_FOUND)
       find_package(AoclUtils QUIET GLOBAL CONFIG
-        PATH_SUFFIXES "lib" "lib/cmake" "lib/CMake" "lib64" "lib64/cmake" "lib64/CMake")
+        PATH_SUFFIXES "lib" "lib/cmake" "lib/CMake")
     endif()
     if(aocl-utils_FOUND OR AoclUtils_FOUND)
       message(STATUS "${ZENDNNL_MSG_PREFIX}Found AOCL-UTILS at ${AOCLUTILS_INSTALL_DIR}")
@@ -164,10 +164,10 @@ macro(find_install_dependencies  _install_prefix)
     # bumped to a release shipping the AoclUtils:: package on all platforms
     # (verify that release's installed config name/namespace before removing).
     find_package(aocl-utils QUIET GLOBAL CONFIG
-      PATH_SUFFIXES "lib" "lib/CMake" "lib64" "lib64/CMake")
+      PATH_SUFFIXES "lib" "lib/CMake")
     if(NOT aocl-utils_FOUND)
       find_package(AoclUtils QUIET GLOBAL CONFIG
-        PATH_SUFFIXES "lib" "lib/cmake" "lib/CMake" "lib64" "lib64/cmake" "lib64/CMake")
+        PATH_SUFFIXES "lib" "lib/cmake" "lib/CMake")
     endif()
     if(aocl-utils_FOUND OR AoclUtils_FOUND)
       message(STATUS "${ZENDNNL_MSG_PREFIX}Found AOCL-UTILS at ${AOCLUTILS_INSTALL_DIR}")

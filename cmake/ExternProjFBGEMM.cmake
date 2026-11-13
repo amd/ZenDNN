@@ -31,6 +31,10 @@ if (ZENDNNL_DEPENDS_FBGEMM)
     list(APPEND FBGEMM_CMAKE_ARGS "-DCMAKE_VERBOSE_MAKEFILE=OFF")
     list(APPEND FBGEMM_CMAKE_ARGS "-DCMAKE_BUILD_TYPE=Release")
     list(APPEND FBGEMM_CMAKE_ARGS "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>")
+    # GNUInstallDirs defaults to lib64 on RHEL, AlmaLinux, and manylinux. Pin
+    # lib so libfbgemm.a, libcpuinfo.a, and the asmjit copy land in the same
+    # directory the fwk imports from.
+    list(APPEND FBGEMM_CMAKE_ARGS "-DCMAKE_INSTALL_LIBDIR=lib")
     list(APPEND FBGEMM_CMAKE_ARGS "-DCMAKE_POSITION_INDEPENDENT_CODE=ON")
 
     list(APPEND FBGEMM_CMAKE_ARGS "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}")

@@ -381,7 +381,7 @@ check_inject_path() {
         echo "error: inject path for ${dep_name} not found at ${inject_path}"
         return 1
     fi
-    if [ ! -d "${inject_path}/lib" ] && [ ! -d "${inject_path}/lib64" ]; then
+    if [ ! -d "${inject_path}/lib" ]; then
         echo "warning: ${inject_path} does not contain a lib/ directory. injection may fail."
     fi
     if [ ! -d "${inject_path}/include" ]; then

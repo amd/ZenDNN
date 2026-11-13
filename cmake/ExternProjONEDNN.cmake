@@ -32,6 +32,9 @@ if (ZENDNNL_DEPENDS_ONEDNN)
     list(APPEND ONEDNN_CMAKE_ARGS "-DCMAKE_VERBOSE_MAKEFILE=OFF")
     list(APPEND ONEDNN_CMAKE_ARGS "-DCMAKE_BUILD_TYPE=Release")
     list(APPEND ONEDNN_CMAKE_ARGS "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>")
+    # GNUInstallDirs defaults to lib64 on RHEL, AlmaLinux, and manylinux. Pin
+    # lib so the fwk import path stays the same everywhere.
+    list(APPEND ONEDNN_CMAKE_ARGS "-DCMAKE_INSTALL_LIBDIR=lib")
     list(APPEND ONEDNN_CMAKE_ARGS "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}")
     list(APPEND ONEDNN_CMAKE_ARGS "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}")
     # Not propagating parent CMAKE_C/CXX_FLAGS to oneDNN: oneDNN is a mature standalone

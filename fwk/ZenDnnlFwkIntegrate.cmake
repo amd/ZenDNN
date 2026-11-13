@@ -361,18 +361,10 @@ if(ZENDNNL_DEPENDS_AOCLDLP)
 endif()
 
 if(ZENDNNL_DEPENDS_ONEDNN)
-  if(DEFINED ENV{ZENDNNL_MANYLINUX_BUILD})
-    zendnnl_add_dependency(NAME onednn
-      PATH "${ZENDNNL_INSTALL_PREFIX}/deps/onednn"
-      LIB_SUFFIX lib64
-      ARCHIVE_FILE "${CMAKE_STATIC_LIBRARY_PREFIX}dnnl${CMAKE_STATIC_LIBRARY_SUFFIX}"
-      ALIAS "DNNL::dnnl")
-  else()
-    zendnnl_add_dependency(NAME onednn
-      PATH "${ZENDNNL_INSTALL_PREFIX}/deps/onednn"
-      ARCHIVE_FILE "${CMAKE_STATIC_LIBRARY_PREFIX}dnnl${CMAKE_STATIC_LIBRARY_SUFFIX}"
-      ALIAS "DNNL::dnnl")
-  endif()
+  zendnnl_add_dependency(NAME onednn
+    PATH "${ZENDNNL_INSTALL_PREFIX}/deps/onednn"
+    ARCHIVE_FILE "${CMAKE_STATIC_LIBRARY_PREFIX}dnnl${CMAKE_STATIC_LIBRARY_SUFFIX}"
+    ALIAS "DNNL::dnnl")
 
   if(ZENDNNL_LIB_BUILD_ARCHIVE)
     target_link_libraries(zendnnl_library INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,DNNL::dnnl>")
@@ -411,36 +403,18 @@ if(ZENDNNL_DEPENDS_PARLOOPER)
 endif()
 
 if(ZENDNNL_DEPENDS_FBGEMM)
-  if(DEFINED ENV{ZENDNNL_MANYLINUX_BUILD})
-    zendnnl_add_dependency(NAME asmjit
-      PATH "${ZENDNNL_INSTALL_PREFIX}/deps/fbgemm"
-      LIB_SUFFIX lib64
-      ARCHIVE_FILE "${CMAKE_STATIC_LIBRARY_PREFIX}asmjit${CMAKE_STATIC_LIBRARY_SUFFIX}"
-      ALIAS "fbgemm::asmjit")
-    zendnnl_add_dependency(NAME cpuinfo
-      PATH "${ZENDNNL_INSTALL_PREFIX}/deps/fbgemm"
-      LIB_SUFFIX lib64
-      ARCHIVE_FILE "${CMAKE_STATIC_LIBRARY_PREFIX}cpuinfo${CMAKE_STATIC_LIBRARY_SUFFIX}"
-      ALIAS "fbgemm::cpuinfo")
-    zendnnl_add_dependency(NAME fbgemm
-      PATH "${ZENDNNL_INSTALL_PREFIX}/deps/fbgemm"
-      LIB_SUFFIX lib64
-      ARCHIVE_FILE "${CMAKE_STATIC_LIBRARY_PREFIX}fbgemm${CMAKE_STATIC_LIBRARY_SUFFIX}"
-      ALIAS "fbgemm::fbgemm_archive")
-  else()
-    zendnnl_add_dependency(NAME asmjit
-      PATH "${ZENDNNL_INSTALL_PREFIX}/deps/fbgemm"
-      ARCHIVE_FILE "${CMAKE_STATIC_LIBRARY_PREFIX}asmjit${CMAKE_STATIC_LIBRARY_SUFFIX}"
-      ALIAS "fbgemm::asmjit")
-    zendnnl_add_dependency(NAME cpuinfo
-      PATH "${ZENDNNL_INSTALL_PREFIX}/deps/fbgemm"
-      ARCHIVE_FILE "${CMAKE_STATIC_LIBRARY_PREFIX}cpuinfo${CMAKE_STATIC_LIBRARY_SUFFIX}"
-      ALIAS "fbgemm::cpuinfo")
-    zendnnl_add_dependency(NAME fbgemm
-      PATH "${ZENDNNL_INSTALL_PREFIX}/deps/fbgemm"
-      ARCHIVE_FILE "${CMAKE_STATIC_LIBRARY_PREFIX}fbgemm${CMAKE_STATIC_LIBRARY_SUFFIX}"
-      ALIAS "fbgemm::fbgemm_archive")
-  endif()
+  zendnnl_add_dependency(NAME asmjit
+    PATH "${ZENDNNL_INSTALL_PREFIX}/deps/fbgemm"
+    ARCHIVE_FILE "${CMAKE_STATIC_LIBRARY_PREFIX}asmjit${CMAKE_STATIC_LIBRARY_SUFFIX}"
+    ALIAS "fbgemm::asmjit")
+  zendnnl_add_dependency(NAME cpuinfo
+    PATH "${ZENDNNL_INSTALL_PREFIX}/deps/fbgemm"
+    ARCHIVE_FILE "${CMAKE_STATIC_LIBRARY_PREFIX}cpuinfo${CMAKE_STATIC_LIBRARY_SUFFIX}"
+    ALIAS "fbgemm::cpuinfo")
+  zendnnl_add_dependency(NAME fbgemm
+    PATH "${ZENDNNL_INSTALL_PREFIX}/deps/fbgemm"
+    ARCHIVE_FILE "${CMAKE_STATIC_LIBRARY_PREFIX}fbgemm${CMAKE_STATIC_LIBRARY_SUFFIX}"
+    ALIAS "fbgemm::fbgemm_archive")
 
   if(ZENDNNL_LIB_BUILD_ARCHIVE)
     target_link_libraries(zendnnl_library INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,fbgemm::fbgemm_archive>")
