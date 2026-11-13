@@ -31,8 +31,8 @@ endif()
 set(AOCLDLP_ROOT_DIR "${ZENDNNL_DEPS_DIR}/aocldlp"
   CACHE PATH "AOCL DLP root dir")
 set(AOCLDLP_GIT_REPO "https://github.com/amd/aocl-dlp.git")
-# aocl-dlp tag AOCL-202610W02
-set(AOCLDLP_GIT_TAG "8c746244b76efe1626f57a01f7517e8bcc408610"
+# aocl-dlp tag AOCL-20261112
+set(AOCLDLP_GIT_TAG "a0ffced58dc77e9a30226b4f992eb25781589392"
   CACHE STRING "AOCL-DLP git tag or ref")
 option(AOCLDLP_GIT_PROGRESS ON)
 
@@ -40,8 +40,8 @@ option(AOCLDLP_GIT_PROGRESS ON)
 set(AOCLUTILS_ROOT_DIR "${ZENDNNL_DEPS_DIR}/aoclutils"
   CACHE PATH "AOCL UTILS root dir")
 set(AOCLUTILS_GIT_REPO "https://github.com/amd/aocl-utils")
-# aocl-utils tag AOCL-20260801
-set(AOCLUTILS_GIT_TAG "621b256db4524239016b5bcfb8eb236d03bd2901")
+# aocl-utils tag AOCL-20261112
+set(AOCLUTILS_GIT_TAG "af36936810811d9211e623f0b7d69b5bd083b0e9")
 
 # gtest repo information
 set(GTEST_ROOT_DIR "${ZENDNNL_DEPS_DIR}/gtest"
