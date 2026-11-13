@@ -230,19 +230,46 @@ jobs:
       with:
        fetch-depth: 0
        clean: true
-    - name: Checkout PR tip commit
+    - name: Checkout PR rebased onto latest base
       if: github.event_name == 'pull_request'
       env:
         PR_NUMBER: ${{ github.event.pull_request.number }}
         PR_TITLE: ${{ github.event.pull_request.title }}
         PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        BASE_REF: ${{ github.event.pull_request.base.ref }}
       run: |
-       echo " Checking out PR tip commit..."
-       echo "Current commit: $(git rev-parse HEAD)"
-       echo "PR HEAD SHA: ${PR_HEAD_SHA}"
-       git checkout "${PR_HEAD_SHA}"
-       echo " Now on commit: $(git rev-parse HEAD)"
-       echo "PR #${PR_NUMBER} - ${PR_TITLE}"
+        set -euo pipefail
+        git config user.name "CI Bot"
+        git config user.email "ci-bot@amd.com"
+        echo "PR base SHA: ${PR_BASE_SHA}"
+        echo "PR head SHA: ${PR_HEAD_SHA}"
+        echo "Fetching latest ${BASE_REF}"
+        git fetch --no-tags origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+        LATEST_BASE="$(git rev-parse "refs/remotes/origin/${BASE_REF}")"
+        echo "Latest ${BASE_REF}: ${LATEST_BASE}"
+        git checkout --detach "${PR_HEAD_SHA}"
+        if [ "${PR_BASE_SHA}" = "${LATEST_BASE}" ]; then
+          echo "Already based on latest ${BASE_REF}. No rebase needed."
+        else
+          echo "Rebasing onto latest ${BASE_REF}"
+          if git rebase "refs/remotes/origin/${BASE_REF}"; then
+            echo "Rebase successful."
+          else
+            echo "Rebase failed. Trying a merge."
+            git rebase --abort
+            git checkout --detach "${PR_HEAD_SHA}"
+            if git merge "refs/remotes/origin/${BASE_REF}" -m "Merge latest ${BASE_REF} into PR for CI"; then
+              echo "Merge successful."
+            else
+              echo "Merge failed. Testing the original PR head."
+              git merge --abort || true
+              git checkout --detach "${PR_HEAD_SHA}"
+            fi
+          fi
+        fi
+        echo "Final HEAD: $(git rev-parse HEAD)"
+        printf 'PR #%s - %s\n' "${PR_NUMBER}" "${PR_TITLE}"
       shell: bash
     - name: PR INFO
       shell: bash
@@ -551,19 +578,46 @@ jobs:
       with:
        fetch-depth: 0
        clean: true
-    - name: Checkout PR tip commit
+    - name: Checkout PR rebased onto latest base
       if: github.event_name == 'pull_request'
       env:
         PR_NUMBER: ${{ github.event.pull_request.number }}
         PR_TITLE: ${{ github.event.pull_request.title }}
         PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        BASE_REF: ${{ github.event.pull_request.base.ref }}
       run: |
-       echo " Checking out PR tip commit..."
-       echo "Current commit: $(git rev-parse HEAD)"
-       echo "PR HEAD SHA: ${PR_HEAD_SHA}"
-       git checkout "${PR_HEAD_SHA}"
-       echo " Now on commit: $(git rev-parse HEAD)"
-       echo "PR #${PR_NUMBER} - ${PR_TITLE}"
+        set -euo pipefail
+        git config user.name "CI Bot"
+        git config user.email "ci-bot@amd.com"
+        echo "PR base SHA: ${PR_BASE_SHA}"
+        echo "PR head SHA: ${PR_HEAD_SHA}"
+        echo "Fetching latest ${BASE_REF}"
+        git fetch --no-tags origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+        LATEST_BASE="$(git rev-parse "refs/remotes/origin/${BASE_REF}")"
+        echo "Latest ${BASE_REF}: ${LATEST_BASE}"
+        git checkout --detach "${PR_HEAD_SHA}"
+        if [ "${PR_BASE_SHA}" = "${LATEST_BASE}" ]; then
+          echo "Already based on latest ${BASE_REF}. No rebase needed."
+        else
+          echo "Rebasing onto latest ${BASE_REF}"
+          if git rebase "refs/remotes/origin/${BASE_REF}"; then
+            echo "Rebase successful."
+          else
+            echo "Rebase failed. Trying a merge."
+            git rebase --abort
+            git checkout --detach "${PR_HEAD_SHA}"
+            if git merge "refs/remotes/origin/${BASE_REF}" -m "Merge latest ${BASE_REF} into PR for CI"; then
+              echo "Merge successful."
+            else
+              echo "Merge failed. Testing the original PR head."
+              git merge --abort || true
+              git checkout --detach "${PR_HEAD_SHA}"
+            fi
+          fi
+        fi
+        echo "Final HEAD: $(git rev-parse HEAD)"
+        printf 'PR #%s - %s\n' "${PR_NUMBER}" "${PR_TITLE}"
       shell: bash
 
     - name: Set up build environment
@@ -821,20 +875,47 @@ jobs:
         fetch-depth: 0
         clean: true
 
-    - name: Checkout PR tip commit
+    - name: Checkout PR rebased onto latest base
       if: github.event_name == 'pull_request'
       shell: bash
       env:
         PR_NUMBER: ${{ github.event.pull_request.number }}
         PR_TITLE: ${{ github.event.pull_request.title }}
         PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        BASE_REF: ${{ github.event.pull_request.base.ref }}
       run: |
-        echo " Checking out PR tip commit..."
-        echo "Current commit: $(git rev-parse HEAD)"
-        echo "PR HEAD SHA: ${PR_HEAD_SHA}"
-        git checkout "${PR_HEAD_SHA}"
-        echo " Now on commit: $(git rev-parse HEAD)"
-        echo "PR #${PR_NUMBER} - ${PR_TITLE}"
+        set -euo pipefail
+        git config user.name "CI Bot"
+        git config user.email "ci-bot@amd.com"
+        echo "PR base SHA: ${PR_BASE_SHA}"
+        echo "PR head SHA: ${PR_HEAD_SHA}"
+        echo "Fetching latest ${BASE_REF}"
+        git fetch --no-tags origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+        LATEST_BASE="$(git rev-parse "refs/remotes/origin/${BASE_REF}")"
+        echo "Latest ${BASE_REF}: ${LATEST_BASE}"
+        git checkout --detach "${PR_HEAD_SHA}"
+        if [ "${PR_BASE_SHA}" = "${LATEST_BASE}" ]; then
+          echo "Already based on latest ${BASE_REF}. No rebase needed."
+        else
+          echo "Rebasing onto latest ${BASE_REF}"
+          if git rebase "refs/remotes/origin/${BASE_REF}"; then
+            echo "Rebase successful."
+          else
+            echo "Rebase failed. Trying a merge."
+            git rebase --abort
+            git checkout --detach "${PR_HEAD_SHA}"
+            if git merge "refs/remotes/origin/${BASE_REF}" -m "Merge latest ${BASE_REF} into PR for CI"; then
+              echo "Merge successful."
+            else
+              echo "Merge failed. Testing the original PR head."
+              git merge --abort || true
+              git checkout --detach "${PR_HEAD_SHA}"
+            fi
+          fi
+        fi
+        echo "Final HEAD: $(git rev-parse HEAD)"
+        printf 'PR #%s - %s\n' "${PR_NUMBER}" "${PR_TITLE}"
 
     - name: Configure, build and test (MSVC)
       shell: bash
