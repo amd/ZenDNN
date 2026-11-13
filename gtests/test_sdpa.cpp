@@ -22,6 +22,8 @@
 #include <string>
 #include <vector>
 #include "gtest_utils.hpp"
+#include "lowoha_operators/common/omp_thread_control.hpp"
+#include "lowoha_operators/sdpa/flash_sdpa/lowoha_sdpa_flash_cpu_common.hpp"
 #include <gtest/gtest.h>
 
 namespace {
@@ -118,6 +120,21 @@ tensor_t make_zero_tensor(tensor_factory_t &tf,
         std::memset(t.get_raw_handle_unsafe(), 0, t.get_buffer_sz_bytes());
     });
 }
+
+// Pins the OpenMP thread count for one scope, so a flash call with
+// num_threads 0 sizes its query tiles for that count, then restores it.
+class omp_threads_scope {
+public:
+    explicit omp_threads_scope(int threads) : before_(omp_get_max_threads()) {
+        omp_set_num_threads(threads);
+    }
+    ~omp_threads_scope() { omp_set_num_threads(before_); }
+    omp_threads_scope(const omp_threads_scope &) = delete;
+    omp_threads_scope &operator=(const omp_threads_scope &) = delete;
+
+private:
+    int before_;
+};
 
 void run_bf16_int8_dynamic_quant_test(tensor_factory_t &tensor_factory,
         uint64_t batch, uint64_t num_heads, uint64_t kv_num_heads,
@@ -290,6 +307,70 @@ TEST(SdpaInt8DynamicQuantTest, BF16_INT8_PV_ONLY_SLIDING_WINDOW) {
             /*is_causal=*/false, /*has_mask=*/false, kBhsdOrder,
             /*is_qk_quant=*/false, /*is_pv_quant=*/true,
             /*sliding_window=*/true, /*sliding_window_size=*/257);
+}
+
+// INT8 Q, K, P and V are quantized per row or per channel, independent of the
+// query tile, so every tile size must give the same output. One 1024-token
+// sequence with 3 heads runs 256-row tiles on 1 thread and 208- and 104-row
+// tiles (192- and 88-row tails) on 16 and 32 threads.
+TEST(SdpaInt8DynamicQuantTest, BF16_DENSE_TILE_SIZE_INDEPENDENT) {
+    tensor_factory_t tensor_factory;
+    constexpr uint64_t num_heads = 3;
+    constexpr uint64_t kv_num_heads = 1;
+    constexpr uint64_t seq_len = 1024;
+    constexpr uint64_t head_dim = 64;
+    auto query_tensor = make_uniform_tensor(tensor_factory,
+            {1UL, num_heads, seq_len, head_dim}, data_type_t::bf16, 1.0f,
+            kBhsdOrder);
+    auto key_tensor = make_uniform_tensor(tensor_factory,
+            {1UL, kv_num_heads, seq_len, head_dim}, data_type_t::bf16, 1.0f,
+            kBhsdOrder);
+    auto value_tensor = make_uniform_tensor(tensor_factory,
+            {1UL, kv_num_heads, seq_len, head_dim}, data_type_t::bf16, 1.0f,
+            kBhsdOrder);
+    auto mask_tensor = tensor_factory.uniform_dist_tensor(
+            {1UL, 1UL, seq_len, seq_len}, data_type_t::f32, 0.5f);
+    const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+    auto run = [&](int threads, tensor_t &output) {
+        omp_threads_scope pin(threads);
+        return sdpa_kernel_test(query_tensor, key_tensor, value_tensor,
+                mask_tensor, output, scale, /*is_causal=*/true,
+                /*has_mask=*/true, sdpa_kernel_t::flash, /*is_qk_quant=*/true,
+                /*is_pv_quant=*/true);
+    };
+
+    auto expected = make_zero_tensor(tensor_factory,
+            {1UL, num_heads, seq_len, head_dim}, data_type_t::bf16, kBhsdOrder);
+    const status_t status = run(1, expected);
+    if (status == status_t::unimplemented
+            || status == status_t::isa_unsupported) {
+        GTEST_SKIP() << "Dynamic INT8 SDPA requires AOCL-DLP and AVX512-VNNI";
+    }
+    ASSERT_EQ(status, status_t::success);
+    // Causal row 0 sees only key 0, so its output is that key's V row.
+    float row0_magnitude = 0.0f;
+    for (uint64_t d = 0; d < head_dim; ++d) {
+        row0_magnitude += std::fabs(expected.at({0, 0, 0, d}));
+    }
+    ASSERT_GT(row0_magnitude, 0.0f);
+    for (int threads : {16, 32}) {
+        auto output = make_zero_tensor(tensor_factory,
+                {1UL, num_heads, seq_len, head_dim}, data_type_t::bf16,
+                kBhsdOrder);
+        ASSERT_EQ(run(threads, output), status_t::success)
+                << "threads=" << threads;
+        uint64_t mismatches = 0;
+        for (uint64_t h = 0; h < num_heads; ++h) {
+            for (uint64_t s = 0; s < seq_len; ++s) {
+                for (uint64_t d = 0; d < head_dim; ++d) {
+                    const float actual = output.at({0, h, s, d});
+                    const float wanted = expected.at({0, h, s, d});
+                    if (!(actual == wanted)) { ++mismatches; }
+                }
+            }
+        }
+        EXPECT_EQ(mismatches, 0U) << "threads=" << threads;
+    }
 }
 
 /**
@@ -561,6 +642,61 @@ void run_f32_sliding_window_vs_reference(tensor_factory_t &tensor_factory,
         compare_tensor_4D_sdpa(output_tensor, output_tensor_ref, batch,
                 num_heads, seq_len_q, seq_len_kv, head_dim, rtol_f32,
                 epsilon_f32, ok);
+    }
+    EXPECT_TRUE(ok);
+}
+
+// Dense flash vs reference without a window, on one F32 sequence with GQA,
+// optionally causal and with an additive [S, S] mask.
+void run_f32_dense_vs_reference(tensor_factory_t &tensor_factory,
+        uint64_t num_heads, uint64_t kv_num_heads, uint64_t seq_len,
+        uint64_t head_dim, bool is_causal, bool has_mask) {
+    constexpr uint64_t batch = 1;
+    auto query_tensor = make_uniform_tensor(tensor_factory,
+            {batch, num_heads, seq_len, head_dim}, data_type_t::f32, 1.0,
+            kBhsdOrder);
+    auto key_tensor = make_uniform_tensor(tensor_factory,
+            {batch, kv_num_heads, seq_len, head_dim}, data_type_t::f32, 1.0,
+            kBhsdOrder);
+    auto value_tensor = make_uniform_tensor(tensor_factory,
+            {batch, kv_num_heads, seq_len, head_dim}, data_type_t::f32, 1.0,
+            kBhsdOrder);
+    auto mask_tensor = has_mask
+            ? tensor_factory.uniform_dist_tensor(
+                      {1UL, 1UL, seq_len, seq_len}, data_type_t::f32, 0.5f)
+            : tensor_t();
+    auto output_tensor = make_zero_tensor(tensor_factory,
+            {batch, num_heads, seq_len, head_dim}, data_type_t::f32,
+            kBhsdOrder);
+    auto output_tensor_ref = make_zero_tensor(tensor_factory,
+            {batch, num_heads, seq_len, head_dim}, data_type_t::f32,
+            kBhsdOrder);
+    const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+    status_t status = sdpa_kernel_test(query_tensor, key_tensor, value_tensor,
+            mask_tensor, output_tensor, scale, is_causal, has_mask,
+            sdpa_kernel_t::flash);
+    status_t ref_status = sdpa_kernel_test(query_tensor, key_tensor,
+            value_tensor, mask_tensor, output_tensor_ref, scale, is_causal,
+            has_mask, sdpa_kernel_t::reference);
+    bool ok = status == status_t::success && ref_status == status_t::success;
+    // compare_tensor_4D_sdpa lets NaN through (abs_err > bound is false).
+    for (uint64_t h = 0; ok && h < num_heads; ++h) {
+        for (uint64_t s = 0; ok && s < seq_len; ++s) {
+            for (uint64_t d = 0; d < head_dim; ++d) {
+                if (!std::isfinite(output_tensor.at({0, h, s, d}))
+                        || !std::isfinite(output_tensor_ref.at({0, h, s, d}))) {
+                    ADD_FAILURE() << "non-finite output at head " << h
+                                  << ", row " << s << ", column " << d;
+                    ok = false;
+                    break;
+                }
+            }
+        }
+    }
+    if (ok) {
+        compare_tensor_4D_sdpa(output_tensor, output_tensor_ref, batch,
+                num_heads, seq_len, seq_len, head_dim, rtol_f32, epsilon_f32,
+                ok);
     }
     EXPECT_TRUE(ok);
 }
@@ -1019,6 +1155,23 @@ TEST(SdpaSlidingWindowTest, F32_EMPTY_ROWS) {
             /*is_causal=*/false);
 }
 
+// The dense query tile follows the thread count: one 1024-token sequence with
+// 3 heads runs 208-row tiles on 16 threads and 104-row tiles on 32 (192- and
+// 88-row tails) instead of 256. Checked causal, and with a mask.
+TEST(SdpaTileSplitTest, F32_DENSE_THREAD_COUNTS) {
+    tensor_factory_t tensor_factory;
+    for (int threads : {16, 32}) {
+        for (bool is_causal : {true, false}) {
+            SCOPED_TRACE("threads=" + std::to_string(threads)
+                    + " is_causal=" + std::to_string(is_causal));
+            omp_threads_scope pin(threads);
+            run_f32_dense_vs_reference(tensor_factory, /*num_heads=*/3,
+                    /*kv_num_heads=*/1, /*seq_len=*/1024, /*head_dim=*/64,
+                    is_causal, /*has_mask=*/!is_causal);
+        }
+    }
+}
+
 /** @fn TEST_P
  *  @param TestSdpa parameterized test class
  *  @param BF16_BF16 BF16 Q/K/V/output (encoder-style self-attention).
@@ -1342,6 +1495,7 @@ struct varlen_setup {
     int64_t window = 0; // 0: no sliding window
     bool fused_qkv = false; // Q/K/V as strided views of one projection output
     bool is_causal = false;
+    int32_t num_threads = 0; // 0: OpenMP default
 };
 
 std::vector<int32_t> offsets_from_lengths(const std::vector<int32_t> &lens) {
@@ -1417,6 +1571,7 @@ public:
         p.sliding_window = setup_.window > 0;
         p.sliding_window_size = setup_.window;
         p.is_causal = setup_.is_causal;
+        p.num_threads = setup_.num_threads;
         p.cu_seqlens_q = cu_q_.data();
         p.cu_seqlens_k = self_attention_ ? nullptr : cu_k_.data();
         p.kernel = kernel;
@@ -1654,6 +1809,99 @@ TEST(SdpaVarlenTest, BF16_WINDOW_FUSED_QKV) {
                     /*head_dim=*/256, /*window=*/512, /*fused_qkv=*/true});
 }
 
+// The Q split follows the thread count: these lengths keep 64-row tiles on 8
+// and 32 threads (on 32, 56 rows would cut the cost estimate by only about 10%,
+// under the packed margin) and take 48 rows on 48 threads, a size that divides
+// none of the lengths. Checked with and without the window, and causal.
+TEST(SdpaVarlenTest, BF16_FUSED_QKV_THREAD_COUNTS) {
+    for (int32_t threads : {8, 32, 48}) {
+        for (int64_t window : {int64_t {0}, int64_t {512}}) {
+            for (bool is_causal : {false, true}) {
+                SCOPED_TRACE("threads=" + std::to_string(threads)
+                        + " window=" + std::to_string(window)
+                        + " is_causal=" + std::to_string(is_causal));
+                varlen_setup s {{1024, 300, 50, 700}, {}, /*num_heads=*/3,
+                        /*kv_num_heads=*/1, /*head_dim=*/256, window,
+                        /*fused_qkv=*/true, is_causal};
+                s.num_threads = threads;
+                run_varlen_bf16_flash_vs_f32_reference(s);
+            }
+        }
+    }
+}
+
+// The tile sizes balanced_q_split_size picks for the shapes above and for the
+// examples in the operator doc.
+TEST(SdpaTileSplitTest, BALANCED_Q_SPLIT_PICKS) {
+    if (loop_team_size(48) < 48) {
+        GTEST_SKIP() << "the OpenMP thread limit caps the thread counts below";
+    }
+    // Dense: one 2048-token sequence with 3 heads, preferred 256.
+    const auto dense_tasks
+            = [](int64_t split) { return 3 * ((2048 + split - 1) / split); };
+    EXPECT_EQ(balanced_q_split_size(256, 8, dense_tasks), 256);
+    EXPECT_EQ(balanced_q_split_size(256, 16, dense_tasks), 128);
+    EXPECT_EQ(balanced_q_split_size(256, 32, dense_tasks), 208);
+    EXPECT_EQ(balanced_q_split_size(256, 1, dense_tasks), 256);
+    EXPECT_EQ(balanced_q_split_size(32, 32, dense_tasks), 32);
+
+    // Dense: one 1024-token sequence with 3 heads, the shape of
+    // F32_DENSE_THREAD_COUNTS and BF16_DENSE_TILE_SIZE_INDEPENDENT. Their
+    // 208- and 104-row tiles straddle a 512-key KV tile, which is what those
+    // tests need to exercise.
+    const auto dense_1024_tasks
+            = [](int64_t split) { return 3 * ((1024 + split - 1) / split); };
+    EXPECT_EQ(balanced_q_split_size(256, 16, dense_1024_tasks), 208);
+    EXPECT_EQ(balanced_q_split_size(256, 32, dense_1024_tasks), 104);
+
+    // Called inside an active parallel region the tile loop runs on one
+    // thread, even when the caller allows two active levels: the flash loops
+    // cap it at one. So the preferred size stays.
+    int team = 1;
+    int64_t nested_pick = 0;
+    {
+        zendnnl::lowoha::scoped_active_levels two_levels(2);
+#pragma omp parallel num_threads(2)
+        {
+#pragma omp single
+            {
+                team = omp_get_num_threads();
+                nested_pick = balanced_q_split_size(256, 32, dense_tasks);
+            }
+        }
+    }
+    if (team > 1) { EXPECT_EQ(nested_pick, 256); }
+
+    // Packed: the lengths of BF16_FUSED_QKV_THREAD_COUNTS, preferred 64.
+    const std::vector<int32_t> ragged {0, 1024, 1324, 1374, 2074};
+    const auto ragged_tasks = [&](int64_t split) {
+        return 3 * varlen_tile_count(ragged.data(), 4, split);
+    };
+    EXPECT_EQ(balanced_q_split_size(64, 32, ragged_tasks), 56);
+    EXPECT_EQ(
+            balanced_q_split_size(64, 8, ragged_tasks, varlen_min_gain_percent),
+            64);
+    EXPECT_EQ(balanced_q_split_size(
+                      64, 32, ragged_tasks, varlen_min_gain_percent),
+            64);
+    EXPECT_EQ(balanced_q_split_size(
+                      64, 48, ragged_tasks, varlen_min_gain_percent),
+            48);
+
+    // Packed: sixteen 128-token sequences, where 64-row tiles cut the estimate
+    // by about 19% and pass the margin.
+    std::vector<int32_t> chunks(17);
+    for (int32_t i = 0; i < 17; ++i) {
+        chunks[i] = 128 * i;
+    }
+    const auto chunk_tasks = [&](int64_t split) {
+        return 3 * varlen_tile_count(chunks.data(), 16, split);
+    };
+    EXPECT_EQ(balanced_q_split_size(
+                      128, 32, chunk_tasks, varlen_min_gain_percent),
+            64);
+}
+
 // More than four sequences selects 512-row query tiles; lengths straddle the
 // 512-key tile.
 TEST(SdpaVarlenTest, BF16_MANY_SEQUENCES) {
@@ -1697,14 +1945,17 @@ TEST(SdpaVarlenTest, F32_MANY_EMPTY_AND_SHORT_SEQUENCES) {
     }
 }
 
-// With equal lengths the packed path picks the dense path's tiles, so on the
-// same memory (dense reads it as a BHSD view of BSHD storage) the outputs
-// must match bit for bit.
+// With equal lengths on 8 threads the packed path keeps the dense path's
+// 64-row tiles (on other thread counts the packed margin can leave them
+// apart), so on the same memory (dense reads it as a BHSD view of BSHD
+// storage) the outputs must match bit for bit.
 TEST(SdpaVarlenTest, BF16_EQUAL_LENGTHS_MATCH_DENSE) {
     constexpr int32_t S = 256;
     for (int64_t window : {int64_t(0), int64_t(129)}) {
-        varlen_problem<bfloat16_t> prob({{S, S, S}, {}, /*num_heads=*/4,
-                /*kv_num_heads=*/2, /*head_dim=*/64, window});
+        varlen_setup setup {{S, S, S}, {}, /*num_heads=*/4,
+                /*kv_num_heads=*/2, /*head_dim=*/64, window};
+        setup.num_threads = 8;
+        varlen_problem<bfloat16_t> prob(setup);
         std::vector<bfloat16_t> packed_out, dense_out;
         ASSERT_EQ(prob.run(prob.make_params(sdpa_kernel_t::flash), packed_out),
                 status_t::success);

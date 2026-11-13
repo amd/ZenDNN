@@ -107,15 +107,19 @@ status_t cpu_flash_attention_varlen_int8_dq(
     const int64_t win_right
             = (use_window && !is_causal) ? sliding_window_size - 1 : 0;
 
-    const int64_t qSplitSize
-            = std::min(varlen_q_split_size(num_seqs, max_q, use_window), max_q);
+    const int num_thread
+            = (num_threads_hint > 0) ? num_threads_hint : omp_get_max_threads();
+    const auto tasks_for = [&](int64_t split) {
+        return num_head * varlen_tile_count(cu_seqlens_q, num_seqs, split);
+    };
+    const int64_t qSplitSize = balanced_q_split_size(
+            std::min(varlen_q_split_size(num_seqs, max_q, use_window), max_q),
+            num_thread, tasks_for, varlen_min_gain_percent);
     const int64_t kvSplitSize
             = std::max<int64_t>(1, std::min<int64_t>(512, max_kv));
     auto &tiles = g_varlen_int8_flash_scratch.tiles;
     build_varlen_tiles(tiles, cu_seqlens_q, num_seqs, qSplitSize);
     const int64_t num_items = static_cast<int64_t>(tiles.size()) * num_head;
-    const int num_thread
-            = (num_threads_hint > 0) ? num_threads_hint : omp_get_max_threads();
 
     const int64_t qStrideM = query.stride_s;
     const int64_t qStrideH = query.stride_h;

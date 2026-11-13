@@ -21,6 +21,8 @@
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 #include "lowoha_operators/sdpa/sdpa_gemm_ck/lowoha_sdpa_ck.hpp"
 
+#include <omp.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -561,6 +563,59 @@ status_t sdpa_flash_cpu_run_int8(const sdpa_flash_cpu_tensor_view &output,
 // Releases this thread's INT8 scratch pool (owned by the INT8 TU).
 void sdpa_flash_cpu_free_int8_scratch();
 
+// Threads that will run a flash loop asking for num_threads. The loops run
+// under scoped_active_levels(1), whatever the caller's setting, so a call made
+// inside an active parallel region runs its loop on one thread; no loop gets
+// more than the thread limit (vcomp, OpenMP 2.0, has no thread limit).
+inline int64_t loop_team_size(int64_t num_threads) {
+#if defined(_MSC_VER) && !defined(__clang__)
+    if (omp_in_parallel()) { return 1; }
+    return num_threads;
+#else
+    if (omp_get_active_level() > 0) { return 1; }
+    return std::min<int64_t>(num_threads, omp_get_thread_limit());
+#endif
+}
+
+// Query tile size that minimizes the busiest thread's work. tasks_for(split)
+// returns how many query tiles the parallel loop runs at that split; with
+// num_threads threads (capped to loop_team_size) the busiest one runs
+// ceil(tasks / num_threads) of them.
+// A tile costs its rows plus a fixed per-tile overhead (K/V packing, softmax
+// setup) of about 12 rows, measured on Turin and Venice. Only sizes at or
+// below `preferred` are tried, in steps of 8 (the custom GEMM row block) down
+// to 32, so shapes that already fill the threads keep `preferred`. A smaller
+// size is used only if it cuts that cost by at least min_gain_percent.
+template <typename TasksFor>
+inline int64_t balanced_q_split_size(int64_t preferred, int64_t num_threads,
+        TasksFor &&tasks_for, int64_t min_gain_percent = 0) {
+    constexpr int64_t min_split = 32;
+    constexpr int64_t step = 8;
+    constexpr int64_t tile_overhead_rows = 12;
+    if (preferred <= min_split) { return preferred; }
+    num_threads = loop_team_size(num_threads);
+    if (num_threads <= 1) { return preferred; }
+    auto busiest_cost = [&](int64_t split) {
+        const int64_t tasks = tasks_for(split);
+        return (tasks + num_threads - 1) / num_threads
+                * (split + tile_overhead_rows);
+    };
+    const int64_t preferred_cost = busiest_cost(preferred);
+    int64_t best = preferred;
+    int64_t best_cost = preferred_cost;
+    for (int64_t split = (preferred - 1) / step * step; split >= min_split;
+            split -= step) {
+        const int64_t cost = busiest_cost(split);
+        if (cost < best_cost) {
+            best = split;
+            best_cost = cost;
+        }
+    }
+    return best_cost * 100 <= preferred_cost * (100 - min_gain_percent)
+            ? best
+            : preferred;
+}
+
 // Query tile size for packed variable-length calls. Same thresholds as the
 // dense kernel, except a long sequence uses 64 rows where dense uses 256.
 // The sequence count stands in for the batch. Every sequence uses this one
@@ -572,12 +627,30 @@ inline int64_t varlen_q_split_size(
     return 32;
 }
 
+// The packed loops hand out tiles with schedule(dynamic, 1), which already
+// evens out small imbalances, so they shrink the tile only when that cuts the
+// estimated cost by at least this much. Measured on ragged batches: a 10% cut
+// (64 to 56 rows) ran 1.2% slower, cuts of 19% and 51% ran 10.7% and 20.1%
+// faster.
+constexpr int64_t varlen_min_gain_percent = 15;
+
 // One query tile of a packed batch: rows [m, m + rows) of sequence `seq`.
 struct varlen_tile {
     int32_t seq;
     int32_t m;
     int32_t rows;
 };
+
+// Number of tiles build_varlen_tiles produces for this split.
+inline int64_t varlen_tile_count(
+        const int32_t *cu_seqlens_q, int64_t num_seqs, int64_t q_split_size) {
+    int64_t tiles = 0;
+    for (int64_t b = 0; b < num_seqs; ++b) {
+        const int64_t len = cu_seqlens_q[b + 1] - cu_seqlens_q[b];
+        tiles += (len + q_split_size - 1) / q_split_size;
+    }
+    return tiles;
+}
 
 // Lists only the tiles that exist, so the parallel loop never hands out an
 // empty iteration however uneven the sequence lengths are.

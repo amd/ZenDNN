@@ -51,6 +51,17 @@ and
 
 - Query head `h` reads K/V head `h / (num_heads / kv_num_heads)`.
 - `kv_num_heads == 0` selects `num_heads` K/V heads.
+- Output does not depend on the query tile size: every size
+  `balanced_q_split_size` can pick, including a partial last tile, gives
+  the reference output with causal, window, and mask bands.
+- `balanced_q_split_size` returns either `preferred` itself or a smaller
+  multiple of 8 that is at least 32, and returns `preferred` when that is 32
+  or less or one thread runs the call. Both packed kernels pass
+  `varlen_min_gain_percent`; the dense kernels pass no margin.
+- Its `tasks_for(split)` counts the tiles the loop runs at that split:
+  `batch * num_heads * ceil(q_len / split)` dense, and
+  `num_heads * varlen_tile_count(...)` packed, matching
+  `build_varlen_tiles`.
 - A dense causal or window band places query `i` at key `i`.
 - A packed band places row `r` of a sequence at key
   `r + kv_len - q_len`, with `q_len` and `kv_len` that sequence's
@@ -112,6 +123,11 @@ and
 
 ### Concurrency and OpenMP
 
+- The thread count passed to `balanced_q_split_size` is the
+  `num_threads` of the tile loop it sizes, and `loop_team_size` caps it to
+  the team that loop gets: the thread limit, and one thread inside an
+  active parallel region, since the loops run under
+  `scoped_active_levels(1)`.
 - A GEMM in the tile loop is single-threaded: each flash loop holds
   `scoped_active_levels(1)`, and the INT8 matmul params set
   `num_threads = 1`.
@@ -120,11 +136,18 @@ and
 
 - The SDPA operator doc's tile-size table matches `varlen_q_split_size`
   and the dense FP and INT8 `q_seq_len` selectors, including the
-  sliding-window exemption and the `batch > 4` override.
+  sliding-window exemption and the `batch > 4` override, and the doc
+  describes the thread-count fit in `balanced_q_split_size` (shrink-only,
+  cost `ceil(tasks / threads) * (rows + 12)`).
 - A GEMM whose `alpha`, `beta`, or row count misses the custom-kernel
   rules in `docs/runtime_env.md` runs on AOCL-DLP.
-- A change to `varlen_q_split_size` or those selectors is benchmarked
-  on both sides of the threshold and at `seq_len == 1`.
+- A change to `varlen_q_split_size`, those selectors, or
+  `balanced_q_split_size` is benchmarked on both sides of each threshold,
+  at `seq_len == 1`, and at 8, 16, and 32 threads on a few-head shape
+  (3 heads, as in EmbeddingGemma), for FP and dynamic INT8.
+- A tile-size rule for a `schedule(dynamic, 1)` loop is benchmarked on a
+  ragged packed batch (for example lengths 1024, 300, 50, 700 at 32
+  threads), where dynamic scheduling already absorbs uneven tiles.
 
 ### Tests and validation quality
 
@@ -141,6 +164,13 @@ and
   PV-only, and both, with a mask, GQA, a window, and packed mode.
 - `SdpaCkGemmApi` and `SdpaCkInt8GemmApi` count `ck::test_api` calls for
   a forced custom-kernel hit and for the AOCL-DLP fallback.
+- Resized tiles run in `SdpaVarlenTest.BF16_FUSED_QKV_THREAD_COUNTS`
+  (packed), `SdpaTileSplitTest.F32_DENSE_THREAD_COUNTS` (dense FP), and
+  `SdpaInt8DynamicQuantTest.BF16_DENSE_TILE_SIZE_INDEPENDENT` (dense
+  INT8), and `SdpaTileSplitTest.BALANCED_Q_SPLIT_PICKS` checks the sizes
+  they rely on. `TestSdpa` shapes (`seq_len` up to 128) never leave the
+  preferred size, so a tile-sizing change keeps these tests on sizes the
+  rule actually picks.
 
 ### Code quality and documentation
 

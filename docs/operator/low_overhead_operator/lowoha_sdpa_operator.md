@@ -271,7 +271,7 @@ Because only token and head strides are used, Q, K and V can be strided views of
 
 Packed mode supports `f32`, `bf16` and `f16`, GQA/MQA, `is_causal`, sliding window and the dynamic-INT8 modes (V per-channel scales are computed over each sequence's own rows). It does not support `attn_mask`, and runs on the flash and reference backends only.
 
-For the causal and window bands, each sequence's queries are aligned to the **end** of its keys: query row `r` sits at key position `r + (kv_len − q_len)`. With equal lengths that is the usual `j <= i`; for an LLM prefill chunk that follows a cached prefix (`kv_len > q_len`), every query sees the whole prefix plus the chunk up to itself. This matches FlashAttention's variable-length API and vLLM's CPU attention. Rows that end up with no visible key (a chunk longer than its keys) produce zeros. Every query tile is processed with one tile size, chosen from the longest sequence and the sequence count. More than four sequences and no window uses 512 rows; any sequence of 192 or more otherwise uses 64, including lengths where the dense kernel uses 256. A shorter sequence gets fewer tiles and a partial last one, and a sequence with no keys produces zeros.
+For the causal and window bands, each sequence's queries are aligned to the **end** of its keys: query row `r` sits at key position `r + (kv_len − q_len)`. With equal lengths that is the usual `j <= i`; for an LLM prefill chunk that follows a cached prefix (`kv_len > q_len`), every query sees the whole prefix plus the chunk up to itself. This matches FlashAttention's variable-length API and vLLM's CPU attention. Rows that end up with no visible key (a chunk longer than its keys) produce zeros. Every query tile is processed with one tile size, chosen from the longest sequence and the sequence count. More than four sequences and no window uses 512 rows; any sequence of 192 or more otherwise uses 64, including lengths where the dense kernel uses 256. That size is then fitted to the thread count the same way as in the dense kernel (see **Tiling heuristics**), counting each sequence's actual tiles. Packed tiles are handed out dynamically, which already evens out small imbalances, so a packed call takes a smaller size only if it cuts the estimated cost by at least 15%. A shorter sequence gets fewer tiles and a partial last one, and a sequence with no keys produces zeros.
 
 Validation (enabled unless `ZENDNNL_DIAGNOSTICS_ENABLE=0`) checks that each offset array starts at `0`, never decreases, and keeps every sequence within `seq_len` / `kv_seq_len`.
 
@@ -310,10 +310,12 @@ sdpa_flash_cpu_run_internal()
   ▼
 flash_attention_kernel_sa_dispatch<SimdTag>()   (floating point only)
   │  Select tile sizes based on Q sequence length (seq_len):
-  │    seq_len >= 768  → q_split=256, kv_split=512
-  │    seq_len >= 192  → q_split=64,  kv_split=512
-  │    seq_len <  192  → q_split=32,  kv_split=512
-  │    batch > 4       → q_split=512  (override)
+  │    seq_len >= 768, no window → q_split=256, kv_split=512
+  │    seq_len >= 192            → q_split=64,  kv_split=512
+  │    seq_len <  192            → q_split=32,  kv_split=512
+  │    batch > 4, no window      → q_split=512  (override)
+  │  Shrink q_split (multiples of 8, >= 32) if that lowers the busiest
+  │  thread's cost, ceil(tasks / threads) × (q_split + 12)
   │
   ▼
 cpu_flash_attention_sa / INT8 kernel
@@ -334,7 +336,8 @@ cpu_flash_attention_sa / INT8 kernel
   │    │      skip the tile when that span is empty
   │    │    1. GEMM: Q_tile × K[n_gemm:]^T       (AOCL BLAS, or BF16 / INT8 CK)
   │    │    2. if window: fill keys outside the row band with -inf
-  │    │       else if causal on the last KV span: fill future with -inf
+  │    │       else if causal and the KV tile reaches past key m: fill each
+  │    │         row's future keys with -inf
   │    │    3. Scale + additive mask fusion at column n_gemm
   │    │    4. Row-wise max + exp + sum           (SIMD fused reductions)
   │    │    5. Rescale the accumulator only after the first live tile
@@ -816,10 +819,12 @@ int lowoha_sdpa_varlen_example() {
 
    | Condition | `q_split_size` | `kv_split_size` | Rationale |
    |-----------|---------------|-----------------|-----------|
-   | `seq_len >= 768` | 256 | 512 | Large tiles maximize GEMM efficiency |
-   | `seq_len >= 192` | 64 | 512 | Moderate tiles for medium sequences |
+   | `seq_len >= 768`, no sliding window | 256 | 512 | Large tiles maximize GEMM efficiency |
+   | `seq_len >= 192` | 64 | 512 | Moderate tiles for medium sequences; sliding-window calls of 768 or more also use 64, so each tile visits a narrow KV band |
    | `seq_len < 192` | 32 | 512 | Small tiles preserve parallelism for short sequences |
-   | `batch > 4` (override) | 512 | 512 | Larger Q tiles when batch parallelism is sufficient |
+   | `batch > 4`, no sliding window (override) | 512 | 512 | Larger Q tiles when batch parallelism is sufficient |
+
+   The table gives the preferred `q_split_size`; the kernel then fits it to the thread count. Each (batch, head, query tile) is one task, and the busiest thread runs `ceil(tasks / threads)` of them, so few heads (EmbeddingGemma has 3) can leave threads idle or give some threads one extra tile. The kernel tries the preferred size and every smaller multiple of 8 down to 32, costs each as `ceil(tasks / threads) × (q_split + 12)`, where the 12 rows stand for the fixed per-tile work (packing the K/V blocks, softmax setup; measured on Turin and Venice), and keeps the cheapest, preferring the larger size on a tie. It never picks a size larger than the preferred one, so shapes that already fill the threads are unchanged, and sliding-window tiles never grow past 64 rows, which keeps the KV band each tile visits narrow. For example, one 2048-token EmbeddingGemma sequence (3 heads) runs 24 full-attention tasks of 256 rows; on 16 threads the kernel switches to 128-row tiles (48 tasks, 3 per thread) and on 32 threads to 208-row tiles (30 tasks, at most one per thread). Its window layers run 96 tasks of 64 rows and are unchanged.
 
 2. **Scratch memory**: Each calling thread retains grow-only scratch storage
    that is reused across calls. The dynamic-INT8 path also retains its
@@ -842,7 +847,7 @@ int lowoha_sdpa_varlen_example() {
    | `dst_data` | `q_split × head_dim` | Running output accumulator (FP32) |
    | `qk_reduced_data` | `q_split × kv_split` | Reduced-precision softmax weights/tile feeding the softmax×V GEMM (BF16 / FP16 path) |
 
-3. **Threading**: Set `params.num_threads` to control parallelism (`0` = auto: uses `OMP_NUM_THREADS` or the system default). Work is distributed across `batch × heads × query-tiles`, so larger batch/head counts expose more parallel work.
+3. **Threading**: Set `params.num_threads` to control parallelism (`0` = auto: uses `OMP_NUM_THREADS` or the system default). Work is distributed across `batch × heads × query-tiles`, so larger batch/head counts expose more parallel work. The query tile size is fitted to the threads that will run the loop (see **Tiling heuristics**): `num_threads`, or the OpenMP default when it is 0, capped by the OpenMP thread limit, and a single thread when the call is made inside an active parallel region (the flash loops always run with one active level).
 
 4. **Self- vs cross-attention**: For self-attention set `kv_seq_len = 0` (or `seq_len`); for cross-attention set `kv_seq_len` to the K/V length. K and V always share `S_kv`.
 

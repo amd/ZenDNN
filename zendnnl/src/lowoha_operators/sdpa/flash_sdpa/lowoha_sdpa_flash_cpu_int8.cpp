@@ -146,16 +146,18 @@ status_t cpu_flash_attention_int8_dq(const sdpa_flash_cpu_tensor_view &output,
     const int64_t mStrideH = has_attn_mask ? nmask.m_stride_h : 0;
     const int64_t mStrideM = has_attn_mask ? nmask.m_stride_m : 0;
 
-    int64_t qSplitSize = std::min<int64_t>(q_split_size, qSize);
-    // Larger Q tiles only widen the KV band a windowed tile has to visit, so
-    // keep the dispatch's tile size for sliding-window calls.
-    if (batchSize > 4 && !use_window) {
-        qSplitSize = std::min<int64_t>(512, qSize);
-    }
-    const int64_t kvSplitSize = std::min<int64_t>(kv_split_size, kvSize);
-    const int64_t qSlice = (qSize - 1) / qSplitSize + 1;
     const int num_thread
             = (num_threads_hint > 0) ? num_threads_hint : omp_get_max_threads();
+    // Larger Q tiles only widen the KV band a windowed tile has to visit, so
+    // keep the dispatch's tile size for sliding-window calls.
+    const int64_t preferred_q_split = std::min<int64_t>(
+            (batchSize > 4 && !use_window) ? 512 : q_split_size, qSize);
+    const int64_t qSplitSize = balanced_q_split_size(
+            preferred_q_split, num_thread, [&](int64_t split) {
+        return batchSize * num_head * ((qSize + split - 1) / split);
+    });
+    const int64_t kvSplitSize = std::min<int64_t>(kv_split_size, kvSize);
+    const int64_t qSlice = (qSize - 1) / qSplitSize + 1;
 
     const auto *q_data = static_cast<const bfloat16_t *>(query.base);
     const auto *k_data = static_cast<const bfloat16_t *>(key.base);
@@ -451,7 +453,10 @@ status_t cpu_flash_attention_int8_dq(const sdpa_flash_cpu_tensor_view &output,
                                 kvBlockSize - hi - 1);
                     }
                 }
-            } else if (is_causal && num_keys - n <= kvSplitSize) {
+            } else if (is_causal && n + kvBlockSize > m + 1) {
+                // Every KV tile that reaches past key m holds keys after some
+                // row's diagonal; a query tile that straddles a KV tile
+                // boundary needs this in more than its last KV tile.
                 for (int64_t row = 0; row < qBlockSize; ++row) {
                     const int64_t last_col = m + row - n;
                     accum_t *row_ptr = qk_data + row * kvBlockSize;
