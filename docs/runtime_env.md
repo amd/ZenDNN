@@ -151,9 +151,11 @@ cached; set them before the first grouped-matmul call.
 >
 > * `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_TILE` (default `all`) — the
 >   prompt runs ALGO 3 on the prompt tile executor, which splits M across the
->   thread teams.  A BF16 prompt uses one run of equal M-blocks per team
->   (each block's A within half of L2) and one equal N-slice per thread
->   unless `ZENDNNL_GRP_MATMUL_PROMPT_TILE_MB` / `_NS` force a size, and at
+>   thread teams.  A BF16 prompt gives every thread one N-slice of its
+>   team's rows, sized so the busiest thread of every team carries the same
+>   work (`..._SINGLE_EXPERT_PROMPT_BALANCE` below), in runs of up to a
+>   quarter more rows than half of L2 holds, unless
+>   `ZENDNNL_GRP_MATMUL_PROMPT_TILE_MB` / `_NS` force a size, and at
 >   pack NR 32 runs 12-row microkernel calls.  The other dtypes use the
 >   multi-expert tile sizing, INT8 / W4A8 on the source quantized once per
 >   call, and an FP16 prompt at pack NR 32 runs 12-row calls over two
@@ -189,10 +191,36 @@ cached; set them before the first grouped-matmul call.
 >   thread, the gate `matmul_direct` applies).  It never adds a phase: the
 >   phase knobs take precedence.
 >
+> Two more knobs of the same grammar split a single expert's work evenly at
+> any thread count, including counts the thread-team size does not divide
+> (15, 31 or 63 threads):
+>
+> * `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_BALANCE` (default `bf16`) — a
+>   prompt on the prompt tile executor gives every thread of every team one
+>   N-slice of its team's rows, with the rows sized so the busiest thread of
+>   each team carries the same work.  Otherwise a BF16 prompt splits M into
+>   one equal run of blocks per team, and at 15, 31 or 63 threads one thread
+>   runs a second whole tile.  The other dtypes keep the multi-expert tile
+>   sizing by default, which already scales at those counts.  `u8s8` has no
+>   effect (the prompt tile does not take static U8×S8).
+> * `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_DECODE_BALANCE` (default `all`) — a
+>   decode on the custom-kernel N-tile path splits N in whole pack-width
+>   blocks spread evenly over the threads, when that leaves the busiest
+>   thread fewer blocks than the exact-divisor tile (which idles the threads
+>   that do not divide N).  Each thread keeps at least
+>   `ZENDNNL_GRP_MATMUL_N_TILE_FLOOR` columns.  An explicit
+>   `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_N_TILE`,
+>   `ZENDNNL_GRP_MATMUL_N_TILE_OVERSUB=0` or
+>   `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY` `0` or `1` keeps the tile those
+>   knobs select (no balanced split).
+>
+> Either at `0` restores the previous split, with the same output bit for
+> bit.
+>
 > The defaults therefore run both phases of a single expert on the custom
 > kernel, at any N; an explicit `ZENDNNL_GRP_MATMUL_ALGO=0` keeps its prompt
-> on AOCL-DLP (the prompt knob reads as empty).  All three at `0` reproduce
-> main.
+> on AOCL-DLP (the prompt knob reads as empty).  All three policy knobs and
+> `..._SINGLE_EXPERT_DECODE_BALANCE` at `0` reproduce main.
 > No knob applies under `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=0`.  A one-thread
 > call stays on ALGO 3 when the knob of its own phase covers it.  The policy
 > covers both passes of a dense fused FFN (ZenTorch's fused FFN) and, through
@@ -324,6 +352,17 @@ The auto-tuner automatically selects the best-performing algorithm for matrix mu
 The INT8 path is native custom-kernel execution; these controls do not add or
 select an AOCL fallback. Unsupported shapes continue through the pre-existing
 dispatcher.
+
+---
+
+## Group MatMul Gated Activations
+
+Forms of the gated activations (`silu_and_mul`, `gelu_and_mul`, `swiglu_oai_mul`) that `group_matmul_direct` applies to the expert GEMM output. Both variables are off by default, read once on first use, and keep the default for any value other than `0` or `1`.
+
+| Variable | Description | Default | Valid Values |
+|----------|-------------|---------|--------------|
+| `ZENDNNL_GRP_MATMUL_GELU_TANH` | Computes `gelu_and_mul` with the tanh form of GELU, `0.5·x·(1 + tanh(√(2/π)·(x + 0.044715·x³)))` (PyTorch `gelu(approximate="tanh")`), instead of the erf form, on every path that computes it: the custom kernel's fused epilogue for BF16, FP16, DQ-INT8 and W4A8 experts, single and multi expert, the separate activation pass, the AOCL-DLP post-op and routed MoE. The two forms differ by at most 4.8e-4. | `0` | `0`, `1` |
+| `ZENDNNL_GRP_MATMUL_FAST_ACT` | Shorter AVX-512 forms of SiLU, GELU and SwiGLU-OAI, and of the DQ-INT8 custom kernel's sigmoid post-op: a degree-3 exp polynomial (relative error 8.6e-5, against 5.1e-5) and the 14-bit reciprocal without its Newton step, with GELU in the tanh form. Each activation costs about 1.3–1.5× less on Zen 5; a MoE layer gains less, as the GEMM dominates its time. The AOCL-DLP fallback keeps its exact SiLU, and routed MoE its SiLU, which is a short form already. | `0` | `0`, `1` |
 
 ---
 

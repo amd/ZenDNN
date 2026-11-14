@@ -102,6 +102,37 @@ w4a8_ukernel_fn_t select_w4a8_ukernel(int MR, int NV, ActivationKind act,
         S4SrcScaleGranularity src_scale_granularity
         = S4SrcScaleGranularity::kPerToken);
 
+/// Writes the weights of `K` rows (a multiple of 8) of one `pack_nr == 32`
+/// block (`[K/8][32][4]` biased nibbles) to `dst` as signed bytes in the
+/// DQ-INT8 VNNI layout `[K/4][32][4]`, the B operand of
+/// `select_int8_accum_ukernel` kernels.  Both pointers are 64-byte aligned.
+void unpack_s4_block_nr32(const int8_t *Bpacked, int K, int8_t *dst);
+
+/// The `select_w4a8_ukernel` kernels at NV=2, split so one unpacked chunk of
+/// groups serves every MR call of a tile: `groups` folds groups
+/// `[g0, g0 + ng)` of `MR` rows (1..12) into the f32 sums `facc` (`[MR][32]`,
+/// 64-byte aligned, zeroed before group 0), each group summed by `accum` (the
+/// `select_int8_accum_ukernel` kernel for `MR`) into `Cs32` (`[MR][32]`,
+/// 64-byte aligned) from `Bunpacked`, the chunk unpacked from group `g0`;
+/// `store` then writes `facc` out.  `A`, `comp` (the block's `[G][32]`
+/// compensation rows), the scales and the outputs index from row 0, group 0
+/// and column 0 of the block as in those kernels, whose bits both match.
+using w4a8_unpacked_groups_fn_t = void (*)(int MR, const uint8_t *A, int lda,
+        const int8_t *Bunpacked, const int32_t *comp,
+        int8_accum_ukernel_fn_t accum, const void *src_scale,
+        const void *wei_scale, ScaleKind scale_kind, int g0, int ng, int G,
+        int group_size, int wei_scale_grp_stride, float *facc, int32_t *Cs32);
+using w4a8_unpacked_store_fn_t
+        = void (*)(int MR, const float *facc, const void *src_scale,
+                ScaleKind scale_kind, const void *bias, BiasKind bias_kind,
+                void *Cout, int ldc, void *Cout_tight, int ldc_tight);
+
+w4a8_unpacked_groups_fn_t select_w4a8_unpacked_groups(
+        S4SrcScaleGranularity src_scale_granularity);
+/// nullptr where `select_w4a8_ukernel` has no kernel for the tuple.
+w4a8_unpacked_store_fn_t select_w4a8_unpacked_store(ActivationKind act,
+        S4OutputKind output, S4SrcScaleGranularity src_scale_granularity);
+
 } // namespace custom_kernel
 } // namespace matmul
 } // namespace lowoha

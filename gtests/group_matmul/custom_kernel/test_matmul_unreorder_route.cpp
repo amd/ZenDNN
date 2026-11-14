@@ -104,6 +104,9 @@ void run_route_case(bool packed_input, int M = 8, bool expect_custom = true,
 #if !ZENDNNL_DEPENDS_AOCLDLP
     if (packed_input) GTEST_SKIP() << "AOCL-DLP is unavailable";
 #endif
+    // An earlier test's pack can still be registered at an address this
+    // case's fresh buffers reuse.
+    ::reset_grp_matmul_caches();
 
     constexpr int K = 64;
     constexpr int N = 2048;

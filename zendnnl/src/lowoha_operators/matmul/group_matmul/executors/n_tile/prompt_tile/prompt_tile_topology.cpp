@@ -172,10 +172,11 @@ TeamMap make_contiguous_team_map(
     const int ts = std::clamp(team_size, 1, m.num_threads);
     m.n_teams = (m.num_threads + ts - 1) / ts;
     m.team_of.resize(m.num_threads);
+    m.rank_in_team.resize(m.num_threads);
     m.team_size.assign(m.n_teams, 0);
     for (int t = 0; t < m.num_threads; ++t) {
         m.team_of[t] = t / ts;
-        ++m.team_size[t / ts];
+        m.rank_in_team[t] = m.team_size[t / ts]++;
     }
     m.domain_of_team.resize(m.n_teams);
     std::iota(m.domain_of_team.begin(), m.domain_of_team.end(), 0);
@@ -191,6 +192,7 @@ TeamMap make_domain_team_map(const std::vector<int> &domain_of_thread,
     TeamMap m;
     m.num_threads = static_cast<int>(domain_of_thread.size());
     m.team_of.assign(m.num_threads, 0);
+    m.rank_in_team.assign(m.num_threads, 0);
     m.l2_bytes = l2_bytes;
     m.l3_bytes = l3_bytes;
     m.from_l3 = false;
@@ -212,7 +214,7 @@ TeamMap make_domain_team_map(const std::vector<int> &domain_of_thread,
         m.domain_of_team.resize(base + k, static_cast<int>(d));
         for (int i = 0; i < s; ++i) {
             m.team_of[members[d][i]] = base + i * k / s;
-            ++m.team_size[base + i * k / s];
+            m.rank_in_team[members[d][i]] = m.team_size[base + i * k / s]++;
         }
         m.n_teams += k;
     }

@@ -46,6 +46,9 @@ struct TeamMap {
     int n_teams = 0;
     /// Team of OMP thread `tid`, size `num_threads`.
     std::vector<int> team_of;
+    /// Rank of OMP thread `tid` within its team, in thread order; size
+    /// `num_threads`.
+    std::vector<int> rank_in_team;
     /// Thread count of each team, size `n_teams`; every entry is >= 1.
     std::vector<int> team_size;
     /// L3 domain of each team, size `n_teams`; sub-teams of one domain

@@ -65,17 +65,27 @@ namespace custom_kernel {
 
 namespace {
 
+// Rounds a product before the add that follows it (no FMA contraction), so
+// the in-register and unpacked epilogues agree bit for bit.
+#if defined(_MSC_VER) && !defined(__clang__)
+#define ZENDNNL_S4_ROUND(x)
+#else
+#define ZENDNNL_S4_ROUND(x) asm("" : "+v"(x))
+#endif
+
 // Emits exactly once per process: proof that dispatch entered the
 // compute body, not just that it selected and packed the INT4 path.
 // Per-call logging here would serialize the OMP team on the logger
 // mutex and destroy the workload being diagnosed.
 std::atomic<bool> s_s4_ukernel_announced {false};
 
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::act_mode;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::act_mode_t;
 using zendnnl::lowoha::matmul::group_matmul_act_avx512::bf16x16_to_f32;
 using zendnnl::lowoha::matmul::group_matmul_act_avx512::f32_to_bf16x16;
-using zendnnl::lowoha::matmul::group_matmul_act_avx512::gelu_avx512;
-using zendnnl::lowoha::matmul::group_matmul_act_avx512::silu_avx512;
-using zendnnl::lowoha::matmul::group_matmul_act_avx512::swiglu_oai_avx512;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::gelu_act_avx512;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::silu_act_avx512;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::swiglu_oai_act_avx512;
 
 // Deinterleave indices for vpermt2ps over two source zmms (32 FP32
 // lanes): even lanes are gates, odd lanes are ups.  Duplicated from
@@ -88,35 +98,37 @@ alignas(64) constexpr int32_t kUpLaneIdxS4[16]
 // Gated-activation store helpers — same math and pair-pack store as
 // the int8 / bf16 siblings, so results stay directly comparable.
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
-static inline void swiglu_oai_store_pair_s4(
-        __m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row) {
+ZENDNNL_ALWAYS_INLINE static inline void swiglu_oai_store_pair_s4(
+        __m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row, act_mode_t mode) {
     const __m512i gate_idx = _mm512_load_si512(kGateLaneIdxS4);
     const __m512i up_idx = _mm512_load_si512(kUpLaneIdxS4);
     __m512 gate = _mm512_permutex2var_ps(acc_lo, gate_idx, acc_hi);
     __m512 up = _mm512_permutex2var_ps(acc_lo, up_idx, acc_hi);
-    __m256i out = f32_to_bf16x16(swiglu_oai_avx512(gate, up));
+    __m256i out = f32_to_bf16x16(swiglu_oai_act_avx512(gate, up, mode));
     _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst_row), out);
 }
 
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
-static inline void silu_and_mul_store_pair_s4(
-        __m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row) {
+ZENDNNL_ALWAYS_INLINE static inline void silu_and_mul_store_pair_s4(
+        __m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row, act_mode_t mode) {
     const __m512i gate_idx = _mm512_load_si512(kGateLaneIdxS4);
     const __m512i up_idx = _mm512_load_si512(kUpLaneIdxS4);
     __m512 gate = _mm512_permutex2var_ps(acc_lo, gate_idx, acc_hi);
     __m512 up = _mm512_permutex2var_ps(acc_lo, up_idx, acc_hi);
-    __m256i out = f32_to_bf16x16(_mm512_mul_ps(silu_avx512(gate), up));
+    __m256i out
+            = f32_to_bf16x16(_mm512_mul_ps(silu_act_avx512(gate, mode), up));
     _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst_row), out);
 }
 
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,avx512dq,fma")
-static inline void gelu_and_mul_store_pair_s4(
-        __m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row) {
+ZENDNNL_ALWAYS_INLINE static inline void gelu_and_mul_store_pair_s4(
+        __m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row, act_mode_t mode) {
     const __m512i gate_idx = _mm512_load_si512(kGateLaneIdxS4);
     const __m512i up_idx = _mm512_load_si512(kUpLaneIdxS4);
     __m512 gate = _mm512_permutex2var_ps(acc_lo, gate_idx, acc_hi);
     __m512 up = _mm512_permutex2var_ps(acc_lo, up_idx, acc_hi);
-    __m256i out = f32_to_bf16x16(_mm512_mul_ps(gelu_avx512(gate), up));
+    __m256i out
+            = f32_to_bf16x16(_mm512_mul_ps(gelu_act_avx512(gate, mode), up));
     _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst_row), out);
 }
 
@@ -347,6 +359,7 @@ static void ukernel_impl_s4(const uint8_t *__restrict A, int lda,
             || Act == ActivationKind::gelu_and_mul) {
         bfloat16_t *__restrict Cout_tight
                 = static_cast<bfloat16_t *>(Cout_tight_void);
+        const act_mode_t mode = act_mode();
         constexpr int n_pairs = NV / 2;
 #pragma GCC unroll 8
         for (int m = 0; m < MR; ++m) {
@@ -361,6 +374,8 @@ static void ukernel_impl_s4(const uint8_t *__restrict A, int lda,
                 if constexpr (SrcScale == S4SrcScaleGranularity::kPerToken) {
                     lo = _mm512_mul_ps(lo, ssc);
                     hi = _mm512_mul_ps(hi, ssc);
+                    ZENDNNL_S4_ROUND(lo);
+                    ZENDNNL_S4_ROUND(hi);
                 }
                 if (has_bias) {
                     lo = _mm512_add_ps(
@@ -371,11 +386,11 @@ static void ukernel_impl_s4(const uint8_t *__restrict A, int lda,
                 bfloat16_t *dst = Cout_tight
                         + static_cast<size_t>(m) * ldc_tight + p * 16;
                 if constexpr (Act == ActivationKind::swiglu_oai_mul) {
-                    swiglu_oai_store_pair_s4(lo, hi, dst);
+                    swiglu_oai_store_pair_s4(lo, hi, dst, mode);
                 } else if constexpr (Act == ActivationKind::silu_and_mul) {
-                    silu_and_mul_store_pair_s4(lo, hi, dst);
+                    silu_and_mul_store_pair_s4(lo, hi, dst, mode);
                 } else {
-                    gelu_and_mul_store_pair_s4(lo, hi, dst);
+                    gelu_and_mul_store_pair_s4(lo, hi, dst, mode);
                 }
             }
         }
@@ -396,6 +411,7 @@ static void ukernel_impl_s4(const uint8_t *__restrict A, int lda,
                 __m512 f = facc[m][v];
                 if constexpr (SrcScale == S4SrcScaleGranularity::kPerToken) {
                     f = _mm512_mul_ps(f, ssc);
+                    ZENDNNL_S4_ROUND(f);
                 }
                 if (has_bias) {
                     f = _mm512_add_ps(f, _mm512_loadu_ps(bias_f32 + v * 16));
@@ -406,6 +422,138 @@ static void ukernel_impl_s4(const uint8_t *__restrict A, int lda,
                 } else {
                     _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst),
                             f32_to_bf16x16(f));
+                }
+            }
+        }
+    }
+}
+
+// `ukernel_impl_s4` at NV=2 over unpacked groups: the K loop is `accum`'s,
+// one call per group, and every f32 step below is the kernel's own, in its
+// order, so the two agree bit for bit.
+template <S4SrcScaleGranularity SrcScale>
+ZENDNNL_TARGET_NOINLINE("avx512f,avx512bw,avx512vl,avx512dq,fma")
+static void w4a8_unpacked_groups_impl(int MR, const uint8_t *A, int lda,
+        const int8_t *Bunpacked, const int32_t *comp,
+        int8_accum_ukernel_fn_t accum, const void *src_scale,
+        const void *wei_scale, ScaleKind scale_kind, int g0, int ng, int G,
+        int group_size, int wei_scale_grp_stride, float *facc, int32_t *Cs32) {
+    constexpr int NV = 2;
+    constexpr int kCols = NV * 16;
+    const size_t group_b_bytes = static_cast<size_t>(group_size) * kCols;
+    for (int g = g0; g < g0 + ng; ++g) {
+        accum(A + static_cast<size_t>(g) * group_size, lda,
+                Bunpacked + (g - g0) * group_b_bytes, group_size, Cs32, kCols,
+                /*add=*/false);
+        __m512i comp_v[NV];
+        __m512 wscale_v[NV];
+        for (int v = 0; v < NV; ++v) {
+            comp_v[v] = _mm512_load_si512(reinterpret_cast<const __m512i *>(
+                    comp + static_cast<size_t>(g) * kCols + v * 16));
+            wscale_v[v] = load_scale16_s4(wei_scale,
+                    static_cast<size_t>(g) * wei_scale_grp_stride
+                            + static_cast<size_t>(v) * 16,
+                    scale_kind);
+        }
+        for (int m = 0; m < MR; ++m) {
+            [[maybe_unused]] __m512 ssc;
+            if constexpr (SrcScale == S4SrcScaleGranularity::kPerGroup) {
+                const int i = m * G + g;
+                ssc = _mm512_set1_ps(scale_kind == ScaleKind::kBf16
+                                ? static_cast<float>(
+                                          static_cast<const bfloat16_t *>(
+                                                  src_scale)[i])
+                                : static_cast<const float *>(src_scale)[i]);
+            }
+            for (int v = 0; v < NV; ++v) {
+                const __m512i sacc = _mm512_add_epi32(
+                        _mm512_load_si512(reinterpret_cast<const __m512i *>(
+                                Cs32 + m * kCols + v * 16)),
+                        comp_v[v]);
+                const __m512 f = _mm512_cvtepi32_ps(sacc);
+                __m512 scale = wscale_v[v];
+                if constexpr (SrcScale == S4SrcScaleGranularity::kPerGroup) {
+                    scale = _mm512_maskz_mul_ps(_mm512_cmpneq_epi32_mask(sacc,
+                                                        _mm512_setzero_si512()),
+                            ssc, scale);
+                }
+                float *fm = facc + m * kCols + v * 16;
+                _mm512_store_ps(
+                        fm, _mm512_fmadd_ps(f, scale, _mm512_load_ps(fm)));
+            }
+        }
+    }
+}
+
+// The final pass of `ukernel_impl_s4` at NV=2, from `facc`.
+template <ActivationKind Act, S4OutputKind Output,
+        S4SrcScaleGranularity SrcScale>
+ZENDNNL_TARGET_NOINLINE("avx512f,avx512bw,avx512vl,avx512dq,fma")
+static void w4a8_unpacked_store_impl(int MR, const float *facc,
+        const void *src_scale, ScaleKind scale_kind, const void *bias,
+        BiasKind bias_kind, void *Cout_void, int ldc, void *Cout_tight_void,
+        int ldc_tight) {
+    static_assert(Act == ActivationKind::none || Output == S4OutputKind::kBf16,
+            "gated S4 epilogues store BF16");
+    constexpr int NV = 2;
+    constexpr int kCols = NV * 16;
+    const bool has_bias = (bias != nullptr && bias_kind != BiasKind::none);
+    alignas(64) float bias_slab[kCols];
+    const float *__restrict bias_f32 = static_cast<const float *>(bias);
+    if (has_bias && bias_kind != BiasKind::fp32) {
+        for (int v = 0; v < NV; ++v) {
+            _mm512_store_ps(
+                    bias_slab + v * 16, load_bias_f32_s4(bias, bias_kind, v));
+        }
+        bias_f32 = bias_slab;
+    }
+
+    [[maybe_unused]] const act_mode_t mode
+            = Act != ActivationKind::none ? act_mode() : act_mode_t {};
+    for (int m = 0; m < MR; ++m) {
+        [[maybe_unused]] __m512 ssc;
+        if constexpr (SrcScale == S4SrcScaleGranularity::kPerToken) {
+            ssc = _mm512_set1_ps(scale_kind == ScaleKind::kBf16
+                            ? static_cast<float>(
+                                      static_cast<const bfloat16_t *>(
+                                              src_scale)[m])
+                            : static_cast<const float *>(src_scale)[m]);
+        }
+        __m512 out[NV];
+        for (int v = 0; v < NV; ++v) {
+            out[v] = _mm512_load_ps(facc + m * kCols + v * 16);
+            if constexpr (SrcScale == S4SrcScaleGranularity::kPerToken) {
+                out[v] = _mm512_mul_ps(out[v], ssc);
+                ZENDNNL_S4_ROUND(out[v]);
+            }
+            if (has_bias) {
+                out[v] = _mm512_add_ps(
+                        out[v], _mm512_loadu_ps(bias_f32 + v * 16));
+            }
+        }
+        if constexpr (Act != ActivationKind::none) {
+            bfloat16_t *dst = static_cast<bfloat16_t *>(Cout_tight_void)
+                    + static_cast<size_t>(m) * ldc_tight;
+            if constexpr (Act == ActivationKind::swiglu_oai_mul) {
+                swiglu_oai_store_pair_s4(out[0], out[1], dst, mode);
+            } else if constexpr (Act == ActivationKind::silu_and_mul) {
+                silu_and_mul_store_pair_s4(out[0], out[1], dst, mode);
+            } else {
+                gelu_and_mul_store_pair_s4(out[0], out[1], dst, mode);
+            }
+        } else {
+            using output_t =
+                    typename std::conditional<Output == S4OutputKind::kF32,
+                            float, bfloat16_t>::type;
+            output_t *dst = static_cast<output_t *>(Cout_void)
+                    + static_cast<size_t>(m) * ldc;
+            for (int v = 0; v < NV; ++v) {
+                if constexpr (Output == S4OutputKind::kF32) {
+                    _mm512_storeu_ps(dst + v * 16, out[v]);
+                } else {
+                    _mm256_storeu_si256(
+                            reinterpret_cast<__m256i *>(dst + v * 16),
+                            f32_to_bf16x16(out[v]));
                 }
             }
         }
@@ -524,6 +672,84 @@ w4a8_ukernel_fn_t select_w4a8_ukernel(int MR, int NV, ActivationKind act,
                           S4SrcScaleGranularity::kPerToken>(MR, NV, act);
     }
     return nullptr;
+}
+
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
+void unpack_s4_block_nr32(
+        const int8_t *__restrict Bpacked, int K, int8_t *__restrict dst) {
+    constexpr int oct_bytes = 32 * kS4BytesPerOctetCol;
+    constexpr int quad_bytes = 32 * kVNNIInt8Quad;
+    const __m512i mask_0f = _mm512_set1_epi8(0x0F);
+    const __m512i bias_8 = _mm512_set1_epi8(8);
+    const int K_oct = K / kS4Octet;
+    for (int ko = 0; ko < K_oct; ++ko) {
+        const int8_t *bp = Bpacked + static_cast<size_t>(ko) * oct_bytes;
+        int8_t *lo = dst + static_cast<size_t>(2 * ko) * quad_bytes;
+        int8_t *hi = lo + quad_bytes;
+        for (int v = 0; v < 2; ++v) {
+            const __m512i p = _mm512_load_si512(
+                    reinterpret_cast<const __m512i *>(bp + v * 64));
+            _mm512_store_si512(reinterpret_cast<__m512i *>(lo + v * 64),
+                    _mm512_sub_epi8(_mm512_and_si512(p, mask_0f), bias_8));
+            _mm512_store_si512(reinterpret_cast<__m512i *>(hi + v * 64),
+                    _mm512_sub_epi8(
+                            _mm512_and_si512(_mm512_srli_epi16(p, 4), mask_0f),
+                            bias_8));
+        }
+    }
+}
+
+namespace {
+
+template <S4OutputKind Output, S4SrcScaleGranularity SrcScale>
+w4a8_unpacked_store_fn_t select_store_for_act(ActivationKind act) {
+    if constexpr (Output == S4OutputKind::kF32) {
+        return act == ActivationKind::none
+                ? w4a8_unpacked_store_impl<ActivationKind::none, Output,
+                          SrcScale>
+                : nullptr;
+    } else {
+        switch (act) {
+            case ActivationKind::none:
+                return w4a8_unpacked_store_impl<ActivationKind::none, Output,
+                        SrcScale>;
+            case ActivationKind::swiglu_oai_mul:
+                return w4a8_unpacked_store_impl<ActivationKind::swiglu_oai_mul,
+                        Output, SrcScale>;
+            case ActivationKind::silu_and_mul:
+                return w4a8_unpacked_store_impl<ActivationKind::silu_and_mul,
+                        Output, SrcScale>;
+            case ActivationKind::gelu_and_mul:
+                return w4a8_unpacked_store_impl<ActivationKind::gelu_and_mul,
+                        Output, SrcScale>;
+            default: return nullptr;
+        }
+    }
+}
+
+} // namespace
+
+w4a8_unpacked_groups_fn_t select_w4a8_unpacked_groups(
+        S4SrcScaleGranularity src_scale_granularity) {
+    return src_scale_granularity == S4SrcScaleGranularity::kPerGroup
+            ? w4a8_unpacked_groups_impl<S4SrcScaleGranularity::kPerGroup>
+            : w4a8_unpacked_groups_impl<S4SrcScaleGranularity::kPerToken>;
+}
+
+w4a8_unpacked_store_fn_t select_w4a8_unpacked_store(ActivationKind act,
+        S4OutputKind output, S4SrcScaleGranularity src_scale_granularity) {
+    const bool per_group
+            = src_scale_granularity == S4SrcScaleGranularity::kPerGroup;
+    if (output == S4OutputKind::kF32) {
+        return per_group ? select_store_for_act<S4OutputKind::kF32,
+                                   S4SrcScaleGranularity::kPerGroup>(act)
+                         : select_store_for_act<S4OutputKind::kF32,
+                                   S4SrcScaleGranularity::kPerToken>(act);
+    }
+    return per_group ? select_store_for_act<S4OutputKind::kBf16,
+                               S4SrcScaleGranularity::kPerGroup>(act)
+                     : select_store_for_act<S4OutputKind::kBf16,
+                               S4SrcScaleGranularity::kPerToken>(act);
 }
 
 } // namespace custom_kernel

@@ -59,15 +59,17 @@ namespace {
 // ...;`) so each name is explicit and pinned at the namespace
 // boundary; future drift between this file and
 // `bf16_microkernel.cpp` is structurally impossible.
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::act_mode;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::act_mode_t;
 using zendnnl::lowoha::matmul::group_matmul_act_avx512::bf16x16_to_f32;
 using zendnnl::lowoha::matmul::group_matmul_act_avx512::f16x16_to_f32;
 using zendnnl::lowoha::matmul::group_matmul_act_avx512::f32_to_bf16x16;
 using zendnnl::lowoha::matmul::group_matmul_act_avx512::f32_to_f16x16;
 using zendnnl::lowoha::matmul::group_matmul_act_avx512::fast_exp_neg_avx512;
-using zendnnl::lowoha::matmul::group_matmul_act_avx512::gelu_avx512;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::gelu_act_avx512;
 using zendnnl::lowoha::matmul::group_matmul_act_avx512::sigmoid_avx512;
-using zendnnl::lowoha::matmul::group_matmul_act_avx512::silu_avx512;
-using zendnnl::lowoha::matmul::group_matmul_act_avx512::swiglu_oai_avx512;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::silu_act_avx512;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::swiglu_oai_act_avx512;
 
 constexpr float kSqrtHalf = 0.7071067811865476f;
 
@@ -93,8 +95,25 @@ inline float silu_scalar(float x) {
     return x * sigmoid_scalar(x);
 }
 
-inline float gelu_scalar(float x) {
+inline float gelu_erf_scalar(float x) {
     return x * 0.5f * (1.0f + std::erf(x * kSqrtHalf));
+}
+
+inline float gelu_tanh_scalar(float x) {
+    return 0.5f * x
+            * (1.0f
+                    + std::tanh(
+                            0.7978845608028654f * (x + 0.044715f * x * x * x)));
+}
+
+// Whether `m` evaluates GELU in the tanh form: ZENDNNL_GRP_MATMUL_GELU_TANH,
+// or ZENDNNL_GRP_MATMUL_FAST_ACT, whose vector GELU is the tanh form.
+inline bool gelu_is_tanh(act_mode_t m) {
+    return m.gelu_tanh || m.fast;
+}
+
+inline float gelu_scalar(float x, bool tanh_form) {
+    return tanh_form ? gelu_tanh_scalar(x) : gelu_erf_scalar(x);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -118,16 +137,18 @@ void silu_and_mul_row_scalar_bf16(
 }
 
 void gelu_and_mul_row_scalar_f32(float *gate, const float *up, int count) {
+    const bool tanh_form = gelu_is_tanh(act_mode());
     for (int n = 0; n < count; ++n)
-        gate[n] = gelu_scalar(gate[n]) * up[n];
+        gate[n] = gelu_scalar(gate[n], tanh_form) * up[n];
 }
 
 void gelu_and_mul_row_scalar_bf16(
         bfloat16_t *gate, const bfloat16_t *up, int count) {
+    const bool tanh_form = gelu_is_tanh(act_mode());
     for (int n = 0; n < count; ++n) {
         float g = static_cast<float>(gate[n]);
         float u = static_cast<float>(up[n]);
-        gate[n] = bfloat16_t(gelu_scalar(g) * u);
+        gate[n] = bfloat16_t(gelu_scalar(g, tanh_form) * u);
     }
 }
 
@@ -176,10 +197,11 @@ void silu_and_mul_row_scalar_f16(
 
 void gelu_and_mul_row_scalar_f16(
         float16_t *gate, const float16_t *up, int count) {
+    const bool tanh_form = gelu_is_tanh(act_mode());
     for (int n = 0; n < count; ++n) {
         float g = static_cast<float>(gate[n]);
         float u = static_cast<float>(up[n]);
-        gate[n] = float16_t(gelu_scalar(g) * u);
+        gate[n] = float16_t(gelu_scalar(g, tanh_form) * u);
     }
 }
 
@@ -224,11 +246,12 @@ alignas(64) static const uint16_t kDeintUpIdx[32]
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
 static void silu_and_mul_row_avx512_f32(
         float *gate, const float *up, int count) {
+    const act_mode_t m = act_mode();
     int n = 0;
     for (; n + 16 <= count; n += 16) {
         __m512 g = _mm512_loadu_ps(gate + n);
         __m512 u = _mm512_loadu_ps(up + n);
-        _mm512_storeu_ps(gate + n, _mm512_mul_ps(silu_avx512(g), u));
+        _mm512_storeu_ps(gate + n, _mm512_mul_ps(silu_act_avx512(g, m), u));
     }
     for (; n < count; ++n)
         gate[n] = silu_scalar(gate[n]) * up[n];
@@ -237,6 +260,7 @@ static void silu_and_mul_row_avx512_f32(
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
 static void silu_and_mul_row_avx512_bf16(
         bfloat16_t *gate, const bfloat16_t *up, int count) {
+    const act_mode_t m = act_mode();
     int n = 0;
     for (; n + 16 <= count; n += 16) {
         __m512 g = bf16x16_to_f32(_mm256_loadu_si256(
@@ -244,7 +268,7 @@ static void silu_and_mul_row_avx512_bf16(
         __m512 u = bf16x16_to_f32(
                 _mm256_loadu_si256(reinterpret_cast<const __m256i *>(&up[n])));
         _mm256_storeu_si256(reinterpret_cast<__m256i *>(&gate[n]),
-                f32_to_bf16x16(_mm512_mul_ps(silu_avx512(g), u)));
+                f32_to_bf16x16(_mm512_mul_ps(silu_act_avx512(g, m), u)));
     }
     for (; n < count; ++n) {
         float g = static_cast<float>(gate[n]);
@@ -256,19 +280,23 @@ static void silu_and_mul_row_avx512_bf16(
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
 static void gelu_and_mul_row_avx512_f32(
         float *gate, const float *up, int count) {
+    const act_mode_t m = act_mode();
+    const bool tanh_form = gelu_is_tanh(m);
     int n = 0;
     for (; n + 16 <= count; n += 16) {
         __m512 g = _mm512_loadu_ps(gate + n);
         __m512 u = _mm512_loadu_ps(up + n);
-        _mm512_storeu_ps(gate + n, _mm512_mul_ps(gelu_avx512(g), u));
+        _mm512_storeu_ps(gate + n, _mm512_mul_ps(gelu_act_avx512(g, m), u));
     }
     for (; n < count; ++n)
-        gate[n] = gelu_scalar(gate[n]) * up[n];
+        gate[n] = gelu_scalar(gate[n], tanh_form) * up[n];
 }
 
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
 static void gelu_and_mul_row_avx512_bf16(
         bfloat16_t *gate, const bfloat16_t *up, int count) {
+    const act_mode_t m = act_mode();
+    const bool tanh_form = gelu_is_tanh(m);
     int n = 0;
     for (; n + 16 <= count; n += 16) {
         __m512 g = bf16x16_to_f32(_mm256_loadu_si256(
@@ -276,28 +304,29 @@ static void gelu_and_mul_row_avx512_bf16(
         __m512 u = bf16x16_to_f32(
                 _mm256_loadu_si256(reinterpret_cast<const __m256i *>(&up[n])));
         _mm256_storeu_si256(reinterpret_cast<__m256i *>(&gate[n]),
-                f32_to_bf16x16(_mm512_mul_ps(gelu_avx512(g), u)));
+                f32_to_bf16x16(_mm512_mul_ps(gelu_act_avx512(g, m), u)));
     }
     for (; n < count; ++n) {
         float g = static_cast<float>(gate[n]);
         float u = static_cast<float>(up[n]);
-        gate[n] = bfloat16_t(gelu_scalar(g) * u);
+        gate[n] = bfloat16_t(gelu_scalar(g, tanh_form) * u);
     }
 }
 
 // FP32 swiglu_oai row helper.  Stride-2 gather from the interleaved
 // `[g0, u0, g1, u1, ...]` buffer, then the unified
-// `swiglu_oai_avx512(gate, up)` does clamp + (1+u)·g·σ(α·g) on the
+// `swiglu_oai_act_avx512(gate, up, m)` does clamp + (1+u)·g·σ(α·g) on the
 // pre-deinterleaved zmm pair.  Scalar tail handles `dim % 16` only.
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
 static void swiglu_oai_mul_row_avx512_f32(float *row, int dim) {
+    const act_mode_t m = act_mode();
     const __m512i idx = _mm512_load_si512(kGatherIdx);
 
     int n = 0;
     for (; n + 16 <= dim; n += 16) {
         __m512 g = _mm512_i32gather_ps(idx, row + 2 * n, 4);
         __m512 u = _mm512_i32gather_ps(idx, row + 2 * n + 1, 4);
-        _mm512_storeu_ps(row + n, swiglu_oai_avx512(g, u));
+        _mm512_storeu_ps(row + n, swiglu_oai_act_avx512(g, u, m));
     }
     const float alpha = 1.702f;
     for (; n < dim; ++n) {
@@ -311,10 +340,11 @@ static void swiglu_oai_mul_row_avx512_f32(float *row, int dim) {
 // interleaved buffer, then two `vpermtxvar_epi16` extract gates
 // (even lanes) and ups (odd lanes) into separate 16-lane BF16 zmms,
 // `bf16x16_to_f32` lifts each to FP32, and the unified
-// `swiglu_oai_avx512(gate, up)` does the rest.  Replaces a 16-iter
+// `swiglu_oai_act_avx512(gate, up, m)` does the rest.  Replaces a 16-iter
 // scalar loop with 1 load + 2 permutes + the shared math.
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
 static void swiglu_oai_mul_row_avx512_bf16(bfloat16_t *row, int dim) {
+    const act_mode_t m = act_mode();
     const __m512i g_idx = _mm512_load_si512(kDeintGateIdx);
     const __m512i u_idx = _mm512_load_si512(kDeintUpIdx);
 
@@ -330,7 +360,7 @@ static void swiglu_oai_mul_row_avx512_bf16(bfloat16_t *row, int dim) {
                 _mm512_castsi512_si256(_mm512_permutexvar_epi16(u_idx, raw)));
 
         _mm256_storeu_si256(reinterpret_cast<__m256i *>(&row[n]),
-                f32_to_bf16x16(swiglu_oai_avx512(g, u)));
+                f32_to_bf16x16(swiglu_oai_act_avx512(g, u, m)));
     }
     const float alpha = 1.702f;
     for (; n < dim; ++n) {
@@ -372,6 +402,7 @@ static void swiglu_oai_mul_row_avx512_bf16(bfloat16_t *row, int dim) {
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
 static void silu_and_mul_row_avx512_f16(
         float16_t *gate, const float16_t *up, int count) {
+    const act_mode_t m = act_mode();
     int n = 0;
     for (; n + 16 <= count; n += 16) {
         __m512 g = f16x16_to_f32(_mm256_loadu_si256(
@@ -379,7 +410,7 @@ static void silu_and_mul_row_avx512_f16(
         __m512 u = f16x16_to_f32(
                 _mm256_loadu_si256(reinterpret_cast<const __m256i *>(&up[n])));
         _mm256_storeu_si256(reinterpret_cast<__m256i *>(&gate[n]),
-                f32_to_f16x16(_mm512_mul_ps(silu_avx512(g), u)));
+                f32_to_f16x16(_mm512_mul_ps(silu_act_avx512(g, m), u)));
     }
     for (; n < count; ++n) {
         float g = static_cast<float>(gate[n]);
@@ -391,6 +422,8 @@ static void silu_and_mul_row_avx512_f16(
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
 static void gelu_and_mul_row_avx512_f16(
         float16_t *gate, const float16_t *up, int count) {
+    const act_mode_t m = act_mode();
+    const bool tanh_form = gelu_is_tanh(m);
     int n = 0;
     for (; n + 16 <= count; n += 16) {
         __m512 g = f16x16_to_f32(_mm256_loadu_si256(
@@ -398,12 +431,12 @@ static void gelu_and_mul_row_avx512_f16(
         __m512 u = f16x16_to_f32(
                 _mm256_loadu_si256(reinterpret_cast<const __m256i *>(&up[n])));
         _mm256_storeu_si256(reinterpret_cast<__m256i *>(&gate[n]),
-                f32_to_f16x16(_mm512_mul_ps(gelu_avx512(g), u)));
+                f32_to_f16x16(_mm512_mul_ps(gelu_act_avx512(g, m), u)));
     }
     for (; n < count; ++n) {
         float g = static_cast<float>(gate[n]);
         float u = static_cast<float>(up[n]);
-        gate[n] = float16_t(gelu_scalar(g) * u);
+        gate[n] = float16_t(gelu_scalar(g, tanh_form) * u);
     }
 }
 
@@ -415,6 +448,7 @@ static void gelu_and_mul_row_avx512_f16(
 // cvt-store (`f32_to_f16x16`) differ from the BF16 path.
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
 static void swiglu_oai_mul_row_avx512_f16(float16_t *row, int dim) {
+    const act_mode_t m = act_mode();
     const __m512i g_idx = _mm512_load_si512(kDeintGateIdx);
     const __m512i u_idx = _mm512_load_si512(kDeintUpIdx);
 
@@ -428,7 +462,7 @@ static void swiglu_oai_mul_row_avx512_f16(float16_t *row, int dim) {
                 _mm512_castsi512_si256(_mm512_permutexvar_epi16(u_idx, raw)));
 
         _mm256_storeu_si256(reinterpret_cast<__m256i *>(&row[n]),
-                f32_to_f16x16(swiglu_oai_avx512(g, u)));
+                f32_to_f16x16(swiglu_oai_act_avx512(g, u, m)));
     }
     const float alpha = 1.702f;
     for (; n < dim; ++n) {
@@ -480,19 +514,20 @@ void swiglu_oai_tile_scalar_bf16(
 }
 
 // FP32 swiglu_oai OOP tile helper (separate src/dst buffers).
-// Same `(g, u)` deinterleave + shared `swiglu_oai_avx512(gate, up)`
+// Same `(g, u)` deinterleave + shared `swiglu_oai_act_avx512(gate, up, m)`
 // pattern as the in-place row helper above; only the source / dst
 // pointers differ.
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
 static void swiglu_oai_tile_avx512_f32(
         const float *src, float *dst, int pairs) {
+    const act_mode_t m = act_mode();
     const __m512i idx = _mm512_load_si512(kGatherIdx);
 
     int n = 0;
     for (; n + 16 <= pairs; n += 16) {
         __m512 g = _mm512_i32gather_ps(idx, src + 2 * n, 4);
         __m512 u = _mm512_i32gather_ps(idx, src + 2 * n + 1, 4);
-        _mm512_storeu_ps(dst + n, swiglu_oai_avx512(g, u));
+        _mm512_storeu_ps(dst + n, swiglu_oai_act_avx512(g, u, m));
     }
     const float alpha = 1.702f;
     for (; n < pairs; ++n) {
@@ -504,10 +539,11 @@ static void swiglu_oai_tile_avx512_f32(
 
 // BF16 swiglu_oai OOP tile helper.  Vectorised 32-lane load +
 // vpermtxvar_epi16 deinterleave, then shared
-// `swiglu_oai_avx512(gate, up)` + `f32_to_bf16x16` store.
+// `swiglu_oai_act_avx512(gate, up, m)` + `f32_to_bf16x16` store.
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
 static void swiglu_oai_tile_avx512_bf16(
         const bfloat16_t *src, bfloat16_t *dst, int pairs) {
+    const act_mode_t m = act_mode();
     const __m512i g_idx = _mm512_load_si512(kDeintGateIdx);
     const __m512i u_idx = _mm512_load_si512(kDeintUpIdx);
 
@@ -522,7 +558,7 @@ static void swiglu_oai_tile_avx512_bf16(
                 _mm512_castsi512_si256(_mm512_permutexvar_epi16(u_idx, raw)));
 
         _mm256_storeu_si256(reinterpret_cast<__m256i *>(&dst[n]),
-                f32_to_bf16x16(swiglu_oai_avx512(g, u)));
+                f32_to_bf16x16(swiglu_oai_act_avx512(g, u, m)));
     }
     const float alpha = 1.702f;
     for (; n < pairs; ++n) {
@@ -567,6 +603,7 @@ void swiglu_oai_tile_scalar_f16(
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
 static void swiglu_oai_tile_avx512_f16(
         const float16_t *src, float16_t *dst, int pairs) {
+    const act_mode_t m = act_mode();
     const __m512i g_idx = _mm512_load_si512(kDeintGateIdx);
     const __m512i u_idx = _mm512_load_si512(kDeintUpIdx);
 
@@ -580,7 +617,7 @@ static void swiglu_oai_tile_avx512_f16(
                 _mm512_castsi512_si256(_mm512_permutexvar_epi16(u_idx, raw)));
 
         _mm256_storeu_si256(reinterpret_cast<__m256i *>(&dst[n]),
-                f32_to_f16x16(swiglu_oai_avx512(g, u)));
+                f32_to_f16x16(swiglu_oai_act_avx512(g, u, m)));
     }
     const float alpha = 1.702f;
     for (; n < pairs; ++n) {

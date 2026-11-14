@@ -263,6 +263,13 @@ void run_fused_ggml_scenario(const std::string &label,
                 << label << ": ref Op2";
     }
 
+    // The pinned ALGO-1 reference reorders the unpacked GGML weights in place
+    // (WEIGHT_CACHE=2).  One in-place buffer cannot serve two pinned
+    // algorithms: an ALGO-3 call would pack that blocked image as raw weights.
+    // The fused call therefore starts from fresh caches, as in a process that
+    // never ran the reference.
+    reset_grp_matmul_caches();
+
     // ── Test: single fused call (Op1 → act → Op2) with GGML weights ──
     int mtile_tag = 0;
     {
@@ -348,21 +355,25 @@ void run_fused_ggml_scenario(const std::string &label,
                         << ": fused GGML two-pass did NOT route to ALGO 3 "
                            "(N-tile)";
             } else { // ntile_algo_pin == 0 (AUTO)
-                // AUTO cross-warm prepares the AOCL per-N-tile layout
-                // (num_experts * stable), exceeding full-weight warm count.
-                EXPECT_GT(stats.aocl.total_attempted, E)
+                // AUTO runs this INT8 MoE layer on ALGO 3 with the custom
+                // kernel, which serves Q8_0 per-group weights, and cross-warm
+                // (AUTO-only) readies every expert's AOCL full-weight
+                // sym-quant layout for a later ALGO-1 prompt call.
+                EXPECT_EQ(stats.group_schedule, 3)
+                        << label << ": AUTO did not run the layer on ALGO 3";
+                EXPECT_EQ(stats.ck.cache_hits + stats.ck.cache_misses, E)
                         << label
-                        << ": per-tile AOCL sym-quant warm did not run";
-                // AUTO fused-MoE GGML: the per-group DYNAMIC quant trips the auto
-                // n_tile gate, so the EXECUTED algo clamps to ALGO 1 — but cross-warm
-                // (AUTO-only) still AOT-warms the ALGO-3 per-tile layout for a later
-                // pinned/decode call.  That proves the prepack + cross-warm wiring on
-                // the fused path (the N-tile executor itself is covered by the pinned
-                // ALGO-3 scenario above).
-                EXPECT_NE(
-                        stats.cross_warm_regime, prepack::CrossWarmRegime::none)
+                        << ": the custom-kernel pack did not cover every "
+                           "expert";
+                EXPECT_EQ(stats.cross_warm_regime,
+                        prepack::CrossWarmRegime::aocl_full_weight_sym_quant)
                         << label
-                        << ": cross-warm did not fire under AUTO (env_algo=0)";
+                        << ": cross-warm did not ready the ALGO-1 prompt "
+                           "layout";
+                EXPECT_EQ(stats.aocl.total_attempted, E)
+                        << label
+                        << ": the AOCL sym-quant warm did not cover every "
+                           "expert";
             }
         }
     }
@@ -548,11 +559,11 @@ TEST(FusedMoEGgml, NtileDenseSiluBF16) {
 }
 
 // AUTO (env_algo=0) fused-MoE GGML: AOT prepack + cross-warm.  The per-group
-// DYNAMIC quant makes the auto n_tile gate clamp the EXECUTED algo to ALGO 1,
-// but cross-warm (AUTO-only) still AOT-warms the ALGO-3 per-tile layout for a
-// future pinned/decode call (cross_warm_regime != none).  This proves the
-// prepack + cross-warm wiring on the fused GGML path; the N-tile executor
-// itself is covered by `NtileDenseSiluBF16` above.
+// INT8 layer runs on ALGO 3 with the custom kernel, which serves the Q8_0
+// per-group weights, and cross-warm (AUTO-only) readies the AOCL full-weight
+// sym-quant layout for a later ALGO-1 prompt call.  This proves the prepack +
+// cross-warm wiring on the fused GGML path; the N-tile executor itself is
+// covered by `NtileDenseSiluBF16` above.
 TEST(FusedMoEGgml, AutoCrossWarmDenseSiluBF16) {
     SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
     const int stable = zendnnl::lowoha::matmul::aocl_stable_n_thr(

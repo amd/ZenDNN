@@ -141,6 +141,7 @@
 #define ZENDNNL_GROUP_MATMUL_CUSTOM_KERNEL_DISPATCH_HPP
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -157,6 +158,12 @@
 namespace zendnnl {
 namespace lowoha {
 namespace matmul {
+namespace test_api {
+/// Forces `custom_kernel::u8_src_pays()` for the lifetime of a test: 0 off,
+/// 1 on; `-1` keeps the CPU check.
+inline std::atomic<int> s_ck_u8_src_override {-1};
+} // namespace test_api
+
 namespace custom_kernel {
 
 using zendnnl::common::bfloat16_t;
@@ -442,6 +449,11 @@ struct CallContext {
     /// converted+permuted to f32 by the silu/gelu interleave pre-pass.
     /// Ignored on the bf16 (non-quant) path.
     ScaleKind scale_kind = ScaleKind::kF32;
+    /// `kernel_table_int8` / `kernel_table_s4` and the deep-K accumulators
+    /// read source bytes already XOR-ed with 0x80 (s8 to u8), so every source
+    /// pointer passed to `dispatch_tile` / `accumulate_block` must hold such
+    /// bytes.  Set by `use_u8_src()`.
+    bool src_u8 = false;
     // Per-MR microkernel function pointers.  Slot 0 is unused (MR=0
     // would be a no-op); slots 1..kMaxMR hold the selected specializations.
     // Sized via `kMaxMR` so any future max_mr bump only needs a constant
@@ -812,6 +824,38 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
         void *tight_dst, int tight_ldc, const void *src_scale,
         const int32_t *src_zp, const void *wei_scale,
         const Int8EpilogueConfig &int8_epilogue);
+
+/// Whether the u8-source DQ-INT8 kernels repay their source copy on this
+/// CPU.  The per-broadcast XOR they drop measured ~15% of the NR32 K-loop on
+/// AMD family 1Ah models 50h-5Fh (Zen 6 server, Venice) and nothing on Zen 4
+/// or Zen 5 (which includes family 1Ah models 60h-7Fh), where the copy costs
+/// 1-3%.
+bool u8_src_pays();
+
+/// Whether `use_u8_src()` can switch this prepared call, on a CPU where it
+/// pays: DQ-INT8 NV=2 `kS8_Sym` outside the group-32 kernels, or W4A8 at pack
+/// NR 32 (whose prompt tiles sum on those DQ-INT8 kernels).
+inline bool u8_src_eligible(const CallContext &ctx) noexcept {
+    if (!ctx.enabled) return false;
+    const bool int8 = is_int8_variant(ctx.variant) && ctx.NV == 2
+            && ctx.compute_int == IntCompute::kS8_Sym && ctx.group_size != 32;
+    const bool w4a8 = is_w4a8_variant(ctx.variant) && ctx.pack_nr == 32;
+    return (int8 || w4a8) && u8_src_pays();
+}
+
+/// Switches a `u8_src_eligible()` call to the kernels that read source bytes
+/// already XOR-ed with 0x80, whose K-loop then skips that XOR on every
+/// broadcast.  Returns false and leaves `ctx` unchanged for any other call.
+bool use_u8_src(CallContext &ctx);
+
+/// Undoes `use_u8_src()`: back to the kernels that read s8 source bytes.
+void use_s8_src(CallContext &ctx);
+
+/// Writes `rows` rows of `cols` s8 bytes from `src` (row stride `lda`) to
+/// `dst` (row stride `ldd`), each byte XOR-ed with 0x80: the source bytes a
+/// `use_u8_src()` call reads.
+void copy_s8_rows_as_u8(const int8_t *src, int64_t lda, uint8_t *dst,
+        int64_t ldd, int rows, int cols);
 
 /// Block-level pieces for executors that partition a call themselves
 /// (`single_expert/single_expert_executor`).  A block is one `ctx.pack_nr`

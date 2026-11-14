@@ -189,23 +189,26 @@ ZENDNNL_ALWAYS_INLINE inline __m512 silu_ps(__m512 x) {
 // ---------------------------------------------------------------------------
 // GELU
 //
-// grp_matmul_gated_act_t::gelu_and_mul is the erf form everywhere in the
-// grouped-Matmul stack: the separate-pass row helpers and the custom-kernel
-// in-register epilogue both call group_matmul_act_avx512::gelu_avx512.  The
-// routed epilogue calls the same function so a call that falls back to the
-// grouped path computes the identical activation.
+// grp_matmul_gated_act_t::gelu_and_mul is evaluated by
+// group_matmul_act_avx512::gelu_act_avx512 everywhere in the grouped-Matmul
+// stack (the separate-pass row helpers and the custom-kernel in-register
+// epilogue), in the form `act_mode()` selects.  The routed epilogue calls the
+// same function so a call that falls back to the grouped path computes the
+// identical activation.
 // ---------------------------------------------------------------------------
-ZENDNNL_ALWAYS_INLINE inline __m512 gelu_ps(__m512 x) {
-    return group_matmul_act_avx512::gelu_avx512(x);
+ZENDNNL_ALWAYS_INLINE inline __m512 gelu_ps(
+        __m512 x, group_matmul_act_avx512::act_mode_t m) {
+    return group_matmul_act_avx512::gelu_act_avx512(x, m);
 }
 
 template <routed_moe_activation_t ACT>
-ZENDNNL_ALWAYS_INLINE inline __m512 gated_act_ps(__m512 x) {
+ZENDNNL_ALWAYS_INLINE inline __m512 gated_act_ps(
+        __m512 x, group_matmul_act_avx512::act_mode_t m) {
     static_assert(ACT == routed_moe_activation_t::silu_and_mul
                     || ACT == routed_moe_activation_t::gelu_and_mul,
             "activation has no routed epilogue");
     if constexpr (ACT == routed_moe_activation_t::gelu_and_mul) {
-        return gelu_ps(x);
+        return gelu_ps(x, m);
     } else {
         return silu_ps(x);
     }
@@ -545,6 +548,8 @@ struct tiny_gemm_gate_up {
         unroll_t<ROWS * COLS> {}(scalec);
 
         // act(x) * y for two 16-lane groups, packed into one 32-lane bf16 store.
+        const group_matmul_act_avx512::act_mode_t mode
+                = group_matmul_act_avx512::act_mode();
         auto storec = [&](auto i) {
             constexpr int row = i / COLS;
             constexpr int col = i % COLS;
@@ -555,8 +560,8 @@ struct tiny_gemm_gate_up {
                         = _mm512_castsi512_ps(vc1[row * COLS + col + 0]);
                 const __m512 y1
                         = _mm512_castsi512_ps(vc1[row * COLS + col + 1]);
-                x0 = _mm512_mul_ps(gated_act_ps<ACT>(x0), y0);
-                x1 = _mm512_mul_ps(gated_act_ps<ACT>(x1), y1);
+                x0 = _mm512_mul_ps(gated_act_ps<ACT>(x0, mode), y0);
+                x1 = _mm512_mul_ps(gated_act_ps<ACT>(x1, mode), y1);
                 _mm512_storeu_si512(
                         reinterpret_cast<void *>(C + row * ldc + col * 16),
                         (__m512i)(_mm512_cvtne2ps_pbh(x1, x0)));

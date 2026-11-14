@@ -58,7 +58,9 @@ namespace ntile_flat_parallel {
 // helpers carry
 // (`avx512f,avx512bw,avx512vl,fma`), or GCC declines to inline across the
 // target-attribute boundary and emits a call in the middle of the tile loop.
-using group_matmul_act_avx512::silu_avx512;
+using group_matmul_act_avx512::act_mode;
+using group_matmul_act_avx512::act_mode_t;
+using group_matmul_act_avx512::silu_act_avx512;
 
 #define ZENDNNL_NTILE_FLAT_PARALLEL_TARGET_ISA \
     "avx512f,avx512bw,avx512dq,avx512vl,avx512vnni,avx512bf16,fma"
@@ -267,6 +269,7 @@ struct int8_gate_up_ukernel_t {
 
         // silu(x) * y for two 16-lane groups, packed into one 32-lane bf16
         // store.
+        const act_mode_t mode = act_mode();
         auto storec
                 = [&](auto i)
                           ZENDNNL_TARGET(ZENDNNL_NTILE_FLAT_PARALLEL_TARGET_ISA)
@@ -280,8 +283,8 @@ struct int8_gate_up_ukernel_t {
                         = _mm512_castsi512_ps(vc1[row * COLS + col + 0]);
                 const __m512 y1
                         = _mm512_castsi512_ps(vc1[row * COLS + col + 1]);
-                x0 = _mm512_mul_ps(silu_avx512(x0), y0);
-                x1 = _mm512_mul_ps(silu_avx512(x1), y1);
+                x0 = _mm512_mul_ps(silu_act_avx512(x0, mode), y0);
+                x1 = _mm512_mul_ps(silu_act_avx512(x1, mode), y1);
                 _mm512_storeu_si512(
                         reinterpret_cast<void *>(C + row * ldc + col * 16),
                         (__m512i)(_mm512_cvtne2ps_pbh(x1, x0)));

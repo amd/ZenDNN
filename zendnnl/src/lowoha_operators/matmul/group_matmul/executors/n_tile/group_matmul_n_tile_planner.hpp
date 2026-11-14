@@ -300,6 +300,9 @@ struct GroupNTileTopology {
             // floor selection (kDecodeNTileInt8 /
             // kMinNTileInt8 via *_for_variant helpers).
             // bf16 / static / WOQ paths leave it false.
+    bool se_balanced_decode = false; // single-expert CK decode splits N in
+            // whole pack blocks over every thread
+            // (`se_balanced_decode`).
 };
 
 // =====================================================================
@@ -319,6 +322,11 @@ struct GroupNTilePlan {
     // Per-thread N-slice floor (== `min_n_tile` argument of
     // ctx.execute_tile).  Set for StaticExpertTeams / ProportionalRounds / FixedTeamRounds.
     int min_n_tile = 1;
+
+    // `topo.se_balanced_decode`: `min_n_tile` is the N-tile floor in whole
+    // pack blocks and the N split spreads whole blocks evenly
+    // (`aligned_n_split` balance mode).
+    bool se_balanced = false;
 
     // (D) StaticExpertTeams parameters
     int decode_thr_per_expert = 0;
@@ -553,6 +561,8 @@ struct PhaseBSnapshot {
     // remaining slots stay zero.
     int num_ops_active = 0;
     std::array<int16_t, GroupNTilePlan::kMaxExperts> expert_thread_counts {};
+    int min_n_tile = 0;
+    bool se_balanced = false;
 };
 
 inline std::atomic<bool> s_capture_phase_b {false};

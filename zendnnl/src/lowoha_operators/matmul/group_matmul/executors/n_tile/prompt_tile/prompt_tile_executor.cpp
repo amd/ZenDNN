@@ -22,6 +22,7 @@
 #include <atomic>
 #include <cstddef>
 #include <memory>
+#include <new>
 #include <string>
 
 #include "../../../common/group_matmul_parallel_common.hpp"
@@ -51,6 +52,15 @@ struct Scratch {
     Plan plan;
     std::unique_ptr<Cursor[]> cursors;
     int cursor_cap = 0;
+    /// First owner slot of each team (`Plan::owner_begin`).
+    std::vector<int> slot_of_team;
+    /// A `src_u8` call's source rows (`prompt_tile_execute`).  Bounded like
+    /// `reorder_quant_buffers_t`: a block 8x the request is reallocated, and
+    /// one above `kU8RowsKeepBytes` is freed after its call, so a long
+    /// prompt's rows are not held through the decode that follows.
+    std::unique_ptr<uint8_t[]> u8_rows;
+    size_t u8_cap = 0;
+    static constexpr size_t kU8RowsKeepBytes = size_t {64} << 20;
 
     Cursor *cursors_for(int n) {
         if (n > cursor_cap) {
@@ -58,6 +68,24 @@ struct Scratch {
             cursor_cap = n;
         }
         return cursors.get();
+    }
+
+    uint8_t *u8_rows_for(size_t bytes) {
+        const bool fits = u8_rows != nullptr && bytes <= u8_cap;
+        if (fits && (u8_cap <= (size_t {1} << 20) || bytes >= u8_cap / 8))
+            return u8_rows.get();
+        uint8_t *p = new (std::nothrow) uint8_t[bytes];
+        if (p == nullptr) return fits ? u8_rows.get() : nullptr;
+        u8_rows.reset(p);
+        u8_cap = bytes;
+        return p;
+    }
+
+    void u8_rows_done() {
+        if (u8_cap > kU8RowsKeepBytes) {
+            u8_rows.reset();
+            u8_cap = 0;
+        }
     }
 };
 
@@ -155,6 +183,7 @@ ZENDNNL_FLATTEN PlannedCall plan_call(const custom_kernel::CallContext &kctx,
     cfg.num_threads = T;
     cfg.single_dense = se_dense_prompt_plan(
             call.M.size(), p.fam == kernel_type_t::kBf16);
+    cfg.balanced = se_balanced_prompt_plan(call.M.size(), kctx.variant);
     p.kc = se_prompt_tile_kc(kctx, p.r.t[kKc], p.key.K);
     cfg.kc = p.kc;
 
@@ -227,13 +256,29 @@ void prompt_tile_execute(custom_kernel::CallContext &kctx, const CallView &call,
     const int ntiles = static_cast<int>(plan.tiles.size());
     // Slot `n_teams` is the whole list, used when the runtime hands the
     // region a different team size than the map was built for.
-    Cursor *cur = s.cursors_for(n_teams + 1);
+    // Owner slots follow: one per thread, team-major (`Plan::owner_begin`).
+    const bool owned = !plan.owner_begin.empty()
+            && static_cast<int>(plan.owner_begin.size()) == tm.num_threads + 1;
+    Cursor *cur = s.cursors_for(n_teams + 1 + (owned ? tm.num_threads : 0));
     for (int t = 0; t < n_teams; ++t) {
         cur[t].next.store(plan.team_begin[t], std::memory_order_relaxed);
         cur[t].end = plan.team_begin[t + 1];
     }
     cur[n_teams].next.store(0, std::memory_order_relaxed);
     cur[n_teams].end = ntiles;
+    Cursor *slot_cur = cur + n_teams + 1;
+    if (owned) {
+        s.slot_of_team.resize(static_cast<size_t>(n_teams) + 1);
+        s.slot_of_team[0] = 0;
+        for (int t = 0; t < n_teams; ++t)
+            s.slot_of_team[t + 1] = s.slot_of_team[t] + tm.team_size[t];
+        for (int o = 0; o < tm.num_threads; ++o) {
+            slot_cur[o].next.store(
+                    plan.owner_begin[o], std::memory_order_relaxed);
+            slot_cur[o].end = plan.owner_begin[o + 1];
+        }
+    }
+    const int *slot_of_team = s.slot_of_team.data();
 
     if (log_plan) {
         const ShapeKey &key = p.key;
@@ -245,7 +290,10 @@ void prompt_tile_execute(custom_kernel::CallContext &kctx, const CallView &call,
                 " team_sizes=", join_sizes(tm.team_size),
                 " team_domains=", join_sizes(tm.domain_of_team),
                 " l2=", tm.l2_bytes, " l3=", tm.l3_bytes,
-                " est_imbalance=", plan.est_imbalance, " num_ops=", num_ops,
+                " est_imbalance=", plan.est_imbalance, " makespan=",
+                plan_makespan(plan, call.K.data(), k[kRb], tm.team_size.data(),
+                        n_teams),
+                " owned=", owned ? 1 : 0, " num_ops=", num_ops,
                 " num_threads=", T, " knobs=", join_knobs(k));
     }
     test_api::s_calls_served.fetch_add(1, std::memory_order_relaxed);
@@ -267,6 +315,24 @@ void prompt_tile_execute(custom_kernel::CallContext &kctx, const CallView &call,
     const bool q8_src_groups = kctx.group_size == 32
             && custom_kernel::is_int8_variant(kctx.variant);
 
+    // DQ-INT8 / W4A8 NR32 single expert: the team copies the source rows
+    // XOR-ed with 0x80 (u8) at the top of the parallel region, so the DQ-INT8
+    // K-loop skips that XOR per broadcast.  The copy is one pass over the
+    // rows; the XOR it saves recurs for every NR block.  Below
+    // `kU8SrcMinMacsPerThread` the copy and its barrier cost more than that.
+    constexpr int64_t kU8SrcMinMacsPerThread = int64_t {1} << 24;
+    int u8_ld = 0;
+    uint8_t *u8_base = nullptr;
+    if (quant != nullptr && num_ops == 1 && call.M[0] > 0
+            && static_cast<int64_t>(call.M[0]) * call.N[0] * call.K[0]
+                    >= kU8SrcMinMacsPerThread * T
+            && custom_kernel::u8_src_eligible(kctx)) {
+        u8_ld = (call.K[0] + 63) / 64 * 64;
+        u8_base = s.u8_rows_for(static_cast<size_t>(call.M[0]) * u8_ld);
+        if (u8_base != nullptr && !custom_kernel::use_u8_src(kctx))
+            u8_base = nullptr;
+    }
+
     auto run_tile = [&](const Tile &t) {
         const int e = t.e;
         const size_t m0 = static_cast<size_t>(t.m0);
@@ -282,9 +348,14 @@ void prompt_tile_execute(custom_kernel::CallContext &kctx, const CallView &call,
                 epi.wei_group_stride = call.N[e];
                 src_groups = epi.src_row_groups;
             }
+            const char *a = static_cast<const char *>(q.src) + m0 * q.lda;
+            int lda = q.lda;
+            if (u8_base != nullptr) {
+                a = reinterpret_cast<const char *>(u8_base) + m0 * u8_ld;
+                lda = u8_ld;
+            }
             custom_kernel::dispatch_tile(kctx, e, t.rows, call.K[e], t.ncols,
-                    t.n0, static_cast<const char *>(q.src) + m0 * q.lda, q.lda,
-                    call.bias[e], d, call.ldc[e],
+                    t.n0, a, lda, call.bias[e], d, call.ldc[e],
                     static_cast<const char *>(q.src_scale)
                             + m0
                                     * static_cast<size_t>(q8_src_groups
@@ -315,7 +386,36 @@ void prompt_tile_execute(custom_kernel::CallContext &kctx, const CallView &call,
 
 #pragma omp parallel num_threads(T)
     {
-        if (omp_get_num_threads() == tm.num_threads) {
+        if (u8_base != nullptr) {
+            const int rows = call.M[0];
+            const int per = (rows + omp_get_num_threads() - 1)
+                    / omp_get_num_threads();
+            const int r0 = std::min(rows, omp_get_thread_num() * per);
+            const int r1 = std::min(rows, r0 + per);
+            if (r1 > r0) {
+                custom_kernel::copy_s8_rows_as_u8(
+                        static_cast<const int8_t *>(quant[0].src)
+                                + static_cast<size_t>(r0) * quant[0].lda,
+                        quant[0].lda, u8_base + static_cast<size_t>(r0) * u8_ld,
+                        u8_ld, r1 - r0, call.K[0]);
+            }
+#pragma omp barrier
+        }
+        if (owned && omp_get_num_threads() == tm.num_threads) {
+            // Own slot, then teammates' (same L3) when stealing.  Not other
+            // teams': a slot holds a thread's few tiles, and an atomic on
+            // every slot of a 64-thread call costs ~50 us across domains.
+            const int tid = omp_get_thread_num();
+            const int my = tm.team_of[tid];
+            const int base = slot_of_team[my];
+            const int size = tm.team_size[my];
+            const int rank = tm.rank_in_team[tid];
+            drain(slot_cur[base + rank]);
+            for (int i = 1; steal && i < size; ++i) {
+                Cursor &c = slot_cur[base + (rank + i) % size];
+                if (c.next.load(std::memory_order_relaxed) < c.end) drain(c);
+            }
+        } else if (omp_get_num_threads() == tm.num_threads) {
             const int my = tm.team_of[omp_get_thread_num()];
             drain(cur[my]);
             if (steal && n_teams > 1) {
@@ -327,6 +427,10 @@ void prompt_tile_execute(custom_kernel::CallContext &kctx, const CallView &call,
         } else {
             drain(cur[n_teams]);
         }
+    }
+    if (u8_base != nullptr) {
+        custom_kernel::use_s8_src(kctx);
+        s.u8_rows_done();
     }
 }
 

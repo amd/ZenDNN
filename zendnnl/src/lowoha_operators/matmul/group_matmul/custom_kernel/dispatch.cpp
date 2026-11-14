@@ -35,6 +35,7 @@
 #include "lowoha_operators/matmul/group_matmul/common/grp_matmul_env.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_hw.hpp"
 #include "pack.hpp"
 #include "qwen_gemma_llama/bf16_decode_microkernel.hpp"
 
@@ -146,6 +147,7 @@ void CallContext::reset() {
     // `scale_kind`, so a stale value across a CallContext reuse would read
     // scales at the wrong element width if the next caller forgot to set it.
     scale_kind = ScaleKind::kF32;
+    src_u8 = false;
     for (auto &fn : kernel_table)
         fn = nullptr;
     for (auto &fn : kernel_table_int8)
@@ -415,7 +417,8 @@ status_t fill_kernel_table(int NV, int max_mr, ActivationKind act_kind,
 // mis-resolved f32 gated variant refuses here rather than at runtime.
 status_t fill_kernel_table_int8(int NV, IntCompute compute,
         ActivationKind act_kind, OutputType dst_dt,
-        int8_ukernel_fn_t (&kernel_table)[kMaxMR + 1], int group_k = 0) {
+        int8_ukernel_fn_t (&kernel_table)[kMaxMR + 1], int group_k = 0,
+        bool src_u8 = false) {
     const bool q8_group = group_k == 32 && compute == IntCompute::kS8_Sym
             && (NV == 2 || NV == 4);
     const int max_mr = q8_group ? std::min(max_mr_for_nv_int8(NV, compute), 4)
@@ -423,7 +426,8 @@ status_t fill_kernel_table_int8(int NV, IntCompute compute,
     for (int mr = 1; mr <= max_mr; ++mr) {
         kernel_table[mr] = q8_group
                 ? select_int8_q8_group_ukernel(mr, NV, act_kind, dst_dt)
-                : select_int8_ukernel(mr, NV, compute, act_kind, dst_dt);
+                : select_int8_ukernel(
+                          mr, NV, compute, act_kind, dst_dt, src_u8);
         if (kernel_table[mr] == nullptr) return status_t::failure;
     }
     return status_t::success;
@@ -458,7 +462,8 @@ status_t fill_kernel_table_f16_kblock(
 // clamp its MR chunking to `ctx.max_mr`.
 status_t fill_kernel_table_s4(int NV, ActivationKind act_kind,
         int src_scale_groups, OutputType dst_dt,
-        w4a8_ukernel_fn_t (&kernel_table)[kMaxMR + 1]) {
+        w4a8_ukernel_fn_t (&kernel_table)[kMaxMR + 1],
+        S4SourceKind source = S4SourceKind::kS8) {
     const int max_mr = max_mr_for_nv_s4(NV);
     const S4SrcScaleGranularity granularity = src_scale_groups > 1
             ? S4SrcScaleGranularity::kPerGroup
@@ -468,7 +473,7 @@ status_t fill_kernel_table_s4(int NV, ActivationKind act_kind,
             : S4OutputKind::kBf16;
     for (int mr = 1; mr <= max_mr; ++mr) {
         kernel_table[mr] = select_w4a8_ukernel(
-                mr, NV, act_kind, S4SourceKind::kS8, output, granularity);
+                mr, NV, act_kind, source, output, granularity);
         if (kernel_table[mr] == nullptr) return status_t::failure;
     }
     return status_t::success;
@@ -1777,9 +1782,11 @@ inline void dispatch_tile_int8_kblocked(const CallContext &ctx, int expert_idx,
     const int n_calls = (M + ctx.max_mr - 1) / ctx.max_mr;
     const int mr_base = M / n_calls;
     const int n_big = M - mr_base * n_calls;
-    const int8_accum_ukernel_fn_t fn_small = select_int8_accum_ukernel(mr_base);
-    const int8_accum_ukernel_fn_t fn_big
-            = (n_big > 0) ? select_int8_accum_ukernel(mr_base + 1) : fn_small;
+    const int8_accum_ukernel_fn_t fn_small
+            = select_int8_accum_ukernel(mr_base, ctx.src_u8);
+    const int8_accum_ukernel_fn_t fn_big = (n_big > 0)
+            ? select_int8_accum_ukernel(mr_base + 1, ctx.src_u8)
+            : fn_small;
     assert(fn_small != nullptr && fn_big != nullptr);
 
     const int64_t l2_budget = ck_l2_budget_bytes();
@@ -1826,6 +1833,134 @@ inline void dispatch_tile_int8_kblocked(const CallContext &ctx, int expert_idx,
         finish_int8_accum_nv2_sym_bf16(c_accum.data(), pack_nr, M, comp,
                 src_scale, wei_scale_block, ctx.scale_kind, dst_block, ldc);
     }
+}
+
+// Per worker thread: a K chunk of one unpacked NR=32 W4A8 block, the f32 sums
+// of a tile's rows and the `[12][32]` int32 group sums of
+// `dispatch_tile_s4_unpacked`.
+struct S4UnpackScratch {
+    using buf_t = std::unique_ptr<void, decltype(&zendnnl_aligned_free)>;
+    buf_t b {nullptr, &zendnnl_aligned_free};
+    size_t b_cap = 0;
+    buf_t f {nullptr, &zendnnl_aligned_free};
+    size_t f_cap = 0;
+    alignas(64) int32_t c[12 * 32];
+
+    static void *grow(buf_t &p, size_t &cap, size_t bytes) {
+        if (bytes > cap) {
+            p.reset(zendnnl_aligned_alloc(64, bytes));
+            cap = p ? bytes : 0;
+        }
+        return p.get();
+    }
+};
+
+// `dispatch_tile_s4` for the NR=32 tiles of a `src_u8` call: each ~512-deep K
+// chunk of a 32-column block is unpacked to s8 once, into L1, and every MR
+// call of the tile sums its groups on the XOR-free DQ-INT8 accumulator over
+// up to 12 rows, rather than every MR call unpacking in registers.  With s8
+// source bytes the accumulator's per-broadcast XOR costs more than the
+// unpack it saves, so those calls keep the in-register kernels.  Same bits
+// as the in-register kernels.  Returns false, having written nothing, when it
+// does not apply.
+bool dispatch_tile_s4_unpacked(const CallContext &ctx, int M, int K, int n_tile,
+        int col_start, const uint8_t *A_bytes, int lda, const void *bias,
+        std::byte *Tight_bytes, int tight_ldc, const void *src_scale_full,
+        const void *wei_scale_full, const int8_t *Bpacked_full,
+        size_t o_blk_stride_bytes, int subtile_cols, bool is_gated_act) {
+    constexpr int kNr = 32;
+    constexpr int kMaxRows = 12;
+    constexpr int kChunkK = 512;
+    if (ctx.pack_nr != kNr || !ctx.src_u8) return false;
+    const S4SrcScaleGranularity gran = ctx.src_scale_groups > 1
+            ? S4SrcScaleGranularity::kPerGroup
+            : S4SrcScaleGranularity::kPerToken;
+    const w4a8_unpacked_store_fn_t sfn
+            = select_w4a8_unpacked_store(ctx.act_kind,
+                    dst_dt_for_variant(ctx.variant) == OutputType::kF32
+                            ? S4OutputKind::kF32
+                            : S4OutputKind::kBf16,
+                    gran);
+    if (sfn == nullptr) return false;
+    const w4a8_unpacked_groups_fn_t gfn = select_w4a8_unpacked_groups(gran);
+    const int gs = ctx.group_size;
+    const int G = K / gs;
+    const int chunk_groups = std::max(1, kChunkK / gs);
+    static thread_local S4UnpackScratch scratch;
+    auto *unpacked = static_cast<int8_t *>(S4UnpackScratch::grow(scratch.b,
+            scratch.b_cap, static_cast<size_t>(chunk_groups) * gs * kNr));
+    auto *facc = static_cast<float *>(S4UnpackScratch::grow(scratch.f,
+            scratch.f_cap, static_cast<size_t>(M) * kNr * sizeof(float)));
+    if (unpacked == nullptr || facc == nullptr) return false;
+
+    const size_t dst_elem = dst_elem_bytes(ctx.variant);
+    const size_t bias_elem = (ctx.bias_kind == BiasKind::fp32)
+            ? sizeof(float)
+            : sizeof(bfloat16_t);
+    const size_t scale_elem = (ctx.scale_kind == ScaleKind::kBf16)
+            ? sizeof(bfloat16_t)
+            : sizeof(float);
+    const size_t group_packed_bytes
+            = static_cast<size_t>(gs / kS4Octet) * kNr * kS4BytesPerOctetCol;
+    const int n_calls = (M + kMaxRows - 1) / kMaxRows;
+    const int mr_base = M / n_calls;
+    const int n_big = M - mr_base * n_calls;
+    const int out_cols = is_gated_act ? kNr / 2 : kNr;
+    const auto src_scale_at = [&](int m_off) {
+        return static_cast<const char *>(src_scale_full)
+                + static_cast<size_t>(m_off) * ctx.src_scale_groups
+                * scale_elem;
+    };
+
+    for (int sub_off = 0; sub_off < n_tile; sub_off += subtile_cols) {
+        const int sub_n = std::min(subtile_cols, n_tile - sub_off);
+        for (int b = 0; b < sub_n / kNr; ++b) {
+            const int col = col_start + sub_off + b * kNr;
+            const int8_t *blk = Bpacked_full
+                    + static_cast<size_t>(col / kNr) * o_blk_stride_bytes;
+            const auto *comp = reinterpret_cast<const int32_t *>(
+                    blk + static_cast<size_t>(G) * group_packed_bytes);
+            const void *wei_scale_blk
+                    = static_cast<const char *>(wei_scale_full)
+                    + col * scale_elem;
+            std::memset(facc, 0, static_cast<size_t>(M) * kNr * sizeof(float));
+            for (int g0 = 0; g0 < G; g0 += chunk_groups) {
+                const int ng = std::min(chunk_groups, G - g0);
+                unpack_s4_block_nr32(
+                        blk + g0 * group_packed_bytes, ng * gs, unpacked);
+                int m_off = 0;
+                for (int c = 0; c < n_calls; ++c) {
+                    const int mr = (c < n_big) ? mr_base + 1 : mr_base;
+                    gfn(mr, A_bytes + static_cast<size_t>(m_off) * lda, lda,
+                            unpacked, comp,
+                            select_int8_accum_ukernel(mr, ctx.src_u8),
+                            src_scale_at(m_off), wei_scale_blk, ctx.scale_kind,
+                            g0, ng, G, gs, ctx.wei_scale_grp_stride,
+                            facc + static_cast<size_t>(m_off) * kNr, scratch.c);
+                    m_off += mr;
+                }
+            }
+            const void *bias_blk = (bias != nullptr)
+                    ? static_cast<const char *>(bias) + col * bias_elem
+                    : nullptr;
+            int m_off = 0;
+            for (int c = 0; c < n_calls; ++c) {
+                const int mr = (c < n_big) ? mr_base + 1 : mr_base;
+                std::byte *row = Tight_bytes
+                        + (static_cast<size_t>(m_off) * tight_ldc
+                                  + static_cast<size_t>(col / kNr) * out_cols)
+                                * dst_elem;
+                sfn(mr, facc + static_cast<size_t>(m_off) * kNr,
+                        src_scale_at(m_off), ctx.scale_kind, bias_blk,
+                        ctx.bias_kind, is_gated_act ? nullptr : row,
+                        is_gated_act ? 0 : tight_ldc,
+                        is_gated_act ? row : nullptr,
+                        is_gated_act ? tight_ldc : 0);
+                m_off += mr;
+            }
+        }
+    }
+    return true;
 }
 
 // Sub-tile + per-MR loop for `kS8_S4_BF16_SYM`.  Shaped like
@@ -1877,6 +2012,11 @@ inline void dispatch_tile_s4(const CallContext &ctx, int expert_idx, int M,
     const bool is_gated_act = (ctx.act_kind == ActivationKind::swiglu_oai_mul)
             || (ctx.act_kind == ActivationKind::silu_and_mul)
             || (ctx.act_kind == ActivationKind::gelu_and_mul);
+
+    if (dispatch_tile_s4_unpacked(ctx, M, K, n_tile, col_start, A_bytes, lda,
+                bias, Tight_bytes, tight_ldc, src_scale_full, wei_scale_full,
+                Bpacked_full, o_blk_stride_bytes, subtile_cols, is_gated_act))
+        return;
 
     for (int sub_off = 0; sub_off < n_tile; sub_off += subtile_cols) {
         const int sub_n = std::min(subtile_cols, n_tile - sub_off);
@@ -2529,6 +2669,72 @@ inline void dispatch_tile_bf16_kblocked(const CallContext &ctx, int expert_idx,
 
 } // namespace
 
+namespace {
+
+bool fill_src_tables(CallContext &ctx, bool src_u8) {
+    const OutputType dst_dt = dst_dt_for_variant(ctx.variant);
+    if (is_w4a8_variant(ctx.variant)) {
+        w4a8_ukernel_fn_t table[kMaxMR + 1] = {};
+        if (fill_kernel_table_s4(ctx.NV, ctx.act_kind, ctx.src_scale_groups,
+                    dst_dt, table,
+                    src_u8 ? S4SourceKind::kU8Zp128 : S4SourceKind::kS8)
+                != status_t::success)
+            return false;
+        std::copy(std::begin(table), std::end(table),
+                std::begin(ctx.kernel_table_s4));
+    } else {
+        int8_ukernel_fn_t table[kMaxMR + 1] = {};
+        if (fill_kernel_table_int8(ctx.NV, ctx.compute_int, ctx.act_kind,
+                    dst_dt, table, ctx.group_size, src_u8)
+                != status_t::success)
+            return false;
+        std::copy(std::begin(table), std::end(table),
+                std::begin(ctx.kernel_table_int8));
+    }
+    ctx.src_u8 = src_u8;
+    return true;
+}
+
+} // namespace
+
+bool u8_src_pays() {
+    const int ovr
+            = test_api::s_ck_u8_src_override.load(std::memory_order_relaxed);
+    if (ovr >= 0) return ovr != 0;
+    static const bool pays = [] {
+        const native::native_hw_t &hw = native::native_hw();
+        return hw.vendor == "AuthenticAMD" && hw.family == 0x1A
+                && hw.model >= 0x50 && hw.model <= 0x5F;
+    }();
+    return pays;
+}
+
+bool use_u8_src(CallContext &ctx) {
+    return u8_src_eligible(ctx) && fill_src_tables(ctx, /*src_u8=*/true);
+}
+
+void use_s8_src(CallContext &ctx) {
+    if (ctx.src_u8) fill_src_tables(ctx, /*src_u8=*/false);
+}
+
+void copy_s8_rows_as_u8(const int8_t *src, int64_t lda, uint8_t *dst,
+        int64_t ldd, int rows, int cols) {
+    constexpr uint64_t kFlip = 0x8080808080808080ULL;
+    for (int r = 0; r < rows; ++r) {
+        const auto *s = reinterpret_cast<const unsigned char *>(src + r * lda);
+        unsigned char *d = dst + r * ldd;
+        int c = 0;
+        for (; c + 8 <= cols; c += 8) {
+            uint64_t w;
+            std::memcpy(&w, s + c, sizeof(w));
+            w ^= kFlip;
+            std::memcpy(d + c, &w, sizeof(w));
+        }
+        for (; c < cols; ++c)
+            d[c] = static_cast<unsigned char>(s[c] ^ 0x80u);
+    }
+}
+
 void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
         int n_tile, int col_start, const void *src, int lda, const void *bias,
         void *tight_dst, int tight_ldc, const void *src_scale,
@@ -2987,7 +3193,7 @@ void accumulate_block(const CallContext &ctx, int expert_idx, int M, int K,
         for (int c = 0; c < n_calls; ++c) {
             const int mr_now = (c < n_big) ? mr_base + 1 : mr_base;
             const int8_accum_ukernel_fn_t kfn
-                    = select_int8_accum_ukernel(mr_now);
+                    = select_int8_accum_ukernel(mr_now, ctx.src_u8);
             assert(kfn != nullptr);
             kfn(A + static_cast<size_t>(m_off) * lda, lda, Bpk, k_end - k_begin,
                     C + static_cast<size_t>(m_off) * pack_nr, pack_nr, add);

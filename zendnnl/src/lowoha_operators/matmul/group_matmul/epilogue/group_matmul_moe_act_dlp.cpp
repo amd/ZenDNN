@@ -32,6 +32,7 @@
 #include "common/bfloat16.hpp"
 #include "common/zendnnl_global.hpp"
 #include "lowoha_operators/matmul/backends/aocl/aocl_postop.hpp"
+#include "lowoha_operators/matmul/group_matmul/common/grp_matmul_env.hpp"
 #include "lowoha_operators/matmul/lowoha_common.hpp"
 
 namespace zendnnl {
@@ -141,7 +142,9 @@ bool silu_and_mul_dlp(void *dst, int row_start, int row_end, int N, int ldc,
 
 bool gelu_and_mul_dlp(void *dst, int row_start, int row_end, int N, int ldc,
         data_type_t dst_dtype) {
-    return apply_act_and_mul_dlp_impl(post_op_type_t::gelu_erf,
+    return apply_act_and_mul_dlp_impl(get_grp_matmul_gelu_is_tanh()
+                    ? post_op_type_t::gelu_tanh
+                    : post_op_type_t::gelu_erf,
             "gelu_and_mul_dlp", dst, row_start, row_end, N, ldc, dst_dtype);
 }
 

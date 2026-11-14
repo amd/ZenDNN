@@ -72,6 +72,11 @@ inline std::atomic<int> s_grp_matmul_custom_kernel_n_tile_override {-1};
 // production env path.
 inline std::atomic<int> s_grp_n_tile_strategy_override {-1};
 
+// Sentinel `-1` = no override.  A positive multiple of 32 sets
+// `ZENDNNL_GRP_MATMUL_N_TILE_FLOOR`; any other non-negative value gives its
+// default 32.
+inline std::atomic<int> s_grp_n_tile_floor_override {-1};
+
 // Sentinel `INT_MIN` = no override; falls through to the cached env
 // path (which itself applies the documented default 0 = AUTO).
 // `-1` is no longer usable as the "no override" marker because it
@@ -500,6 +505,9 @@ inline int get_grp_matmul_custom_kernel_n_tile() {
 //   trade parallelism for microkernel efficiency on shallow-K shapes.
 //   Non-multiples of 32 (or non-numeric) → default 32.
 inline int get_grp_n_tile_floor() {
+    const int ovr = test_api::s_grp_n_tile_floor_override.load(
+            std::memory_order_relaxed);
+    if (ovr >= 0) return (ovr > 0 && (ovr % 32) == 0) ? ovr : 32;
     static const int v = []() {
         const char *e = std::getenv("ZENDNNL_GRP_MATMUL_N_TILE_FLOOR");
         int parsed = 0;

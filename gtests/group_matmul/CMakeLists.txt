@@ -24,6 +24,7 @@ target_sources(gtests
   PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/group_matmul_test_helpers.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/e2e/test_basic.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/e2e/test_gated_act_forms.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/fused_moe/test_fused_moe.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_algos.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/e2e/test_quant.cpp

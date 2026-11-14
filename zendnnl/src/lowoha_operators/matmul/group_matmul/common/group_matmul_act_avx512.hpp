@@ -74,6 +74,7 @@
 
 #include <immintrin.h>
 #include "common/zendnnl_compat.hpp"
+#include "lowoha_operators/matmul/group_matmul/common/grp_matmul_env.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -214,6 +215,43 @@ static inline __m512 sigmoid_avx512(__m512 x) {
     return rcp;
 }
 
+/// `fast_exp_neg_fast_avx512(x) ≈ exp(-x)` for `ZENDNNL_GRP_MATMUL_FAST_ACT`:
+/// `fast_exp_neg_avx512` with a degree-3 minimax polynomial for `2^f`, two
+/// FMAs shorter, at a max relative error of 8.6e-5 (5.1e-5 there).  The
+/// result is capped below 2^125 (x < -86.6) rather than 2^128, so that
+/// 1 / (1 + exp(-x)) stays a normal float: subnormal arithmetic costs
+/// several times more.
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+ZENDNNL_ALWAYS_INLINE static inline __m512 fast_exp_neg_fast_avx512(__m512 x) {
+    const __m512 log2e = _mm512_set1_ps(-1.4426950408889634f);
+
+    __m512 t = _mm512_mul_ps(x, log2e);
+    __m512 ti = _mm512_roundscale_ps(t, _MM_FROUND_TO_NEG_INF);
+    __m512 f = _mm512_sub_ps(t, ti);
+
+    __m512 p = _mm512_fmadd_ps(
+            _mm512_set1_ps(0.0770575805f), f, _mm512_set1_ps(0.227655409f));
+    p = _mm512_fmadd_ps(p, f, _mm512_set1_ps(0.695114432f));
+    p = _mm512_fmadd_ps(p, f, _mm512_set1_ps(1.0f));
+
+    __m512 ti_clamped = _mm512_max_ps(
+            _mm512_min_ps(ti, _mm512_set1_ps(124.0f)), _mm512_set1_ps(-126.0f));
+    __m512i ei = _mm512_cvtps_epi32(ti_clamped);
+    __m512i exp_bits = _mm512_slli_epi32(
+            _mm512_add_epi32(ei, _mm512_set1_epi32(127)), 23);
+    __m512 pow2i = _mm512_castsi512_ps(exp_bits);
+
+    return _mm512_max_ps(_mm512_mul_ps(pow2i, p), _mm512_setzero_ps());
+}
+
+/// `sigmoid_fast_avx512(x)`: `sigmoid_avx512` on `fast_exp_neg_fast_avx512`,
+/// with `rcp14_ps` alone (2^-14 relative) instead of a Newton-refined one.
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+ZENDNNL_ALWAYS_INLINE static inline __m512 sigmoid_fast_avx512(__m512 x) {
+    return _mm512_rcp14_ps(
+            _mm512_add_ps(_mm512_set1_ps(1.0f), fast_exp_neg_fast_avx512(x)));
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Element-wise gated activations (no `* up` — caller multiplies)
 // ═══════════════════════════════════════════════════════════════════
@@ -346,6 +384,45 @@ static inline __m512 gelu_avx512(__m512 x) {
     return _mm512_mul_ps(_mm512_mul_ps(half, x), _mm512_add_ps(one, e));
 }
 
+/// Sigmoid argument of the tanh-form GELU,
+///   gelu_tanh(x) = 0.5·x·(1 + tanh(y)) = x·sigmoid(2y),
+///   y = √(2/π)·(x + 0.044715·x³),
+/// i.e. 2y = x·(2√(2/π) + 2√(2/π)·0.044715·x²), clamped to ±80: beyond it
+/// sigmoid is 1 in FP32 or below 1.8e-35, and below about -87 its
+/// reciprocal is subnormal, which costs several times more.
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+ZENDNNL_ALWAYS_INLINE static inline __m512 gelu_tanh_arg_avx512(__m512 x) {
+    const __m512 c1 = _mm512_set1_ps(1.5957691216f);
+    const __m512 c3 = _mm512_set1_ps(0.0713548163f);
+    const __m512 z
+            = _mm512_mul_ps(x, _mm512_fmadd_ps(c3, _mm512_mul_ps(x, x), c1));
+    return _mm512_max_ps(
+            _mm512_set1_ps(-80.0f), _mm512_min_ps(_mm512_set1_ps(80.0f), z));
+}
+
+/// Lanes whose clamped tanh-GELU argument `z` is above -80, NaN included.
+/// The tanh GELU is 0 on the others (x below -9.7), as PyTorch's is in FP32,
+/// where tanh rounds to -1 there: x times the clamped sigmoid would grow
+/// with |x| instead.
+ZENDNNL_TARGET("avx512f")
+ZENDNNL_ALWAYS_INLINE static inline __mmask16 gelu_tanh_live(__m512 z) {
+    return _mm512_cmp_ps_mask(z, _mm512_set1_ps(-80.0f), _CMP_NLE_UQ);
+}
+
+/// `gelu_tanh_avx512(x)`: PyTorch `gelu(approximate="tanh")`.
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+ZENDNNL_ALWAYS_INLINE static inline __m512 gelu_tanh_avx512(__m512 x) {
+    const __m512 z = gelu_tanh_arg_avx512(x);
+    return _mm512_maskz_mul_ps(gelu_tanh_live(z), x, sigmoid_avx512(z));
+}
+
+/// `gelu_tanh_avx512` on `sigmoid_fast_avx512`.
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+ZENDNNL_ALWAYS_INLINE static inline __m512 gelu_tanh_fast_avx512(__m512 x) {
+    const __m512 z = gelu_tanh_arg_avx512(x);
+    return _mm512_maskz_mul_ps(gelu_tanh_live(z), x, sigmoid_fast_avx512(z));
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Gated activation on pre-deinterleaved (gate, up) FP32 zmm pair
 // ═══════════════════════════════════════════════════════════════════
@@ -378,6 +455,63 @@ static inline __m512 swiglu_oai_avx512(__m512 gate, __m512 up) {
     const __m512 one = _mm512_set1_ps(1.0f);
     __m512 sig = sigmoid_avx512(_mm512_mul_ps(gate, alpha));
     return _mm512_mul_ps(_mm512_add_ps(one, up), _mm512_mul_ps(gate, sig));
+}
+
+/// `swiglu_oai_avx512` on `sigmoid_fast_avx512`.
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+ZENDNNL_ALWAYS_INLINE static inline __m512 swiglu_oai_fast_avx512(
+        __m512 gate, __m512 up) {
+    const __m512 cmin = _mm512_set1_ps(-7.0f);
+    const __m512 cmax = _mm512_set1_ps(+7.0f);
+    gate = _mm512_max_ps(_mm512_min_ps(gate, cmax), cmin);
+    up = _mm512_max_ps(_mm512_min_ps(up, cmax), cmin);
+    __m512 sig
+            = sigmoid_fast_avx512(_mm512_mul_ps(gate, _mm512_set1_ps(1.702f)));
+    return _mm512_mul_ps(
+            _mm512_add_ps(_mm512_set1_ps(1.0f), up), _mm512_mul_ps(gate, sig));
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Activation forms selected by ZENDNNL_GRP_MATMUL_GELU_TANH and
+// ZENDNNL_GRP_MATMUL_FAST_ACT (both default off)
+// ═══════════════════════════════════════════════════════════════════
+
+/// The selected forms.  Callers read `act_mode()` once per tile or row,
+/// outside their vector loops, and pass it to the `*_act_avx512` forms.
+struct act_mode_t {
+    bool gelu_tanh = false;
+    bool fast = false;
+};
+
+inline act_mode_t act_mode() {
+    return {get_grp_matmul_gelu_tanh(), get_grp_matmul_fast_act()};
+}
+
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+ZENDNNL_ALWAYS_INLINE static inline __m512 sigmoid_act_avx512(
+        __m512 x, act_mode_t m) {
+    return m.fast ? sigmoid_fast_avx512(x) : sigmoid_avx512(x);
+}
+
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+ZENDNNL_ALWAYS_INLINE static inline __m512 silu_act_avx512(
+        __m512 x, act_mode_t m) {
+    return m.fast ? _mm512_mul_ps(x, sigmoid_fast_avx512(x)) : silu_avx512(x);
+}
+
+/// The fast form is the tanh GELU whichever GELU is selected.
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+ZENDNNL_ALWAYS_INLINE static inline __m512 gelu_act_avx512(
+        __m512 x, act_mode_t m) {
+    if (m.fast) return gelu_tanh_fast_avx512(x);
+    return m.gelu_tanh ? gelu_tanh_avx512(x) : gelu_avx512(x);
+}
+
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+ZENDNNL_ALWAYS_INLINE static inline __m512 swiglu_oai_act_avx512(
+        __m512 gate, __m512 up, act_mode_t m) {
+    return m.fast ? swiglu_oai_fast_avx512(gate, up)
+                  : swiglu_oai_avx512(gate, up);
 }
 
 } // namespace group_matmul_act_avx512

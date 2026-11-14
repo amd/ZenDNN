@@ -174,6 +174,47 @@ inline bool se_dense_prompt_plan(size_t num_ops, bool bf16_family) {
     return num_ops == 1 && bf16_family;
 }
 
+// The `single_expert_dtype` bit of a resolved custom-kernel variant (0 when
+// the single-expert policy does not name it).
+inline unsigned se_variant_dtype(
+        custom_kernel::KernelVariant v, bool static_u8s8) {
+    if (custom_kernel::is_int8_variant(v))
+        return static_u8s8 ? kSingleExpertU8s8 : kSingleExpertInt8;
+    if (custom_kernel::is_w4a8_variant(v)) return kSingleExpertW4a8;
+    if (custom_kernel::is_f16_variant(v)) return kSingleExpertF16;
+    if (v == custom_kernel::KernelVariant::kBF16_BF16_BF16
+            || v == custom_kernel::KernelVariant::kBF16_BF16_F32)
+        return kSingleExpertBf16;
+    return 0u;
+}
+
+// Whether the prompt tile planner splits a single expert per thread
+// (`plan_balanced`) for this variant.  The prompt tile never takes static
+// U8xS8 (`grp_matmul_single_expert_ck`), so an INT8 variant here is DQ-INT8.
+inline bool se_balanced_prompt_plan(
+        size_t num_ops, custom_kernel::KernelVariant v) {
+    return num_ops == 1
+            && (get_grp_matmul_single_expert_prompt_balance_dtypes()
+                       & se_variant_dtype(v, /*static_u8s8=*/false))
+            != 0;
+}
+
+// Whether a single-expert decode on the custom kernel splits N in whole
+// `pack_nr` blocks spread over every thread instead of exact-divisor tiles.
+// An explicit tile (`..._CUSTOM_KERNEL_N_TILE`), adaptive sizing off
+// (`..._N_TILE_OVERSUB=0`), `..._N_TILE_STRATEGY=0` (no single-expert knob
+// applies) or `=1` (StaticExpertTeams) keeps the tile they select.
+inline bool se_balanced_decode(int num_ops, int max_M, bool use_custom,
+        custom_kernel::KernelVariant v, bool static_u8s8) {
+    return use_custom && is_single_dense_expert(num_ops) && max_M <= kDecodeMaxM
+            && get_grp_n_tile_strategy() >= 2
+            && get_grp_matmul_custom_kernel_n_tile() <= 0
+            && get_grp_n_tile_oversub() > 0
+            && (get_grp_matmul_single_expert_decode_balance_dtypes()
+                       & se_variant_dtype(v, static_u8s8))
+            != 0;
+}
+
 // ── Adaptive N-tile floor (single-expert only) ───────────────────────
 // SCOPE: `num_ops == 1`.  Real MoE groups keep the legacy fixed
 // `phase_cap`, so multi-expert round scheduling and per-expert tiling

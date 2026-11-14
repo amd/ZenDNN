@@ -178,6 +178,73 @@ TEST(TestGroupMatmulInt8PromptTile, SingleExpertMatchesRounds) {
     }
 }
 
+// The balanced decode N split of a single DQ-INT8 or W4A8 expert (the
+// native S4 kernel cuts at even boundaries) writes exactly what the
+// exact-divisor tile writes.  At 15 threads N 2720 (85 blocks) takes it:
+// its tile is 192 columns on 14 threads, 7 blocks on the busiest against 6
+// balanced.  N 1344 (42 blocks) does not: 96-column tiles on 14 threads
+// leave 3 blocks on the busiest, as 15 even shares do.
+struct DecodeBalanceShape {
+    int N;
+    bool engages;
+};
+constexpr DecodeBalanceShape kDecodeBalanceShapes[]
+        = {{2720, true}, {1344, false}};
+
+TEST(TestSingleExpertDecodeBalance, Int8KeepsBits) {
+    using namespace moe_test_utils;
+    namespace ck = zendnnl::lowoha::matmul::custom_kernel;
+    if (!ck::avx512vnni_available()) {
+        GTEST_SKIP() << "AVX-512 VNNI not available on this host";
+    }
+    const int K = 1024;
+    SingleExpertCkPolicy force(1, 1, 1);
+    CustomKernelInt8Override ck_int8(true);
+    for (const auto &[N, engages] : kDecodeBalanceShapes) {
+        for (const int rows : {1, 8}) {
+            SCOPED_TRACE(::testing::Message() << "M=" << rows << " N=" << N);
+            tensor_factory_t tf;
+            const Int8AlgoCustomParam p {0, rows, 1, N};
+            std::vector<tensor_t> src, wei, bias, dst;
+            ASSERT_NO_FATAL_FAILURE(build_int8_dq_inputs(
+                    tf, p, N, K, src, wei, bias, dst, data_type_t::f32));
+            dst = {tf.zero_tensor(
+                    {static_cast<uint64_t>(rows), static_cast<uint64_t>(N)},
+                    data_type_t::bf16)};
+            expect_decode_balance_keeps_bits(src, wei, bias, dst, 15, engages);
+        }
+    }
+}
+
+TEST(TestSingleExpertDecodeBalance, W4a8KeepsBits) {
+    using namespace moe_test_utils;
+    namespace ck = zendnnl::lowoha::matmul::custom_kernel;
+    if (!ck::avx512vnni_available()) {
+        GTEST_SKIP() << "AVX-512 VNNI not available on this host";
+    }
+    const uint64_t K = 1024, group_size = 128, G = K / group_size;
+    const data_type_t scale_dt = data_type_t::bf16;
+    SingleExpertCkPolicy force(1, 1, 1);
+    for (const auto &[n, engages] : kDecodeBalanceShapes) {
+        const uint64_t N = static_cast<uint64_t>(n);
+        for (const uint64_t rows : {uint64_t {1}, uint64_t {8}}) {
+            SCOPED_TRACE(::testing::Message() << "M=" << rows << " N=" << N);
+            tensor_factory_t tf;
+            auto ws = tf.uniform_dist_tensor({G, N}, scale_dt, 2.0);
+            std::vector<tensor_t> wt {tf.uniform_dist_tensor(
+                    {K, N}, data_type_t::s4, 7.0, false, ws)};
+            auto ss = tf.zero_tensor({rows, 1u}, scale_dt);
+            std::vector<tensor_t> inp {tf.uniform_dist_tensor(
+                    {rows, K}, data_type_t::bf16, 2.0, false, ss, tensor_t())};
+            std::vector<tensor_t> bias {
+                    tf.uniform_dist_tensor({1u, N}, data_type_t::bf16, 2.0)};
+            std::vector<tensor_t> out {
+                    tf.zero_tensor({rows, N}, data_type_t::bf16)};
+            expect_decode_balance_keeps_bits(inp, wt, bias, out, 15, engages);
+        }
+    }
+}
+
 // ── Rule 0.45 — single dense expert decode → ALGO 3 ──────────────────
 // A lone expert (`num_ops == 1`) in decode is routed to ALGO 3 so it
 // reaches the N-tile planner where the dense-FFN optimisations live
@@ -369,6 +436,19 @@ TEST(TestGroupMatmulAutoPhaseEnv, SingleExpertCkKnobDefaults) {
     }
     if (std::getenv("ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_FORCE_CK") == nullptr) {
         EXPECT_EQ(get_grp_matmul_single_expert_force_ck_dtypes(),
+                kSingleExpertAll);
+    }
+    // The per-thread prompt plan for BF16 only; the balanced decode split
+    // for every dtype.
+    SingleExpertBalanceMasks balance_env(-1, -1);
+    if (std::getenv("ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_BALANCE")
+            == nullptr) {
+        EXPECT_EQ(get_grp_matmul_single_expert_prompt_balance_dtypes(),
+                kSingleExpertBf16);
+    }
+    if (std::getenv("ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_DECODE_BALANCE")
+            == nullptr) {
+        EXPECT_EQ(get_grp_matmul_single_expert_decode_balance_dtypes(),
                 kSingleExpertAll);
     }
 }

@@ -111,7 +111,8 @@ status_t group_matmul_kernel_test(std::vector<tensor_t> &inputs,
         const grp_matmul_gated_act_params *gated_act,
         const std::vector<int> &pack_format_b,
         const std::vector<int> &active_rows, data_type_t dq_compute,
-        int32_t weight_cache_type, const std::vector<int> &ggml_superblock) {
+        int32_t weight_cache_type, const std::vector<int> &ggml_superblock,
+        int32_t num_threads) {
     using namespace zendnnl::lowoha::matmul;
     try {
         const size_t num_ops = inputs.size();
@@ -176,7 +177,7 @@ status_t group_matmul_kernel_test(std::vector<tensor_t> &inputs,
             params_v[i].dtypes.wei = wei_dt;
             params_v[i].dtypes.dst = dst_dt;
             params_v[i].dtypes.bias = bias_dt;
-            params_v[i].num_threads = 0;
+            params_v[i].num_threads = num_threads;
             // Forward the caller-requested algo so the F16-aware setup in
             // group_matmul_direct (ISA gate + reference-accum publication)
             // sees the actual algo the test wants exercised. Prior to this
@@ -364,6 +365,63 @@ void expect_prompt_tile_matches_rounds(int mask, int mb, int ns,
             EXPECT_TRUE(got[0][e] != unwritten[e])
                     << "reference left expert " << e << " unwritten";
         }
+        EXPECT_TRUE(got[0][e] == got[1][e]) << "expert " << e << " differs";
+    }
+}
+
+// ── expect_decode_balance_keeps_bits ───────────────────────────────────────
+void expect_decode_balance_keeps_bits(std::vector<tensor_t> &inputs,
+        std::vector<tensor_t> &weights, std::vector<tensor_t> &biases,
+        std::vector<tensor_t> &outputs, int num_threads, bool engages) {
+    using namespace moe_test_utils;
+    namespace mm = zendnnl::lowoha::matmul;
+    AlgoEnvGuard algo(3);
+    CustomKernelOverride ck_on(true);
+    NTileStrategyOverride rounds(2);
+
+    const auto initial = output_bytes(outputs);
+    for (tensor_t &out : outputs)
+        fill_tensor_with_nan(out);
+    const auto unwritten = output_bytes(outputs);
+    std::vector<std::vector<uint8_t>> got[2];
+    std::string mode[2];
+    mm::test_api::PhaseBSnapshot plan[2];
+    for (int run = 0; run < 2; ++run) {
+        SingleExpertBalanceMasks masks(
+                -1, run == 0 ? 0 : static_cast<int>(mm::kSingleExpertAll));
+        PhaseBCaptureGuard plan_capture;
+        ExecutionPathCaptureGuard capture;
+        reset_grp_matmul_caches();
+        for (size_t e = 0; e < outputs.size(); ++e)
+            std::memcpy(outputs[e].get_raw_handle_unsafe(), initial[e].data(),
+                    initial[e].size());
+        ASSERT_EQ(group_matmul_kernel_test(inputs, weights, biases, outputs,
+                          matmul_algo_t::aocl_dlp_blocked, 1.0f, 0.0f,
+                          /*moe_postop=*/nullptr, /*gated_act=*/nullptr,
+                          /*pack_format_b=*/ {}, /*active_rows=*/ {},
+                          data_type_t::s8, /*weight_cache_type=*/2,
+                          /*ggml_superblock=*/ {}, num_threads),
+                status_t::success)
+                << "run " << run;
+        const char *m
+                = mm::test_api::s_last_group_matmul_direct_execution_path.load(
+                        std::memory_order_relaxed);
+        mode[run] = m != nullptr ? m : "";
+        plan[run] = mm::test_api::s_last_phase_b_snapshot;
+        got[run] = output_bytes(outputs);
+    }
+    for (int run = 0; run < 2; ++run) {
+        ASSERT_NE(mode[run].find("_custom"), std::string::npos)
+                << "run " << run << " ran off the custom kernel: " << mode[run];
+        ASSERT_TRUE(plan[run].valid) << "run " << run << ": " << mode[run];
+    }
+    EXPECT_FALSE(plan[0].se_balanced);
+    EXPECT_EQ(plan[1].se_balanced, engages)
+            << "min_n_tile " << plan[1].min_n_tile << " vs "
+            << plan[0].min_n_tile << " off";
+    for (size_t e = 0; e < outputs.size(); ++e) {
+        EXPECT_TRUE(got[0][e] != unwritten[e])
+                << "expert " << e << " left unwritten";
         EXPECT_TRUE(got[0][e] == got[1][e]) << "expert " << e << " differs";
     }
 }

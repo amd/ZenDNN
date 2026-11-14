@@ -47,6 +47,7 @@
 
 #include "common/zendnnl_global.hpp"
 #include "lowoha_operators/matmul/group_matmul/common/group_matmul_parallel_common.hpp"
+#include "lowoha_operators/matmul/group_matmul/common/grp_matmul_env.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/dispatch.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 #include "lowoha_operators/matmul/routed_moe/routed_moe_internal.hpp"
@@ -219,12 +220,23 @@ struct moe_problem {
 // Mirrors the executor's pipeline including where it rounds to bf16 and the
 // order in which it applies the two scales, so the only expected divergence is
 // the exp/reciprocal approximation inside SiLU, or the erf approximation inside
-// GELU (exact std::erf here).  Written independently of the kernels (plain
-// loops, no intrinsics, no shared helpers).
+// GELU (exact std::erf here, std::tanh for the tanh form).  Written
+// independently of the kernels (plain loops, no intrinsics, no shared
+// helpers).
 //
 // `expert_map` follows the same convention as the contract: null means the ids
 // are already local, and a negative entry masks a slot out.
 // ---------------------------------------------------------------------------
+float gelu_ref(float x) {
+    if (zendnnl::lowoha::matmul::get_grp_matmul_gelu_is_tanh()) {
+        return 0.5f * x
+                * (1.f
+                        + std::tanh(
+                                0.7978845608f * (x + 0.044715f * x * x * x)));
+    }
+    return 0.5f * x * (1.f + std::erf(x * 0.70710678f));
+}
+
 std::vector<uint16_t> reference_moe(
         const moe_problem &pb, const int32_t *expert_map = nullptr) {
     const int64_t M = pb.M, K = pb.K, N = pb.N, topk = pb.topk;
@@ -266,7 +278,7 @@ std::vector<uint16_t> reference_moe(
                 const float uf = (static_cast<float>(u) * sa) * s13e[N + j];
                 const float act
                         = pb.act == routed_moe_activation_t::gelu_and_mul
-                        ? 0.5f * gf * (1.f + std::erf(gf * 0.70710678f))
+                        ? gelu_ref(gf)
                         : gf / (1.f + std::exp(-gf));
                 inter[j] = bf16_to_f32(f32_to_bf16(act * uf));
             }
@@ -399,14 +411,18 @@ ZENDNNL_TARGET("avx512f,avx512bw,avx512dq,avx512vl,avx512vnni,avx512bf16,fma")
 void routed_epilogue_act(
         routed_moe_activation_t act, const float *x, float *y, int64_t n) {
     namespace rm = zendnnl::lowoha::matmul::routed_moe;
+    const auto mode
+            = zendnnl::lowoha::matmul::group_matmul_act_avx512::act_mode();
     for (int64_t i = 0; i < n; i += 16) {
         const __m512 v = _mm512_loadu_ps(x + i);
         _mm512_storeu_ps(y + i,
                 act == routed_moe_activation_t::gelu_and_mul
                         ? rm::gated_act_ps<
-                                  routed_moe_activation_t::gelu_and_mul>(v)
+                                  routed_moe_activation_t::gelu_and_mul>(
+                                  v, mode)
                         : rm::gated_act_ps<
-                                  routed_moe_activation_t::silu_and_mul>(v));
+                                  routed_moe_activation_t::silu_and_mul>(
+                                  v, mode));
     }
 }
 #endif
@@ -664,6 +680,9 @@ TEST_F(RoutedMoEKernel, GeluIsBitIdenticalToGroupedPostPass) {
 // relative on the exp(-x^2) term, so |gelu error| <= 0.5 |x| * 5e-5.  The bound
 // below leaves 2x margin on that and is ~80x below one bf16 ulp at |x| = 1.
 TEST_F(RoutedMoEKernel, GeluTracksErfReference) {
+    if (zendnnl::lowoha::matmul::get_grp_matmul_gelu_is_tanh()) {
+        GTEST_SKIP() << "pins the erf form; a GELU knob selects the tanh form";
+    }
     constexpr int64_t n = 16 * 256;
     std::vector<float> x(static_cast<size_t>(n)), y(static_cast<size_t>(n));
     for (int64_t i = 0; i < n; ++i) {

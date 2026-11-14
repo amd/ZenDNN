@@ -109,11 +109,13 @@ namespace {
 // same FP32 primitives keeps the F16 fused-CK output on the same
 // numerical contract as the separate-pass reference, modulo the
 // FP16-accumulate caveat documented in the header.
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::act_mode;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::act_mode_t;
 using zendnnl::lowoha::matmul::group_matmul_act_avx512::bf16x16_to_f32;
 using zendnnl::lowoha::matmul::group_matmul_act_avx512::f32_to_f16x16;
-using zendnnl::lowoha::matmul::group_matmul_act_avx512::gelu_avx512;
-using zendnnl::lowoha::matmul::group_matmul_act_avx512::silu_avx512;
-using zendnnl::lowoha::matmul::group_matmul_act_avx512::swiglu_oai_avx512;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::gelu_act_avx512;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::silu_act_avx512;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::swiglu_oai_act_avx512;
 
 // Deinterleave indices for vpermt2ps over two source zmms (= 32 FP32
 // lanes total) — IDENTICAL to the bf16 sibling.  Even-indexed lanes
@@ -141,13 +143,13 @@ static inline _Float16 f16_raw_to_scalar(const float16_t &v) {
 // `f32_to_f16x16` and stores 256 bits.  Same structure as the bf16
 // `swiglu_oai_store_pair`; only the final cvt (FP32→F16) differs.
 ZENDNNL_TARGET("avx512f,avx512fp16,avx512bw,avx512vl,fma")
-static inline void swiglu_oai_store_pair_f16(
-        __m512 lo, __m512 hi, float16_t *dst_row) {
+ZENDNNL_ALWAYS_INLINE static inline void swiglu_oai_store_pair_f16(
+        __m512 lo, __m512 hi, float16_t *dst_row, act_mode_t mode) {
     const __m512i gate_idx = _mm512_load_si512(kGateLaneIdx);
     const __m512i up_idx = _mm512_load_si512(kUpLaneIdx);
     __m512 gate = _mm512_permutex2var_ps(lo, gate_idx, hi);
     __m512 up = _mm512_permutex2var_ps(lo, up_idx, hi);
-    __m512 r = swiglu_oai_avx512(gate, up);
+    __m512 r = swiglu_oai_act_avx512(gate, up, mode);
     __m256i out = f32_to_f16x16(r);
     _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst_row), out);
 }
@@ -155,27 +157,27 @@ static inline void swiglu_oai_store_pair_f16(
 // silu_and_mul — silu(gate) * up.  See the bf16 sibling's
 // `silu_and_mul_store_pair` for the numerical contract.
 ZENDNNL_TARGET("avx512f,avx512fp16,avx512bw,avx512vl,fma")
-static inline void silu_and_mul_store_pair_f16(
-        __m512 lo, __m512 hi, float16_t *dst_row) {
+ZENDNNL_ALWAYS_INLINE static inline void silu_and_mul_store_pair_f16(
+        __m512 lo, __m512 hi, float16_t *dst_row, act_mode_t mode) {
     const __m512i gate_idx = _mm512_load_si512(kGateLaneIdx);
     const __m512i up_idx = _mm512_load_si512(kUpLaneIdx);
     __m512 gate = _mm512_permutex2var_ps(lo, gate_idx, hi);
     __m512 up = _mm512_permutex2var_ps(lo, up_idx, hi);
-    __m512 r = _mm512_mul_ps(silu_avx512(gate), up);
+    __m512 r = _mm512_mul_ps(silu_act_avx512(gate, mode), up);
     __m256i out = f32_to_f16x16(r);
     _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst_row), out);
 }
 
-// gelu_and_mul — gelu(gate) * up (gelu_tanh form, see the bf16
-// sibling's `gelu_and_mul_store_pair` for the numerical contract).
+// gelu_and_mul — gelu(gate) * up (see the bf16 sibling's
+// `gelu_and_mul_store_pair` for the forms `mode` selects).
 ZENDNNL_TARGET("avx512f,avx512fp16,avx512bw,avx512vl,fma")
-static inline void gelu_and_mul_store_pair_f16(
-        __m512 lo, __m512 hi, float16_t *dst_row) {
+ZENDNNL_ALWAYS_INLINE static inline void gelu_and_mul_store_pair_f16(
+        __m512 lo, __m512 hi, float16_t *dst_row, act_mode_t mode) {
     const __m512i gate_idx = _mm512_load_si512(kGateLaneIdx);
     const __m512i up_idx = _mm512_load_si512(kUpLaneIdx);
     __m512 gate = _mm512_permutex2var_ps(lo, gate_idx, hi);
     __m512 up = _mm512_permutex2var_ps(lo, up_idx, hi);
-    __m512 r = _mm512_mul_ps(gelu_avx512(gate), up);
+    __m512 r = _mm512_mul_ps(gelu_act_avx512(gate, mode), up);
     __m256i out = f32_to_f16x16(r);
     _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst_row), out);
 }
@@ -316,6 +318,8 @@ static inline void f16_kernel_body(const float16_t *__restrict A, int lda,
             }
     }
 
+    [[maybe_unused]] const act_mode_t mode
+            = Act != ActivationKind::none ? act_mode() : act_mode_t {};
 #pragma GCC unroll 12
     for (int m = 0; m < MR; ++m)
 #pragma GCC unroll 4
@@ -326,11 +330,11 @@ static inline void f16_kernel_body(const float16_t *__restrict A, int lda,
                 float16_t *dst = Cout_tight + static_cast<size_t>(m) * ldc_tight
                         + j * 16;
                 if constexpr (Act == ActivationKind::swiglu_oai_mul) {
-                    swiglu_oai_store_pair_f16(lo, hi, dst);
+                    swiglu_oai_store_pair_f16(lo, hi, dst, mode);
                 } else if constexpr (Act == ActivationKind::silu_and_mul) {
-                    silu_and_mul_store_pair_f16(lo, hi, dst);
+                    silu_and_mul_store_pair_f16(lo, hi, dst, mode);
                 } else {
-                    gelu_and_mul_store_pair_f16(lo, hi, dst);
+                    gelu_and_mul_store_pair_f16(lo, hi, dst, mode);
                 }
             } else {
                 DstT *dst = Cout + static_cast<size_t>(m) * ldc + j * 32;

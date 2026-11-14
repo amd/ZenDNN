@@ -28,8 +28,9 @@
 ///   * `make_uniform_params`, `make_mixed_params` — `matmul_params`
 ///     vector builders.
 ///   * `GemmVecs::uniform` — uniform per-call GEMM wrapper vectors.
-///   * Reference activation math (`ref_silu_mul`, `ref_gelu_mul`,
-///     `ref_swiglu_oai`, `ref_gated_act`, `apply_ref_gated_act`,
+///   * Reference activation math in the library's forms (`ref_silu_mul`,
+///     `ref_gelu_mul`, `ref_swiglu_oai`, `ref_gated_act_scalar`,
+///     `ref_gated_act_avx512`, `ref_gated_act`, `apply_ref_gated_act`,
 ///     `apply_ref_gated_act_tensor`, `pick_random_gated_act`,
 ///     `compare_activated_2D`).
 ///   * Tolerance presets (`Tol`, `tol_fused`, `tol_act`, `tol_moe`).
@@ -55,10 +56,15 @@
 #include <vector>
 #include <type_traits>
 
+#include <immintrin.h>
+
 #include "common/bfloat16.hpp"
 #include "common/float16.hpp"
+#include "common/platform_info.hpp"
 #include "gtest_utils.hpp"
+#include "lowoha_operators/matmul/group_matmul/common/group_matmul_act_avx512.hpp"
 #include "lowoha_operators/matmul/group_matmul/common/group_matmul_parallel_common.hpp"
+#include "lowoha_operators/matmul/group_matmul/common/grp_matmul_env.hpp"
 #include "lowoha_operators/matmul/group_matmul/executors/m_tile/group_matmul_m_tile.hpp"
 #include "lowoha_operators/matmul/group_matmul/executors/n_tile/group_matmul_n_tile.hpp"
 #include "lowoha_operators/matmul/group_matmul/executors/n_tile/prompt_tile/prompt_tile_tunables.hpp"
@@ -349,13 +355,29 @@ struct GemmVecs {
 };
 
 // ───────────────────────────────────────────────────────────────────
-// [1.d] Scalar reference math for gated activations and weighted reduce
+// [1.d] Reference math for gated activations and weighted reduce
 // ───────────────────────────────────────────────────────────────────
+//
+// The references evaluate each activation in the form the library does:
+// on an AVX-512 CPU the shared `group_matmul_act_avx512` forms the
+// ZENDNNL_GRP_MATMUL_GELU_TANH / ZENDNNL_GRP_MATMUL_FAST_ACT knobs select,
+// and the exact scalar forms below elsewhere and on the last `dim % 16`
+// columns of a row, which the library's separate pass computes in scalar.
+// A test that requantizes the activated values (DQ-INT8 and W4A8 down
+// projections) then sees no rounding step the activation form alone
+// moved.  The accuracy of the forms themselves is tested in
+// `e2e/test_gated_act_forms.cpp`.
 
 inline float ref_silu_mul(float g, float u) {
     return g * (1.0f / (1.0f + std::exp(-g))) * u;
 }
+// The GELU form the library computes: tanh under
+// ZENDNNL_GRP_MATMUL_GELU_TANH or ZENDNNL_GRP_MATMUL_FAST_ACT, erf otherwise.
 inline float ref_gelu_mul(float g, float u) {
+    if (zendnnl::lowoha::matmul::get_grp_matmul_gelu_is_tanh()) {
+        const float inner = 0.7978845608028654f * (g + 0.044715f * g * g * g);
+        return 0.5f * g * (1.0f + std::tanh(inner)) * u;
+    }
     return g * 0.5f * (1.0f + std::erf(g * 0.7071067811865476f)) * u;
 }
 inline float ref_swiglu_oai(float g, float u) {
@@ -366,9 +388,7 @@ inline float ref_swiglu_oai(float g, float u) {
     return (1.0f + u) * g * sig;
 }
 
-// Computes reference activation output for row `m` column `n` of expert `e`.
-// The raw (pre-activation) Op1 output is read from `raw_dst` with stride N.
-inline float ref_gated_act(
+inline float ref_gated_act_scalar(
         grp_matmul_gated_act_t act, float g_or_even, float u_or_odd) {
     switch (act) {
         case grp_matmul_gated_act_t::silu_and_mul:
@@ -379,6 +399,39 @@ inline float ref_gated_act(
             return ref_swiglu_oai(g_or_even, u_or_odd);
         default: return 0.0f;
     }
+}
+
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,avx512dq,fma")
+inline float ref_gated_act_avx512(
+        grp_matmul_gated_act_t act, float g_or_even, float u_or_odd) {
+    namespace fa = zendnnl::lowoha::matmul::group_matmul_act_avx512;
+    const fa::act_mode_t m = fa::act_mode();
+    const __m512 g = _mm512_set1_ps(g_or_even);
+    const __m512 u = _mm512_set1_ps(u_or_odd);
+    switch (act) {
+        case grp_matmul_gated_act_t::silu_and_mul:
+            return _mm512_cvtss_f32(
+                    _mm512_mul_ps(fa::silu_act_avx512(g, m), u));
+        case grp_matmul_gated_act_t::gelu_and_mul:
+            return _mm512_cvtss_f32(
+                    _mm512_mul_ps(fa::gelu_act_avx512(g, m), u));
+        case grp_matmul_gated_act_t::swiglu_oai_mul:
+            return _mm512_cvtss_f32(fa::swiglu_oai_act_avx512(g, u, m));
+        default: return 0.0f;
+    }
+}
+
+inline bool ref_act_avx512() {
+    static const bool v
+            = zendnnl::common::zendnnl_platform_info().get_avx512f_status();
+    return v;
+}
+
+// Reference activation of one (gate, up) pair in a vector column.
+inline float ref_gated_act(
+        grp_matmul_gated_act_t act, float g_or_even, float u_or_odd) {
+    return ref_act_avx512() ? ref_gated_act_avx512(act, g_or_even, u_or_odd)
+                            : ref_gated_act_scalar(act, g_or_even, u_or_odd);
 }
 
 // Apply activation in-place on dst[:, 0:dim].  dst has M rows with stride ldc.
@@ -402,8 +455,11 @@ inline void apply_ref_gated_act(
                 u[n] = static_cast<float>(row[dim + n]);
             }
         }
+        const int vector_cols = dim - dim % 16;
         for (int n = 0; n < dim; ++n) {
-            float v = ref_gated_act(act, g[n], u[n]);
+            const float v = n < vector_cols
+                    ? ref_gated_act(act, g[n], u[n])
+                    : ref_gated_act_scalar(act, g[n], u[n]);
             if constexpr (std::is_same_v<T, bfloat16_t>) {
                 row[n] = bfloat16_t(v);
             } else {
@@ -1146,6 +1202,57 @@ struct SingleExpertCkMasks {
     }
     SingleExpertCkMasks(const SingleExpertCkMasks &) = delete;
     SingleExpertCkMasks &operator=(const SingleExpertCkMasks &) = delete;
+};
+
+// Sets `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_{PROMPT,DECODE}_BALANCE` to dtype
+// masks (`single_expert_dtype`) for a scope; `-1` uses the cached env value.
+struct SingleExpertBalanceMasks {
+    std::array<int, 2> prev;
+    SingleExpertBalanceMasks(int prompt, int decode) {
+        namespace ta = zendnnl::lowoha::matmul::test_api;
+        prev = {ta::s_grp_matmul_single_expert_prompt_balance_override.exchange(
+                        prompt),
+                ta::s_grp_matmul_single_expert_decode_balance_override.exchange(
+                        decode)};
+    }
+    ~SingleExpertBalanceMasks() {
+        namespace ta = zendnnl::lowoha::matmul::test_api;
+        ta::s_grp_matmul_single_expert_prompt_balance_override.store(prev[0]);
+        ta::s_grp_matmul_single_expert_decode_balance_override.store(prev[1]);
+    }
+    SingleExpertBalanceMasks(const SingleExpertBalanceMasks &) = delete;
+    SingleExpertBalanceMasks &operator=(const SingleExpertBalanceMasks &)
+            = delete;
+};
+
+// Sets `ZENDNNL_GRP_MATMUL_N_TILE_FLOOR` for a scope; `-1` uses the cached
+// env value.
+struct NTileFloorOverride {
+    int prev;
+    explicit NTileFloorOverride(int value)
+        : prev(zendnnl::lowoha::matmul::test_api::s_grp_n_tile_floor_override
+                          .exchange(value)) {}
+    ~NTileFloorOverride() {
+        zendnnl::lowoha::matmul::test_api::s_grp_n_tile_floor_override.store(
+                prev);
+    }
+    NTileFloorOverride(const NTileFloorOverride &) = delete;
+    NTileFloorOverride &operator=(const NTileFloorOverride &) = delete;
+};
+
+// Sets `ZENDNNL_GRP_MATMUL_N_TILE_OVERSUB` for a scope; `-1` uses the cached
+// env value.
+struct NTileOversubOverride {
+    int prev;
+    explicit NTileOversubOverride(int value)
+        : prev(zendnnl::lowoha::matmul::test_api::s_grp_n_tile_oversub_override
+                          .exchange(value)) {}
+    ~NTileOversubOverride() {
+        zendnnl::lowoha::matmul::test_api::s_grp_n_tile_oversub_override.store(
+                prev);
+    }
+    NTileOversubOverride(const NTileOversubOverride &) = delete;
+    NTileOversubOverride &operator=(const NTileOversubOverride &) = delete;
 };
 
 // RAII override for the decode ALGO 5 pin QUALIFIER

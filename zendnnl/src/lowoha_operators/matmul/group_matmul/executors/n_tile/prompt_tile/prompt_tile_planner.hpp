@@ -18,8 +18,10 @@
 /// @brief Pure tile planner for the ALGO 3 prompt tile executor.
 ///
 /// Splits one grouped-matmul call into (expert, M-block, N-slice) tiles
-/// and partitions the tile list into contiguous, equal-cost ranges, one
-/// per thread team (a team is the set of threads sharing one L3).  No
+/// and partitions the tile list into contiguous ranges, one per thread team
+/// (a team is the set of threads sharing one L3), each in proportion to its
+/// team's size; a single dense layer may instead get one range per thread
+/// inside its team's range (`plan_balanced`).  No
 /// OpenMP, no globals and no env reads, so it is unit-testable in
 /// isolation; the executor supplies the knobs, cache sizes, kernel facts
 /// and team sizes through `PlannerConfig`.
@@ -94,10 +96,20 @@ struct PlannerConfig {
     /// The call is one dense layer (one BF16 expert): auto sizes give
     /// every team equal M-blocks and every thread equal N-slices.
     bool single_dense = false;
+    /// The call is one dense layer split per thread (`plan_balanced`); takes
+    /// precedence over `single_dense` when the layer fits it.
+    bool balanced = false;
     /// K chunk the tiles accumulate in (`CallContext::prompt_kc`; 0: the
     /// full K).  The L2-derived M-block and N-slice sizes then hold one
     /// chunk of A and B rather than the whole depth.
     int kc = 0;
+};
+
+/// One team's column split in a per-thread plan (`plan_balanced`): `s`
+/// slices of N's pack blocks, `c = ceil(nblk / s)` on the busiest, and
+/// `q = nblk / s` whole blocks a thread with `rem = nblk % s` left over.
+struct TeamCols {
+    int s, c, q, rem;
 };
 
 /// Planner temporaries, kept with the plan so a reused `Plan` plans
@@ -106,6 +118,9 @@ struct PlanScratch {
     std::vector<std::pair<int64_t, int>> order;
     std::vector<int> rows, cols;
     std::vector<int64_t> cost_prefix;
+    std::vector<TeamCols> team_cols;
+    std::vector<int> team_rows;
+    std::vector<int64_t> busy;
 };
 
 /// Moves a scratch vector into a local for one call and back on exit.  The
@@ -130,12 +145,17 @@ struct Plan {
     std::vector<Tile> tiles;
     /// Team `t` owns tiles [team_begin[t], team_begin[t + 1]).
     std::vector<int> team_begin;
+    /// Empty, or one slot per thread in team-major, rank-minor order: rank
+    /// `r` of team `t` owns tiles [owner_begin[s], owner_begin[s + 1]) with
+    /// `s` = (threads of teams before t) + r.  Slots of a team tile its range.
+    std::vector<int> owner_begin;
     /// Representative sizes of the heaviest expert (for logging).
     int mb = 0;
     int ns = 0;
     int64_t total_cost = 0;
-    /// max over teams of (team cost / team size) divided by the ideal
-    /// per-thread cost; 1.0 means a perfect static split.
+    /// Busiest thread's planned cost over the ideal per-thread cost: the
+    /// costliest owner slot of a per-thread plan, else the max over teams of
+    /// team cost / team size; 1.0 means a perfect static split.
     double est_imbalance = 1.0;
     PlanScratch scratch;
 };
@@ -339,20 +359,321 @@ inline void partition_teams(const std::vector<int64_t> &cost_prefix,
     out.est_imbalance = worst > 0.0 ? worst : 1.0;
 }
 
+/// Busiest thread's cost of `plan`, with tiles indivisible: owner slots are
+/// summed as planned; a team without slots is list-scheduled in tile order
+/// over its threads (`busy` is scratch).
+inline int64_t plan_busiest(const Plan &plan, const int *K, int rb,
+        const int *team_size, int n_teams, std::vector<int64_t> &busy) {
+    const auto cost = [&](int i) {
+        const Tile &tl = plan.tiles[static_cast<size_t>(i)];
+        return tile_cost(tl, K[tl.e], rb);
+    };
+    int64_t worst = 0;
+    if (!plan.owner_begin.empty()) {
+        for (size_t s = 0; s + 1 < plan.owner_begin.size(); ++s) {
+            int64_t c = 0;
+            for (int i = plan.owner_begin[s]; i < plan.owner_begin[s + 1]; ++i)
+                c += cost(i);
+            worst = std::max(worst, c);
+        }
+        return worst;
+    }
+    for (int t = 0; t < n_teams; ++t) {
+        busy.assign(static_cast<size_t>(std::max(team_size[t], 1)), 0);
+        for (int i = plan.team_begin[t]; i < plan.team_begin[t + 1]; ++i)
+            *std::min_element(busy.begin(), busy.end()) += cost(i);
+        worst = std::max(worst, *std::max_element(busy.begin(), busy.end()));
+    }
+    return worst;
+}
+
+/// Busiest thread's cost of `plan` over the ideal per-thread cost
+/// (`plan_busiest`).
+inline double plan_makespan(const Plan &plan, const int *K, int rb,
+        const int *team_size, int n_teams) {
+    if (plan.tiles.empty() || n_teams <= 0) return 1.0;
+    int64_t threads = 0;
+    for (int t = 0; t < n_teams; ++t)
+        threads += std::max(team_size[t], 0);
+    if (threads <= 0 || plan.total_cost <= 0) return 1.0;
+    std::vector<int64_t> busy;
+    return static_cast<double>(
+                   plan_busiest(plan, K, rb, team_size, n_teams, busy))
+            * static_cast<double>(threads)
+            / static_cast<double>(plan.total_cost);
+}
+
+/// Per-thread plan of one dense layer.  Each of the `s_t` threads of team
+/// `t` owns one balanced N-slice of its team's rows, or, where that leaves
+/// the busiest thread more work, `nblk / s_t` whole column blocks of the
+/// rows and one `s_t`-th of the rows of the `nblk % s_t` blocks left over.
+/// Each team takes the most row units its busiest thread can carry under
+/// the smallest cost bound that holds every unit, and the last few units go
+/// where the busiest thread grows least, so every thread of every team
+/// carries close to `M * N / T` work at any thread count (the dense equal
+/// split gives a 4-thread team of a 31-thread call a second whole tile).
+/// A team's rows split into runs of at most `auto_mb(K)` plus a quarter.
+/// Returns false, planning nothing, when the layer does not fit
+/// (`dense_fits`) or no team can take the rows left past whole units
+/// without an MR call under `min_mr`.
+inline bool plan_balanced(int e, int M, int N, int K, const PlannerConfig &cfg,
+        const int *team_size, int n_teams, Plan &out) {
+    const int pack = std::max(cfg.pack_nr, 1);
+    const int nblk = N / pack;
+    if (M <= 0 || nblk <= 0 || n_teams <= 0) return false;
+    int team_max = 1;
+    int threads = 0;
+    for (int t = 0; t < n_teams; ++t) {
+        team_max = std::max(team_max, team_size[t]);
+        threads += std::max(team_size[t], 0);
+    }
+    if (threads <= 0 || !dense_fits(M, N, K, cfg, n_teams, team_max))
+        return false;
+
+    // Row unit: the family's alignment, halved for a short M while it stays
+    // at or above `min_mr` (the split's rounding error is one unit per team).
+    int unit = std::max(cfg.row_align, 1);
+    if (unit % 2 == 0 && unit / 2 >= std::max(cfg.min_mr, 1)
+            && M / unit < 16 * n_teams)
+        unit /= 2;
+    // Runs may exceed `auto_mb(K)` by a quarter: with the cap exact, an even
+    // share a unit past a multiple of it pays one more B pass on some teams.
+    const int cap0 = std::max(unit, (auto_mb(K, cfg) / unit) * unit);
+    const int cap = cap0 + cap0 / 4;
+    const int rb = cfg.tun[kRb];
+
+    Borrowed<TeamCols> cols_buf(out.scratch.team_cols);
+    Borrowed<int> rows_buf(out.scratch.team_rows), runs_buf(out.scratch.rows),
+            pieces_buf(out.scratch.cols);
+    std::vector<TeamCols> &tc = cols_buf.get();
+    std::vector<int> &rows = rows_buf.get();
+    std::vector<int> &runs = runs_buf.get();
+    std::vector<int> &pieces = pieces_buf.get();
+    tc.resize(n_teams);
+    rows.assign(n_teams, 0);
+    for (int t = 0; t < n_teams; ++t) {
+        const int s = std::clamp(team_size[t], 0, nblk);
+        tc[t] = s > 0 ? TeamCols {s, (nblk + s - 1) / s, nblk / s, nblk % s}
+                      : TeamCols {0, 0, 0, 0};
+    }
+    // A team whose thread count does not divide `nblk` lays its blocks out
+    // in one of two ways, whichever leaves its busiest thread less work:
+    // `c`-block slices, or `q` whole blocks per thread plus a `ceil(r / s)`-
+    // row piece of the `rem` blocks left over (a short piece pays its `rb`
+    // for few rows).  Costs are in column blocks x rows, `rb` per tile
+    // row-run.
+    PlannerConfig piece_cfg = cfg;
+    piece_cfg.row_align = unit;
+    const auto piece_rows = [&](int r, int s) {
+        const int n0 = (r + (r + s - 1) / s - 1) / ((r + s - 1) / s);
+        return ((r + n0 - 1) / n0 + unit - 1) / unit * unit;
+    };
+    // Runs `split_rows(r, cap)` cuts r rows into, its tail merge aside: at
+    // most `ceil(r / cap)`, fewer where its aligned block size rounds up.
+    const int align = std::max(cfg.row_align, 1);
+    const auto run_count = [&](int r) {
+        if (r <= cap) return 1;
+        const int n0 = (r + cap - 1) / cap;
+        const int bs = ((r + n0 - 1) / n0 + align - 1) / align * align;
+        return (r + bs - 1) / bs;
+    };
+    const auto slices_cost = [&](int t, int r) -> int64_t {
+        return static_cast<int64_t>(tc[t].c) * (r + rb * run_count(r));
+    };
+    const auto split_cost = [&](int t, int r, int piece) -> int64_t {
+        return static_cast<int64_t>(tc[t].q) * (r + rb * run_count(r))
+                + static_cast<int64_t>(tc[t].rem) * (piece + rb);
+    };
+    // Busiest-thread cost of team t at r rows.
+    const auto load = [&](int t, int r) -> int64_t {
+        if (r <= 0) return 0;
+        const int64_t whole = slices_cost(t, r);
+        return tc[t].rem == 0
+                ? whole
+                : std::min(whole, split_cost(t, r, piece_rows(r, tc[t].s)));
+    };
+    const int units = M / unit;
+    // Most whole units team t takes with its busiest thread at cost <= L,
+    // counting `ceil(r / cap)` runs (at least `run_count(r)`): with k runs,
+    // r <= min(k * cap, L / c - rb * k) as slices of c blocks, or, as whole
+    // blocks and a piece of at most `r / s + unit` rows,
+    // r <= min(k * cap, (L - rb * (q * k + rem) - rem * unit) * s / nblk).
+    const auto units_within = [&](int t, int64_t L) -> int {
+        const int64_t s = tc[t].s;
+        if (s == 0) return 0;
+        const int64_t c = tc[t].c, q = tc[t].q, rem = tc[t].rem;
+        int64_t best = 0;
+        for (int64_t k = 1;; ++k) {
+            const int64_t as_slices = L / c - rb * k;
+            const int64_t as_split = rem == 0
+                    ? as_slices
+                    : (L - rb * (q * k + rem) - rem * unit) * s / nblk;
+            const int64_t r
+                    = std::min<int64_t>(k * cap, std::max(as_slices, as_split));
+            if (r <= (k - 1) * cap) break;
+            best = std::max(best, r / unit);
+            if (r < k * cap || best >= units) break;
+        }
+        return static_cast<int>(std::min<int64_t>(best, units));
+    };
+    const auto units_at = [&](int64_t L) {
+        int64_t s = 0;
+        for (int t = 0; t < n_teams; ++t)
+            s += units_within(t, L);
+        return s;
+    };
+    // Planned on every call, so the rows come from a search on the cost, not
+    // a unit-by-unit fill: the smallest busiest-thread cost that holds every
+    // unit, then each team at the cost just below it; the few units left go
+    // one at a time where the busiest thread grows least.  A run's fixed
+    // `rb` cost would make a proportional split overshoot a small team (a
+    // 1-thread team of a 33-thread call holds all column blocks).
+    // A team carries at most `L * s / nblk` rows at cost L, so a cost below
+    // `units * unit * nblk / threads` cannot hold every unit; the search
+    // starts there and widens until a cost holds them.
+    int64_t cap_cost = 0;
+    const int64_t all_rows = static_cast<int64_t>(units) * unit;
+    for (int t = 0; t < n_teams; ++t)
+        if (tc[t].s > 0)
+            cap_cost = std::max(cap_cost,
+                    static_cast<int64_t>(tc[t].c)
+                            * (all_rows + rb * ((all_rows + cap - 1) / cap)));
+    int64_t lo = std::max<int64_t>(
+            0, static_cast<int64_t>(units) * unit * nblk / threads - 1);
+    int64_t step = std::max<int64_t>(lo / 16, 1);
+    int64_t hi = std::min(cap_cost, lo + step);
+    while (hi < cap_cost && units_at(hi) < units) {
+        lo = hi;
+        step *= 2;
+        hi = std::min(cap_cost, lo + step);
+    }
+    while (lo + 1 < hi) {
+        const int64_t mid = lo + (hi - lo) / 2;
+        (units_at(mid) >= units ? hi : lo) = mid;
+    }
+    int given = 0;
+    for (int t = 0; t < n_teams; ++t) {
+        rows[t] = units_within(t, lo) * unit;
+        given += rows[t] / unit;
+    }
+    if (given < units) {
+        // Each team's cost with one more unit; only the taker's changes.
+        Borrowed<int64_t> next_buf(out.scratch.cost_prefix);
+        std::vector<int64_t> &next = next_buf.get();
+        next.resize(n_teams);
+        for (int t = 0; t < n_teams; ++t)
+            next[t] = tc[t].s > 0 ? load(t, rows[t] + unit) : INT64_MAX;
+        for (; given < units; ++given) {
+            const int best = static_cast<int>(
+                    std::min_element(next.begin(), next.end()) - next.begin());
+            rows[best] += unit;
+            next[best] = load(best, rows[best] + unit);
+        }
+    }
+    // Every run of a team's rows keeps its MR calls at `min_mr` or spans the
+    // expert's M (`split_rows` cannot split a run its aligned block covers).
+    const auto rows_ok = [&](int r) {
+        if (r == M) return true;
+        if (r <= cap) return min_call_rows(r, cfg.max_mr) >= cfg.min_mr;
+        split_rows(r, cap, cfg, runs);
+        for (size_t b = 0; b + 1 < runs.size(); ++b) {
+            const int n = runs[b + 1] - runs[b];
+            if (n != M && min_call_rows(n, cfg.max_mr) < cfg.min_mr)
+                return false;
+        }
+        return true;
+    };
+    if (const int left = M - units * unit; left > 0) {
+        int best = -1;
+        int64_t best_load = 0;
+        for (int t = 0; t < n_teams; ++t) {
+            if (tc[t].s == 0 || (units > 0 && rows[t] <= 0)
+                    || !rows_ok(rows[t] + left))
+                continue;
+            const int64_t l = load(t, rows[t] + left);
+            if (best < 0 || l < best_load) {
+                best = t;
+                best_load = l;
+            }
+        }
+        if (best < 0) return false;
+        rows[best] += left;
+    }
+    for (int t = 0; t < n_teams; ++t)
+        if (rows[t] > 0 && !rows_ok(rows[t])) return false;
+
+    out.tiles.clear();
+    out.owner_begin.assign(static_cast<size_t>(threads) + 1, 0);
+    out.mb = 0;
+    out.ns = 0;
+    int m0 = 0;
+    int slot = 0;
+    int64_t total = 0;
+    int64_t worst = 0;
+    for (int t = 0; t < n_teams; ++t) {
+        out.team_begin[t] = static_cast<int>(out.tiles.size());
+        const auto [s, c, q, rem] = tc[t];
+        const int R = rows[t];
+        split_rows(R, cap, cfg, runs);
+        pieces.clear();
+        if (rem > 0 && R > 0) {
+            split_rows(R, (R + s - 1) / s, piece_cfg, pieces);
+            int piece = 0;
+            for (size_t i = 0; i + 1 < pieces.size(); ++i)
+                piece = std::max(piece, pieces[i + 1] - pieces[i]);
+            // Busiest thread: (q + 1) blocks of every run as slices, against
+            // q blocks plus `rem` blocks of its piece.
+            const int64_t nruns = static_cast<int64_t>(runs.size()) - 1;
+            if (static_cast<int64_t>(rem) * (piece + rb) >= R + rb * nruns)
+                pieces.clear();
+        }
+        // With pieces, thread r owns blocks [r * q, (r + 1) * q) and piece r
+        // of blocks [s * q, nblk); otherwise balanced slices of q or q + 1.
+        int n0 = 0;
+        for (int r = 0; r < team_size[t]; ++r, ++slot) {
+            out.owner_begin[slot] = static_cast<int>(out.tiles.size());
+            if (r >= s || R <= 0) continue;
+            int64_t mine = 0;
+            const auto emit = [&](int m, int nrows, int c0, int ncols) {
+                const Tile tl {e, m0 + m, nrows, c0, ncols};
+                out.tiles.push_back(tl);
+                mine += tile_cost(tl, K, rb);
+                out.mb = std::max(out.mb, nrows);
+                out.ns = std::max(out.ns, ncols);
+            };
+            const int ncols
+                    = (pieces.empty() ? q + (r < rem ? 1 : 0) : q) * pack;
+            for (size_t b = 0; b + 1 < runs.size(); ++b)
+                emit(runs[b], runs[b + 1] - runs[b], n0, ncols);
+            n0 += ncols;
+            if (static_cast<size_t>(r) + 1 < pieces.size())
+                emit(pieces[r], pieces[r + 1] - pieces[r], s * q * pack,
+                        rem * pack);
+            total += mine;
+            worst = std::max(worst, mine);
+        }
+        m0 += R;
+    }
+    out.owner_begin[slot] = static_cast<int>(out.tiles.size());
+    out.team_begin[n_teams] = static_cast<int>(out.tiles.size());
+    out.total_cost = total;
+    out.est_imbalance = total > 0
+            ? static_cast<double>(worst) * threads / static_cast<double>(total)
+            : 1.0;
+    return true;
+}
+
 // ── Planner ──────────────────────────────────────────────────────────
 
-/// Build the tile list and the per-team ranges.
-///
-/// `team_size[t]` is the thread count of team `t`; teams receive cost in
-/// proportion to their size.  Every expert must have `N % pack_nr == 0`
-/// (the CK contract `prepare_for_call` already enforced).  Experts with
-/// `M <= 0` produce no tiles.  `out` is reused across calls without
-/// shrinking its buffers.
-inline void plan_tiles(const int *M, const int *N, const int *K, int num_ops,
-        const PlannerConfig &cfg, const int *team_size, int n_teams,
-        Plan &out) {
+/// The tile list and per-team ranges a team's threads drain together: the
+/// dense split of one dense layer (`single_dense`), else the shrink loop's
+/// tiles.  See `plan_tiles`.
+inline void plan_team_tiles(const int *M, const int *N, const int *K,
+        int num_ops, const PlannerConfig &cfg, const int *team_size,
+        int n_teams, Plan &out) {
     out.tiles.clear();
     out.team_begin.assign(static_cast<size_t>(std::max(n_teams, 1)) + 1, 0);
+    out.owner_begin.clear();
     out.total_cost = 0;
     out.est_imbalance = 1.0;
     out.mb = 0;
@@ -468,6 +789,40 @@ inline void plan_tiles(const int *M, const int *N, const int *K, int num_ops,
         }
     }
     partition_teams(cost_prefix, team_size, n_teams, out);
+}
+
+/// Build the tile list and the per-team ranges.
+///
+/// `team_size[t]` is the thread count of team `t`; teams receive cost in
+/// proportion to their size.  Every expert must have `N % pack_nr == 0`
+/// (the CK contract `prepare_for_call` already enforced).  Experts with
+/// `M <= 0` produce no tiles.  `out` is reused across calls without
+/// shrinking its buffers.  Under `cfg.balanced` one active expert without a
+/// forced block size gets the per-thread plan (`plan_balanced`) where its
+/// busiest thread carries no more than the team plan's: a team draining its
+/// tiles can interleave uneven slice widths that fixed per-thread slices
+/// cannot.
+inline void plan_tiles(const int *M, const int *N, const int *K, int num_ops,
+        const PlannerConfig &cfg, const int *team_size, int n_teams,
+        Plan &out) {
+    plan_team_tiles(M, N, K, num_ops, cfg, team_size, n_teams, out);
+    if (!cfg.balanced || cfg.tun[kMb] > 0 || cfg.tun[kNs] > 0) return;
+    int lead = -1;
+    for (int e = 0; e < num_ops; ++e) {
+        if (M[e] <= 0 || N[e] <= 0) continue;
+        if (lead >= 0) return;
+        lead = e;
+    }
+    if (lead < 0 || out.tiles.empty()) return;
+    const int rb = cfg.tun[kRb];
+    Borrowed<int64_t> busy_buf(out.scratch.busy);
+    std::vector<int64_t> &busy = busy_buf.get();
+    const int64_t shared = plan_busiest(out, K, rb, team_size, n_teams, busy);
+    if (!plan_balanced(
+                lead, M[lead], N[lead], K[lead], cfg, team_size, n_teams, out))
+        return;
+    if (plan_busiest(out, K, rb, team_size, n_teams, busy) > shared)
+        plan_team_tiles(M, N, K, num_ops, cfg, team_size, n_teams, out);
 }
 
 } // namespace prompt_tile

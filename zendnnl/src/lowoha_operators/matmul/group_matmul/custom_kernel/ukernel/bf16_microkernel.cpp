@@ -80,12 +80,13 @@ namespace {
 // `gelu_and_mul_store_pair`) share bit-for-bit identical math with
 // the standard reference's row helpers.  See the header doc-block
 // for the cross-path numerical contract.
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::act_mode;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::act_mode_t;
 using zendnnl::lowoha::matmul::group_matmul_act_avx512::bf16x16_to_f32;
 using zendnnl::lowoha::matmul::group_matmul_act_avx512::f32_to_bf16x16;
-using zendnnl::lowoha::matmul::group_matmul_act_avx512::gelu_avx512;
-using zendnnl::lowoha::matmul::group_matmul_act_avx512::sigmoid_avx512;
-using zendnnl::lowoha::matmul::group_matmul_act_avx512::silu_avx512;
-using zendnnl::lowoha::matmul::group_matmul_act_avx512::swiglu_oai_avx512;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::gelu_act_avx512;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::silu_act_avx512;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::swiglu_oai_act_avx512;
 
 // Deinterleave indices for vpermt2ps over two source zmms (= 32 FP32
 // lanes total).  Even-indexed lanes (0, 2, ..., 30) are gates; odd-
@@ -105,7 +106,7 @@ alignas(64) constexpr int32_t kUpLaneIdx[16]
 //
 // ── Structure ────────────────────────────────────────────────────────
 //   1. Deinterleave gate/up out of the accumulator pair (`vpermt2ps`).
-//   2. Call the shared `swiglu_oai_avx512(gate, up)` from
+//   2. Call the shared `swiglu_oai_act_avx512(gate, up, mode)` from
 //      `group_matmul_act_avx512.hpp` — IDENTICAL math to the standard
 //      reference's row helpers in `group_matmul_moe_act.cpp` (same
 //      5-term Cephes exp(-x), same rcp14 + 1-step Newton-Raphson
@@ -128,15 +129,15 @@ alignas(64) constexpr int32_t kUpLaneIdx[16]
 // sub-ULP differences in the "better" direction; the gated-act gtest
 // tolerance is sized to accept both.
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
-static inline void swiglu_oai_store_pair(
-        __m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row) {
+ZENDNNL_ALWAYS_INLINE static inline void swiglu_oai_store_pair(
+        __m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row, act_mode_t mode) {
     const __m512i gate_idx = _mm512_load_si512(kGateLaneIdx);
     const __m512i up_idx = _mm512_load_si512(kUpLaneIdx);
 
     __m512 gate = _mm512_permutex2var_ps(acc_lo, gate_idx, acc_hi);
     __m512 up = _mm512_permutex2var_ps(acc_lo, up_idx, acc_hi);
 
-    __m512 r = swiglu_oai_avx512(gate, up);
+    __m512 r = swiglu_oai_act_avx512(gate, up, mode);
 
     __m256i out = f32_to_bf16x16(r);
     _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst_row), out);
@@ -147,69 +148,34 @@ static inline void swiglu_oai_store_pair(
 //
 // ── Structure ────────────────────────────────────────────────────────
 //   1. Deinterleave gate/up out of the accumulator pair (`vpermt2ps`).
-//   2. Call the shared `gelu_avx512(gate)` from
-//      `group_matmul_act_avx512.hpp` — same polynomial form used by
-//      the standard reference's `gelu_and_mul_row_avx512_*` helpers
-//      in `group_matmul_moe_act.cpp`, so both paths produce bit-
+//   2. Call the shared `gelu_act_avx512(gate, mode)` from
+//      `group_matmul_act_avx512.hpp` — the same form the standard
+//      reference's `gelu_and_mul_row_avx512_*` helpers in
+//      `group_matmul_moe_act.cpp` select, so both paths produce bit-
 //      identical activation output.
 //   3. Multiply by `up` and store as BF16 via the shared
 //      `f32_to_bf16x16` integer-RNE sequence.
 //
 // ── Numerical contract ───────────────────────────────────────────────
-// Mathematically equivalent (within BF16 tolerance) to the textbook
-// `gelu_and_mul` reference:
-//
-//   reference:  out = gelu_erf(gate) * up
-//               gelu_erf(x) = x * 0.5 * (1 + erf(x / sqrt(2)))
-//
-// The shared `gelu_avx512` uses the well-known `gelu_tanh`
-// polynomial approximation:
-//
-//               y = sqrt(2/pi) * (x + 0.044715 * x^3)
-//               gelu_tanh(x) = 0.5 * x * (1 + tanh(y))
-//
-// rewritten via `tanh(y) = 2·sigmoid(2y) − 1` so the form is one
-// `sigmoid_avx512` call:
-//
-//               gelu_tanh(x) = x * sigmoid(2y)
-//               y2 = c1*x + c2*x^3 ; c1 ≈ 1.5957691, c2 ≈ 0.0713548
-//               g'  = x * sigmoid_avx512(y2)
-//               out = g' * up
-//
-// Numerical fidelity:
-//   * |gelu_tanh − gelu_erf| ≤ 1.5e-3 across all real x (well-known).
-//   * BF16 ulp ≈ 7.8e-3 relative; so the gelu_tanh ↔ gelu_erf delta
-//     is about 5× tighter than BF16 can represent.
-//   * `mt::tol_act(/*is_bf16=*/true)` band is {rel=0.15, abs=0.02},
-//     so the kernel passes the existing reference comparison with
-//     >10× margin.
-//
-// Why gelu_tanh (polynomial) instead of gelu_erf (libc):
-//   * The reference's "AVX-512" gelu helper
-//     (`gelu_and_mul_row_avx512_*` in group_matmul_moe_act.cpp) is
-//     itself a thin wrapper around per-lane `std::erf` — it stores
-//     the FP32 vector to stack, calls libc 16 times, and reloads.
-//     That's the slow path the fused kernel is replacing.
-//   * Calling `std::erf` from inside the matmul ukernel would defeat
-//     the entire fusion (function-call overhead per output row).
-//   * gelu_tanh is the form used by GPT-2/BERT/PaLM; gelu_erf and
-//     gelu_tanh are interchangeable for any production model
-//     decoding into BF16 dst.
-//
-// Differences from `silu_and_mul_store_pair`:
-//   * Three FMAs to compute `y2 = c1·x + c2·x³` (vs zero in silu).
-//   * Otherwise identical: same `sigmoid_avx512`, same `gate * up`
-//     finish, same `f32_to_bf16x16` store path.
+//   out = gelu(gate) * up, with gelu
+//   * by default the erf form 0.5·x·(1 + erf(x/√2)) (A&S 7.1.26 erf),
+//     PyTorch's default `gelu`;
+//   * under ZENDNNL_GRP_MATMUL_GELU_TANH=1 the tanh form
+//     x·sigmoid(2y), y = √(2/π)·(x + 0.044715·x³), PyTorch's
+//     `gelu(approximate="tanh")`; it differs from the erf form by at
+//     most 4.8e-4;
+//   * under ZENDNNL_GRP_MATMUL_FAST_ACT=1 the tanh form on the cheaper
+//     exp and reciprocal.
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
-static inline void gelu_and_mul_store_pair(
-        __m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row) {
+ZENDNNL_ALWAYS_INLINE static inline void gelu_and_mul_store_pair(
+        __m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row, act_mode_t mode) {
     const __m512i gate_idx = _mm512_load_si512(kGateLaneIdx);
     const __m512i up_idx = _mm512_load_si512(kUpLaneIdx);
 
     __m512 gate = _mm512_permutex2var_ps(acc_lo, gate_idx, acc_hi);
     __m512 up = _mm512_permutex2var_ps(acc_lo, up_idx, acc_hi);
 
-    __m512 r = _mm512_mul_ps(gelu_avx512(gate), up);
+    __m512 r = _mm512_mul_ps(gelu_act_avx512(gate, mode), up);
 
     __m256i out = f32_to_bf16x16(r);
     _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst_row), out);
@@ -220,7 +186,7 @@ static inline void gelu_and_mul_store_pair(
 //
 // ── Structure ────────────────────────────────────────────────────────
 //   1. Deinterleave gate/up out of the accumulator pair (`vpermt2ps`).
-//   2. Call the shared `silu_avx512(gate)` from
+//   2. Call the shared `silu_act_avx512(gate, mode)` from
 //      `group_matmul_act_avx512.hpp` — same math as the standard
 //      reference's `silu_and_mul_row_avx512_*` helpers in
 //      `group_matmul_moe_act.cpp`, so both paths produce bit-
@@ -238,15 +204,15 @@ static inline void gelu_and_mul_store_pair(
 //     silu uses α=1, i.e. no multiplier).
 //   * Final multiply is `silu(gate) * up`, not `(1+up) * (gate * sig)`.
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
-static inline void silu_and_mul_store_pair(
-        __m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row) {
+ZENDNNL_ALWAYS_INLINE static inline void silu_and_mul_store_pair(
+        __m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row, act_mode_t mode) {
     const __m512i gate_idx = _mm512_load_si512(kGateLaneIdx);
     const __m512i up_idx = _mm512_load_si512(kUpLaneIdx);
 
     __m512 gate = _mm512_permutex2var_ps(acc_lo, gate_idx, acc_hi);
     __m512 up = _mm512_permutex2var_ps(acc_lo, up_idx, acc_hi);
 
-    __m512 r = _mm512_mul_ps(silu_avx512(gate), up);
+    __m512 r = _mm512_mul_ps(silu_act_avx512(gate, mode), up);
 
     __m256i out = f32_to_bf16x16(r);
     _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst_row), out);
@@ -639,6 +605,7 @@ static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
     if constexpr (Act == ActivationKind::swiglu_oai_mul
             || Act == ActivationKind::silu_and_mul
             || Act == ActivationKind::gelu_and_mul) {
+        const act_mode_t mode = act_mode();
         constexpr int n_pairs = NV / 2; // 1 for NV=2, 2 for NV=4
 #pragma GCC unroll 16
         for (int m = 0; m < MR; ++m) {
@@ -648,13 +615,13 @@ static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
                         + static_cast<size_t>(m) * ldc_tight + p * 16;
                 if constexpr (Act == ActivationKind::swiglu_oai_mul) {
                     swiglu_oai_store_pair(
-                            acc[0][m][2 * p], acc[0][m][2 * p + 1], dst);
+                            acc[0][m][2 * p], acc[0][m][2 * p + 1], dst, mode);
                 } else if constexpr (Act == ActivationKind::silu_and_mul) {
                     silu_and_mul_store_pair(
-                            acc[0][m][2 * p], acc[0][m][2 * p + 1], dst);
+                            acc[0][m][2 * p], acc[0][m][2 * p + 1], dst, mode);
                 } else { // ActivationKind::gelu_and_mul
                     gelu_and_mul_store_pair(
-                            acc[0][m][2 * p], acc[0][m][2 * p + 1], dst);
+                            acc[0][m][2 * p], acc[0][m][2 * p + 1], dst, mode);
                 }
             }
         }

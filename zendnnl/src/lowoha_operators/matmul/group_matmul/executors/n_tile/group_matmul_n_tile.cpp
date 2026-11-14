@@ -851,8 +851,9 @@ inline void GroupNTileContext::execute_tile(const GroupNTilePlan &plan, int e,
     const bool native_s4_wei = w4a8_native && is_w4a8_config(params[e]);
     const auto split = n_split_for_tile(N[e], n_thr, local_tid, plan.nr_align,
             /*even_boundaries=*/native_s4_wei,
-            /*balance_remainder=*/
-            se_balance_remainder(single_expert, use_custom, native_s4_wei));
+            /*balance_remainder=*/plan.se_balanced
+                    || se_balance_remainder(
+                            single_expert, use_custom, native_s4_wei));
     const int col_start = split.first;
     const int col_end = split.second;
     const int n_tile = col_end - col_start;
@@ -1716,6 +1717,8 @@ inline bool force_decode_dynamic_plan(
         const GroupNTileTopology &topo, GroupNTilePlan &plan) {
     if (topo.max_N <= 0) return false;
     plan.strategy = GroupNTileStrategy::CcdExpertWaves;
+    // Its tile is sized per CCD below, not by the balanced decode split.
+    plan.se_balanced = false;
     // Size the decode tile so a NARROW-N expert fills every lane of the CCD
     // it is assigned to instead of leaving the surplus idle; a wide-N expert
     // that already fills its CCD keeps the legacy fixed tile untouched.
@@ -2876,8 +2879,32 @@ inline GroupNTilePlan plan_group_n_tile(const GroupNTileTopology &topo,
     // `nr_aligned_min_n_tile` keeps the adaptive tile at or above the
     // column alignment `aligned_n_split` will cut on — see its doc-block
     // for why a narrower tile would breach the CK pack contract.
-    const int ab_min_tile = nr_aligned_min_n_tile(
+    // A balanced single-expert decode cuts N in whole pack blocks over every
+    // thread; an exact-divisor tile would idle threads that do not divide N.
+    // Taken only when it gives the busiest thread fewer blocks: at equal
+    // blocks the legacy tile wakes fewer threads (a small N at T = 15).
+    // Each thread keeps at least `..._N_TILE_FLOOR` columns, in whole blocks.
+    const int legacy_min_tile = nr_aligned_min_n_tile(
             se_adaptive_min_n_tile(topo, phase_cap), nr_align);
+    int balanced_min_tile = nr_align;
+    if (topo.se_balanced_decode && use_custom_at_plan_time && nr_align > 0
+            && topo.max_N > 0 && topo.max_N % nr_align == 0) {
+        const int nblk = topo.max_N / nr_align;
+        // In 64 bits: the floor knob takes any positive multiple of 32.  A
+        // floor past N keeps one thread, which never beats the legacy tile.
+        const int floor_blk = static_cast<int>(std::clamp<int64_t>(
+                (static_cast<int64_t>(get_grp_n_tile_floor()) + nr_align - 1)
+                        / nr_align,
+                1, nblk));
+        const int legacy_thr = std::clamp(
+                topo.max_N / std::max(legacy_min_tile, 1), 1, topo.num_threads);
+        const int legacy_busiest = (nblk + legacy_thr - 1) / legacy_thr;
+        const int bal_thr = std::clamp(nblk / floor_blk, 1, topo.num_threads);
+        plan.se_balanced = (nblk + bal_thr - 1) / bal_thr < legacy_busiest;
+        balanced_min_tile = floor_blk * nr_align;
+    }
+    const int ab_min_tile
+            = plan.se_balanced ? balanced_min_tile : legacy_min_tile;
 
     // ── Force-StaticExpertTeams path (knob value 1) ──────────────────────────────
     // When the user explicitly forces StaticExpertTeams, attempt it BEFORE any
@@ -5437,9 +5464,11 @@ void n_tile_execute(const std::vector<char> &layout,
     // dtype-aware tuning surface correct once they diverge.
     const bool is_int8_call
             = use_custom && custom_kernel::is_int8_variant(kctx.variant);
-    const GroupNTileTopology topo
-            = summarise_topology(M, N, K, num_threads, wei_elem,
-                    /*is_int8=*/is_int8_call);
+    GroupNTileTopology topo = summarise_topology(M, N, K, num_threads, wei_elem,
+            /*is_int8=*/is_int8_call);
+    topo.se_balanced_decode = se_balanced_decode(topo.num_ops, topo.max_M,
+            use_custom, kctx.variant,
+            !params.empty() && is_static_u8s8_quant_config(params[0]));
     // Pass `use_custom` so the planner can short-circuit to the
     // strict-stable plan for the non-custom path.
     // The custom path keeps the legacy cost-model picks because its
@@ -5740,6 +5769,8 @@ void n_tile_execute(const std::vector<char> &layout,
         snap.n_thr_fixed = plan.n_thr_fixed;
         snap.num_ops_active = num_ops;
         snap.expert_thread_counts = plan.expert_thread_counts;
+        snap.min_n_tile = plan.min_n_tile;
+        snap.se_balanced = plan.se_balanced;
         snap.valid = true; // published last (single-thread invariant)
     }
 

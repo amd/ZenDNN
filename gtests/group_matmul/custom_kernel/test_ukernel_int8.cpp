@@ -49,10 +49,13 @@
 #include <cstring>
 #include <limits>
 #include <random>
+#include <string>
 #include <vector>
 #include <type_traits>
 
 #include "ck_test_helpers.hpp"
+#include "gtest_utils.hpp"
+#include "lowoha_operators/matmul/group_matmul/custom_kernel/dispatch.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/ukernel/int8_microkernel.hpp"
 
@@ -559,6 +562,234 @@ TEST(CkInt8UkernelBf16Scale, MatchesScalarReference) {
         }
     }
     EXPECT_EQ(n_bad, 0) << "Total bf16-scale mismatches: " << n_bad;
+}
+
+// `src_u8` kernels read source bytes XOR-ed with 0x80 once up front
+// (`copy_s8_rows_as_u8`) where the s8-source kernels XOR every broadcast;
+// on the same data the two must agree bit for bit.
+TEST(CkInt8UkernelU8Src, BitExactWithS8Source) {
+    INT8_CK_SKIP_IF_NO_VNNI();
+    constexpr int NV = 2, NR = NV * 16, K = 196, lda = K + 12;
+    const int max_mr = ck::max_mr_for_nv_int8(NV, ck::IntCompute::kS8_Sym);
+
+    std::mt19937 rng(0x0A8Fu);
+    std::uniform_int_distribution<int> bd(-128, 127);
+    std::uniform_real_distribution<float> sc(0.001f, 0.01f);
+
+    std::vector<int8_t> wei(static_cast<size_t>(K) * NR);
+    for (auto &w : wei)
+        w = static_cast<int8_t>(bd(rng));
+    const int8_t *packed_raw = nullptr;
+    ASSERT_EQ(ck::get_or_pack_weight_int8(wei.data(), K, NR, /*ldb=*/NR, NR,
+                      /*transB=*/false,
+                      /*interleave_split_halves=*/false, &packed_raw, nullptr,
+                      /*disable_cache=*/true),
+            status_t::success);
+    ASSERT_NE(packed_raw, nullptr);
+    struct PackedGuard {
+        const int8_t *p;
+        ~PackedGuard() { ck::free_owned_packed_weight_int8(p); }
+    } pg {packed_raw};
+
+    std::vector<int8_t> src_s8(static_cast<size_t>(max_mr) * lda);
+    for (auto &b : src_s8)
+        b = static_cast<int8_t>(bd(rng));
+    std::vector<uint8_t> src_u8(src_s8.size());
+    ck::copy_s8_rows_as_u8(src_s8.data(), lda, src_u8.data(), lda, max_mr, lda);
+    for (size_t i = 0; i < src_s8.size(); ++i)
+        ASSERT_EQ(src_u8[i], static_cast<uint8_t>(src_s8[i]) ^ 0x80u) << i;
+    const auto *s8_bytes = reinterpret_cast<const uint8_t *>(src_s8.data());
+
+    std::vector<float> src_scale(max_mr), wei_scale(NR), bias(NR);
+    for (auto &s : src_scale)
+        s = sc(rng);
+    for (auto &s : wei_scale)
+        s = sc(rng);
+    for (int v = 0; v < NR; ++v)
+        bias[v] = 0.02f * v;
+
+    const ck::ActivationKind acts[] = {ck::ActivationKind::none,
+            ck::ActivationKind::swiglu_oai_mul,
+            ck::ActivationKind::silu_and_mul, ck::ActivationKind::gelu_and_mul};
+    for (int MR = 1; MR <= max_mr; ++MR) {
+        for (const auto act : acts) {
+            for (const auto dt :
+                    {ck::OutputType::kBf16, ck::OutputType::kF32}) {
+                const bool gated = act != ck::ActivationKind::none;
+                if (gated && dt == ck::OutputType::kF32) continue;
+                const auto fn_s8 = ck::select_int8_ukernel(
+                        MR, NV, ck::IntCompute::kS8_Sym, act, dt);
+                const auto fn_u8 = ck::select_int8_ukernel(MR, NV,
+                        ck::IntCompute::kS8_Sym, act, dt, /*src_u8=*/true);
+                ASSERT_NE(fn_s8, nullptr) << "MR=" << MR;
+                ASSERT_NE(fn_u8, nullptr) << "MR=" << MR;
+                const int cols = gated ? NR / 2 : NR;
+                const size_t elem = (dt == ck::OutputType::kF32) ? 4 : 2;
+                std::vector<unsigned char> out_s8(
+                        static_cast<size_t>(MR) * cols * elem, 0);
+                std::vector<unsigned char> out_u8(out_s8.size(), 0);
+                const auto run = [&](ck::int8_ukernel_fn_t fn, const uint8_t *A,
+                                         void *out) {
+                    fn(A, lda, packed_raw, src_scale.data(), nullptr,
+                            wei_scale.data(), ck::ScaleKind::kF32,
+                            ck::Int8EpilogueConfig {}, bias.data(),
+                            ck::BiasKind::fp32, gated ? nullptr : out,
+                            gated ? 0 : cols, gated ? out : nullptr,
+                            gated ? cols : 0, K);
+                };
+                run(fn_s8, s8_bytes, out_s8.data());
+                run(fn_u8, src_u8.data(), out_u8.data());
+                EXPECT_EQ(out_s8, out_u8)
+                        << "MR=" << MR << " act=" << static_cast<int>(act)
+                        << " dt=" << static_cast<int>(dt);
+            }
+        }
+        const auto acc_s8 = ck::select_int8_accum_ukernel(MR);
+        const auto acc_u8 = ck::select_int8_accum_ukernel(MR, /*src_u8=*/true);
+        ASSERT_NE(acc_s8, nullptr) << "MR=" << MR;
+        ASSERT_NE(acc_u8, nullptr) << "MR=" << MR;
+        std::vector<int32_t> c_s8(static_cast<size_t>(MR) * NR, 7);
+        std::vector<int32_t> c_u8(c_s8);
+        acc_s8(s8_bytes, lda, packed_raw, K, c_s8.data(), NR, /*add=*/true);
+        acc_u8(src_u8.data(), lda, packed_raw, K, c_u8.data(), NR,
+                /*add=*/true);
+        EXPECT_EQ(c_s8, c_u8) << "accum MR=" << MR;
+    }
+}
+
+// A single-expert DQ-INT8 prompt on the prompt tile executor gives the same
+// bits whether the team hands the NR32 kernels u8 source rows or s8 ones.
+// The shape clears the executor's per-thread work floor for the u8 copy.
+TEST(CkInt8UkernelU8Src, PromptTileMatchesS8Source) {
+    INT8_CK_SKIP_IF_NO_VNNI();
+    namespace mm = zendnnl::lowoha::matmul;
+    reset_grp_matmul_caches();
+    constexpr int M = 200, N = 512, K = 384, T = 2;
+    std::mt19937 rng(0x5EEDu);
+    std::uniform_real_distribution<float> fd(-2.0f, 2.0f);
+    std::uniform_int_distribution<int> wd(-127, 127);
+    std::vector<bfloat16_t> src(static_cast<size_t>(M) * K);
+    for (auto &v : src)
+        v = bfloat16_t(fd(rng));
+    std::vector<int8_t> wei(static_cast<size_t>(N) * K);
+    for (auto &w : wei)
+        w = static_cast<int8_t>(wd(rng));
+    std::vector<float> wei_scale(N);
+    for (auto &s : wei_scale)
+        s = 0.001f + 0.005f * std::fabs(fd(rng));
+
+    mt::SingleExpertCkPolicy on(1, 1, 1);
+    const auto run = [&](int u8_src) {
+        const int prev = mm::test_api::s_ck_u8_src_override.exchange(u8_src);
+        std::vector<float> src_scale(M, 0.0f);
+        std::vector<bfloat16_t> dst(
+                static_cast<size_t>(M) * N, bfloat16_t(0.0f));
+        mm::matmul_params p;
+        p.dtypes.src = data_type_t::bf16;
+        p.dtypes.wei = data_type_t::s8;
+        p.dtypes.dst = data_type_t::bf16;
+        p.dtypes.compute = data_type_t::s8;
+        p.dynamic_quant = true;
+        p.num_threads = T;
+        p.quant_params.src_scale.buff = src_scale.data();
+        p.quant_params.src_scale.dt = data_type_t::f32;
+        p.quant_params.src_scale.dims = {M, 1};
+        p.quant_params.wei_scale.buff = wei_scale.data();
+        p.quant_params.wei_scale.dt = data_type_t::f32;
+        p.quant_params.wei_scale.dims = {1, N};
+        mt::ExecutionPathCaptureGuard mode;
+        EXPECT_EQ(mm::group_matmul_direct({'r'}, {false}, {true}, {M}, {N}, {K},
+                          {1.0f}, {src.data()}, {K}, {wei.data()}, {K},
+                          {nullptr}, {0.0f}, {dst.data()}, {N}, {true}, {p}),
+                status_t::success);
+        const char *path
+                = mm::test_api::s_last_group_matmul_direct_execution_path.load(
+                        std::memory_order_relaxed);
+        EXPECT_NE(path, nullptr);
+        if (path != nullptr) {
+            EXPECT_NE(std::string(path).find("ptile"), std::string::npos)
+                    << path;
+        }
+        mm::test_api::s_ck_u8_src_override.store(prev);
+        return dst;
+    };
+    const std::vector<bfloat16_t> s8 = run(0);
+    const std::vector<bfloat16_t> u8 = run(1);
+    EXPECT_EQ(std::memcmp(s8.data(), u8.data(), s8.size() * sizeof(s8[0])), 0);
+    reset_grp_matmul_caches();
+}
+
+// A single-expert W4A8 prompt likewise: with u8 source rows its NR32 tiles
+// sum unpacked weight groups on the DQ-INT8 accumulator, with the same bits
+// as the in-register S4 kernels the s8 run takes.
+TEST(CkInt8UkernelU8Src, PromptTileW4a8MatchesS8Source) {
+    INT8_CK_SKIP_IF_NO_VNNI();
+    namespace mm = zendnnl::lowoha::matmul;
+    reset_grp_matmul_caches();
+    constexpr int M = 200, N = 512, K = 512, G = K / 128, T = 2;
+    std::mt19937 rng(0x5EEE);
+    std::uniform_real_distribution<float> fd(-2.0f, 2.0f);
+    std::uniform_int_distribution<int> bd(0, 255);
+    std::vector<bfloat16_t> src(static_cast<size_t>(M) * K);
+    for (auto &v : src)
+        v = bfloat16_t(fd(rng));
+    std::vector<uint8_t> wei(static_cast<size_t>(N) * K / 2);
+    for (auto &w : wei)
+        w = static_cast<uint8_t>(bd(rng));
+    std::vector<float> wei_scale(static_cast<size_t>(G) * N);
+    for (auto &s : wei_scale)
+        s = 0.001f + 0.005f * std::fabs(fd(rng));
+
+    mt::SingleExpertCkPolicy on(1, 1, 1);
+    const auto run = [&](int u8_src) {
+        const int prev = mm::test_api::s_ck_u8_src_override.exchange(u8_src);
+        std::vector<float> src_scale(M, 0.0f);
+        std::vector<bfloat16_t> dst(
+                static_cast<size_t>(M) * N, bfloat16_t(0.0f));
+        mm::matmul_params p;
+        p.dtypes.src = data_type_t::bf16;
+        p.dtypes.wei = data_type_t::s4;
+        p.dtypes.dst = data_type_t::bf16;
+        p.dtypes.compute = data_type_t::s8;
+        p.dynamic_quant = true;
+        p.num_threads = T;
+        p.quant_params.src_scale.buff = src_scale.data();
+        p.quant_params.src_scale.dt = data_type_t::f32;
+        p.quant_params.src_scale.dims = {M, 1};
+        p.quant_params.wei_scale.buff = wei_scale.data();
+        p.quant_params.wei_scale.dt = data_type_t::f32;
+        p.quant_params.wei_scale.dims = {G, N};
+        mt::ExecutionPathCaptureGuard mode;
+        EXPECT_EQ(mm::group_matmul_direct({'r'}, {false}, {true}, {M}, {N}, {K},
+                          {1.0f}, {src.data()}, {K}, {wei.data()}, {K},
+                          {nullptr}, {0.0f}, {dst.data()}, {N}, {true}, {p}),
+                status_t::success);
+        const char *path
+                = mm::test_api::s_last_group_matmul_direct_execution_path.load(
+                        std::memory_order_relaxed);
+        EXPECT_NE(path, nullptr);
+        if (path != nullptr) {
+            EXPECT_NE(std::string(path).find("ptile"), std::string::npos)
+                    << path;
+        }
+        mm::test_api::s_ck_u8_src_override.store(prev);
+        return dst;
+    };
+    const std::vector<bfloat16_t> s8 = run(0);
+    const std::vector<bfloat16_t> u8 = run(1);
+    EXPECT_EQ(std::memcmp(s8.data(), u8.data(), s8.size() * sizeof(s8[0])), 0);
+    reset_grp_matmul_caches();
+}
+
+TEST(CkInt8UkernelU8Src, NullOutsideNv2Sym) {
+    EXPECT_EQ(ck::select_int8_ukernel(4, 4, ck::IntCompute::kS8_Sym,
+                      ck::ActivationKind::none, ck::OutputType::kBf16,
+                      /*src_u8=*/true),
+            nullptr);
+    EXPECT_EQ(ck::select_int8_ukernel(4, 2, ck::IntCompute::kU8_Asym,
+                      ck::ActivationKind::none, ck::OutputType::kBf16,
+                      /*src_u8=*/true),
+            nullptr);
 }
 
 INSTANTIATE_TEST_SUITE_P(SymAndAsym, CkInt8UkernelTest,

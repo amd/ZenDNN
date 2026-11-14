@@ -367,6 +367,310 @@ TEST(PromptTilePlanner, SingleDenseLayerSplitsEvenlyPerThread) {
     EXPECT_GT(plain.tiles.size(), 32u);
 }
 
+/// Every thread of a per-thread plan owns one slot, the slots of a team tile
+/// its range in rank order, and together they cover the tile list once.
+void check_owner_slots(
+        const std::vector<int> &team_size, const pt::Plan &plan) {
+    int threads = 0;
+    for (const int s : team_size)
+        threads += s;
+    ASSERT_EQ(plan.owner_begin.size(), static_cast<size_t>(threads) + 1);
+    EXPECT_EQ(plan.owner_begin.front(), 0);
+    EXPECT_EQ(plan.owner_begin.back(), static_cast<int>(plan.tiles.size()));
+    int slot = 0;
+    for (size_t t = 0; t < team_size.size(); ++t) {
+        EXPECT_EQ(plan.owner_begin[slot], plan.team_begin[t]) << "team " << t;
+        for (int r = 0; r < team_size[t]; ++r, ++slot)
+            EXPECT_LE(plan.owner_begin[slot], plan.owner_begin[slot + 1]);
+        EXPECT_EQ(plan.owner_begin[slot], plan.team_begin[t + 1])
+                << "team " << t;
+    }
+}
+
+// The per-thread plan keeps the busiest thread near M*N/T at thread counts
+// the sub-team size does not divide (Turin 8-core and Venice 32-core L3
+// domains), for every family's row unit and at pack NR 64; each thread owns
+// one slot inside its team's range, its busiest thread costs no more than
+// the family's own plan, and at T = 32 it costs the same as the dense split.
+TEST(PromptTilePlanner, BalancedPlanBoundsTheBusiestThread) {
+    struct Family {
+        const char *name;
+        int a_bytes, wei_bits, min_mr, row_align, max_mr, pack_nr;
+    };
+    const Family families[] = {{"bf16", 2, 16, 4, 8, 12, 32},
+            {"bf16_nr64", 2, 16, 4, 8, 6, 64}, {"f16", 2, 16, 1, 12, 12, 32},
+            {"int8", 1, 8, 1, 12, 12, 32}, {"w4a8", 1, 4, 1, 6, 6, 32}};
+    struct Shape {
+        int M, N, K;
+    };
+    const Shape shapes[] = {{2048, 1280, 768}, {2048, 768, 768},
+            {2048, 2304, 768}, {2048, 768, 1152}, {2048, 1024, 640},
+            {2048, 2048, 1024}, {2048, 1024, 3072}, {4096, 512, 256},
+            {4096, 256, 1024}, {512, 1280, 768}};
+    for (const int l3 : {8, 32}) {
+        for (const int T : {14, 15, 16, 30, 31, 32, 33, 62, 63, 64}) {
+            std::vector<int> dom(T);
+            for (int t = 0; t < T; ++t)
+                dom[t] = t / l3;
+            const pt::TeamMap tm
+                    = pt::make_domain_team_map(dom, 4, 1 << 20, 32 << 20);
+            for (int t = 0; t < tm.n_teams; ++t) {
+                std::vector<int> seen;
+                for (int i = 0; i < T; ++i)
+                    if (tm.team_of[i] == t) seen.push_back(tm.rank_in_team[i]);
+                ASSERT_EQ(static_cast<int>(seen.size()), tm.team_size[t]);
+                for (int r = 0; r < tm.team_size[t]; ++r)
+                    EXPECT_EQ(seen[r], r) << "team " << t;
+            }
+            for (const Family &f : families) {
+                for (const Shape &s : shapes) {
+                    SCOPED_TRACE(std::string(f.name) + " l3="
+                            + std::to_string(l3) + " T=" + std::to_string(T)
+                            + " M=" + std::to_string(s.M)
+                            + " N=" + std::to_string(s.N)
+                            + " K=" + std::to_string(s.K));
+                    pt::PlannerConfig cfg;
+                    cfg.num_threads = T;
+                    cfg.a_bytes = f.a_bytes;
+                    cfg.wei_bits = f.wei_bits;
+                    cfg.min_mr = f.min_mr;
+                    cfg.row_align = f.row_align;
+                    cfg.max_mr = f.max_mr;
+                    cfg.pack_nr = f.pack_nr;
+                    cfg.balanced = true;
+                    pt::Plan plan;
+                    pt::plan_tiles(&s.M, &s.N, &s.K, 1, cfg,
+                            tm.team_size.data(), tm.n_teams, plan);
+                    check_plan({s.M}, {s.N}, {s.K}, cfg, tm.team_size, plan);
+                    ASSERT_NO_FATAL_FAILURE(
+                            check_owner_slots(tm.team_size, plan));
+                    const int rb = cfg.tun[pt::kRb];
+                    const double ms = pt::plan_makespan(
+                            plan, &s.K, rb, tm.team_size.data(), tm.n_teams);
+                    // Worst over these shapes: 1.0625, a 12-row unit's
+                    // rounding at 30 and 64 threads.
+                    EXPECT_LE(ms, 1.065);
+                    // The plan's own estimate, recounted from its tiles.
+                    EXPECT_DOUBLE_EQ(ms, plan.est_imbalance);
+                    // Busiest thread's absolute cost against the family's
+                    // own plan (dense for BF16, shrink otherwise).
+                    cfg.balanced = false;
+                    cfg.single_dense = f.wei_bits == 16 && f.min_mr == 4;
+                    pt::Plan legacy;
+                    pt::plan_tiles(&s.M, &s.N, &s.K, 1, cfg,
+                            tm.team_size.data(), tm.n_teams, legacy);
+                    const double busiest = ms * plan.total_cost;
+                    const double legacy_busiest
+                            = pt::plan_makespan(legacy, &s.K, rb,
+                                      tm.team_size.data(), tm.n_teams)
+                            * legacy.total_cost;
+                    EXPECT_LE(busiest, legacy_busiest * (1.0 + 1e-9));
+                }
+            }
+        }
+    }
+
+    // The dense split runs a second whole tile on one thread at T = 31; the
+    // per-thread plan does not, and at T = 32 both cost the same.
+    const int M = 2048, N = 1280, K = 768;
+    for (const int T : {31, 32}) {
+        std::vector<int> dom(T);
+        for (int t = 0; t < T; ++t)
+            dom[t] = t / 8;
+        const pt::TeamMap tm
+                = pt::make_domain_team_map(dom, 4, 1 << 20, 32 << 20);
+        pt::PlannerConfig cfg;
+        cfg.num_threads = T;
+        cfg.single_dense = true;
+        pt::Plan dense, balanced;
+        pt::plan_tiles(
+                &M, &N, &K, 1, cfg, tm.team_size.data(), tm.n_teams, dense);
+        cfg.balanced = true;
+        pt::plan_tiles(
+                &M, &N, &K, 1, cfg, tm.team_size.data(), tm.n_teams, balanced);
+        const double d = pt::plan_makespan(
+                dense, &K, cfg.tun[pt::kRb], tm.team_size.data(), tm.n_teams);
+        const double b = pt::plan_makespan(balanced, &K, cfg.tun[pt::kRb],
+                tm.team_size.data(), tm.n_teams);
+        EXPECT_TRUE(dense.owner_begin.empty());
+        if (T == 31) {
+            EXPECT_GT(d, 1.8);
+            EXPECT_LT(b, 1.05);
+        } else {
+            EXPECT_DOUBLE_EQ(d, 1.0);
+            EXPECT_DOUBLE_EQ(b, 1.0);
+            EXPECT_EQ(balanced.tiles.size(), dense.tiles.size());
+        }
+    }
+
+    // A layer the dense split does not take keeps the shrink loop.
+    for (const auto &[m, n, k] : {std::tuple {256, 262144, 640},
+                 std::tuple {100, 768, 768}, std::tuple {512, 64, 1024}}) {
+        const std::vector<int> teams(8, 4);
+        pt::PlannerConfig cfg;
+        cfg.num_threads = 32;
+        pt::Plan plain, balanced;
+        pt::plan_tiles(&m, &n, &k, 1, cfg, teams.data(), 8, plain);
+        cfg.balanced = true;
+        pt::plan_tiles(&m, &n, &k, 1, cfg, teams.data(), 8, balanced);
+        EXPECT_TRUE(balanced.owner_begin.empty()) << "M=" << m;
+        EXPECT_EQ(balanced.tiles.size(), plain.tiles.size()) << "M=" << m;
+    }
+}
+
+// At pack NR 64 (MR 6) the rows a whole unit leaves never give a team a
+// 7-row tile (an MR 3 call), nor does a deep K whose L2 run is shorter
+// than one row block; a call no team can take them on keeps the dense
+// split.
+TEST(PromptTilePlanner, BalancedPlanKeepsMinMrAtPackNr64) {
+    pt::PlannerConfig cfg;
+    cfg.pack_nr = 64;
+    cfg.max_mr = 6;
+    cfg.balanced = true;
+    cfg.single_dense = true;
+    for (const int T : {15, 26, 31, 35, 63}) {
+        std::vector<int> dom(T);
+        for (int t = 0; t < T; ++t)
+            dom[t] = t / 8;
+        const pt::TeamMap tm
+                = pt::make_domain_team_map(dom, 4, 1 << 20, 32 << 20);
+        cfg.num_threads = T;
+        for (int M = 101; M <= 411; M += 2) {
+            for (const auto &[N, K] : {std::pair {256, 128},
+                         std::pair {1280, 768}, std::pair {4096, 2048}}) {
+                SCOPED_TRACE("T=" + std::to_string(T) + " M="
+                        + std::to_string(M) + " N=" + std::to_string(N));
+                pt::Plan plan;
+                pt::plan_tiles(&M, &N, &K, 1, cfg, tm.team_size.data(),
+                        tm.n_teams, plan);
+                check_plan({M}, {N}, {K}, cfg, tm.team_size, plan);
+            }
+        }
+    }
+    // Four teams of 4, 4, 4 and 3 threads, 139 rows: the per-thread plan.
+    const std::vector<int> teams {4, 4, 4, 3};
+    const int M = 139, N = 256, K = 128;
+    cfg.num_threads = 15;
+    pt::Plan plan;
+    pt::plan_tiles(&M, &N, &K, 1, cfg, teams.data(), 4, plan);
+    check_plan({M}, {N}, {K}, cfg, teams, plan);
+    ASSERT_NO_FATAL_FAILURE(check_owner_slots(teams, plan));
+    // A 27251-deep K and a 512 KiB L2: runs of at most 5 rows.
+    const std::vector<int> deep(9, 3);
+    const int Md = 51, Nd = 512, Kd = 27251;
+    pt::PlannerConfig dcfg = cfg;
+    dcfg.num_threads = 27;
+    dcfg.l2_bytes = 512 << 10;
+    dcfg.l3_bytes_per_team = int64_t(1) << 32;
+    dcfg.tun[pt::kMbMin] = 4;
+    pt::Plan dplan;
+    pt::plan_tiles(&Md, &Nd, &Kd, 1, dcfg, deep.data(), 9, dplan);
+    check_plan({Md}, {Nd}, {Kd}, dcfg, deep, dplan);
+    // 11 rows over teams of 4 and 3 threads: either team would run the 3
+    // rows past two 4-row units as a 7-row tile, so the per-thread plan
+    // declines and the dense split runs one 11-row tile.
+    const std::vector<int> two {4, 3};
+    const int Ms = 11, Ns = 320, Ks = 9184;
+    pt::PlannerConfig scfg = dcfg;
+    scfg.num_threads = 7;
+    scfg.tun[pt::kMbMin] = 2;
+    pt::Plan splan;
+    pt::plan_tiles(&Ms, &Ns, &Ks, 1, scfg, two.data(), 2, splan);
+    EXPECT_TRUE(splan.owner_begin.empty());
+    check_plan({Ms}, {Ns}, {Ks}, scfg, two, splan);
+}
+
+// A team whose thread count does not divide N's pack blocks gives each
+// thread `nblk / s` whole blocks and a piece of the rows of the blocks left
+// over where that leaves its busiest thread less work than whole slices:
+// 5 blocks over 4 threads cost 1.25 blocks a thread, not 2.
+TEST(PromptTilePlanner, BalancedPlanSplitsLeftoverBlocksByRows) {
+    const std::vector<int> teams(4, 4);
+    const int M = 2048, N = 160, K = 2048;
+    pt::PlannerConfig cfg;
+    cfg.num_threads = 16;
+    cfg.balanced = true;
+    cfg.single_dense = true;
+    pt::Plan plan;
+    pt::plan_tiles(&M, &N, &K, 1, cfg, teams.data(), 4, plan);
+    check_plan({M}, {N}, {K}, cfg, teams, plan);
+    ASSERT_NO_FATAL_FAILURE(check_owner_slots(teams, plan));
+    for (int slot = 0; slot < 16; ++slot) {
+        int blocks = 0, piece_rows = 0;
+        for (int i = plan.owner_begin[slot]; i < plan.owner_begin[slot + 1];
+                ++i) {
+            const pt::Tile &t = plan.tiles[i];
+            if (t.n0 == 4 * cfg.pack_nr)
+                piece_rows += t.rows;
+            else
+                blocks = std::max(blocks, t.ncols / cfg.pack_nr);
+        }
+        EXPECT_EQ(blocks, 1) << "slot " << slot;
+        EXPECT_EQ(piece_rows, M / 16) << "slot " << slot;
+    }
+    const double ms
+            = pt::plan_makespan(plan, &K, cfg.tun[pt::kRb], teams.data(), 4);
+    EXPECT_LT(ms, 1.05);
+}
+
+// The per-thread plan replaces the team plan only where its busiest thread
+// carries no more: N 640 at pack NR 64 is 10 blocks a 4-thread team drains
+// in interleaved slices of 3, 3, 2 and 2 blocks, while fixed slices leave
+// one thread 3 blocks of every row.
+TEST(PromptTilePlanner, BalancedPlanNeverCostsMoreThanTheTeamPlan) {
+    std::vector<int64_t> busy;
+    const auto busiest
+            = [&](const pt::Plan &p, const int *K, const pt::PlannerConfig &c,
+                      const std::vector<int> &teams) {
+        return pt::plan_busiest(p, K, c.tun[pt::kRb], teams.data(),
+                static_cast<int>(teams.size()), busy);
+    };
+    const std::vector<int> sixteen(16, 4);
+    const int M = 2048, N = 640, K = 3072;
+    pt::PlannerConfig cfg;
+    cfg.num_threads = 64;
+    cfg.pack_nr = 64;
+    cfg.max_mr = 6;
+    cfg.single_dense = true;
+    pt::Plan team_plan, chosen;
+    pt::plan_tiles(&M, &N, &K, 1, cfg, sixteen.data(), 16, team_plan);
+    cfg.balanced = true;
+    pt::plan_tiles(&M, &N, &K, 1, cfg, sixteen.data(), 16, chosen);
+    check_plan({M}, {N}, {K}, cfg, sixteen, chosen);
+    EXPECT_TRUE(chosen.owner_begin.empty())
+            << "kept the dearer per-thread plan";
+    EXPECT_EQ(busiest(chosen, &K, cfg, sixteen),
+            busiest(team_plan, &K, cfg, sixteen));
+
+    // And over narrow-N layers at uneven thread counts.
+    for (const int T : {15, 16, 31, 32, 63}) {
+        std::vector<int> dom(T);
+        for (int t = 0; t < T; ++t)
+            dom[t] = t / 8;
+        const pt::TeamMap tm
+                = pt::make_domain_team_map(dom, 4, 1 << 20, 32 << 20);
+        for (const int n : {128, 160, 192, 224, 320, 640})
+            for (const int m : {256, 1024, 4096})
+                for (const int k : {256, 2048}) {
+                    SCOPED_TRACE("T=" + std::to_string(T) + " M="
+                            + std::to_string(m) + " N=" + std::to_string(n)
+                            + " K=" + std::to_string(k));
+                    pt::PlannerConfig c;
+                    c.num_threads = T;
+                    c.single_dense = true;
+                    pt::Plan base, plan;
+                    pt::plan_tiles(&m, &n, &k, 1, c, tm.team_size.data(),
+                            tm.n_teams, base);
+                    c.balanced = true;
+                    pt::plan_tiles(&m, &n, &k, 1, c, tm.team_size.data(),
+                            tm.n_teams, plan);
+                    check_plan({m}, {n}, {k}, c, tm.team_size, plan);
+                    EXPECT_LE(busiest(plan, &k, c, tm.team_size),
+                            busiest(base, &k, c, tm.team_size));
+                }
+    }
+}
+
 TEST(PromptTilePlanner, HeaviestExpertFirstAndBalancedTeams) {
     const std::vector<int> M = skewed_m(256, 900, 3);
     const int num_ops = static_cast<int>(M.size());
@@ -1067,6 +1371,7 @@ struct Case {
     int threads = 8;
     int nr = 0; // CK pack NR override; 0 keeps the default
     bool wide = false; // inputs spread over 2^-6..2^6 (see `wide_value`)
+    int strategy = 2; // ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY
 };
 
 struct RunOut {
@@ -1090,8 +1395,9 @@ std::string describe(const Case &c) {
             + " T=" + std::to_string(c.threads) + " N=" + std::to_string(c.N)
             + " K=" + std::to_string(c.K) + " tight=" + (c.tight ? "1" : "0")
             + " bias=" + std::to_string(static_cast<int>(c.bias_dt))
-            + " dst=" + std::to_string(static_cast<int>(c.dst_dt)) + " nr="
-            + std::to_string(c.nr) + " wide=" + (c.wide ? "1" : "0") + " M=";
+            + " dst=" + std::to_string(static_cast<int>(c.dst_dt))
+            + " nr=" + std::to_string(c.nr) + " wide=" + (c.wide ? "1" : "0")
+            + " strategy=" + std::to_string(c.strategy) + " M=";
     for (const int m : c.M)
         s += std::to_string(m) + ",";
     return s;
@@ -1112,13 +1418,13 @@ float wide_value(uint32_t h) {
 }
 
 /// Runs the call once through `algo` (ALGO 3 unless a test asks for AUTO)
-/// with the CK on and the strategy pinned to rounds; `prompt_tile` toggles
-/// the tile executor.
+/// with the CK on and the strategy pinned (rounds unless the case sets it);
+/// `prompt_tile` toggles the tile executor.
 template <typename T>
 RunOut run_case_typed(const Case &c, int prompt_tile, int algo) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
-    NTileStrategyOverride strat(2);
+    NTileStrategyOverride strat(c.strategy);
     CustomKernelOverride ck_on(true);
     CustomKernelF16Override ck_f16_on(true);
     CustomKernelNROverride nr(c.nr > 0 ? c.nr : -1);
@@ -1190,6 +1496,9 @@ RunOut run_case_typed(const Case &c, int prompt_tile, int algo) {
             gv.is_wc, params, c.threads, &mode, c.act, c.src_dt);
     out.mode = mode != nullptr ? mode : "";
     out.served = pt::test_api::s_calls_served.load() - served0;
+    // The weights die with this call; a pack they leave registered (in place
+    // under WEIGHT_CACHE=2) would alias a later test's buffer at their address.
+    reset_grp_matmul_caches();
     return out;
 }
 
@@ -1489,18 +1798,219 @@ TEST(PromptTileExecutor, SingleBf16ExpertMatchesRoundsBitwise) {
             }
         }
     }
-    // embeddinggemma FFN-like widths: K 768, N 2304 (gated) and 768.
-    for (const auto &[N, K, act] :
-            {std::tuple {2304, 768, grp_matmul_gated_act_t::gelu_and_mul},
-                    std::tuple {768, 1152, grp_matmul_gated_act_t::none}}) {
-        Case c;
-        c.M = {1024};
-        c.N = N;
-        c.K = K;
-        c.act = act;
-        c.wide = true;
-        expect_bitwise_equal(c);
+    // embeddinggemma FFN-like widths: K 768, N 2304 (gated) and 768, also at
+    // thread counts the sub-team size does not divide (per-thread plan),
+    // under the detected team map and under teams of 4 (4, 4, 4, 3 at 15
+    // threads), which a host's pinning cannot make even.  N 160 (5 blocks)
+    // splits its leftover block by rows, and M 1001 leaves rows past whole
+    // units.  The BF16 mask is set, whatever the environment says.
+    namespace ck = zendnnl::lowoha::matmul::custom_kernel;
+    SingleExpertBalanceMasks balance(
+            static_cast<int>(zendnnl::lowoha::matmul::kSingleExpertBf16), -1);
+    const auto owner_slots = [](int M, int N, int K, int T) {
+        const std::vector<int> Ms {M}, Ns {N}, Ks {K};
+        const std::vector<const void *> src(1, nullptr), bias(1, nullptr);
+        const std::vector<void *> dst(1, nullptr);
+        const pt::CallView call {Ms, Ns, Ks, src, Ks, bias, dst, Ns};
+        ck::CallContext kctx;
+        kctx.variant = ck::KernelVariant::kBF16_BF16_BF16;
+        kctx.pack_nr = 32;
+        kctx.max_mr = 12;
+        return pt::test_api::plan_only(kctx, call, T).owner_begin.size();
+    };
+    for (const int team : {0, 4}) {
+        PtOverride teams(pt::kTeam, team);
+        for (const int T : {0, 15, 31}) {
+            for (const auto &[M, N, K, act] :
+                    {std::tuple {1024, 2304, 768,
+                             grp_matmul_gated_act_t::gelu_and_mul},
+                            std::tuple {1024, 768, 1152,
+                                    grp_matmul_gated_act_t::none},
+                            std::tuple {1001, 160, 512,
+                                    grp_matmul_gated_act_t::none}}) {
+                Case c;
+                c.M.assign(1, M);
+                c.N = N;
+                c.K = K;
+                c.act = act;
+                c.wide = true;
+                if (T > 0) c.threads = T;
+                SCOPED_TRACE("team=" + std::to_string(team));
+                if (team == 4 && T > 0 && N != 160) {
+                    EXPECT_EQ(
+                            owner_slots(M, N, K, T), static_cast<size_t>(T) + 1)
+                            << "per-thread plan not taken";
+                }
+                expect_bitwise_equal(c);
+            }
+        }
     }
+}
+
+// `..._SINGLE_EXPERT_PROMPT_BALANCE` lists the dtypes whose single-expert
+// prompt gets the per-thread plan (one owner slot per thread): BF16 by
+// default, FP16 only when listed, and none at `0`.
+TEST(PromptTileExecutor, SingleExpertPromptBalanceFollowsItsDtypeMask) {
+    namespace ck = zendnnl::lowoha::matmul::custom_kernel;
+    namespace mm = zendnnl::lowoha::matmul;
+    PtOverride teams(pt::kTeam, 4);
+    const std::vector<int> M {1024}, N {768}, K {768};
+    const std::vector<const void *> src(1, nullptr), bias(1, nullptr);
+    const std::vector<void *> dst(1, nullptr);
+    const pt::CallView call {M, N, K, src, K, bias, dst, N};
+    const auto slots = [&](ck::KernelVariant v, int mask) {
+        moe_test_utils::SingleExpertBalanceMasks masks(mask, -1);
+        ck::CallContext kctx;
+        kctx.variant = v;
+        kctx.pack_nr = 32;
+        kctx.max_mr = 8;
+        return pt::test_api::plan_only(kctx, call, 15).owner_begin.size();
+    };
+    const int bf16 = static_cast<int>(mm::kSingleExpertBf16);
+    const int all = static_cast<int>(mm::kSingleExpertAll);
+    EXPECT_EQ(slots(ck::KernelVariant::kBF16_BF16_BF16, bf16), 16u);
+    EXPECT_EQ(slots(ck::KernelVariant::kBF16_BF16_BF16, 0), 0u);
+    EXPECT_EQ(slots(ck::KernelVariant::kF16_F16_F16, bf16), 0u);
+    EXPECT_EQ(slots(ck::KernelVariant::kF16_F16_F16, all), 16u);
+    // A call of several experts never takes it.
+    const std::vector<int> M2 {512, 512}, N2 {768, 768}, K2 {768, 768};
+    const std::vector<const void *> src2(2, nullptr), bias2(2, nullptr);
+    const std::vector<void *> dst2(2, nullptr);
+    const std::vector<int> ld2 {768, 768};
+    const pt::CallView moe {M2, N2, K2, src2, ld2, bias2, dst2, ld2};
+    moe_test_utils::SingleExpertBalanceMasks masks(all, -1);
+    ck::CallContext kctx;
+    kctx.variant = ck::KernelVariant::kBF16_BF16_BF16;
+    kctx.pack_nr = 32;
+    kctx.max_mr = 8;
+    EXPECT_TRUE(pt::test_api::plan_only(kctx, moe, 15).owner_begin.empty());
+}
+
+struct DecodeRun {
+    RunOut out;
+    zendnnl::lowoha::matmul::test_api::PhaseBSnapshot plan;
+};
+
+/// One single-expert decode with `..._SINGLE_EXPERT_DECODE_BALANCE` at
+/// `mask`, and the N-tile plan it ran.
+DecodeRun run_decode(const Case &c, int mask) {
+    using namespace moe_test_utils;
+    SingleExpertBalanceMasks masks(-1, mask);
+    PhaseBCaptureGuard capture;
+    DecodeRun r;
+    r.out = run_case(c, 0);
+    r.plan = zendnnl::lowoha::matmul::test_api::s_last_phase_b_snapshot;
+    return r;
+}
+
+/// Both runs planned on the N-tile path, ran without error (on the custom
+/// kernel when `custom`) and wrote the destination, with the same bits.
+void expect_same_decode(
+        const DecodeRun &a, const DecodeRun &b, bool custom = true) {
+    for (const DecodeRun *r : {&a, &b}) {
+        ASSERT_TRUE(r->plan.valid) << "no N-tile plan: " << r->out.mode;
+        ASSERT_EQ(r->out.mode.rfind("error_", 0), std::string::npos)
+                << r->out.mode;
+        if (custom) {
+            ASSERT_NE(r->out.mode.find("_custom"), std::string::npos)
+                    << r->out.mode;
+        }
+        ASSERT_TRUE(std::any_of(r->out.dst[0].begin(), r->out.dst[0].end(),
+                [](uint8_t v) {
+            return v != 0x5A;
+        })) << "left unwritten: "
+            << r->out.mode;
+    }
+    ASSERT_EQ(a.out.dst[0].size(), b.out.dst[0].size());
+    EXPECT_EQ(std::memcmp(a.out.dst[0].data(), b.out.dst[0].data(),
+                      a.out.dst[0].size()),
+            0);
+}
+
+// Decode's per-thread N split changes which thread computes a column, never
+// a column's sum: a single-expert decode is bitwise equal with the balanced
+// split on and off.  It engages only where it leaves the busiest thread
+// fewer pack blocks than the exact-divisor tile: N 2048 at 15 threads
+// (8 x 256 columns: 8 blocks, balanced 5) and 31 (16 x 128: 4, balanced 3),
+// N 1280 at 15 (10 x 128: 4, balanced 3); not N 1280 at 31 (20 x 64: 2,
+// as over 31 threads).
+TEST(PromptTileExecutor, SingleExpertDecodeBalanceKeepsBits) {
+    SKIP_WITHOUT_BF16_CUSTOM_KERNEL();
+    using namespace moe_test_utils;
+    SingleExpertCkPolicy on(1, 1, 1);
+    struct Shape {
+        int T, N, K;
+        bool engages;
+    };
+    for (const Shape &s : {Shape {15, 2048, 1024, true},
+                 Shape {31, 2048, 1024, true}, Shape {15, 1280, 768, true},
+                 Shape {31, 1280, 768, false}}) {
+        Case c;
+        c.M.assign(1, 8);
+        c.N = s.N;
+        c.K = s.K;
+        c.wide = true;
+        c.threads = s.T;
+        SCOPED_TRACE(describe(c));
+        const DecodeRun legacy = run_decode(c, 0);
+        const DecodeRun balanced = run_decode(c,
+                static_cast<int>(zendnnl::lowoha::matmul::kSingleExpertBf16));
+        expect_same_decode(legacy, balanced);
+        EXPECT_FALSE(legacy.plan.se_balanced);
+        EXPECT_EQ(balanced.plan.se_balanced, s.engages);
+        if (s.engages) { EXPECT_EQ(balanced.plan.min_n_tile, 32); }
+    }
+}
+
+// An explicit tile, adaptive sizing off, `..._N_TILE_STRATEGY=0` (no
+// single-expert knob applies) or `=1` (StaticExpertTeams) keeps the decode
+// tile they select (N 2048 at 31 threads, which balances without them), and
+// the balanced split keeps at least `..._N_TILE_FLOOR` columns a thread in
+// whole pack blocks: a 128 floor at 31 threads leaves 16 threads as busy as
+// the exact 128-column tile, and at 15 it balances 4-5 blocks a thread (at
+// least 128 columns, not 8 blocks).
+TEST(PromptTileExecutor, SingleExpertDecodeBalanceHonoursTileKnobs) {
+    SKIP_WITHOUT_BF16_CUSTOM_KERNEL();
+    using namespace moe_test_utils;
+    SingleExpertCkPolicy on(1, 1, 1);
+    const int all = static_cast<int>(zendnnl::lowoha::matmul::kSingleExpertAll);
+    Case c;
+    c.M.assign(1, 8);
+    c.N = 2048;
+    c.K = 1024;
+    c.wide = true;
+    c.threads = 31;
+    SCOPED_TRACE(describe(c));
+    const auto expect_kept = [&](const Case &p, const std::string &what) {
+        SCOPED_TRACE(what);
+        const DecodeRun base = run_decode(p, 0);
+        const DecodeRun r = run_decode(p, all);
+        expect_same_decode(base, r, /*custom=*/p.strategy == 2);
+        EXPECT_FALSE(r.plan.se_balanced);
+        EXPECT_EQ(r.plan.min_n_tile, base.plan.min_n_tile);
+    };
+    {
+        CustomKernelNTileOverride tile(256);
+        expect_kept(c, "CUSTOM_KERNEL_N_TILE=256");
+    }
+    {
+        NTileOversubOverride oversub(0);
+        expect_kept(c, "N_TILE_OVERSUB=0");
+    }
+    for (const int strategy : {0, 1}) {
+        Case p = c;
+        p.strategy = strategy;
+        expect_kept(p, "N_TILE_STRATEGY=" + std::to_string(strategy));
+    }
+    NTileFloorOverride floor(128);
+    expect_kept(c, "N_TILE_FLOOR=128");
+    Case p = c;
+    p.threads = 15;
+    const DecodeRun base = run_decode(p, 0);
+    const DecodeRun b = run_decode(p, all);
+    expect_same_decode(base, b);
+    EXPECT_TRUE(b.plan.se_balanced);
+    EXPECT_EQ(b.plan.min_n_tile, 128);
 }
 
 // With the knob on a single-expert BF16 prompt runs 12-row CK calls; its

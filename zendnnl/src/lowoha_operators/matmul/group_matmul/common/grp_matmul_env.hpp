@@ -289,6 +289,12 @@ inline std::atomic<int> s_grp_matmul_algo_legacy_override {-1};
 inline std::atomic<int> s_grp_matmul_custom_kernel_subtile_per_expert_override {
         -1};
 
+// Gated-activation form knobs (`get_grp_matmul_gelu_tanh`,
+// `get_grp_matmul_fast_act`).  Sentinel `-1` = no override (env / default);
+// 0 / 1 = off / on.
+inline std::atomic<int> s_grp_matmul_gelu_tanh_override {-1};
+inline std::atomic<int> s_grp_matmul_fast_act_override {-1};
+
 // Last `execution_path` string set by `group_matmul_direct` on a
 // successful return.  Read-only inspection hook for tests that need
 // to verify which executor path actually ran (e.g. asserting the
@@ -700,6 +706,56 @@ inline bool grp_matmul_int8_kblock_enabled(bool kblock_auto) {
     }
     return resolve_grp_matmul_int8_kblock(get_grp_matmul_int8_kblock_env(),
             grp_matmul_kblock_enabled(kblock_auto));
+}
+
+// ZENDNNL_GRP_MATMUL_GELU_TANH = { "0", "1" } — cached, default OFF.
+//   ON: `gelu_and_mul` evaluates GELU in the tanh form
+//     0.5·x·(1 + tanh(√(2/π)·(x + 0.044715·x³)))
+//   (PyTorch `gelu(approximate="tanh")`, the GELU of `gelu_pytorch_tanh`
+//   models) instead of the erf form, everywhere group_matmul evaluates it:
+//   the custom-kernel epilogues of every dtype, single and multi expert,
+//   the separate-pass and AOCL-DLP fallbacks, and routed MoE.  The two
+//   forms differ by at most 4.8e-4.  Any value other than 0 / 1 keeps the
+//   default.
+inline bool get_grp_matmul_gelu_tanh() {
+    const int ovr = test_api::s_grp_matmul_gelu_tanh_override.load(
+            std::memory_order_relaxed);
+    if (ovr >= 0) return ovr != 0;
+    static const bool v = []() {
+        int parsed = 0;
+        return parse_env_int_strict(
+                       std::getenv("ZENDNNL_GRP_MATMUL_GELU_TANH"), parsed)
+                && parsed == 1;
+    }();
+    return v;
+}
+
+// ZENDNNL_GRP_MATMUL_FAST_ACT = { "0", "1" } — cached, default OFF.
+//   ON: the gated activations (silu_and_mul, gelu_and_mul, swiglu_oai_mul)
+//   and the DQ-INT8 sigmoid post-op take shorter AVX-512 forms wherever
+//   group_matmul evaluates them: a degree-3 exp polynomial (max relative
+//   error 8.6e-5, against 5.1e-5), sigmoid without the Newton step after
+//   `rcp14` (2^-14), and GELU in the tanh form (within 4.8e-4 of the erf
+//   form).  The AOCL-DLP fallback keeps its exact SiLU, and routed MoE
+//   its SiLU, which is a short form already.  Any value other than 0 / 1
+//   keeps the default.
+inline bool get_grp_matmul_fast_act() {
+    const int ovr = test_api::s_grp_matmul_fast_act_override.load(
+            std::memory_order_relaxed);
+    if (ovr >= 0) return ovr != 0;
+    static const bool v = []() {
+        int parsed = 0;
+        return parse_env_int_strict(
+                       std::getenv("ZENDNNL_GRP_MATMUL_FAST_ACT"), parsed)
+                && parsed == 1;
+    }();
+    return v;
+}
+
+// The GELU form of every group_matmul path: tanh under either knob (the
+// fast forms have no erf GELU), erf otherwise.
+inline bool get_grp_matmul_gelu_is_tanh() {
+    return get_grp_matmul_gelu_tanh() || get_grp_matmul_fast_act();
 }
 
 // NOTE: `get_grp_matmul_custom_kernel_n_tile()`

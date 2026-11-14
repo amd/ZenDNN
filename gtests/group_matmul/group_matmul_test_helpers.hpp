@@ -35,6 +35,9 @@
 ///   * `expect_prompt_tile_matches_rounds(…)` — runs one such call on the
 ///                                       round and prompt tile executors
 ///                                       and expects identical outputs.
+///   * `expect_decode_balance_keeps_bits(…)` — runs a single-expert decode
+///                                       with the balanced N split off and
+///                                       on and expects identical outputs.
 ///
 /// Consumers:
 ///   * `gtest_main.cpp` — the only file outside `group_matmul/` that
@@ -127,6 +130,8 @@ void PrintTo(const GroupQuantMatmulType &value, ::std::ostream *os);
  *                    for the source quantization to fill.
  *  @param weight_cache_type Per-call `matmul_params::weight_cache_type` set on
  *                    every expert (default 2 = the `matmul_params` default).
+ *  @param num_threads `matmul_params::num_threads` of every expert (default
+ *                    0 = the library's thread count, cached at its first call).
  *  @return group_matmul_direct status
  */
 status_t group_matmul_kernel_test(std::vector<tensor_t> &inputs,
@@ -138,7 +143,7 @@ status_t group_matmul_kernel_test(std::vector<tensor_t> &inputs,
         const std::vector<int> &pack_format_b = {},
         const std::vector<int> &active_rows = {},
         data_type_t dq_compute = data_type_t::s8, int32_t weight_cache_type = 2,
-        const std::vector<int> &ggml_superblock = {});
+        const std::vector<int> &ggml_superblock = {}, int32_t num_threads = 0);
 
 /** @fn expect_prompt_tile_matches_rounds
  *  @brief Runs one `group_matmul_kernel_test` call on ALGO 3's custom kernel
@@ -154,5 +159,17 @@ void expect_prompt_tile_matches_rounds(int mask, int mb, int ns,
         const grp_matmul_gated_act_params *gated_act,
         const std::vector<int> &active_rows,
         data_type_t dq_compute = data_type_t::s8);
+
+/** @fn expect_decode_balance_keeps_bits
+ *  @brief Runs one single-expert decode through `group_matmul_kernel_test`
+ *  on ALGO 3's custom kernel at `num_threads` OpenMP threads, with the
+ *  N-tile strategy pinned to rounds: first with
+ *  `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_DECODE_BALANCE=0`, then with every
+ *  dtype listed.  Expects both runs to write `outputs`, bit for bit alike,
+ *  and the second to take the balanced N split exactly when `engages`.
+ */
+void expect_decode_balance_keeps_bits(std::vector<tensor_t> &inputs,
+        std::vector<tensor_t> &weights, std::vector<tensor_t> &biases,
+        std::vector<tensor_t> &outputs, int num_threads, bool engages);
 
 #endif // ZENDNNL_GTESTS_GROUP_MATMUL_TEST_HELPERS_HPP

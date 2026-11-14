@@ -221,7 +221,8 @@ inline int max_mr_for_nv_int8(int NV, IntCompute compute) {
 ///   * `A` — per-row int byte stream of MR rows of K K-elements at
 ///     `lda` element-stride.  For `Compute = kS8_Sym` the caller
 ///     passes the s8 buffer cast to `uint8_t *` (the kernel
-///     internally XORs with `0x80808080` per K-broadcast).  For
+///     internally XORs with `0x80808080` per K-broadcast), or, for a
+///     kernel selected with `src_u8`, those bytes already XOR-ed.  For
 ///     `Compute = kU8_Asym` the caller passes the u8 buffer
 ///     directly.
 ///   * `Bpacked` — pointer to this o-block's packed weight slab
@@ -269,9 +270,10 @@ using int8_ukernel_fn_t = void (*)(const uint8_t *A, int lda,
 using int8_accum_ukernel_fn_t = void (*)(const uint8_t *A, int lda,
         const int8_t *Bpacked, int K, int32_t *C, int ldc, bool add);
 
-/// Select the NR=32 symmetric accumulation-only specialization for `MR`.
-/// Returns nullptr outside MR 1..12.
-int8_accum_ukernel_fn_t select_int8_accum_ukernel(int MR);
+/// Select the NR=32 symmetric accumulation-only specialization for `MR`;
+/// with `src_u8`, the one reading already XOR-ed source bytes.  Returns
+/// nullptr outside MR 1..12.
+int8_accum_ukernel_fn_t select_int8_accum_ukernel(int MR, bool src_u8 = false);
 
 /// Apply full-K compensation and dynamic per-token/per-channel dequantization
 /// to one NR=32 s32 scratch block, then store BF16 output.
@@ -286,9 +288,11 @@ void finish_int8_accum_nv2_sym_bf16(const int32_t *C, int ldc_c, int M,
 ///
 /// `dst_dt` mirrors the bf16 sibling's `OutputType` axis and adds `kU8` for
 /// static per-tensor requantization. F32/U8 destinations are valid only for
-/// `Act = none`; gated activations remain BF16-only.
+/// `Act = none`; gated activations remain BF16-only.  `src_u8` selects the
+/// NV=2 symmetric kernels that read already XOR-ed source bytes (nullptr for
+/// any other NV or compute).
 int8_ukernel_fn_t select_int8_ukernel(int MR, int NV, IntCompute compute,
-        ActivationKind act, OutputType dst_dt);
+        ActivationKind act, OutputType dst_dt, bool src_u8 = false);
 
 /// Q8_0 per-group (K-group 32) symmetric s8 kernel. NV is 2 (NR=32)
 /// or 4 (NR=64); MR is 1..4.

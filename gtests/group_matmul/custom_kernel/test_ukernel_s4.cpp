@@ -35,11 +35,13 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include "common/bfloat16.hpp"
 #include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
+#include "lowoha_operators/matmul/group_matmul/custom_kernel/ukernel/int8_microkernel.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/ukernel/s4_microkernel.hpp"
 
 namespace ck = ::zendnnl::lowoha::matmul::custom_kernel;
@@ -535,6 +537,164 @@ TEST(CkUkernelS4, RoutedU8ModeMatchesS8AndStoresF32) {
     EXPECT_EQ(ck::select_w4a8_ukernel(1, NV, ck::ActivationKind::silu_and_mul,
                       ck::S4SourceKind::kU8Zp128, ck::S4OutputKind::kF32),
             nullptr);
+}
+
+// An unpacked NR=32 block summed on the DQ-INT8 accumulators gives the bits
+// of the in-register kernels for every row count up to 12, epilogue, output,
+// source-scale layout and group size, from s8 or pre-biased u8 source bytes,
+// whether its groups come in one unpacked chunk or one per chunk.
+TEST(CkUkernelS4, UnpackedBlockMatchesInRegisterKernels) {
+    if (!ck::avx512vnni_available()) GTEST_SKIP() << "no AVX-512 VNNI";
+    constexpr int K = 256;
+    constexpr int N = 32;
+    constexpr int NV = 2;
+    constexpr int kMaxRows = 12;
+    const auto wsrc = build_packed(K, N, K, /*transB=*/true);
+    std::vector<float> bias(N);
+    for (int n = 0; n < N; ++n)
+        bias[static_cast<size_t>(n)] = bias_at(n);
+    alignas(64) int32_t cs32[kMaxRows * N];
+
+    for (const int group_size : {32, 128}) {
+        const int G = K / group_size;
+        Slab slab(ck::packed_weight_size_s4(K, N, N, group_size));
+        ASSERT_NE(slab.p, nullptr);
+        ASSERT_EQ(
+                ck::prepack_weight_into_s4(wsrc.data(), K, N, K, N, true,
+                        /*interleave_split_halves=*/false, group_size, slab.p),
+                status_t::success);
+        const auto *blk = static_cast<const int8_t *>(slab.p);
+        Slab unpacked(static_cast<size_t>(K) * N);
+        ASSERT_NE(unpacked.p, nullptr);
+        const size_t group_packed_bytes
+                = static_cast<size_t>(group_size / ck::kS4Octet) * N
+                * ck::kS4BytesPerOctetCol;
+        const auto *comp = reinterpret_cast<const int32_t *>(blk
+                + static_cast<size_t>(K / ck::kS4Octet) * N
+                        * ck::kS4BytesPerOctetCol);
+        std::vector<float> wscales(static_cast<size_t>(G) * N);
+        for (int g = 0; g < G; ++g)
+            for (int n = 0; n < N; ++n)
+                wscales[static_cast<size_t>(g) * N + n] = wscale_at(g, n);
+        const std::vector<bfloat16_t> wscales_bf(
+                wscales.begin(), wscales.end());
+
+        for (const bool per_group : {false, true}) {
+            const auto gran = per_group ? ck::S4SrcScaleGranularity::kPerGroup
+                                        : ck::S4SrcScaleGranularity::kPerToken;
+            const int sgroups = per_group ? G : 1;
+            std::vector<float> sscales(static_cast<size_t>(kMaxRows) * sgroups);
+            for (int m = 0; m < kMaxRows; ++m)
+                for (int g = 0; g < sgroups; ++g)
+                    sscales[static_cast<size_t>(m) * sgroups + g]
+                            = per_group ? sscale_at(m, g) : sscale_at(m);
+            const std::vector<bfloat16_t> sscales_bf(
+                    sscales.begin(), sscales.end());
+            std::vector<uint8_t> s8(static_cast<size_t>(kMaxRows) * K);
+            std::vector<uint8_t> u8(s8.size());
+            for (int m = 0; m < kMaxRows; ++m)
+                for (int k = 0; k < K; ++k) {
+                    const auto q = static_cast<uint8_t>(a_at(m, k));
+                    s8[static_cast<size_t>(m) * K + k] = q;
+                    u8[static_cast<size_t>(m) * K + k]
+                            = static_cast<uint8_t>(q ^ 0x80u);
+                }
+
+            for (const bool bf16_scales : {false, true}) {
+                const ck::ScaleKind sk = bf16_scales ? ck::ScaleKind::kBf16
+                                                     : ck::ScaleKind::kF32;
+                const void *ws = bf16_scales
+                        ? static_cast<const void *>(wscales_bf.data())
+                        : static_cast<const void *>(wscales.data());
+                const auto ss = [&](int m0) -> const void * {
+                    const size_t i = static_cast<size_t>(m0) * sgroups;
+                    return bf16_scales
+                            ? static_cast<const void *>(sscales_bf.data() + i)
+                            : static_cast<const void *>(sscales.data() + i);
+                };
+                for (const auto act : {ck::ActivationKind::none,
+                             ck::ActivationKind::swiglu_oai_mul,
+                             ck::ActivationKind::silu_and_mul,
+                             ck::ActivationKind::gelu_and_mul}) {
+                    for (const auto out :
+                            {ck::S4OutputKind::kBf16, ck::S4OutputKind::kF32}) {
+                        const bool gated = act != ck::ActivationKind::none;
+                        if (gated && out == ck::S4OutputKind::kF32) continue;
+                        const auto gfn = ck::select_w4a8_unpacked_groups(gran);
+                        const auto sfn = ck::select_w4a8_unpacked_store(
+                                act, out, gran);
+                        ASSERT_NE(sfn, nullptr);
+                        const int cols = gated ? N / 2 : N;
+                        const size_t elem
+                                = out == ck::S4OutputKind::kF32 ? 4 : 2;
+                        for (int rows = 1; rows <= kMaxRows; ++rows) {
+                            SCOPED_TRACE("gs=" + std::to_string(group_size)
+                                    + " per_group=" + std::to_string(per_group)
+                                    + " act="
+                                    + std::to_string(static_cast<int>(act))
+                                    + " f32=" + std::to_string(elem == 4)
+                                    + " bf16_scales="
+                                    + std::to_string(bf16_scales)
+                                    + " rows=" + std::to_string(rows));
+                            const size_t bytes
+                                    = static_cast<size_t>(rows) * cols * elem;
+                            std::vector<unsigned char> want(bytes, 0);
+                            const auto out_at
+                                    = [&](std::vector<unsigned char> &v,
+                                              int m) -> void * {
+                                return v.data()
+                                        + static_cast<size_t>(m) * cols * elem;
+                            };
+                            for (int m0 = 0; m0 < rows;
+                                    m0 += ck::max_mr_for_nv_s4(NV)) {
+                                const int mr = std::min(
+                                        ck::max_mr_for_nv_s4(NV), rows - m0);
+                                const auto kfn = ck::select_w4a8_ukernel(mr, NV,
+                                        act, ck::S4SourceKind::kS8, out, gran);
+                                ASSERT_NE(kfn, nullptr);
+                                kfn(s8.data() + static_cast<size_t>(m0) * K, K,
+                                        blk, ss(m0), ws, sk, bias.data(),
+                                        ck::BiasKind::fp32,
+                                        gated ? nullptr : out_at(want, m0),
+                                        gated ? 0 : cols,
+                                        gated ? out_at(want, m0) : nullptr,
+                                        gated ? cols : 0, K, group_size, N);
+                            }
+                            for (const bool from_u8 : {false, true}) {
+                                for (const int chunk : {1, G}) {
+                                    std::vector<unsigned char> got(bytes, 0);
+                                    alignas(64) float facc[kMaxRows * N] = {};
+                                    for (int g0 = 0; g0 < G; g0 += chunk) {
+                                        const int ng = std::min(chunk, G - g0);
+                                        auto *dst = static_cast<int8_t *>(
+                                                unpacked.p);
+                                        ck::unpack_s4_block_nr32(
+                                                blk + g0 * group_packed_bytes,
+                                                ng * group_size, dst);
+                                        gfn(rows,
+                                                from_u8 ? u8.data() : s8.data(),
+                                                K, dst, comp,
+                                                ck::select_int8_accum_ukernel(
+                                                        rows, from_u8),
+                                                ss(0), ws, sk, g0, ng, G,
+                                                group_size, N, facc, cs32);
+                                    }
+                                    sfn(rows, facc, ss(0), sk, bias.data(),
+                                            ck::BiasKind::fp32,
+                                            gated ? nullptr : got.data(),
+                                            gated ? 0 : cols,
+                                            gated ? got.data() : nullptr,
+                                            gated ? cols : 0);
+                                    EXPECT_EQ(got, want) << "u8=" << from_u8
+                                                         << " chunk=" << chunk;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 // Selector bounds — the s4 MR ceiling is tighter than the other

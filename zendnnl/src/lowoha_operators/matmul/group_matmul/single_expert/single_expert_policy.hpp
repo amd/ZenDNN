@@ -110,6 +110,16 @@ inline std::atomic<int> s_grp_matmul_single_expert_force_ck_override {-1};
 // `-1` uses the cached env value.
 inline std::atomic<int> s_grp_matmul_single_expert_prompt_kc_override {-1};
 
+// `single_expert_dtype` masks for
+// `ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_{PROMPT,DECODE}_BALANCE` for the lifetime
+// of a test; `-1` uses the cached env value.
+inline std::atomic<int> s_grp_matmul_single_expert_prompt_balance_override {-1};
+inline std::atomic<int> s_grp_matmul_single_expert_decode_balance_override {-1};
+
+// `ZENDNNL_GRP_MATMUL_N_TILE_OVERSUB` for the lifetime of a test; `-1` uses
+// the cached env value.
+inline std::atomic<int> s_grp_n_tile_oversub_override {-1};
+
 } // namespace test_api
 
 inline std::atomic<int> &test_api_dense_decode_ntile_override() {
@@ -162,6 +172,9 @@ inline bool get_grp_matmul_dense_decode_ntile() {
 //   in scope, `team_per_expert < num_threads` leaves real headroom under the
 //   cap.  Non-numeric input → default 2.
 inline int get_grp_n_tile_oversub() {
+    const int ovr = test_api::s_grp_n_tile_oversub_override.load(
+            std::memory_order_relaxed);
+    if (ovr >= 0) return ovr;
     static const int v = []() {
         const char *e = std::getenv("ZENDNNL_GRP_MATMUL_N_TILE_OVERSUB");
         int parsed = 0;
@@ -297,6 +310,45 @@ inline unsigned get_grp_matmul_single_expert_force_ck_dtypes() {
     if (ovr >= 0) return static_cast<unsigned>(ovr) & kSingleExpertAll;
     static const unsigned v = read_grp_matmul_single_expert_knob(
             "ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_FORCE_CK", kSingleExpertAll);
+    return v;
+}
+
+// Thread-count-exact work split for a single expert on the custom kernel,
+// two cached dtype-set knobs (same tokens as above):
+//   * ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_BALANCE (default `bf16`) — the
+//     prompt tile planner gives every thread of every L3 team one N slice of
+//     its team's rows, the rows sized so the busiest thread of each team
+//     carries the same work (`plan_balanced`).  Otherwise BF16 keeps the
+//     dense equal split, sized to `ceil(M / n_teams)`, whose whole tiles
+//     leave one thread a second tile at 15, 31 or 63 threads.  The other
+//     families' shrink loop (>= 8 tiles per thread) already scales at those
+//     counts, and their kernels run some single large tiles slower.  `u8s8`
+//     has no effect: the prompt tile does not take static U8xS8.
+//   * ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_DECODE_BALANCE (default `all`) —
+//     decode splits N in whole `pack_nr` blocks spread evenly over the
+//     thread count when that leaves the busiest thread fewer blocks than
+//     the exact-divisor tile, which idles threads that do not divide N.
+//     Each thread keeps at least `ZENDNNL_GRP_MATMUL_N_TILE_FLOOR` columns;
+//     an explicit `..._CUSTOM_KERNEL_N_TILE`, `..._N_TILE_OVERSUB=0` or
+//     `..._N_TILE_STRATEGY` 0 or 1 keeps the tile they select.
+inline unsigned get_grp_matmul_single_expert_prompt_balance_dtypes() {
+    const int ovr
+            = test_api::s_grp_matmul_single_expert_prompt_balance_override.load(
+                    std::memory_order_relaxed);
+    if (ovr >= 0) return static_cast<unsigned>(ovr) & kSingleExpertAll;
+    static const unsigned v = read_grp_matmul_single_expert_knob(
+            "ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_PROMPT_BALANCE",
+            kSingleExpertBf16);
+    return v;
+}
+inline unsigned get_grp_matmul_single_expert_decode_balance_dtypes() {
+    const int ovr
+            = test_api::s_grp_matmul_single_expert_decode_balance_override.load(
+                    std::memory_order_relaxed);
+    if (ovr >= 0) return static_cast<unsigned>(ovr) & kSingleExpertAll;
+    static const unsigned v = read_grp_matmul_single_expert_knob(
+            "ZENDNNL_GRP_MATMUL_SINGLE_EXPERT_DECODE_BALANCE",
+            kSingleExpertAll);
     return v;
 }
 
