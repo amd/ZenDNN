@@ -64,6 +64,25 @@ void compute_int8_tail_tile(const native_plan_t &plan,
         const native_int8_call_t &call, const native_weight_view_t &w, int m0,
         int mr, int n0, int cols, float *C, int ldc);
 
+/// The finish of compute_int8_tile over a call with per-tensor or
+/// per-channel weight scales, for a tile whose int32 sums of all of K C
+/// already holds at its float positions, as the per-channel INT8 kernel sums
+/// them (native_s8_gemv_fn_t): C then holds what compute_int8_tile gives,
+/// with its bits.  cols < nr: the last column tile of a weight of padded
+/// columns, finished as compute_int8_tail_tile's.
+void finish_int8_channel_tile(const native_plan_t &plan,
+        const native_int8_call_t &call, const native_weight_view_t &w, int m0,
+        int mr, int n0, int nr, int cols, float *C, int ldc);
+
+/// The finish compute_int8_tile applies to a tile of a call whose weight
+/// scales apply after the groups (native_int8_call_t::scales_after_groups),
+/// once C holds the sum of its groups taken with unit weight scales (and,
+/// over an s4 weight, unit source scales): alpha, the scales and beta in the
+/// reference algorithm's order.  A tile of columns below w.N only.
+void finish_int8_tile_after_groups(const native_plan_t &plan,
+        const native_int8_call_t &call, const native_weight_view_t &w, int m0,
+        int mr, int n0, int nr, float *C, int ldc);
+
 } // namespace native
 } // namespace matmul
 } // namespace lowoha

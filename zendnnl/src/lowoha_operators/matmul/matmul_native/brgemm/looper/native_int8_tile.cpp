@@ -68,6 +68,21 @@ void compute_int8_tail_tile(const native_plan_t &plan,
     compute_channel_tile<true>(plan, call, w, m0, mr, n0, nr, C, ldc, nullptr);
 }
 
+void finish_int8_channel_tile(const native_plan_t &plan,
+        const native_int8_call_t &call, const native_weight_view_t &w, int m0,
+        int mr, int n0, int nr, int cols, float *C, int ldc) {
+    assert(w.wei_dt == data_type_t::s8
+            && call.scheme == native_int8_scheme_t::per_channel);
+    if (cols < nr) {
+        assert(n0 + cols == w.N);
+        compute_channel_tile<true>(plan, call, w, m0, mr, n0,
+                (cols + 15) / 16 * 16, C, ldc, nullptr, true);
+        return;
+    }
+    compute_channel_tile<false>(
+            plan, call, w, m0, mr, n0, nr, C, ldc, nullptr, true);
+}
+
 } // namespace native
 } // namespace matmul
 } // namespace lowoha

@@ -31,9 +31,9 @@ namespace native {
 
 using zendnnl::error_handling::status_t;
 
-// No call of matmul_direct runs a GEMV kernel or makes a GEMV pack: every
-// call of the native BRGEMM, M = 1 included, runs on the native tiles over
-// the weight's one layout.
+// No call of matmul_direct runs these GEMV kernels or makes their packs: the
+// native BRGEMM runs an M = 1 call on the GEMV kernels of the weight's one
+// layout (native_gemv_ukernel.hpp).
 
 /// The GEMV kernels of an M = 1 call: a GEMV kernel on one thread over the
 /// call's raw weight, or none.

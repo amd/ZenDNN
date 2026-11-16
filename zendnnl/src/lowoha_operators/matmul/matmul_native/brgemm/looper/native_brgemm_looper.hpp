@@ -37,9 +37,18 @@ namespace native {
 /// (when why is not null) naming the reason, and leaves dst and the weight
 /// as they were; once work started, every error is failure.  desc.K,
 /// desc.N and weight.pack_nr must satisfy native_layout_fits (the layout
-/// rule's shape); a release build does not check them.  Every M, 1
-/// included, runs on the native tiles over the weight's layout.
+/// rule's shape); a release build does not check them.  Every call reads the
+/// weight's one layout: M = 1 on the GEMV kernels (native_gemv_ukernel.hpp),
+/// whose results have the tiles' bits, every other M on the native tiles.
 status_t native_brgemm_execute(const GemmDescriptor &desc,
+        const native_weight_ref_t &weight, const void *src, void *dst,
+        const void *bias, const matmul_params &params,
+        const char **why = nullptr);
+
+/// native_brgemm_execute with an M = 1 call on the native tiles instead of
+/// the GEMV kernels: the reference the tests check the GEMV kernels' bits
+/// against.
+status_t native_brgemm_execute_on_tiles(const GemmDescriptor &desc,
         const native_weight_ref_t &weight, const void *src, void *dst,
         const void *bias, const matmul_params &params,
         const char **why = nullptr);

@@ -264,6 +264,25 @@ void compute_group_tile(const native_plan_t &plan,
     }
 }
 
+void finish_int8_tile_after_groups(const native_plan_t &plan,
+        const native_int8_call_t &call, const native_weight_view_t &w, int m0,
+        int mr, int n0, int nr, float *C, int ldc) {
+    assert(call.scales_after_groups);
+    alignas(64) float scale_buf[kMaxTileNr];
+    for (int c = 0; c < nr;) {
+        const int cw = native_int8_col_width(plan, nr - c);
+        const int p0 = w.tile_col(n0, nr, c);
+        const int p1 = second_col(w, n0, nr, c, cw / 16, p0);
+        if (w.wei_dt == data_type_t::s4)
+            finish_call_after_groups<false, true>(
+                    call, w, m0, mr, p0, p1, cw, cw, scale_buf, C + c, ldc);
+        else
+            finish_call_after_groups<false, false>(
+                    call, w, m0, mr, p0, p1, cw, cw, scale_buf, C + c, ldc);
+        c += cw;
+    }
+}
+
 template void compute_group_tile<false>(const native_plan_t &,
         const native_int8_call_t &, const native_weight_view_t &, int, int, int,
         int, float *, int, const native_int8_out_t *);

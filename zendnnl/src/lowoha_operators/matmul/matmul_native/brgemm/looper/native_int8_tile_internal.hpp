@@ -214,12 +214,14 @@ static inline __m512 native_int8_beta_term(const native_int8_call_t &call,
 }
 
 /// compute_int8_tile of a call with per-tensor or per-channel weight scales;
-/// Tail: compute_int8_tail_tile's (out is nullptr).
+/// Tail: compute_int8_tail_tile's (out is nullptr).  summed: C already holds
+/// the int32 sums of all of K at its float positions, as the per-channel
+/// kernel sums them, and only the finish runs.
 template <bool Tail>
 void compute_channel_tile(const native_plan_t &plan,
         const native_int8_call_t &call, const native_weight_view_t &w, int m0,
-        int mr, int n0, int nr, float *C, int ldc,
-        const native_int8_out_t *out);
+        int mr, int n0, int nr, float *C, int ldc, const native_int8_out_t *out,
+        bool summed = false);
 
 /// compute_int8_tile of a call with per-group weight scales: C (or out) holds
 /// the sum of the scaled groups; alpha, beta and the bias are the

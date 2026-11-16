@@ -26,21 +26,12 @@
 
 #include "common/zendnnl_compat.hpp"
 
-// The compilers whose headers have the AVX512-FP16 intrinsics, as
-// common/float16.hpp takes them.
-#if defined(ZENDNNL_HAS_AVX512FP16_MASK_LOAD_STORE_INTRINSICS) \
-        || (defined(__GNUC__) && (__GNUC__ >= 12))
-#define NATIVE_F16_PH_KERNELS 1
-#else
-#define NATIVE_F16_PH_KERNELS 0
-#endif
-
 namespace zendnnl {
 namespace lowoha {
 namespace matmul {
 namespace native {
 
-#if NATIVE_F16_PH_KERNELS
+#if ZENDNNL_NATIVE_F16_PH_KERNELS
 namespace {
 
 constexpr int kMaxMr = 12;
@@ -229,7 +220,7 @@ constexpr auto kNv4
 #endif
 
 int native_f16_ph_ukernel_max_mr(int nv) {
-#if NATIVE_F16_PH_KERNELS
+#if ZENDNNL_NATIVE_F16_PH_KERNELS
     return nv == 1 || nv == 2 || nv == 4 ? kMaxMr : 0;
 #else
     (void)nv;
@@ -239,7 +230,7 @@ int native_f16_ph_ukernel_max_mr(int nv) {
 
 native_f16_ph_ukernel_fn_t select_native_f16_ph_ukernel(int mr, int nv) {
     if (mr < 1 || mr > native_f16_ph_ukernel_max_mr(nv)) return nullptr;
-#if NATIVE_F16_PH_KERNELS
+#if ZENDNNL_NATIVE_F16_PH_KERNELS
     return (nv == 1 ? kNv1 : (nv == 2 ? kNv2 : kNv4))[mr - 1];
 #else
     return nullptr;

@@ -102,8 +102,8 @@ void finish_in_reference_order(const native_int8_call_t &call, int m0, int mr,
 template <bool Tail>
 void compute_channel_tile(const native_plan_t &plan,
         const native_int8_call_t &call, const native_weight_view_t &w, int m0,
-        int mr, int n0, int nr, float *C, int ldc,
-        const native_int8_out_t *out) {
+        int mr, int n0, int nr, float *C, int ldc, const native_int8_out_t *out,
+        bool summed) {
     const uint32_t zp_shift = call.src_signed ? 128u : 0u;
     // The kernel then yields f32(S) (unit scales, only the +128 term), and
     // the reference-order finish does the rest.
@@ -177,13 +177,16 @@ void compute_channel_tile(const native_plan_t &plan,
         assert(max_mr >= 1 && max_mr <= kMaxTileMr);
         // A call apart reads one line of each pair of its runs' blocks: its
         // K pass takes the cache sets of twice its width.
-        const int pass = native_int8_pass_quads(
-                plan, w.k_groups, apart ? 2 * cw : cw, mr, max_mr);
+        // Summed: C holds the sums of all of K, which one pass of no K quads
+        // adds and finishes.
+        const int pass = summed ? w.k_groups
+                                : native_int8_pass_quads(plan, w.k_groups,
+                                          apart ? 2 * cw : cw, mr, max_mr);
         for (int kq = 0; kq < w.k_groups; kq += pass) {
-            args.k_quads = std::min(pass, w.k_groups - kq);
+            args.k_quads = summed ? 0 : std::min(pass, w.k_groups - kq);
             args.B = b0 + static_cast<size_t>(kq) * args.b_stride;
-            args.first_pass = kq == 0;
-            args.last_pass = kq + args.k_quads == w.k_groups;
+            args.first_pass = !summed && kq == 0;
+            args.last_pass = summed || kq + args.k_quads == w.k_groups;
             for (int i = 0; i < mr;) {
                 const int rows = std::min(max_mr, mr - i);
                 for (int r = 0; r < rows; ++r) {
@@ -202,7 +205,7 @@ void compute_channel_tile(const native_plan_t &plan,
                 args.A = call.A + static_cast<size_t>(m0 + i) * call.lda
                         + static_cast<size_t>(kq) * 4;
                 args.C = C + static_cast<size_t>(i) * ldc + c;
-                args.partial = pass < w.k_groups
+                args.partial = summed || pass < w.k_groups
                         ? reinterpret_cast<int32_t *>(args.C)
                         : nullptr;
                 if (out != nullptr)
@@ -229,10 +232,10 @@ void compute_channel_tile(const native_plan_t &plan,
 
 template void compute_channel_tile<false>(const native_plan_t &,
         const native_int8_call_t &, const native_weight_view_t &, int, int, int,
-        int, float *, int, const native_int8_out_t *);
+        int, float *, int, const native_int8_out_t *, bool);
 template void compute_channel_tile<true>(const native_plan_t &,
         const native_int8_call_t &, const native_weight_view_t &, int, int, int,
-        int, float *, int, const native_int8_out_t *);
+        int, float *, int, const native_int8_out_t *, bool);
 
 } // namespace native
 } // namespace matmul

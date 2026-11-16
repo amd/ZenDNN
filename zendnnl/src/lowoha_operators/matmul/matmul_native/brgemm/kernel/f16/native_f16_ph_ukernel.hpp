@@ -20,6 +20,17 @@
 #include <cstddef>
 #include <cstdint>
 
+// 1 where the compiler's headers have the AVX512-FP16 intrinsics, as
+// common/float16.hpp takes them: the f16_ph tile kernels and the f16_ph GEMV
+// kernels (kernel/gemv/native_gemv_f16_ph.cpp) exist under this one
+// condition.
+#if defined(ZENDNNL_HAS_AVX512FP16_MASK_LOAD_STORE_INTRINSICS) \
+        || (defined(__GNUC__) && (__GNUC__ >= 12))
+#define ZENDNNL_NATIVE_F16_PH_KERNELS 1
+#else
+#define ZENDNNL_NATIVE_F16_PH_KERNELS 0
+#endif
+
 namespace zendnnl {
 namespace lowoha {
 namespace matmul {

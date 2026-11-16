@@ -48,6 +48,7 @@ target_sources(gtests
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_weight_lifetime.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_brgemm_group.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_matmul_dispatch.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_native_gemv.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_gemv_operands.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_one_layout.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_postop_chain.cpp

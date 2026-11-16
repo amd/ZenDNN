@@ -92,10 +92,12 @@ Current pairing:
   gated activation. Its epilogue (`native_epilogue.cpp`) applies them, mish
   included. A call outside that list returns an error status, or under
   `ZENDNNL_MATMUL_ALGO=10` without `lowoha_algo` goes back to the default
-  route (see Native matmul below). Every call, M = 1 included, runs on
-  the native tiles over the weight's one layout; the GEMV kernels
-  (`decide_native_gemv`, `run_native_gemv`) are called only by their
-  tests. Check the kernel that runs, not only `native_epilogue.cpp`.
+  route (see Native matmul below). Every call reads the weight's one
+  layout: M = 1 on the GEMV kernels of `brgemm/kernel/gemv/`, whose
+  results must keep the tiles' bits, every other M on the native tiles;
+  the earlier GEMV kernels (`decide_native_gemv`, `run_native_gemv`) are
+  called only by their tests. Check the kernel that runs, not only
+  `native_epilogue.cpp`.
 
 Binary post-op leading dimension `-1` still becomes N. An f16 binary post-op
 requires AVX512-FP16 on every route but the native BRGEMM: a call that asks
