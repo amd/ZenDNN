@@ -48,7 +48,6 @@
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/native_int8_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_brgemm_looper.hpp"
-#include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_gemv.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_operator_bridge.hpp"
@@ -302,9 +301,8 @@ TEST(NativeLayoutRule, NWhoseBlocksExceedAnInt) {
 
 // A bf16 weight of K up to 67108864 (2^26): the bf16 kernels offset its K
 // pairs, 64 elements apart in a block, in an int.  The layout rule refuses a
-// larger K, and an M = 1 call of it gets no GEMV choice, so the native
-// BRGEMM turns it away as at M = 2: the same status and reason, before any
-// work.
+// larger K, so the native BRGEMM turns an M = 1 call of it away as at M = 2:
+// the same status and reason, before any work.
 TEST(NativeLayoutRule, Bf16KWhosePairsExceedAnInt) {
     const data_type_t bf16 = data_type_t::bf16;
     const char *const reason
@@ -318,42 +316,6 @@ TEST(NativeLayoutRule, Bf16KWhosePairsExceedAnInt) {
                          query(bf16, bf16, native::kMaxNativeBf16K + 1, 64))
                          .reason,
             reason);
-
-    // The narrow kernel's widths on a [K, N] weight, and the BKC kernel's
-    // on a constant [N, K] weight on one thread.
-    struct shape_t {
-        int N;
-        bool transB;
-        native::native_gemv_t kernel;
-    };
-    for (const shape_t s :
-            {shape_t {4, false, native::native_gemv_t::bf16_narrow},
-                    shape_t {64, true, native::native_gemv_t::bf16_bkc}}) {
-        SCOPED_TRACE(native::native_gemv_name(s.kernel));
-        for (const int K : {1000, native::kMaxNativeBf16K + 1}) {
-            native::GemmDescriptor d;
-            d.M = 1;
-            d.N = s.N;
-            d.K = K;
-            d.lda = K;
-            d.ldb = s.transB ? K : s.N;
-            d.ldc = s.N;
-            d.transB = s.transB;
-            d.src_dt = bf16;
-            d.wei_dt = bf16;
-            d.dst_dt = bf16;
-            d.is_weights_const = true;
-            d.num_threads = 1;
-            matmul_params p;
-            p.dtypes.src = bf16;
-            p.dtypes.wei = bf16;
-            p.dtypes.dst = bf16;
-            EXPECT_EQ(static_cast<int>(native::decide_native_gemv(d, p).kernel),
-                    static_cast<int>(
-                            K == 1000 ? s.kernel : native::native_gemv_t::none))
-                    << "K " << K;
-        }
-    }
 
     // Through the native BRGEMM's check, which reads no buffer for these
     // calls: no layout or image is cached anywhere near the stand-in

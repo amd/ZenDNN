@@ -94,10 +94,8 @@ Current pairing:
   `ZENDNNL_MATMUL_ALGO=10` without `lowoha_algo` goes back to the default
   route (see Native matmul below). Every call reads the weight's one
   layout: M = 1 on the GEMV kernels of `brgemm/kernel/gemv/`, whose
-  results must keep the tiles' bits, every other M on the native tiles;
-  the earlier GEMV kernels (`decide_native_gemv`, `run_native_gemv`) are
-  called only by their tests. Check the kernel that runs, not only
-  `native_epilogue.cpp`.
+  results must keep the tiles' bits, every other M on the native tiles.
+  Check the kernel that runs, not only `native_epilogue.cpp`.
 
 Binary post-op leading dimension `-1` still becomes N. An f16 binary post-op
 requires AVX512-FP16 on every route but the native BRGEMM: a call that asks
@@ -247,8 +245,6 @@ What a matmul call keeps across calls (extend this list when a PR adds state):
   an AOCL-DLP prepack) in the caller's buffer, and an image record remembers
   it. Change detection reads the two 64-byte ends only, and a dropped layout
   stays until a clear.
-- The GEMV caches of `matmul_native/common/kernel_cache.cpp`, read by tests
-  only.
 - The widened f16 sources (`matmul_native/brgemm/looper/`), at most 32
   buffers and 512 MiB, and the per-thread staged rows of gated calls
   (`matmul_native/common/native_epilogue.cpp`), kept up to 4 MiB a thread.

@@ -167,30 +167,23 @@ bool native_weight_packed_in_place(const void *weight, size_t owned_bytes);
 bool native_weight_find_image(
         const void *weight, size_t owned_bytes, native_image_check_t &found);
 
-/// What native_weight_read_raw did.
+/// What native_weight_raw_hold_t::hold did.
 enum class native_raw_read_t : uint8_t {
-    done, ///< read ran on the raw weight
-    image, ///< the buffer holds an in-place image: read did not run
-    failed, ///< no memory to hold the buffer: read did not run
+    done, ///< the raw weight is held
+    image, ///< the buffer holds an in-place image: nothing is held
+    failed, ///< no memory to hold the buffer: nothing is held
 };
 
-/// Runs read, a pack outside this cache that reads the extent bytes of the
-/// raw weight at weight, with those bytes held as the packs of
-/// get_native_layout hold theirs: no in-place rewrite of bytes among them
-/// starts or runs while read runs, and other reads of them go on.  A buffer
-/// that holds an image by then (at weight, or starting inside the extent
-/// bytes) has no raw weight left, and read does not run.  owned_bytes is the
-/// caller's buffer at weight, as for native_weight_find_image.
-native_raw_read_t native_weight_read_raw(const void *weight, size_t extent,
-        size_t owned_bytes, const std::function<void()> &read);
-
 /// Holds the extent bytes of the raw weight at weight for a reader outside
-/// this cache whose read is not one function: from a hold that returns done
-/// until the holder is destroyed, as native_weight_read_raw holds them while
-/// its read runs.  hold returns image, holding nothing, when the buffer holds
-/// an image by then, and failed when there is no memory to hold it.  One
-/// hold per holder; while it holds, its thread waits for no rewrite of those
-/// bytes (as a native call on the buffer may).
+/// this cache, as the packs of get_native_layout hold theirs: from a hold
+/// that returns done until the holder is destroyed, no in-place rewrite of
+/// bytes among them starts or runs, and other reads of them go on.  hold
+/// returns image, holding nothing, when the buffer holds an image by then
+/// (at weight, or starting inside the extent bytes), and failed when there
+/// is no memory to hold it; owned_bytes is the caller's buffer at weight, as
+/// for native_weight_find_image.  One hold per holder; while it holds, its
+/// thread waits for no rewrite of those bytes (as a native call on the
+/// buffer may).
 class native_weight_raw_hold_t {
 public:
     native_weight_raw_hold_t() = default;
@@ -205,36 +198,6 @@ public:
 private:
     std::pair<std::uintptr_t, std::uintptr_t> span_ {0, 0};
     bool held_ = false;
-};
-
-/// A short read of weight bytes outside this cache that holds none of them
-/// (native_weight_read_raw holds what it reads), on the calling thread: it
-/// may read them only while the check lives and ok().  ok() is false while
-/// an in-place rewrite runs, and, with bytes, when an in-place image may
-/// overlap the bytes at weight or the images changed as the check began; a
-/// rewrite that starts meanwhile writes only once the check has ended.  It
-/// may take the cache lock shared before it begins (with bytes, when the
-/// images changed since the thread last looked), and none while it lives;
-/// what the caller does inside it takes no lock either, as a rewrite waits
-/// for it.  A thread runs one at a time, and calls nothing of this cache
-/// inside it.
-class native_weight_check_t {
-public:
-    explicit native_weight_check_t(
-            const void *weight = nullptr, size_t bytes = 0);
-    ~native_weight_check_t() {
-        if (reading_ != nullptr)
-            reading_->store(reading_->load(std::memory_order_relaxed) + 1,
-                    std::memory_order_release);
-    }
-    native_weight_check_t(const native_weight_check_t &) = delete;
-    native_weight_check_t &operator=(const native_weight_check_t &) = delete;
-
-    bool ok() const { return ok_; }
-
-private:
-    std::atomic<uint64_t> *reading_ = nullptr;
-    bool ok_ = false;
 };
 
 /// Drops every cached layout and every in-place record.  Same quiescence

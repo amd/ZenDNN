@@ -20,18 +20,6 @@ include(CreateIncludeFiles)
 set(zendnnl_src_dir "${CMAKE_CURRENT_SOURCE_DIR}")
 set(zendnnl_inc_file "${CMAKE_BINARY_DIR}/zendnnl.hpp")
 
-# MSVC (cl 19.4x) hits an internal compiler error (C1001, back-end 'p2' pass)
-# when optimizing this AVX-512 bf16 GEMV kernel at /O2. An in-source
-# #pragma optimize does not help because the offending code is a template whose
-# instantiation is code-generated outside the pragma's scope. Compile just this
-# one translation unit without optimization on MSVC; every other toolchain and
-# TU is unaffected. Revisit if a future cl release fixes the ICE.
-if(MSVC)
-  set_source_files_properties(
-    "${CMAKE_CURRENT_SOURCE_DIR}/lowoha_operators/matmul/matmul_native/brgemm/kernel/bf16/bf16_gemv_narrow.cpp"
-    PROPERTIES COMPILE_OPTIONS "/Od")
-endif()
-
 # build archive
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
   add_library(zendnnl_archive STATIC)

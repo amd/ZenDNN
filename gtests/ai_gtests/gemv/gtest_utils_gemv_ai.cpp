@@ -79,7 +79,7 @@ static const std::vector<DataTypeCombination> gemv_int8_combos = {
         DataTypeCombination::S8_S8_BF16, // s8 src, s8 weight → bf16 output
 };
 
-// Activation post-ops that the KC GEMV kernel can fuse
+// Unary activation post-ops
 static std::vector<PostOpConfig> get_gemv_postop_configs() {
     std::vector<PostOpConfig> configs;
     configs.push_back(PostOpConfig {}); // none
@@ -135,7 +135,7 @@ MatmulParamsAI GemvParameterGenerator::create_gemv_param(uint64_t n, uint64_t k,
     return param;
 }
 
-// KC path: N<=256, packed B fits in L2.
+// N up to 256, K up to 1024.
 void GemvParameterGenerator::add_kc_path_params(
         std::vector<MatmulParamsAI> &params) {
     static const uint64_t kc_n_vals[] = {1, 2, 4, 8, 16, 32, 64, 128, 192, 256};
@@ -380,23 +380,23 @@ void GemvParameterGenerator::add_boundary_params(
             {1, 1},
             {1, 32},
             {32, 1},
-            // BKC_NR_PAD=16 boundaries: each triggers different tail NVT
+            // N around the layout's runs of 16 columns and blocks of 32
             {15, 128},
             {16, 128},
-            {17, 128}, // tail<1> → tail<1> → tail<2>
+            {17, 128},
             {31, 128},
             {32, 128},
-            {33, 128}, // tail<2> → tail<2> → tail<3>
+            {33, 128},
             {47, 128},
             {48, 128},
-            {49, 128}, // tail<3> → tail<3> → tail<4>
+            {49, 128},
             {63, 64},
             {64, 63},
-            {65, 64}, // tail<4> → nr64<1> → nr64<1>+tail<1>
-            // NP+tail combos
-            {80, 256}, // nr64<1> + tail<1>
-            {96, 256}, // nr64<1> + tail<2>
-            {100, 256}, // nr64<1> + tail<3> (non-16-aligned)
+            {65, 64},
+            // Whole blocks and a tail
+            {80, 256},
+            {96, 256},
+            {100, 256},
             {127, 128},
             {128, 127},
             {129, 128},
@@ -431,11 +431,11 @@ void GemvParameterGenerator::add_edge_case_params(
             {4096, 1}, // very wide N, tiny K
             {3, 7}, // odd non-power-of-2
             {17, 33}, // prime-ish
-            {24, 512}, // N=24 pads to 32: 25% waste with BKC_NR_PAD=16
-            {48, 512}, // N=48 pads to 48: zero waste with BKC_NR_PAD=16
-            {100, 256}, // N=100 pads to 112: np=1 + tail<3>
-            {200, 256}, // N=200 pads to 208: np=3 + tail<1>
-            {256, 256}, // KC boundary exact
+            {24, 512}, // N=24 pads to one block of 32 columns
+            {48, 512}, // N=48 pads to two blocks
+            {100, 256}, // N=100 pads to four blocks
+            {200, 256}, // N=200 pads to seven blocks
+            {256, 256}, // whole blocks
             {255, 1023}, // just below boundaries
     };
     auto postop_cfgs = get_gemv_postop_configs();
@@ -478,7 +478,7 @@ GemvParameterGenerator::generate_minimal_test_suite() {
     PostOpConfig relu_po = AITestUtils::create_relu_config();
 
     for (auto combo : gemv_bf16_combos) {
-        // KC path: a few representative shapes
+        // N up to 256: a few representative shapes
         minimal.push_back(create_gemv_param(64, 128, combo,
                 TestCategory::ACCURACY, no_postop, false, true, "gemv_min"));
         minimal.push_back(create_gemv_param(128, 256, combo,
@@ -528,7 +528,7 @@ GemvParameterGenerator::generate_category_specific_params(
 // // maximize code coverage while minimizing test count. This includes:
 // //   - One test per data type combination (BF16 and INT8)
 // //   - One test per post-op type
-// //   - KC path and N above 256 coverage
+// //   - N up to 256 and N above 256 coverage
 // //   - Key boundary tests
 // //
 // // Returns:

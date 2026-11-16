@@ -156,8 +156,7 @@ struct native_cache_state_t {
     /// (thread_memo) of an older generation do not serve.
     std::atomic<uint64_t> generation {1};
     /// In-place rewrites from the reservation of their record to its end;
-    /// while one runs, the checks read no weight bytes
-    /// (native_weight_check_t).
+    /// while one runs, the memo checks read no weight bytes (memo_check_t).
     /// Changed under the mutex held exclusively.
     std::atomic<size_t> rewrites {0};
 };
@@ -241,16 +240,6 @@ bool spans_overlap(const thread_spans_t &tl, const void *p, size_t bytes) {
 bool image_may_overlap(const void *p, size_t bytes) {
     const thread_spans_t *tl = current_thread_spans();
     return tl != nullptr && spans_overlap(*tl, p, bytes);
-}
-
-/// image_may_overlap without a lock: also true when the images changed
-/// since the calling thread last looked.
-bool image_may_overlap_unlocked(const void *p, size_t bytes) {
-    native_cache_state_t &state = cache_state();
-    if (state.image_count.load(std::memory_order_acquire) == 0) return false;
-    const thread_spans_t &tl = thread_spans();
-    return state.spans_gen.load(std::memory_order_acquire) != tl.gen
-            || spans_overlap(tl, p, bytes);
 }
 
 /// Forgets the record at it, under the mutex held exclusively.
@@ -603,10 +592,9 @@ void wait_for_reads_locked(
     --state.rewrites_waiting;
 }
 
-/// What the checks of a thread (native_weight_check_t: its memo's, and
-/// those of reads outside this cache) tell in-place rewrites: reading is odd
-/// while one may read bytes of a weight buffer.  A line of its own: every
-/// check of its thread stores to it.
+/// What the memo checks of a thread (memo_check_t) tell in-place rewrites:
+/// reading is odd while one may read bytes of a weight buffer.  A line of
+/// its own: every check of its thread stores to it.
 struct alignas(64) memo_reader_t {
     std::atomic<uint64_t> reading {0};
     /// Its thread exited and a later thread may take it; under the mutex of
@@ -831,7 +819,7 @@ const memo_entry_t *memo_find(
 }
 
 /// A check of an entry of the calling thread's memo, on the reader the
-/// memo holds (native_weight_check_t).
+/// memo holds.
 class memo_check_t {
 public:
     explicit memo_check_t(memo_reader_t &reader)
@@ -1377,14 +1365,6 @@ bool native_weight_packed_in_place(const void *weight, size_t owned_bytes) {
     return native_weight_find_image(weight, owned_bytes, found);
 }
 
-native_raw_read_t native_weight_read_raw(const void *weight, size_t extent,
-        size_t owned_bytes, const std::function<void()> &read) {
-    native_weight_raw_hold_t hold;
-    const native_raw_read_t got = hold.hold(weight, extent, owned_bytes);
-    if (got == native_raw_read_t::done) read();
-    return got;
-}
-
 native_raw_read_t native_weight_raw_hold_t::hold(
         const void *weight, size_t extent, size_t owned_bytes) {
     native_cache_state_t &state = cache_state();
@@ -1409,17 +1389,6 @@ native_raw_read_t native_weight_raw_hold_t::hold(
 native_weight_raw_hold_t::~native_weight_raw_hold_t() {
     if (!held_) return;
     read_hold_t release {cache_state(), span_, true};
-}
-
-native_weight_check_t::native_weight_check_t(const void *weight, size_t bytes) {
-    memo_reader_t *reader = thread_reader();
-    if (reader == nullptr) return;
-    // The copy of the spans is brought up to date before the check begins:
-    // once begun, a check takes no lock, as rewrites wait for it.
-    if (bytes != 0) current_thread_spans();
-    reading_ = &reader->reading;
-    ok_ = begin_check(*reader)
-            && (bytes == 0 || !image_may_overlap_unlocked(weight, bytes));
 }
 
 void clear_native_weight_caches() {

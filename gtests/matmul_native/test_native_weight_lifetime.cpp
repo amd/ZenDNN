@@ -20,8 +20,7 @@
 // pack read, an in-place rewrite keeps the layouts cached from the bytes it
 // overwrites, the native weight cache clear forgets the cached layouts and
 // the in-place images, lookups of other buffers go on while a buffer packs,
-// a rewrite in place waits for the packs and the GEMV kernels that read the
-// bytes it writes, and
+// a rewrite in place waits for the packs that read the bytes it writes, and
 // no check of what is kept reads past the buffer of the call that makes it.
 // A call's check for an image is handed to its layout lookup, and what
 // a thread's calls were served stays right for its later calls across
@@ -48,8 +47,6 @@
 
 #include "gtest_utils.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
-#include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_gemv.hpp"
-#include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_hw.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_weight_cache.hpp"
 #include "lowoha_operators/matmul/matmul_native/native_layout_policy.hpp"
@@ -946,8 +943,8 @@ TEST_F(NativeWeightLifetime, MemoLookupsOfAViewDuringTheFirstRewriteStay) {
 // not marked by a first call at weight cache mode 2 that rewrites the whole
 // buffer in place: checking it reads bytes the rewrite writes, so a lookup
 // of the view waits until the rewrite ends, and is then refused, as the view
-// lies inside the image.  A raw read of the buffer's first bytes, held
-// through native_weight_read_raw, keeps the rewrite from writing meanwhile.
+// lies inside the image.  A hold of the buffer's first bytes
+// (native_weight_raw_hold_t) keeps the rewrite from writing meanwhile.
 TEST_F(NativeWeightLifetime, LookupOfAnUnmarkedLayoutWaitsForTheRewrite) {
     const int K = 256, N = 128;
     for (const data_type_t dt : {kBf16, kS4}) {
@@ -967,12 +964,11 @@ TEST_F(NativeWeightLifetime, LookupOfAnUnmarkedLayoutWaitsForTheRewrite) {
         {
             joiner_t calls;
             calls.threads.emplace_back([&] {
-                read = nat::native_weight_read_raw(
-                        buf.get(), kEndBytes, buf.bytes, [&] {
-                    held.store(true);
-                    while (!release.load())
-                        std::this_thread::yield();
-                });
+                nat::native_weight_raw_hold_t hold;
+                read = hold.hold(buf.get(), kEndBytes, buf.bytes);
+                held.store(true);
+                while (!release.load())
+                    std::this_thread::yield();
             });
             while (!held.load())
                 std::this_thread::yield();
@@ -1000,231 +996,6 @@ TEST_F(NativeWeightLifetime, LookupOfAnUnmarkedLayoutWaitsForTheRewrite) {
                 << "a view inside the image is refused";
         mm::clear_matmul_native_weight_caches();
     }
-}
-
-/// The descriptor native_layout_matmul builds for c, a call of one thread.
-nat::GemmDescriptor gemv_descriptor(const nt::call_t &c) {
-    nat::GemmDescriptor d;
-    d.M = c.M;
-    d.N = c.N;
-    d.K = c.K;
-    d.lda = c.lda_or_tight();
-    d.ldb = c.ldb_or_tight();
-    d.ldc = c.ldc_or_tight();
-    d.alpha = c.alpha;
-    d.beta = c.beta;
-    d.src_dt = c.params.dtypes.src;
-    d.wei_dt = c.params.dtypes.wei;
-    d.dst_dt = c.params.dtypes.dst;
-    d.bias_dt = c.params.dtypes.bias;
-    d.is_weights_const = c.is_weights_const;
-    d.num_threads = 1;
-    return d;
-}
-
-// A one-row bf16 GEMV kernel run (run_native_gemv) that found its weight
-// raw before a first call at weight cache mode 2 reserved the rewrite of
-// the buffer in place: the BKC kernel's thread-local hit check and the
-// narrow kernel (the first 4 columns, ldb N) read the raw weight without
-// holding it, so they wait until the rewrite ends, and the run is then
-// turned away, as only the tiles read the image.  A raw read of the
-// buffer's first bytes, held through native_weight_read_raw, keeps the
-// rewrite from writing meanwhile.
-TEST_F(NativeWeightLifetime, GemvReadsOfAWeightWaitForItsRewrite) {
-    const int K = 256, N = 128;
-    for (const int n : {N, 4}) {
-        const nat::native_gemv_t kernel = n == N
-                ? nat::native_gemv_t::bf16_bkc
-                : nat::native_gemv_t::bf16_narrow;
-        SCOPED_TRACE(nat::native_gemv_name(kernel));
-        const nt::buffer_t buf = contiguous_weight(kBf16, K, N, 1461);
-        const nt::buffer_t src = nt::random_buffer(kBf16, K, 1462, -1, 1);
-        std::vector<float> warm(n, -777.0f), got(n, -777.0f);
-        nt::call_t c;
-        c.M = 1;
-        c.N = n;
-        c.K = K;
-        c.ldb = N;
-        c.src = src.get();
-        c.wei = buf.get();
-        c.dst = warm.data();
-        c.params.dtypes.src = kBf16;
-        c.params.dtypes.wei = kBf16;
-        c.params.dtypes.dst = data_type_t::f32;
-        c.params.num_threads = 1;
-        c.params.weight_cache_type = 1;
-        c.params.lowoha_algo = matmul_algo_t::native_brgemm;
-        const nat::GemmDescriptor desc = gemv_descriptor(c);
-        const nat::native_gemv_plan_t plan
-                = nat::decide_native_gemv(desc, c.params);
-        ASSERT_EQ(plan.kernel, kernel);
-        std::atomic<bool> found {false}, held {false}, release {false},
-                go {false}, returned {false};
-        status_t warmed = status_t::failure, again = status_t::failure,
-                 gemv = status_t::success, rewrite = status_t::failure;
-        nat::native_raw_read_t read = nat::native_raw_read_t::failed;
-        {
-            joiner_t calls;
-            calls.threads.emplace_back([&] {
-                warmed = nat::run_native_gemv(plan, desc, src.get(), buf.get(),
-                        warm.data(), nullptr, c.params, 1);
-                again = nat::run_native_gemv(plan, desc, src.get(), buf.get(),
-                        got.data(), nullptr, c.params, 1);
-                found.store(true);
-                while (!go.load())
-                    std::this_thread::yield();
-                std::fill(got.begin(), got.end(), -777.0f);
-                gemv = nat::run_native_gemv(plan, desc, src.get(), buf.get(),
-                        got.data(), nullptr, c.params, 1);
-                returned.store(true);
-            });
-            // The GEMV's call found the weight raw before the rewrite starts.
-            while (!found.load())
-                std::this_thread::yield();
-            calls.threads.emplace_back([&] {
-                read = nat::native_weight_read_raw(
-                        buf.get(), kEndBytes, buf.bytes, [&] {
-                    held.store(true);
-                    while (!release.load())
-                        std::this_thread::yield();
-                });
-            });
-            while (!held.load())
-                std::this_thread::yield();
-            calls.threads.emplace_back([&] {
-                nat::native_layout_t o;
-                rewrite = nat::get_native_layout(
-                        raw_weight(kBf16, buf.get(), K, N), 2, 0, 1, o);
-            });
-            // The rewrite reserved its record and waits for the read.
-            while (!nat::native_weight_packed_in_place(buf.get(), buf.bytes))
-                std::this_thread::yield();
-            go.store(true);
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            EXPECT_FALSE(returned.load())
-                    << "the GEMV read the weight while its rewrite ran";
-            release.store(true);
-        }
-        ASSERT_EQ(warmed, status_t::success);
-        EXPECT_EQ(again, status_t::success);
-        EXPECT_EQ(read, nat::native_raw_read_t::done);
-        EXPECT_EQ(rewrite, status_t::success);
-        EXPECT_TRUE(nat::native_weight_packed_in_place(buf.get(), buf.bytes));
-        EXPECT_EQ(gemv, status_t::unimplemented)
-                << "the buffer holds the image, which only the tiles read";
-        EXPECT_TRUE(std::all_of(got.begin(), got.end(), [](float v) {
-            return v == -777.0f;
-        })) << "the GEMV wrote dst";
-        mm::clear_matmul_native_weight_caches();
-    }
-}
-
-// A rewrite in place waits for the checks under way before it writes, and
-// holds no lock while it waits: while the narrow GEMV of a long weight runs
-// inside its check, a first call at weight cache mode 2 rewriting another
-// buffer waits for it, and a new thread's first cached layout, which lists
-// the thread's reader under the cache lock, is cached meanwhile.  Were the
-// lock held, a check that waits for the cache lock (as its image test did)
-// would wait for itself through the two.  The GEMV reads its weight and its
-// source from untouched pages of a sparse mapping, so it runs for longer
-// than the other calls take.
-TEST_F(NativeWeightLifetime, FirstLayoutsGoOnWhileARewriteWaitsForAGemv) {
-#if defined(__linux__)
-    const int K = nat::kMaxNativeBf16K, n = 4;
-    const size_t wei_bytes = static_cast<size_t>(K) * n * sizeof(uint16_t);
-    const size_t src_bytes = static_cast<size_t>(K) * sizeof(uint16_t);
-    struct mapping_t {
-        void *at = MAP_FAILED;
-        size_t bytes = 0;
-        ~mapping_t() {
-            if (at != MAP_FAILED) munmap(at, bytes);
-        }
-    } map;
-    map.bytes = wei_bytes + src_bytes;
-    map.at = mmap(nullptr, map.bytes, PROT_READ | PROT_WRITE,
-            MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    if (map.at == MAP_FAILED)
-        GTEST_SKIP() << "no address space for the sparse weight";
-    const void *wei = map.at;
-    const void *src = static_cast<const char *>(map.at) + wei_bytes;
-    nt::call_t c;
-    c.M = 1;
-    c.N = n;
-    c.K = K;
-    c.src = src;
-    c.wei = wei;
-    c.params.dtypes.src = kBf16;
-    c.params.dtypes.wei = kBf16;
-    c.params.dtypes.dst = data_type_t::f32;
-    c.params.num_threads = 1;
-    c.params.weight_cache_type = 1;
-    c.params.lowoha_algo = matmul_algo_t::native_brgemm;
-    const nat::GemmDescriptor desc = gemv_descriptor(c);
-    const nat::native_gemv_plan_t plan
-            = nat::decide_native_gemv(desc, c.params);
-    ASSERT_EQ(plan.kernel, nat::native_gemv_t::bf16_narrow);
-    const nt::buffer_t rewritten = contiguous_weight(kBf16, 256, 128, 1471);
-    const nt::buffer_t first = contiguous_weight(kBf16, 64, 64, 1472);
-    const auto deadline
-            = std::chrono::steady_clock::now() + std::chrono::seconds(120);
-    const auto waiting = [&] {
-        std::this_thread::yield();
-        return std::chrono::steady_clock::now() < deadline;
-    };
-    std::vector<float> got(n, -777.0f);
-    std::atomic<bool> gemv_returned {false}, rewrite_returned {false};
-    std::atomic<bool> cached_during_gemv {false}, cached_during_rewrite {false};
-    status_t gemv = status_t::failure, rewrite = status_t::failure,
-             cached = status_t::failure;
-    {
-        joiner_t calls;
-        calls.threads.reserve(3);
-        calls.threads.emplace_back([&] {
-            gemv = nat::run_native_gemv(
-                    plan, desc, src, wei, got.data(), nullptr, c.params, 1);
-            gemv_returned.store(true);
-        });
-        // The GEMV's kernel read the weight's first page: its check began.
-        unsigned char resident = 0;
-        while (mincore(map.at, 1, &resident) == 0 && !(resident & 1)
-                && waiting()) {}
-        ASSERT_TRUE(resident & 1) << "the GEMV did not start";
-        calls.threads.emplace_back([&] {
-            nat::native_layout_t o;
-            rewrite = nat::get_native_layout(
-                    raw_weight(kBf16, rewritten.get(), 256, 128), 2, 0, 1, o);
-            rewrite_returned.store(true);
-        });
-        // The rewrite reserved its record, and then waits for the check.
-        while (!nat::native_weight_packed_in_place(
-                       rewritten.get(), rewritten.bytes)
-                && waiting()) {}
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        calls.threads.emplace_back([&] {
-            nat::native_layout_t o;
-            cached = nat::get_native_layout(
-                    raw_weight(first.get(), 64, 64), 1, 0, 1, o);
-            cached_during_gemv.store(!gemv_returned.load());
-            cached_during_rewrite.store(!rewrite_returned.load());
-        });
-    }
-    EXPECT_EQ(gemv, status_t::success);
-    EXPECT_EQ(rewrite, status_t::success);
-    EXPECT_EQ(cached, status_t::success);
-    EXPECT_TRUE(nat::native_weight_packed_in_place(
-            rewritten.get(), rewritten.bytes));
-    EXPECT_TRUE(cached_during_gemv.load())
-            << "the first layout was cached only once the GEMV's check had "
-               "ended: the rewrite waited for the check holding a lock";
-    EXPECT_TRUE(cached_during_rewrite.load())
-            << "the rewrite did not wait for the GEMV's check";
-    EXPECT_TRUE(std::all_of(got.begin(), got.end(), [](float v) {
-        return v == 0.0f;
-    })) << "the GEMV of a zero weight";
-    mm::clear_matmul_native_weight_caches();
-#else
-    GTEST_SKIP() << "needs a sparse anonymous mapping";
-#endif
 }
 
 // ── The per-thread layout memo ───────────────────────────────────────────
