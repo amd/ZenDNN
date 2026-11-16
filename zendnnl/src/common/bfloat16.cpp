@@ -22,64 +22,6 @@
 namespace zendnnl {
 namespace common {
 
-//implementation
-bfloat16_t::bfloat16_t() : raw_bits_ {0} {}
-
-bfloat16_t::bfloat16_t(float f) : raw_bits_ {0} {
-    switch (std::fpclassify(f)) {
-        case FP_SUBNORMAL:
-        case FP_ZERO:
-            // sign preserving zero (denormal go to zero)
-            raw_bits_ = fp32bf16_t {f}.bf16[1];
-            raw_bits_ &= 0x8000;
-            break;
-        case FP_INFINITE: raw_bits_ = fp32bf16_t {f}.bf16[1]; break;
-        case FP_NAN:
-            // truncate and set MSB of the mantissa force QNAN
-            raw_bits_ = fp32bf16_t {f}.bf16[1];
-            ;
-            raw_bits_ |= (0x01 << 6);
-            break;
-        case FP_NORMAL:
-            // round to nearest even and truncate
-            fp32bf16_t rbits {f};
-            const uint32_t rounding_bias = 0x00007FFF + (rbits.bf16[1] & 0x1);
-            rbits.u32 += rounding_bias;
-            raw_bits_ = rbits.bf16[1];
-            break;
-    }
-}
-
-bfloat16_t::operator float() const {
-    return fp32bf16_t {raw_bits_}.fp32;
-}
-
-bfloat16_t::operator int() const {
-    return int(fp32bf16_t {raw_bits_}.fp32);
-}
-
-bfloat16_t &bfloat16_t::operator=(float f) {
-    return (*this) = bfloat16_t(f);
-}
-
-float bfloat16_t::bf16_to_f32_val(int16_t bf16_val) {
-    int32_t inter_temp = *((int16_t *)&bf16_val);
-    inter_temp = inter_temp << 16;
-    float float_value = 0.0;
-    memcpy(&float_value, &inter_temp, sizeof(int32_t));
-    return float_value;
-}
-
-int16_t bfloat16_t::f32_to_bf16_val(float val) {
-    // Use round-to-nearest-even to match hardware behavior
-    uint32_t bits;
-    std::memcpy(&bits, &val, sizeof(float));
-    uint32_t lsb = (bits >> 16) & 1;
-    uint32_t rounding_bias = 0x7FFF + lsb;
-    bits += rounding_bias;
-    return static_cast<int16_t>(bits >> 16);
-}
-
 void bfloat16_t::bf16_to_f32_buf(
         const uint16_t *bf16_buf, float *f32_buf, int64_t size_) {
     for (int64_t j = 0; j < size_; ++j) {

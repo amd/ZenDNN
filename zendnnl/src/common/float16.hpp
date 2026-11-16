@@ -18,6 +18,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <immintrin.h>
 #include "common/zendnnl_compat.hpp"
 #include <initializer_list>
@@ -69,18 +70,22 @@ public:
    */
     /**@{*/
     /** @brief Default constructor, initializes to zero. */
-    float16_t();
+    ZENDNNL_ALWAYS_INLINE float16_t() : raw_bits_ {0} {}
 
     /** @brief Conversion constructor from float32 to float16.
    * @param f : float32 value.
    */
-    float16_t(float f);
+    ZENDNNL_ALWAYS_INLINE float16_t(float f) : raw_bits_ {0} {
+        raw_bits_ = f32_to_f16_val(f);
+    }
 
     /** @brief Conversion assignment from float32 to float16.
    * @param f : float32 value.
    * @return A reference to converted float16 value.
    */
-    float16_t &operator=(float f);
+    ZENDNNL_ALWAYS_INLINE float16_t &operator=(float f) {
+        return (*this) = float16_t(f);
+    }
 
     /** @brief Conversion constructor from an integer type to float16.
    * @param i : an integer type value.
@@ -106,10 +111,14 @@ public:
    */
     /**@{*/
     /** @brief Conversion from float16 to float. */
-    operator float() const;
+    ZENDNNL_ALWAYS_INLINE operator float() const {
+        return f16_to_f32_val(raw_bits_);
+    }
 
     /** @brief Conversion from float16 to int. */
-    operator int() const;
+    ZENDNNL_ALWAYS_INLINE operator int() const {
+        return int(f16_to_f32_val(raw_bits_));
+    }
     /**@}*/
 
     /** @brief Get the raw 16-bit representation.
@@ -141,7 +150,44 @@ public:
    * @param f16_val The float16 value (as uint16_t) to be converted.
    * @return The converted float32 value.
    */
-    static float f16_to_f32_val(uint16_t f16_val);
+    ZENDNNL_ALWAYS_INLINE static float f16_to_f32_val(uint16_t f16_val) {
+        const uint16_t sign = (f16_val & kF16SignMask);
+        const uint16_t exp = (f16_val & kF16ExpMask) >> kF16MantBits;
+        const uint16_t mant = (f16_val & kF16MantMask);
+
+        uint32_t f32_bits = 0;
+
+        if (exp == 0) {
+            if (mant == 0) {
+                // +-Zero: preserve sign
+                f32_bits = static_cast<uint32_t>(sign) << 16;
+            } else {
+                // Subnormal: value = (-1)^sign * 2^(-14) * (mant / 1024)
+                float value = static_cast<float>(mant) / (1 << kF16MantBits);
+                value *= (1.0f / (1 << (kF16ExpBias - 1))); // * 2^(-14)
+                if (sign) { value = -value; }
+                std::memcpy(&f32_bits, &value, sizeof(float));
+            }
+        } else if (exp == kF16ExpMax) {
+            // Infinity or NaN
+            f32_bits = (static_cast<uint32_t>(sign) << 16) | kF32ExpMask
+                    | (static_cast<uint32_t>(mant) << kMantShift);
+            if (mant != 0) {
+                // Force quiet NaN (set MSB of mantissa)
+                f32_bits |= (1u << (kF32MantBits - 1));
+            }
+        } else {
+            // Normal number: rebias exponent
+            uint32_t f32_exp = static_cast<uint32_t>(exp) + kExpRebias;
+            uint32_t f32_mant = static_cast<uint32_t>(mant) << kMantShift;
+            f32_bits = (static_cast<uint32_t>(sign) << 16)
+                    | (f32_exp << kF32MantBits) | f32_mant;
+        }
+
+        float result;
+        std::memcpy(&result, &f32_bits, sizeof(float));
+        return result;
+    }
 
     /**
    * @brief Convert float32 value to float16 value using rounding to
@@ -149,7 +195,83 @@ public:
    * @param val The float32 value to be converted.
    * @return The converted float16 value as uint16_t.
    */
-    static uint16_t f32_to_f16_val(float val);
+    ZENDNNL_ALWAYS_INLINE static uint16_t f32_to_f16_val(float val) {
+        uint32_t f32_bits;
+        std::memcpy(&f32_bits, &val, sizeof(float));
+
+        const uint32_t sign = (f32_bits & kF32SignMask) >> 16; // move to bit 15
+        const uint32_t exp = (f32_bits & kF32ExpMask) >> kF32MantBits;
+        const uint32_t mant = (f32_bits & kF32MantMask);
+
+        uint16_t f16_bits = 0;
+
+        if (exp == 0) {
+            // f32 zero or subnormal → f16 zero (preserve sign)
+            f16_bits = static_cast<uint16_t>(sign);
+        } else if (exp == 255) {
+            // f32 Infinity or NaN
+            f16_bits = static_cast<uint16_t>(sign) | kF16ExpMask;
+            if (mant != 0) {
+                // NaN: truncate mantissa and force quiet NaN
+                uint16_t f16_mant = static_cast<uint16_t>(mant >> kMantShift);
+                f16_bits |= f16_mant;
+                f16_bits |= (1 << (kF16MantBits - 1)); // force QNAN
+            }
+        } else {
+            // Normal number: rebias exponent
+            int32_t new_exp = static_cast<int32_t>(exp) - kExpRebias;
+
+            if (new_exp >= kF16ExpMax) {
+                // Overflow → Infinity
+                f16_bits = static_cast<uint16_t>(sign) | kF16ExpMask;
+            } else if (new_exp <= 0) {
+                if (new_exp < -kF16MantBits) {
+                    // Too small even for subnormal → zero
+                    f16_bits = static_cast<uint16_t>(sign);
+                } else {
+                    // Subnormal: shift mantissa right, include implicit 1 bit
+                    uint32_t full_mant = mant | (1u << kF32MantBits);
+                    int shift = kMantShift + 1 - new_exp;
+
+                    // Round-to-nearest-even
+                    uint32_t round_bit = 1u << (shift - 1);
+                    uint32_t sticky = (full_mant & (round_bit - 1)) ? 1u : 0u;
+                    uint32_t shifted = full_mant >> shift;
+
+                    if ((full_mant & round_bit) && (sticky || (shifted & 1))) {
+                        shifted += 1;
+                    }
+
+                    f16_bits = static_cast<uint16_t>(sign)
+                            | static_cast<uint16_t>(shifted & kF16MantMask);
+                }
+            } else {
+                // Normal range: round-to-nearest-even
+                uint32_t round_bit = 1u << (kMantShift - 1);
+                uint32_t sticky = (mant & (round_bit - 1)) ? 1u : 0u;
+                uint32_t truncated = mant >> kMantShift;
+
+                if ((mant & round_bit) && (sticky || (truncated & 1))) {
+                    truncated += 1;
+                    if (truncated > kF16MantMask) {
+                        truncated = 0;
+                        new_exp += 1;
+                        if (new_exp >= kF16ExpMax) {
+                            f16_bits
+                                    = static_cast<uint16_t>(sign) | kF16ExpMask;
+                            return f16_bits;
+                        }
+                    }
+                }
+
+                f16_bits = static_cast<uint16_t>(sign)
+                        | static_cast<uint16_t>(new_exp << kF16MantBits)
+                        | static_cast<uint16_t>(truncated & kF16MantMask);
+            }
+        }
+
+        return f16_bits;
+    }
 
     /**
    * @brief Convert a float16 buffer to float32 buffer.
@@ -221,6 +343,22 @@ public:
 
 private:
     uint16_t raw_bits_; /*!< float16 raw bits (IEEE 754 half-precision) */
+
+    // IEEE 754 half: 1 sign | 5 exponent (bias 15) | 10 mantissa
+    static constexpr uint16_t kF16SignMask = 0x8000;
+    static constexpr uint16_t kF16ExpMask = 0x7C00;
+    static constexpr uint16_t kF16MantMask = 0x03FF;
+    static constexpr int kF16ExpBias = 15;
+    static constexpr int kF16ExpMax = 31;
+    static constexpr int kF16MantBits = 10;
+    // IEEE 754 single: 1 sign | 8 exponent (bias 127) | 23 mantissa
+    static constexpr uint32_t kF32SignMask = 0x80000000u;
+    static constexpr uint32_t kF32ExpMask = 0x7F800000u;
+    static constexpr uint32_t kF32MantMask = 0x007FFFFFu;
+    static constexpr int kF32ExpBias = 127;
+    static constexpr int kF32MantBits = 23;
+    static constexpr int kMantShift = kF32MantBits - kF16MantBits; // 13
+    static constexpr int kExpRebias = kF32ExpBias - kF16ExpBias; // 112
 };
 
 #if defined(ZENDNNL_HAS_AVX512FP16_MASK_LOAD_STORE_INTRINSICS) \

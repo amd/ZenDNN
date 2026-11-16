@@ -18,7 +18,9 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <immintrin.h>
+#include "common/zendnnl_compat.hpp"
 #include <initializer_list>
 
 namespace zendnnl {
@@ -54,18 +56,43 @@ public:
    */
     /**@{*/
     /** @brief Default constructor, initializes to zero. */
-    bfloat16_t();
+    ZENDNNL_ALWAYS_INLINE bfloat16_t() : raw_bits_ {0} {}
 
     /** @brief Convertion constructor from float32 to bfloat16.
    * @param f : float32 value.
    */
-    bfloat16_t(float f);
+    ZENDNNL_ALWAYS_INLINE bfloat16_t(float f) : raw_bits_ {0} {
+        switch (std::fpclassify(f)) {
+            case FP_SUBNORMAL:
+            case FP_ZERO:
+                // sign preserving zero (denormal go to zero)
+                raw_bits_ = fp32bf16_t {f}.bf16[1];
+                raw_bits_ &= 0x8000;
+                break;
+            case FP_INFINITE: raw_bits_ = fp32bf16_t {f}.bf16[1]; break;
+            case FP_NAN:
+                // truncate and set MSB of the mantissa force QNAN
+                raw_bits_ = fp32bf16_t {f}.bf16[1];
+                raw_bits_ |= (0x01 << 6);
+                break;
+            case FP_NORMAL:
+                // round to nearest even and truncate
+                fp32bf16_t rbits {f};
+                const uint32_t rounding_bias
+                        = 0x00007FFF + (rbits.bf16[1] & 0x1);
+                rbits.u32 += rounding_bias;
+                raw_bits_ = rbits.bf16[1];
+                break;
+        }
+    }
 
     /** @brief Convertion assignment from float32 to bfloat16.
    * @param f : float32 value.
    * @return A reference to converted bfloat16 value.
    */
-    bfloat16_t &operator=(float f);
+    ZENDNNL_ALWAYS_INLINE bfloat16_t &operator=(float f) {
+        return (*this) = bfloat16_t(f);
+    }
 
     /** @brief Convertion constructor from an integer type to bfloat16.
    * @param i : an integer type value.
@@ -91,10 +118,14 @@ public:
    */
     /**@{*/
     /** @brief Conversion from bfloat16 to float. */
-    operator float() const;
+    ZENDNNL_ALWAYS_INLINE operator float() const {
+        return fp32bf16_t {raw_bits_}.fp32;
+    }
 
     /** @brief Conversion from bfloat16 to int. */
-    operator int() const;
+    ZENDNNL_ALWAYS_INLINE operator int() const {
+        return int(fp32bf16_t {raw_bits_}.fp32);
+    }
     /**@}*/
 
     /** @brief Construct a bfloat16_t directly from its raw 16-bit
@@ -120,14 +151,28 @@ public:
    * @param bf16_val The BF16 value to be converted.
    * @return The converted float32 value.
    */
-    static float bf16_to_f32_val(int16_t bf16_val);
+    ZENDNNL_ALWAYS_INLINE static float bf16_to_f32_val(int16_t bf16_val) {
+        int32_t inter_temp = *((int16_t *)&bf16_val);
+        inter_temp = inter_temp << 16;
+        float float_value = 0.0;
+        std::memcpy(&float_value, &inter_temp, sizeof(int32_t));
+        return float_value;
+    }
 
     /**
    * @brief Convert float32 value to bf16 value using rounding to nearest-even.
    * @param val The float32 value to be converted.
    * @return The converted bf16 value.
    */
-    static int16_t f32_to_bf16_val(float val);
+    ZENDNNL_ALWAYS_INLINE static int16_t f32_to_bf16_val(float val) {
+        // Use round-to-nearest-even to match hardware behavior
+        uint32_t bits;
+        std::memcpy(&bits, &val, sizeof(float));
+        uint32_t lsb = (bits >> 16) & 1;
+        uint32_t rounding_bias = 0x7FFF + lsb;
+        bits += rounding_bias;
+        return static_cast<int16_t>(bits >> 16);
+    }
 
     /**
    * @brief Convert 16 float32 values to 16 BF16 values using AVX512 instructions.

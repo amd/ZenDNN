@@ -3478,7 +3478,10 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
                 // flaky on the random branch.
                 bool is_weights_const = is_woq || is_wei_s8 || is_w4a8
                         || pack_format_b == 1 || (rand() % 2 == 0);
-                if (matmul_config_t::instance().get_weight_cache() != 0
+                // params.lowoha_algo is already reference on this call, so the
+                // warmup would be a second full reference gemm.
+                if (!use_reference
+                        && matmul_config_t::instance().get_weight_cache() != 0
                         && is_weights_const
                         && (algo == matmul_algo_t::aocl_dlp_blocked
                                 || algo == matmul_algo_t::onednn_blocked
