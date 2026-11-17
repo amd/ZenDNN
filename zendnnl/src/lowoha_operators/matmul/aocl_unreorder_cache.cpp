@@ -56,7 +56,13 @@ struct aligned_deleter {
 
 using aligned_ptr_t = std::unique_ptr<void, aligned_deleter>;
 
-enum class derived_ck_family : uint8_t { bf16, f16, int8_u8s8 };
+enum class derived_ck_family : uint8_t {
+    bf16,
+    f16,
+    int8_u8s8,
+    int8_sym,
+    s4_w4a8
+};
 
 aligned_ptr_t allocate_buffer(size_t bytes) {
     if (bytes == 0
@@ -75,20 +81,31 @@ aligned_ptr_t allocate_buffer(size_t bytes) {
 static status_t get_or_cache_aocl_ck_weight_impl(const void *aocl_packed, int K,
         int N, int ldb, bool transB, int32_t num_threads, int pack_nr,
         bool interleave_split_halves, std::shared_ptr<void> &ck_weight,
-        bool *was_hit, int32_t weight_cache_mode, derived_ck_family family) {
+        bool *was_hit, int32_t weight_cache_mode, derived_ck_family family,
+        int group_size = 0) {
     ck_weight.reset();
     if (was_hit != nullptr) *was_hit = false;
     if (aocl_packed == nullptr || K <= 0 || N <= 0 || ldb <= 0) {
         return status_t::failure;
     }
     const bool is_f16 = family == derived_ck_family::f16;
-    const bool is_int8 = family == derived_ck_family::int8_u8s8;
-    const data_type_t src_dtype = is_int8
+    const bool is_static_int8 = family == derived_ck_family::int8_u8s8;
+    const bool is_sym_int8 = family == derived_ck_family::int8_sym;
+    const bool is_s4 = family == derived_ck_family::s4_w4a8;
+    const bool is_int8 = is_static_int8 || is_sym_int8;
+    const data_type_t src_dtype = is_static_int8
             ? data_type_t::u8
-            : (is_f16 ? data_type_t::f16 : data_type_t::bf16);
-    const data_type_t wei_dtype = is_int8
-            ? data_type_t::s8
-            : (is_f16 ? data_type_t::f16 : data_type_t::bf16);
+            : ((is_sym_int8 || is_s4) ? data_type_t::s8
+                                      : (is_f16 ? data_type_t::f16
+                                                : data_type_t::bf16));
+    const data_type_t wei_dtype = is_s4
+            ? data_type_t::s4
+            : (is_int8 ? data_type_t::s8
+                       : (is_f16 ? data_type_t::f16 : data_type_t::bf16));
+    if ((is_sym_int8 || is_s4)
+            && (group_size <= 0 || group_size > K || K % group_size != 0)) {
+        return status_t::unimplemented;
+    }
     auto &config = zendnnl::common::matmul_config_t::instance();
     const int32_t effective_cache_mode = weight_cache_mode >= 0
             ? effective_weight_cache_type(weight_cache_mode)
@@ -105,7 +122,9 @@ static status_t get_or_cache_aocl_ck_weight_impl(const void *aocl_packed, int K,
     // current num_threads may differ and cannot safely stand in for it.
     // Decline the derived route when M-hint packing is active; AOCL can still
     // consume its original blocked buffer directly.
-    if (!is_f16 && config.get_dlp_m_hint() > 0) {
+    const bool uses_m_hint
+            = family == derived_ck_family::bf16 || is_static_int8;
+    if (uses_m_hint && config.get_dlp_m_hint() > 0) {
         return status_t::unimplemented;
     }
 
@@ -120,6 +139,8 @@ static status_t get_or_cache_aocl_ck_weight_impl(const void *aocl_packed, int K,
             cache_extra_hash, static_cast<size_t>(src_dtype));
     cache_extra_hash = zendnnl::common::hash_combine(
             cache_extra_hash, static_cast<size_t>(wei_dtype));
+    cache_extra_hash = zendnnl::common::hash_combine(
+            cache_extra_hash, static_cast<size_t>(group_size));
 
     const Key_matmul key(transB, static_cast<unsigned int>(K),
             static_cast<unsigned int>(N), static_cast<unsigned int>(ldb),
@@ -151,10 +172,14 @@ static status_t get_or_cache_aocl_ck_weight_impl(const void *aocl_packed, int K,
     params.prepack.N = N;
     params.prepack.ldb = ldb;
     params.prepack.transposed = transB;
+    params.prepack.sym_group_size = group_size;
 
     const size_t raw_bytes = reorder::weight_unreorder_size(params);
     size_t ck_bytes = custom_kernel::packed_weight_size_bf16(K, N, pack_nr);
-    if (is_int8) {
+    if (is_s4) {
+        ck_bytes = custom_kernel::packed_weight_size_s4(
+                K, N, pack_nr, group_size);
+    } else if (is_int8) {
         ck_bytes = custom_kernel::packed_weight_size_int8(K, N, pack_nr);
     } else if (is_f16) {
         ck_bytes = custom_kernel::packed_weight_size_f16(K, N, pack_nr);
@@ -170,7 +195,12 @@ static status_t get_or_cache_aocl_ck_weight_impl(const void *aocl_packed, int K,
     if (unreorder_status != status_t::success) return unreorder_status;
 
     status_t pack_status = status_t::failure;
-    if (is_int8) {
+    if (is_s4) {
+        pack_status = custom_kernel::prepack_weight_into_s4(
+                static_cast<const int8_t *>(raw_temporary.get()), K, N, ldb,
+                pack_nr, transB, interleave_split_halves, group_size,
+                ck_arena.get());
+    } else if (is_int8) {
         pack_status = custom_kernel::prepack_weight_into_int8(
                 static_cast<const int8_t *>(raw_temporary.get()), K, N, ldb,
                 pack_nr, transB, interleave_split_halves, ck_arena.get());
@@ -215,6 +245,26 @@ status_t get_or_cache_aocl_ck_weight_int8(const void *aocl_packed, int K, int N,
     return get_or_cache_aocl_ck_weight_impl(aocl_packed, K, N, ldb, transB,
             num_threads, pack_nr, interleave_split_halves, ck_weight, was_hit,
             weight_cache_mode, derived_ck_family::int8_u8s8);
+}
+
+status_t get_or_cache_aocl_ck_weight_int8_sym(const void *aocl_packed, int K,
+        int N, int ldb, bool transB, int32_t num_threads, int pack_nr,
+        bool interleave_split_halves, int group_size,
+        std::shared_ptr<void> &ck_weight, bool *was_hit,
+        int32_t weight_cache_mode) {
+    return get_or_cache_aocl_ck_weight_impl(aocl_packed, K, N, ldb, transB,
+            num_threads, pack_nr, interleave_split_halves, ck_weight, was_hit,
+            weight_cache_mode, derived_ck_family::int8_sym, group_size);
+}
+
+status_t get_or_cache_aocl_ck_weight_s4(const void *aocl_packed, int K, int N,
+        int ldb, bool transB, int32_t num_threads, int pack_nr,
+        bool interleave_split_halves, int group_size,
+        std::shared_ptr<void> &ck_weight, bool *was_hit,
+        int32_t weight_cache_mode) {
+    return get_or_cache_aocl_ck_weight_impl(aocl_packed, K, N, ldb, transB,
+            num_threads, pack_nr, interleave_split_halves, ck_weight, was_hit,
+            weight_cache_mode, derived_ck_family::s4_w4a8, group_size);
 }
 
 void clear_aocl_ck_weight_cache() {

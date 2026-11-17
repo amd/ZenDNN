@@ -89,7 +89,7 @@ struct reorder_params_t;
  *       granularity (for wei_scale {G, N}, group_size = K / G).
  */
 struct prepack_params_t {
-    matmul_algo_t algo; ///< Target prepack layout:
+    matmul_algo_t algo; ///< Target prepack layout (default: aocl_dlp_blocked):
     ///< @c matmul_algo_t::aocl_dlp_blocked   — AOCL DLP blocked weight; OR
     ///< @c matmul_algo_t::moe_custom_kernel  — group_matmul custom-kernel VNNI
     data_type_t wei_dtype; ///< Weight data type
@@ -130,7 +130,7 @@ struct prepack_params_t {
     mutable size_t cached_size;
 
     prepack_params_t()
-        : algo(matmul_algo_t::none)
+        : algo(matmul_algo_t::aocl_dlp_blocked)
         , wei_dtype(data_type_t::none)
         , src_dtype(data_type_t::none)
         , K(0)
@@ -278,14 +278,20 @@ status_t weight_prepack_into(
 //                    -> aocl_unreorder_u8s8s32os32_reference
 //                       (blocked s8 prefix only; u8s8 column-sum tail
 //                        is ignored)
+//   wei_dtype = s8 + sym_group_size > 0
+//                    -> aocl_unreorder_s8s8s32os32_sym_quant
+//   wei_dtype = s4 + src_dtype = s8
+//                    -> aocl_unreorder_s8s4s32os32
+//   wei_dtype = s4/u4 (non-native-W4A8)
+//                    -> aocl_unreorder_bf16s4f32of32
 //
 // `ldb` is the destination leading dimension (AOCL: >= N when not
-// transposed, >= K when transposed). The output size is rows*ldb*elem.
+// transposed, >= K when transposed). The output size is rows*ldb*elem,
+// except packed s4/u4 outputs, which occupy ceil(rows*ldb/2) bytes.
 //
 // NOT supported (return status_t::unimplemented / size 0):
 //   - matmul_algo_t::moe_custom_kernel / onednn_blocked / libxsmm_blocked
-//   - wei_dtype s4 / u4 (AOCL exposes no unreorder for the 4-bit packs)
-//   - sym_group_size > 0 (no aocl_unreorder_*_sym_quant)
+//   - sym_group_size > 0 for a dtype other than s8 or native s8xs4
 //
 // consider_m_hint: see prepack_params_t. Pack and unpack must agree.
 // =====================================================================
@@ -296,9 +302,11 @@ status_t weight_prepack_into(
  * Inspects @c params.prepack. The returned value is the destination
  * buffer size @c rows * ldb * sizeof(element), where @c rows is @c K
  * (or @c N when transposed) and @c ldb is the destination leading
- * dimension — NOT the AOCL pack size and no u8s8 column-sum tail. A
- * buffer allocated to exactly this many bytes is the correct
- * destination for @ref reorder_direct in unreorder mode.
+ * dimension. Packed S4/U4 is the exception: two logical elements share one
+ * byte, so the size is @c ceil(rows*ldb/2). This is NOT the AOCL pack size
+ * and includes no u8s8 column-sum tail. A buffer allocated to exactly this
+ * many bytes is the correct destination for @ref reorder_direct in
+ * unreorder mode.
  *
  * @param params  Reorder parameters with @c params.prepack populated.
  * @return Plain output size in bytes on success; @c 0 on validation

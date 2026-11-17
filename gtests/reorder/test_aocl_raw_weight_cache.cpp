@@ -267,6 +267,99 @@ void run_derived_ck_cache_f16_case(
 #endif
 }
 
+void run_derived_ck_cache_quant_case(bool s4) {
+#if !ZENDNNL_DEPENDS_AOCLDLP
+    (void)s4;
+    GTEST_SKIP() << "AOCL-DLP quantized unreorder APIs are unavailable";
+#else
+    constexpr int K = 64;
+    constexpr int N = 128;
+    constexpr int ldb = K;
+    constexpr int group_size = 16;
+    constexpr int pack_nr = 32;
+    const size_t logical_elems = static_cast<size_t>(N) * ldb;
+    std::vector<int8_t> original(
+            s4 ? (logical_elems + 1) / 2 : logical_elems, 0);
+    for (size_t i = 0; i < logical_elems; ++i) {
+        const int value = static_cast<int>((i * 7 + 3) % (s4 ? 15 : 23))
+                - (s4 ? 7 : 11);
+        if (s4) {
+            uint8_t &byte
+                    = reinterpret_cast<uint8_t *>(original.data())[i >> 1];
+            const uint8_t nibble = static_cast<uint8_t>(value) & 0x0F;
+            byte = (i & 1U) ? static_cast<uint8_t>((byte & 0x0F) | nibble << 4)
+                            : static_cast<uint8_t>((byte & 0xF0) | nibble);
+        } else {
+            original[i] = static_cast<int8_t>(value);
+        }
+    }
+
+    reorder::reorder_params_t prepack;
+    prepack.is_prepack = true;
+    prepack.prepack.algo = matmul_algo_t::aocl_dlp_blocked;
+    prepack.prepack.wei_dtype = s4 ? data_type_t::s4 : data_type_t::s8;
+    prepack.prepack.src_dtype = data_type_t::s8;
+    prepack.prepack.K = K;
+    prepack.prepack.N = N;
+    prepack.prepack.ldb = ldb;
+    prepack.prepack.transposed = true;
+    prepack.prepack.sym_group_size = group_size;
+
+    const size_t packed_bytes = reorder::weight_prepack_size(prepack);
+    if (packed_bytes == 0) {
+        GTEST_SKIP() << "AOCL symmetric quantized reorder is unavailable";
+    }
+    aligned_ptr_t packed(zendnnl_aligned_alloc(64, packed_bytes));
+    ASSERT_NE(packed, nullptr);
+    ASSERT_EQ(reorder::reorder_direct(original.data(), packed.get(), prepack),
+            status_t::success);
+
+    const size_t ck_bytes = s4
+            ? ck::packed_weight_size_s4(K, N, pack_nr, group_size)
+            : ck::packed_weight_size_int8(K, N, pack_nr);
+    ASSERT_GT(ck_bytes, 0u);
+    aligned_ptr_t expected_ck(zendnnl_aligned_alloc(64, ck_bytes));
+    ASSERT_NE(expected_ck, nullptr);
+    const status_t expected_status = s4
+            ? ck::prepack_weight_into_s4(original.data(), K, N, ldb, pack_nr,
+                      /*transB=*/true, /*interleave_split_halves=*/false,
+                      group_size, expected_ck.get())
+            : ck::prepack_weight_into_int8(original.data(), K, N, ldb, pack_nr,
+                      /*transB=*/true, /*interleave_split_halves=*/false,
+                      expected_ck.get());
+    ASSERT_EQ(expected_status, status_t::success);
+
+    CacheCapacityGuard capacity_guard;
+    WeightCacheModeGuard cache_on(1);
+    matmul::clear_aocl_ck_weight_cache();
+    std::shared_ptr<void> first;
+    bool hit = true;
+    const auto derive = [&](std::shared_ptr<void> &out, bool *was_hit) {
+        return s4
+                ? matmul::get_or_cache_aocl_ck_weight_s4(packed.get(), K, N,
+                          ldb, /*transB=*/true, /*num_threads=*/4, pack_nr,
+                          /*interleave_split_halves=*/false, group_size, out,
+                          was_hit)
+                : matmul::get_or_cache_aocl_ck_weight_int8_sym(packed.get(), K,
+                          N, ldb, /*transB=*/true, /*num_threads=*/4, pack_nr,
+                          /*interleave_split_halves=*/false, group_size, out,
+                          was_hit);
+    };
+    ASSERT_EQ(derive(first, &hit), status_t::success);
+    EXPECT_FALSE(hit);
+    ASSERT_NE(first, nullptr);
+    EXPECT_EQ(std::memcmp(first.get(), expected_ck.get(), ck_bytes), 0);
+
+    std::shared_ptr<void> second;
+    ASSERT_EQ(derive(second, &hit), status_t::success);
+    EXPECT_TRUE(hit);
+    EXPECT_EQ(first.get(), second.get());
+    first.reset();
+    second.reset();
+    matmul::clear_aocl_ck_weight_cache();
+#endif
+}
+
 TEST(TestAoclDerivedCkWeightCache, NonTransposedRoundTripAndHit) {
     run_derived_ck_cache_case(false);
 }
@@ -287,6 +380,14 @@ TEST(TestAoclDerivedCkWeightCache, F16NonTransposedRoundTripAndHit) {
 TEST(TestAoclDerivedCkWeightCache, F16TransposedInterleavedRoundTripAndHit) {
     run_derived_ck_cache_f16_case(
             /*transposed=*/true, /*interleave_split_halves=*/true);
+}
+
+TEST(TestAoclDerivedCkWeightCache, SymmetricInt8RoundTripAndHit) {
+    run_derived_ck_cache_quant_case(/*s4=*/false);
+}
+
+TEST(TestAoclDerivedCkWeightCache, NativeS4RoundTripAndHit) {
+    run_derived_ck_cache_quant_case(/*s4=*/true);
 }
 
 TEST(TestAoclDerivedCkWeightCache, DisabledWeightCacheDeclinesPersistentEntry) {

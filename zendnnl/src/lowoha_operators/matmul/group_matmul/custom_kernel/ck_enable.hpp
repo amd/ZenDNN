@@ -209,11 +209,9 @@ inline bool get_grp_matmul_custom_kernel_f16() {
 
 /// The variant whose pack serves a (K, N) weight of this dtype tuple, or
 /// `kUnsupported`: the family sub-toggle and ISA, the pack width, the INT8
-/// and W4A8 K alignment, the INT8 accumulation depth, and an AOCL-prepacked
-/// weight the kernel cannot convert (every family but BF16, FP16 and static
-/// U8xS8).  A non-positive K skips the K gates, and the pack-width gate also
-/// needs a positive N.  The master knob and the per-call quant metadata are
-/// the caller's.
+/// and W4A8 K alignment, and the INT8 accumulation depth. A non-positive K
+/// skips the K gates, and the pack-width gate also needs a positive N. The
+/// master knob and the per-call quant metadata are the caller's.
 custom_kernel::KernelVariant grp_matmul_ck_weight_variant(data_type_t src,
         data_type_t wei, data_type_t dst, bool dynamic_quant,
         data_type_t compute, bool static_u8s8, bool aocl_prepacked, int K,
@@ -242,7 +240,7 @@ inline bool group_matmul_custom_kernel_candidate(const ParamsVec &params,
         const std::vector<int> &M, const std::vector<int> &N,
         grp_matmul_gated_act_t fused_act) {
     size_t rep = params.size();
-    int64_t s4_groups = 0;
+    int64_t s4_per_group_src_groups = 0;
     for (size_t i = 0; i < params.size(); ++i) {
         if (i < M.size() && M[i] <= 0) { continue; }
         rep = i;
@@ -303,10 +301,17 @@ inline bool group_matmul_custom_kernel_candidate(const ParamsVec &params,
             if (ws.dims.size() != 2 || ws.dims[0] < 1 || ws.dims[1] != N[i]) {
                 return false;
             }
-            if (s4_groups == 0) {
-                s4_groups = ws.dims[0];
-            } else if (s4_groups != ws.dims[0]) {
-                return false;
+            // Per-token source scales do not carry a K-group count; experts
+            // may therefore have different G as long as N-tile preparation
+            // later verifies one effective K/G group size and scale stride.
+            // Per-group source scales still use the call-level
+            // src_scale_groups field and must remain uniform.
+            if (src_per_group) {
+                if (s4_per_group_src_groups == 0) {
+                    s4_per_group_src_groups = ws.dims[0];
+                } else if (s4_per_group_src_groups != ws.dims[0]) {
+                    return false;
+                }
             }
             continue;
         }

@@ -312,6 +312,11 @@ bool w4a8_populate_plain_s8_cache(const std::vector<const void *> &weight,
         if (weight[e] == nullptr || K[e] <= 0 || N[e] <= 0 || ldb[e] <= 0)
             continue;
         if (!is_w4a8_config(params[e])) continue;
+        // An AOCL-prepacked S4 pointer is already a blocked full-weight image,
+        // not raw nibble storage. CK preparation owns its inverse conversion;
+        // if CK declines, n_tile_execute sends the untouched image to the
+        // full-N AOCL fallback. Never feed it to cvt_s4_to_s8().
+        if (is_aocl_prepacked_weight(params[e])) continue;
 
         if (static_cast<size_t>(e) < is_weights_const.size()
                 && !is_weights_const[e]) {

@@ -779,11 +779,15 @@ inline bool m_tile_supported(const std::vector<char> &layout,
         // plain row-major ('n') + unpacked (pack_format_b == 0).
         const bool reordered_pergroup_dyn_s8
                 = params[i].dtypes.wei == data_type_t::s8
+                && params[i].dtypes.compute == data_type_t::s8
+                && params[i].quant_params.src_zp.buff == nullptr
                 && params[i].dynamic_quant && params[i].mem_format_b == 'r'
                 && params[i].quant_params.src_scale.dims.size() == 2
                 && params[i].quant_params.src_scale.dims[1] > 1;
         const bool reordered_pergroup_static_s8
                 = params[i].dtypes.wei == data_type_t::s8
+                && params[i].dtypes.compute == data_type_t::s8
+                && params[i].quant_params.src_zp.buff == nullptr
                 && !params[i].dynamic_quant && params[i].mem_format_b == 'r'
                 && params[i].quant_params.src_scale.buff != nullptr
                 && params[i].quant_params.src_scale.dims.size() == 2
@@ -809,6 +813,18 @@ inline bool m_tile_supported(const std::vector<char> &layout,
         // routable after an AOCL-prepacked weight is introduced.
         const bool aocl_prepacked_static_u8s8
                 = is_static_u8s8_quant_config(params[i]);
+        const auto aocl_prepacked_variant
+                = custom_kernel::resolve_variant(params[i].dtypes.src,
+                        params[i].dtypes.wei, params[i].dtypes.dst,
+                        params[i].dynamic_quant, params[i].dtypes.compute);
+        const bool aocl_prepacked_sym_int8
+                = custom_kernel::is_int8_variant(aocl_prepacked_variant)
+                && !aocl_prepacked_static_u8s8
+                && params[i].dtypes.compute == data_type_t::s8
+                && params[i].postop_.empty();
+        const bool aocl_prepacked_s4
+                = custom_kernel::is_w4a8_variant(aocl_prepacked_variant)
+                && params[i].postop_.empty();
         const bool aocl_prepacked_for_ck_ok = allow_prepacked_b
                 && get_grp_matmul_custom_kernel()
                 && params[i].mem_format_b == 'r'
@@ -818,7 +834,8 @@ inline bool m_tile_supported(const std::vector<char> &layout,
                                 == zendnnl::common::matmul_algo_t::
                                         aocl_dlp_blocked)
                 && (aocl_prepacked_bf16 || aocl_prepacked_f16
-                        || aocl_prepacked_static_u8s8);
+                        || aocl_prepacked_static_u8s8 || aocl_prepacked_sym_int8
+                        || aocl_prepacked_s4);
         if (params[i].mem_format_b != 'n' && !reordered_pergroup_s8
                 && !ck_prepacked_b_ok && !aocl_prepacked_for_ck_ok) {
             return false;

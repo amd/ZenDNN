@@ -237,6 +237,12 @@ inline bool single_matmul_group_routable(char layout, int M, int N, int K,
     const bool int_variant = custom_kernel::is_int8_variant(variant);
     const bool s4_variant = custom_kernel::is_w4a8_variant(variant);
     const bool f16_variant = custom_kernel::is_f16_variant(variant);
+    const bool dynamic_asym_int8 = int_variant
+            && !is_static_u8s8_quant_config(params)
+            && (variant == custom_kernel::KernelVariant::kU8_S8_BF16_ASYM
+                    || variant
+                            == custom_kernel::KernelVariant::kU8_S8_F32_ASYM);
+    if (aocl_prepacked && dynamic_asym_int8) return false;
     // The single-expert CK policy routes a covered layer (below decode's
     // N-tile count too for a dtype FORCE_CK lists): Rule 0.46 runs each
     // covered phase on the custom kernel.  A raw weight routes in both phases once

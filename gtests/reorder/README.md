@@ -115,6 +115,9 @@ Plain weight packed to the AOCL blocked layout and unpacked back, compared withi
 | `AOCL_UNREORDER_F32_STRIDED` / `_S8_STRIDED` | `ldb > N` on both the source and the recovered destination |
 | `AOCL_UNREORDER_BF16_M_HINT` / `_S8_M_HINT` / `_U8SRC_M_HINT` | `m_hint=32` on the fixture N. Pack and unpack both forward `gemm_hints`; AOCL derives the same NR |
 | `AOCL_UNREORDER_M_HINT_OPT_OUT` | `consider_m_hint=false` unpacks a buffer packed with the hint off |
+| `AoclQuantUnreorder.SymmetricS8UnhintedRoundTrip` | symmetric S8 with a legal non-divisor group while process M-hint is enabled; the inverse remains unhinted |
+| `AoclQuantUnreorder.SignedS4NonTransposedOddPaddedLdb` | BF16×S4 inverse, non-transposed packed nibbles, odd padded `ldb`, exact size, and destination guard |
+| `AoclQuantUnreorder.UnsignedU4TransposedOddPaddedLdb` | BF16×U4 inverse, transposed packed nibbles, odd padded `ldb`, exact size, and destination guard |
 
 Validation is a separate `TEST(AoclUnreorderGuard, …)` suite with a fixed `8×16` shape, so `--test` does not repeat it:
 
@@ -122,7 +125,8 @@ Validation is a separate `TEST(AoclUnreorderGuard, …)` suite with a fixed `8×
 |---|---|
 | `BothFlagsFail` | `is_prepack && is_unreorder` → `failure` |
 | `UnsupportedAlgoSizeZero` | custom-kernel / onednn / libxsmm → `weight_unreorder_size == 0` |
-| `UnsupportedDtypeSizeZero` | s4 and the s8 sym-quant variant → size `0` |
+| `UnsupportedDtypeSizeZero` | unsupported symmetric dtype/source pairs, oversized groups, and misaligned groups → size `0` without reading the dummy source |
+| `PrepackRejectsMismatchedSymmetricIdentity` | prepack and inverse reject the same unsupported source families and bad groups |
 | `BadParamsFail` | `ldb < N`, `K`/`N` ≤ 0, null `packed` or `dst` → `failure` |
 
 The round-trip cases self-skip when AOCL-DLP is not built (size `0` /

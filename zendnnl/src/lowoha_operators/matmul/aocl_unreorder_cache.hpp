@@ -55,16 +55,36 @@ status_t get_or_cache_aocl_ck_weight_f16(const void *aocl_packed, int K, int N,
 
 /**
  * Convert a pure static U8xS8 AOCL-DLP-blocked weight into the CK INT8
- * VNNI-quad layout (including CK's per-column compensation row).
- *
- * AOCL symmetric-quant packs are deliberately excluded: AOCL exposes no
- * inverse for `s8s8s32os32_sym_quant`. The source dtype is fixed to U8 so the
- * inverse exactly matches `aocl_reorder_u8s8s32os32`.
+ * VNNI-quad layout (including CK's per-column compensation row). The source
+ * dtype is fixed to U8 so the inverse exactly matches
+ * `aocl_reorder_u8s8s32os32`.
  */
 status_t get_or_cache_aocl_ck_weight_int8(const void *aocl_packed, int K, int N,
         int ldb, bool transB, int32_t num_threads, int pack_nr,
         bool interleave_split_halves, std::shared_ptr<void> &ck_weight,
         bool *was_hit = nullptr, int32_t weight_cache_mode = -1);
+
+/**
+ * Symmetric-quantized S8 sibling. Uses
+ * `aocl_unreorder_s8s8s32os32_sym_quant` with the B-side K group size that
+ * produced the blocked image, then writes the normal CK INT8 pack.
+ */
+status_t get_or_cache_aocl_ck_weight_int8_sym(const void *aocl_packed, int K,
+        int N, int ldb, bool transB, int32_t num_threads, int pack_nr,
+        bool interleave_split_halves, int group_size,
+        std::shared_ptr<void> &ck_weight, bool *was_hit = nullptr,
+        int32_t weight_cache_mode = -1);
+
+/**
+ * Native W4A8 S4 sibling. Uses `aocl_unreorder_s8s4s32os32` to recover the
+ * nibble-packed raw S4 matrix, then writes the CK S4 pack for the same group
+ * size.
+ */
+status_t get_or_cache_aocl_ck_weight_s4(const void *aocl_packed, int K, int N,
+        int ldb, bool transB, int32_t num_threads, int pack_nr,
+        bool interleave_split_halves, int group_size,
+        std::shared_ptr<void> &ck_weight, bool *was_hit = nullptr,
+        int32_t weight_cache_mode = -1);
 
 /** Clear every cached AOCL-derived CK weight. */
 void clear_aocl_ck_weight_cache();

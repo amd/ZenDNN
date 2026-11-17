@@ -62,8 +62,15 @@ custom_kernel::KernelVariant grp_matmul_ck_weight_variant(data_type_t src,
                     || K > custom_kernel::kMaxSafeInt8AccumK))
         return kNone;
     if (K > 0 && s4 && K % custom_kernel::kS4Octet != 0) return kNone;
-    // The custom kernel converts BF16, FP16, and static U8xS8 AOCL-DLP packs.
-    if (aocl_prepacked && !bf16 && !f16 && !static_u8s8) return kNone;
+    // AOCL-prepacked dynamic asymmetric INT8 has no CK inverse route. Keep it
+    // on the scalar/full-N AOCL path instead of entering grouped preparation
+    // only to be refused there.
+    if (aocl_prepacked && int8 && !static_u8s8 && compute == data_type_t::u8) {
+        return kNone;
+    }
+    // Every currently supported CK weight family has an AOCL inverse.
+    (void)aocl_prepacked;
+    (void)static_u8s8;
     return v;
 }
 

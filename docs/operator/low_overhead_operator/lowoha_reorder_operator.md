@@ -180,7 +180,7 @@ status_t reorder_direct(
 | Value | Description |
 |-------|-------------|
 | `status_t::success` | Operation completed successfully |
-| `status_t::unimplemented` | Mode/dtype/layout not available (e.g. unreorder of a non-AOCL pack, s8 sym-quant, or a build without AOCL-DLP) |
+| `status_t::unimplemented` | Mode/dtype/layout not available (e.g. unreorder of a non-AOCL pack or a build without AOCL-DLP) |
 | `status_t::failure` | Invalid parameters, both `is_prepack` and `is_unreorder`, null pointers, an AOCL unreorder error, etc. |
 
 **Note:** When `dynamic_quant = true` and `dst = nullptr`, the function computes and fills the scale/zero-point output buffers without performing quantization. This is useful for pre-computing quantization parameters.
@@ -482,11 +482,11 @@ struct prepack_params_t {
                                 //   matmul_algo_t::moe_custom_kernel -> group_matmul CK VNNI
                                 //                                       (packs into caller dst)
   data_type_t   wei_dtype;      // Weight data type (f32 / bf16 / f16 / s8 / s4 / u4)
-  data_type_t   src_dtype;      // Source (matmul A) dtype. Disambiguates s8 vs u8
-                                //   src, and (with wei_dtype = s8) decides whether
-                                //   the column-sum buffer is appended -- see
-                                //   "Appended Column-Sum Buffer". MUST equal the
-                                //   matmul's dtypes.src.
+  data_type_t   src_dtype;      // Effective A dtype consumed with this packed
+                                //   layout. Dynamic W4A8 uses s8 here even when
+                                //   the public matmul source is bf16. For static
+                                //   U8xS8 it decides whether the column-sum
+                                //   buffer is appended and must match dtypes.src.
   int64_t       K;              // Weight rows
   int64_t       N;              // Weight cols
   int64_t       ldb;            // Physical leading dimension of the input weights
@@ -508,7 +508,13 @@ struct prepack_params_t {
 
 ### Supported prepack combinations
 
-`weight_prepack_size` and `reorder_direct` use these combinations when `prepack.algo` is `matmul_algo_t::aocl_dlp_blocked`. `sym_group_size > 0` selects the symmetric grouped s8 pack. s4, u4, and that symmetric grouped pack cannot be unpacked.
+`weight_prepack_size` and `reorder_direct` use these combinations when
+`prepack.algo` is `matmul_algo_t::aocl_dlp_blocked`.
+`sym_group_size > 0` selects a symmetric pack only for S8 weights with an
+effective BF16/S8 source, or S4 weights with an effective S8 source. The group
+must not exceed K and must either equal K or be a multiple of 4. Other
+dtype/source combinations reject a positive group instead of silently choosing
+a different layout.
 
 | Weight dtype | Source dtype | Granularity |
 |--------------|--------------|-------------|
@@ -783,14 +789,21 @@ Only `matmul_algo_t::aocl_dlp_blocked` is invertible, and only for the dtypes AO
 | `f16` | any | yes (AVX512-FP16, otherwise the reference unpack) |
 | `s8` | s8, bf16, or f32 | yes |
 | `s8` | u8 | yes. The column-sum tail is ignored |
+| `s8` | s8 or bf16, `sym_group_size > 0` | yes, via the symmetric-S8 inverse |
+| `s4` | s8 | yes, via the native W4A8 S8×S4 inverse |
+| `s4` or `u4` | other effective source | yes, via the BF16×S4 inverse |
 
 Everything else is rejected — `weight_unreorder_size` returns `0` and `reorder_direct` returns `status_t::unimplemented`:
 
 - `matmul_algo_t::moe_custom_kernel` / `onednn_blocked` / `libxsmm_blocked`
-- `wei_dtype` `s4` / `u4`
-- `sym_group_size > 0` (the symmetric grouped pack has no unpack)
+- a positive `sym_group_size` on any family other than symmetric S8 or native
+  S8×S4
 
-`prepack.consider_m_hint` defaults to true and, for bf16 and s8 with `src_dtype` s8 or u8, forwards `ZENDNNL_DLP_M_HINT` and `num_threads` as `nt_hint` on both the pack and the unreorder. AOCL derives the panel width from those hints, so the unpack must see the same values the pack used. False omits them and only matches a buffer packed with the hint off. f32, f16, and mixed s8 do not attach hints.
+`prepack.consider_m_hint` defaults to true and, for bf16 and plain s8 with
+`src_dtype` s8 or u8, forwards `ZENDNNL_DLP_M_HINT` and `num_threads` as
+`nt_hint` on both the pack and the unreorder. Symmetric S8/S4 prepack does not
+attach hints, so its inverse explicitly omits them too. AOCL derives the panel
+width from hints on the families that use them; pack and unpack must agree.
 
 For a `u8` source (`wei_dtype = s8` + `src_dtype = u8`), the prepacked buffer carries an appended column-sum tail; unreorder unpacks **only** the blocked s8 prefix (recovering the original s8 weights) and ignores the tail.
 
@@ -798,7 +811,7 @@ For a `u8` source (`wei_dtype = s8` + `src_dtype = u8`), the prepacked buffer ca
 
 Mirrors prepack: **query the size, allocate, then call `reorder_direct`.** Here `src` is the packed (blocked) buffer and `dst` is the plain output.
 
-1. **Query the size** with `weight_unreorder_size(rp)`. Returns the destination size in bytes — `rows * ldb * sizeof(element)`, where `rows` is `K` (or `N` when transposed) and `ldb` is `prepack.ldb`. This is **not** the AOCL pack size and does not include a column-sum tail. `0` on validation/dispatch failure or a build without AOCL-DLP.
+1. **Query the size** with `weight_unreorder_size(rp)`. Returns the destination size in bytes — `rows * ldb * sizeof(element)`, where `rows` is `K` (or `N` when transposed) and `ldb` is `prepack.ldb`. Packed S4/U4 uses `ceil(rows * ldb / 2)` bytes. This is **not** the AOCL pack size and does not include a column-sum tail. `0` on validation/dispatch failure or a build without AOCL-DLP.
 2. **Allocate a buffer of at least that size.**
 3. **Call `reorder_direct(packed, dst, rp)`** with the same `rp` (`is_unreorder = true`). The library writes the plain layout into `dst` and never mutates `packed` or touches the AOCL weight/LRU caches.
 
@@ -2147,10 +2160,11 @@ Unreorder validation runs **unconditionally** (not diagnostic-gated), because it
 29. **Mutual exclusion:** `is_prepack` and `is_unreorder` must not both be set — `reorder_direct` returns `status_t::failure`
 30. **Dimensions / leading dimension:** `prepack.K > 0`, `prepack.N > 0`, and `prepack.ldb` ≥ `prepack.K` (transposed) or ≥ `prepack.N` (non-transposed) → else `status_t::failure`
 31. **Algo:** `prepack.algo` must be `matmul_algo_t::aocl_dlp_blocked` (custom-kernel / onednn / libxsmm have no unreorder API) → else `status_t::unimplemented` / size `0`
-32. **dtype:** `prepack.wei_dtype` must be `f32` / `bf16` / `f16` / `s8`, and `prepack.sym_group_size` must be `0` (s4/u4 and the s8 sym-quant variant have no unreorder API) → else `status_t::unimplemented` / size `0`
-33. **m_hint:** default `consider_m_hint` forwards `ZENDNNL_DLP_M_HINT` and `num_threads` for bf16 and s8 with `src_dtype` s8 or u8. AOCL derives NR from those hints, so pack and unreorder must see the same values. False omits them and only matches an unhinted pack. f32, f16, and mixed s8 do not attach hints.
-34. **Null pointers:** `packed` and `dst` must be non-null in `weight_unreorder_into` → else `status_t::failure`
-35. **Buffer size:** the caller is responsible — `dst` must hold at least `weight_unreorder_size(params)` bytes (`= rows * ldb * sizeof(element)`). The library does **not** verify this. AOCL failures are returned as `status_t::failure` (or `unimplemented` for `NOT_SUPPORTED`) and `dst` is not treated as valid.
+32. **dtype:** `prepack.wei_dtype` must be `f32` / `bf16` / `f16` / `s8` / `s4` / `u4`
+33. **symmetric group:** a positive `sym_group_size` is valid only for S8 with effective BF16/S8 source or S4 with effective S8 source; it must be ≤ K and either equal K or be divisible by 4 → otherwise failure / size `0`
+34. **m_hint:** default `consider_m_hint` forwards `ZENDNNL_DLP_M_HINT` and `num_threads` for bf16 and plain s8 with `src_dtype` s8 or u8. Symmetric S8/S4 remains unhinted. AOCL derives NR from hints, so hinted pack and inverse must agree.
+35. **Null pointers:** `packed` and `dst` must be non-null in `weight_unreorder_into` → else `status_t::failure`
+36. **Buffer size:** the caller is responsible — `dst` must hold at least `weight_unreorder_size(params)` bytes (`rows * ldb * sizeof(element)`, or `ceil(rows * ldb / 2)` for S4/U4). The library does **not** verify this. AOCL failures are returned as `status_t::failure` (or `unimplemented` for `NOT_SUPPORTED`) and `dst` is not treated as valid.
 
 ### Group Reorder Validation (`group_reorder`)
 

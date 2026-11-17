@@ -476,7 +476,8 @@ int group_matmul_algo_select(const std::vector<char> &layout,
     // prepack-extras tail).
     const int num_ops_eff = static_cast<int>(M.size());
     const bool m_tile_safe = m_tile_supported(layout, M, params, num_ops_eff);
-    // ALGO 3 allows CK-VNNI prepacked B; W4A8 native prepack stays on full-N ALGOs.
+    // ALGO 3 allows CK-VNNI and AOCL-prepacked B when CK can consume or
+    // invert that family; a declined AOCL conversion falls back at full N.
     const bool n_tile_safe = m_tile_supported(layout, M, params, num_ops_eff,
                                      /*allow_prepacked_b=*/true)
             && n_tile_supported(M, N, params, num_ops_eff, fused_act);

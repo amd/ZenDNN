@@ -646,7 +646,7 @@ TEST(TestMatmulUnreorderRoute, StaticU8S8AoclPackedUsesCachedDerivedCkPath) {
         GTEST_SKIP() << "AVX-512 VNNI custom kernel is unavailable";
     }
 
-    constexpr int M = 5, K = 64, N = 256, threads = 4;
+    constexpr int M = 4, K = 64, N = 256, threads = 4;
     constexpr bool trans_b = true;
     constexpr int ldb = K;
     std::vector<uint8_t> src(static_cast<size_t>(M) * K);
@@ -750,6 +750,766 @@ TEST(TestMatmulUnreorderRoute, StaticU8S8AoclPackedUsesCachedDerivedCkPath) {
                 << "i=" << i;
     }
     ::reset_grp_matmul_caches();
+}
+
+void run_symmetric_quant_aocl_packed_route(
+        bool s4, bool pending_dynamic_scale = false) {
+    if (!ck::avx512vnni_available()) {
+        GTEST_SKIP() << "AVX-512 VNNI custom kernel is unavailable";
+    }
+
+    constexpr int K = 64, N = 256, threads = 4;
+    const int M = pending_dynamic_scale ? 1 : 5;
+    const int group_size = s4 ? 16 : K;
+    const int G = K / group_size;
+    std::vector<bfloat16_t> src(static_cast<size_t>(M) * K);
+    const size_t weight_elems = static_cast<size_t>(N) * K;
+    std::vector<int8_t> weight(s4 ? (weight_elems + 1) / 2 : weight_elems, 0);
+    std::vector<float> src_scale(M);
+    std::vector<float> wei_scale(static_cast<size_t>(G) * N);
+    for (size_t i = 0; i < src.size(); ++i)
+        src[i] = bfloat16_t(
+                0.03125f * static_cast<float>(static_cast<int>(i % 17) - 8));
+    for (int m = 0; m < M; ++m)
+        src_scale[m] = 0.0125f + 0.0005f * static_cast<float>(m);
+    for (int g = 0; g < G; ++g)
+        for (int n = 0; n < N; ++n)
+            wei_scale[static_cast<size_t>(g) * N + n]
+                    = 0.02f + 0.00025f * static_cast<float>((g + n) % 5);
+    for (size_t i = 0; i < weight_elems; ++i) {
+        const int value = static_cast<int>((i * 7 + 1) % (s4 ? 15 : 23))
+                - (s4 ? 7 : 11);
+        if (s4) {
+            uint8_t &byte = reinterpret_cast<uint8_t *>(weight.data())[i >> 1];
+            const uint8_t nibble = static_cast<uint8_t>(value) & 0x0F;
+            byte = (i & 1U) ? static_cast<uint8_t>((byte & 0x0F) | nibble << 4)
+                            : static_cast<uint8_t>((byte & 0xF0) | nibble);
+        } else {
+            weight[i] = static_cast<int8_t>(value);
+        }
+    }
+
+    reorder::reorder_params_t prepack;
+    prepack.is_prepack = true;
+    prepack.num_threads = threads;
+    prepack.prepack.algo = matmul_algo_t::aocl_dlp_blocked;
+    prepack.prepack.wei_dtype = s4 ? data_type_t::s4 : data_type_t::s8;
+    prepack.prepack.src_dtype = data_type_t::s8;
+    prepack.prepack.K = K;
+    prepack.prepack.N = N;
+    prepack.prepack.ldb = K;
+    prepack.prepack.transposed = true;
+    prepack.prepack.sym_group_size = group_size;
+    const size_t packed_bytes = reorder::weight_prepack_size(prepack);
+    if (packed_bytes == 0) {
+        GTEST_SKIP() << "AOCL symmetric quantized reorder is unavailable";
+    }
+    aligned_ptr_t packed(zendnnl_aligned_alloc(64, packed_bytes));
+    ASSERT_NE(packed, nullptr);
+    ASSERT_EQ(reorder::reorder_direct(weight.data(), packed.get(), prepack),
+            status_t::success);
+
+    matmul::matmul_params params;
+    params.dtypes.src = data_type_t::bf16;
+    params.dtypes.wei = s4 ? data_type_t::s4 : data_type_t::s8;
+    params.dtypes.dst = data_type_t::bf16;
+    params.dtypes.compute = data_type_t::s8;
+    params.dynamic_quant = true;
+    params.mem_format_b = 'r';
+    params.weight_cache_type = 1;
+    params.num_threads = threads;
+    params.quant_params.src_scale.buff
+            = pending_dynamic_scale ? nullptr : src_scale.data();
+    params.quant_params.src_scale.dt = data_type_t::f32;
+    params.quant_params.src_scale.dims = {M, 1};
+    params.quant_params.wei_scale.buff = wei_scale.data();
+    params.quant_params.wei_scale.dt = data_type_t::f32;
+    params.quant_params.wei_scale.dims = {G, N};
+    matmul::matmul_batch_params_t batch;
+
+    RouteConfigGuard route_config;
+    WeightCacheGuard cache_mode(1);
+    mt::AlgoEnvGuard auto_algo(3);
+    mt::CustomKernelOverride custom_on(true);
+    mt::CustomKernelInt8Override int8_on(true);
+    mt::NTileStrategyOverride rounds(2);
+    const unsigned family
+            = s4 ? matmul::kSingleExpertW4a8 : matmul::kSingleExpertInt8;
+    mt::SingleExpertCkMasks single_expert(family, family, family);
+    ::reset_grp_matmul_caches();
+
+    std::vector<bfloat16_t> dst_ck(static_cast<size_t>(M) * N);
+    std::vector<bfloat16_t> dst_aocl(static_cast<size_t>(M) * N);
+    const auto variant = ck::resolve_variant(params.dtypes.src,
+            params.dtypes.wei, params.dtypes.dst, params.dynamic_quant,
+            params.dtypes.compute);
+    ASSERT_NE(variant, ck::KernelVariant::kUnsupported);
+    const auto single_ck
+            = matmul::grp_matmul_single_expert_ck(params, K, N, threads);
+    ASSERT_TRUE(single_ck.decode);
+    ASSERT_TRUE(matmul::matmul_custom_kernel_quant_supported(
+            M, N, K, variant, params));
+    ASSERT_TRUE(matmul::group_matmul_custom_kernel_candidate(
+            std::vector<matmul::matmul_params> {params}, std::vector<int> {M},
+            std::vector<int> {N}, matmul::grp_matmul_gated_act_t::none));
+    const int selected = matmul::group_matmul_algo_select(
+            std::vector<char> {'r'}, std::vector<int> {M}, std::vector<int> {N},
+            std::vector<int> {K}, std::vector<matmul::matmul_params> {params},
+            threads);
+    ASSERT_EQ(selected, 3);
+    ASSERT_TRUE(matmul::single_matmul_group_routable('r', M, N, K, threads,
+            /*batch_count=*/1, /*transA=*/false, /*transB=*/true,
+            /*alpha=*/1.0f, /*beta=*/0.0f, /*bias=*/nullptr, /*ldb=*/K,
+            /*is_weights_const=*/true, params));
+    {
+        mt::ExecutionPathCaptureGuard mode_capture;
+        ASSERT_EQ(matmul::matmul_direct('r', false, true, M, N, K, 1.0f,
+                          src.data(), K, packed.get(), K, /*bias=*/nullptr,
+                          0.0f, dst_ck.data(), N, true, batch, params),
+                status_t::success);
+        const char *mode
+                = matmul::test_api::s_last_group_matmul_direct_execution_path
+                          .load(std::memory_order_relaxed);
+        ASSERT_NE(mode, nullptr);
+        EXPECT_NE(std::string(mode).find("custom"), std::string::npos) << mode;
+    }
+
+    std::shared_ptr<void> derived_ck;
+    bool hit = false;
+    const status_t cache_status = s4
+            ? matmul::get_or_cache_aocl_ck_weight_s4(packed.get(), K, N, K,
+                      /*transB=*/true, threads, ck::plan_pack_nr(K, N),
+                      /*interleave_split_halves=*/false, group_size, derived_ck,
+                      &hit, /*weight_cache_mode=*/1)
+            : matmul::get_or_cache_aocl_ck_weight_int8_sym(packed.get(), K, N,
+                      K, /*transB=*/true, threads, ck::plan_pack_nr(K, N),
+                      /*interleave_split_halves=*/false, group_size, derived_ck,
+                      &hit, /*weight_cache_mode=*/1);
+    ASSERT_EQ(cache_status, status_t::success);
+    EXPECT_TRUE(hit);
+
+    ::reset_grp_matmul_caches();
+    matmul_config_t::instance().set_custom_kernel_route(false);
+    ASSERT_EQ(matmul::matmul_direct('r', false, true, M, N, K, 1.0f, src.data(),
+                      K, packed.get(), K, /*bias=*/nullptr, 0.0f,
+                      dst_aocl.data(), N, true, batch, params),
+            status_t::success);
+    for (size_t i = 0; i < dst_ck.size(); ++i) {
+        const float actual = static_cast<float>(dst_ck[i]);
+        const float expected = static_cast<float>(dst_aocl[i]);
+        EXPECT_NEAR(actual, expected, 0.01f + 0.01f * std::fabs(expected))
+                << "i=" << i;
+    }
+    derived_ck.reset();
+    ::reset_grp_matmul_caches();
+}
+
+TEST(TestMatmulUnreorderRoute, SymmetricInt8AoclPackedRoutesToCk) {
+    run_symmetric_quant_aocl_packed_route(/*s4=*/false);
+}
+
+TEST(TestMatmulUnreorderRoute, NativeS4AoclPackedRoutesToCk) {
+    run_symmetric_quant_aocl_packed_route(/*s4=*/true);
+}
+
+TEST(TestMatmulUnreorderRoute, SymmetricInt8PendingDynamicScaleRoutesToCk) {
+    mt::GroupDqOverride group_dq_off(0);
+    run_symmetric_quant_aocl_packed_route(
+            /*s4=*/false, /*pending_dynamic_scale=*/true);
+}
+
+TEST(TestMatmulUnreorderRoute, DynamicAsymmetricAoclPackedKeepsAoclFallback) {
+    if (!ck::avx512vnni_available()) {
+        GTEST_SKIP() << "AVX-512 VNNI is unavailable";
+    }
+    constexpr int M = 4, K = 64, N = 256, threads = 4;
+    std::vector<bfloat16_t> src(static_cast<size_t>(M) * K);
+    std::vector<int8_t> weight(static_cast<size_t>(N) * K);
+    for (size_t i = 0; i < src.size(); ++i)
+        src[i] = bfloat16_t(
+                0.025f * static_cast<float>(static_cast<int>(i % 17) - 8));
+    for (size_t i = 0; i < weight.size(); ++i)
+        weight[i] = static_cast<int8_t>(static_cast<int>(i % 23) - 11);
+
+    reorder::reorder_params_t prepack;
+    prepack.is_prepack = true;
+    prepack.prepack.algo = matmul_algo_t::aocl_dlp_blocked;
+    prepack.prepack.wei_dtype = data_type_t::s8;
+    prepack.prepack.src_dtype = data_type_t::u8;
+    prepack.prepack.K = K;
+    prepack.prepack.N = N;
+    prepack.prepack.ldb = K;
+    prepack.prepack.transposed = true;
+    const size_t packed_bytes = reorder::weight_prepack_size(prepack);
+    ASSERT_GT(packed_bytes, 0u);
+    aligned_ptr_t packed(zendnnl_aligned_alloc(64, packed_bytes));
+    ASSERT_NE(packed, nullptr);
+    ASSERT_EQ(reorder::reorder_direct(weight.data(), packed.get(), prepack),
+            status_t::success);
+
+    std::vector<float> src_scale(M, 0.0f), wei_scale(N, 0.0125f);
+    matmul::matmul_params params;
+    params.dtypes.src = data_type_t::bf16;
+    params.dtypes.wei = data_type_t::s8;
+    params.dtypes.dst = data_type_t::bf16;
+    params.dtypes.compute = data_type_t::u8;
+    params.dynamic_quant = true;
+    params.mem_format_b = 'r';
+    params.weight_cache_type = 1;
+    params.num_threads = threads;
+    params.quant_params.src_scale.buff = src_scale.data();
+    params.quant_params.src_scale.dt = data_type_t::f32;
+    params.quant_params.src_scale.dims = {M, 1};
+    params.quant_params.src_zp.buff = nullptr;
+    params.quant_params.src_zp.dt = data_type_t::s32;
+    params.quant_params.src_zp.dims = {M, 1};
+    params.quant_params.wei_scale.buff = wei_scale.data();
+    params.quant_params.wei_scale.dt = data_type_t::f32;
+    params.quant_params.wei_scale.dims = {1, N};
+
+    RouteConfigGuard route_config;
+    WeightCacheGuard cache_mode(1);
+    mt::AlgoEnvGuard algo3(3);
+    mt::CustomKernelOverride custom_on(true);
+    mt::CustomKernelInt8Override int8_on(true);
+    mt::GroupDqOverride group_dq_off(0);
+    mt::NTileStrategyOverride rounds(2);
+    matmul::matmul_batch_params_t batch;
+    std::vector<bfloat16_t> dst(static_cast<size_t>(M) * N);
+    mt::ExecutionPathCaptureGuard mode_capture;
+    ASSERT_EQ(matmul::matmul_direct('r', false, true, M, N, K, 1.0f, src.data(),
+                      K, packed.get(), K, /*bias=*/nullptr, 0.0f, dst.data(), N,
+                      true, batch, params),
+            status_t::success);
+    const char *mode
+            = matmul::test_api::s_last_group_matmul_direct_execution_path.load(
+                    std::memory_order_relaxed);
+    EXPECT_EQ(mode, nullptr)
+            << "asymmetric AOCL-prepacked INT8 should stay on scalar matmul";
+    ::reset_grp_matmul_caches();
+}
+
+TEST(TestMatmulUnreorderRoute, PlainS8AoclPackDoesNotUseSymmetricInverse) {
+    if (!ck::avx512vnni_available()) {
+        GTEST_SKIP() << "AVX-512 VNNI is unavailable";
+    }
+    constexpr int M = 1, K = 64, N = 256, threads = 4;
+    std::vector<int8_t> src(static_cast<size_t>(M) * K);
+    std::vector<int8_t> weight(static_cast<size_t>(N) * K);
+    for (size_t i = 0; i < src.size(); ++i)
+        src[i] = static_cast<int8_t>(static_cast<int>(i % 17) - 8);
+    for (size_t i = 0; i < weight.size(); ++i)
+        weight[i] = static_cast<int8_t>(static_cast<int>(i % 23) - 11);
+
+    reorder::reorder_params_t prepack;
+    prepack.is_prepack = true;
+    prepack.prepack.algo = matmul_algo_t::aocl_dlp_blocked;
+    prepack.prepack.wei_dtype = data_type_t::s8;
+    prepack.prepack.src_dtype = data_type_t::s8;
+    prepack.prepack.K = K;
+    prepack.prepack.N = N;
+    prepack.prepack.ldb = K;
+    prepack.prepack.transposed = true;
+    prepack.prepack.sym_group_size = 0;
+    const size_t packed_bytes = reorder::weight_prepack_size(prepack);
+    ASSERT_GT(packed_bytes, 0u);
+    aligned_ptr_t packed(zendnnl_aligned_alloc(64, packed_bytes));
+    ASSERT_NE(packed, nullptr);
+    ASSERT_EQ(reorder::reorder_direct(weight.data(), packed.get(), prepack),
+            status_t::success);
+
+    float src_scale = 0.02f;
+    std::vector<float> wei_scale(N, 0.01f);
+    matmul::matmul_params params;
+    params.dtypes.src = data_type_t::s8;
+    params.dtypes.wei = data_type_t::s8;
+    params.dtypes.dst = data_type_t::bf16;
+    params.dtypes.compute = data_type_t::s8;
+    params.mem_format_b = 'r';
+    params.lowoha_algo = matmul_algo_t::aocl_dlp_blocked;
+    params.weight_cache_type = 1;
+    params.num_threads = threads;
+    params.quant_params.src_scale.buff = &src_scale;
+    params.quant_params.src_scale.dt = data_type_t::f32;
+    params.quant_params.src_scale.dims = {1, 1};
+    params.quant_params.wei_scale.buff = wei_scale.data();
+    params.quant_params.wei_scale.dt = data_type_t::f32;
+    params.quant_params.wei_scale.dims = {N};
+
+    RouteConfigGuard route_config;
+    WeightCacheGuard cache_mode(1);
+    mt::AlgoEnvGuard algo3(3);
+    mt::CustomKernelOverride custom_on(true);
+    mt::CustomKernelInt8Override int8_on(true);
+    mt::NTileStrategyOverride rounds(2);
+    matmul::matmul_batch_params_t batch;
+    std::vector<bfloat16_t> dst(static_cast<size_t>(M) * N);
+    mt::ExecutionPathCaptureGuard mode_capture;
+    ASSERT_EQ(matmul::matmul_direct('r', false, true, M, N, K, 1.0f, src.data(),
+                      K, packed.get(), K, /*bias=*/nullptr, 0.0f, dst.data(), N,
+                      true, batch, params),
+            status_t::success);
+    const char *mode
+            = matmul::test_api::s_last_group_matmul_direct_execution_path.load(
+                    std::memory_order_relaxed);
+    ASSERT_NE(mode, nullptr);
+    EXPECT_EQ(std::string(mode).find("custom"), std::string::npos) << mode;
+    ::reset_grp_matmul_caches();
+}
+
+void run_multi_expert_prepacked_int8(
+        bool heterogeneous_k, bool ck_prepacked = false) {
+    if (!ck::avx512vnni_available()) {
+        GTEST_SKIP() << "AVX-512 VNNI custom kernel is unavailable";
+    }
+
+    constexpr int E = 3, rows = 4, N = 256, threads = 4;
+    const std::vector<int> M {0, rows, rows};
+    const std::vector<int> K {32, 32, heterogeneous_k ? 128 : 32};
+    std::vector<std::vector<bfloat16_t>> src(E);
+    std::vector<std::vector<int8_t>> raw_weight(E);
+    std::vector<std::vector<float>> src_scale(E), wei_scale(E);
+    std::vector<aligned_ptr_t> packed(E);
+    std::vector<const void *> src_ptr(E, nullptr), weight_ptr(E, nullptr),
+            ref_weight_ptr(E, nullptr);
+    std::vector<void *> dst_ptr(E, nullptr), ref_ptr(E, nullptr);
+    std::vector<std::vector<bfloat16_t>> dst(E), ref(E);
+    std::vector<matmul::matmul_params> params(E);
+
+    for (int e = 0; e < E; ++e) {
+        params[e].dtypes.src = data_type_t::bf16;
+        params[e].dtypes.wei = data_type_t::s8;
+        params[e].dtypes.dst = data_type_t::bf16;
+        params[e].dtypes.compute = data_type_t::s8;
+        params[e].dynamic_quant = true;
+        params[e].mem_format_b = 'r';
+        params[e].lowoha_algo = ck_prepacked ? matmul_algo_t::moe_custom_kernel
+                                             : matmul_algo_t::aocl_dlp_blocked;
+        params[e].weight_cache_type = 1;
+        params[e].num_threads = threads;
+        params[e].quant_params.src_scale.dt = data_type_t::f32;
+        params[e].quant_params.src_scale.dims
+                = {static_cast<int64_t>(std::max(1, M[e])), 1};
+        params[e].quant_params.wei_scale.dt = data_type_t::f32;
+        params[e].quant_params.wei_scale.dims = {1, N};
+        if (M[e] == 0) continue;
+
+        src[e].resize(static_cast<size_t>(M[e]) * K[e]);
+        raw_weight[e].resize(static_cast<size_t>(N) * K[e]);
+        src_scale[e].resize(M[e], 0.0f);
+        wei_scale[e].resize(N);
+        dst[e].resize(static_cast<size_t>(M[e]) * N);
+        ref[e].resize(static_cast<size_t>(M[e]) * N);
+        for (size_t i = 0; i < src[e].size(); ++i)
+            src[e][i] = bfloat16_t(0.025f
+                    * static_cast<float>(
+                            static_cast<int>((i + e * 3) % 19) - 9));
+        for (size_t i = 0; i < raw_weight[e].size(); ++i)
+            raw_weight[e][i] = static_cast<int8_t>(
+                    static_cast<int>((i * 5 + e) % 23) - 11);
+        for (int n = 0; n < N; ++n)
+            wei_scale[e][n]
+                    = 0.0125f + 0.00025f * static_cast<float>((n + e) % 7);
+
+        reorder::reorder_params_t prepack;
+        prepack.is_prepack = true;
+        prepack.prepack.algo = ck_prepacked ? matmul_algo_t::moe_custom_kernel
+                                            : matmul_algo_t::aocl_dlp_blocked;
+        prepack.prepack.wei_dtype = data_type_t::s8;
+        prepack.prepack.src_dtype = data_type_t::s8;
+        prepack.prepack.K = K[e];
+        prepack.prepack.N = N;
+        prepack.prepack.ldb = K[e];
+        prepack.prepack.transposed = true;
+        prepack.prepack.sym_group_size = ck_prepacked ? 0 : K[e];
+        const size_t packed_bytes = reorder::weight_prepack_size(prepack);
+        ASSERT_GT(packed_bytes, 0u);
+        packed[e].reset(zendnnl_aligned_alloc(64, packed_bytes));
+        ASSERT_NE(packed[e], nullptr);
+        ASSERT_EQ(reorder::reorder_direct(
+                          raw_weight[e].data(), packed[e].get(), prepack),
+                status_t::success);
+
+        params[e].quant_params.src_scale.buff = src_scale[e].data();
+        params[e].quant_params.wei_scale.buff = wei_scale[e].data();
+        src_ptr[e] = src[e].data();
+        weight_ptr[e] = packed[e].get();
+        ref_weight_ptr[e] = raw_weight[e].data();
+        dst_ptr[e] = dst[e].data();
+        ref_ptr[e] = ref[e].data();
+    }
+
+    const std::vector<char> layout(E, 'r');
+    const std::vector<bool> transA(E, false), transB(E, true);
+    const std::vector<int> N_vec(E, N), lda = K, ldb = K, ldc(E, N);
+    const std::vector<float> alpha(E, 1.0f), beta(E, 0.0f);
+    const std::vector<const void *> bias(E, nullptr);
+    const std::vector<bool> weights_const(E, true);
+
+    RouteConfigGuard route_config;
+    WeightCacheGuard cache_mode(1);
+    mt::AlgoEnvGuard algo3(3);
+    mt::CustomKernelOverride custom_on(true);
+    mt::CustomKernelInt8Override int8_on(true);
+    mt::NTileStrategyOverride rounds(2);
+    ::reset_grp_matmul_caches();
+
+    {
+        mt::ExecutionPathCaptureGuard mode_capture;
+        ASSERT_EQ(matmul::group_matmul_direct(layout, transA, transB, M, N_vec,
+                          K, alpha, src_ptr, lda, weight_ptr, ldb, bias, beta,
+                          dst_ptr, ldc, weights_const, params,
+                          /*moe_postop=*/nullptr, /*gated_act=*/nullptr),
+                status_t::success);
+        const char *mode
+                = matmul::test_api::s_last_group_matmul_direct_execution_path
+                          .load(std::memory_order_relaxed);
+        ASSERT_NE(mode, nullptr);
+        if (heterogeneous_k && !ck_prepacked) {
+            EXPECT_EQ(std::string(mode).find("custom"), std::string::npos)
+                    << mode;
+        } else {
+            EXPECT_NE(std::string(mode).find("custom"), std::string::npos)
+                    << mode;
+        }
+    }
+
+    ::reset_grp_matmul_caches();
+    matmul_config_t::instance().set_custom_kernel_route(false);
+    std::vector<matmul::matmul_params> ref_params = params;
+    for (auto &p : ref_params) {
+        p.mem_format_b = 'n';
+        p.lowoha_algo = matmul_algo_t::none;
+    }
+    {
+        mt::AlgoEnvGuard algo1(1);
+        ASSERT_EQ(matmul::group_matmul_direct(layout, transA, transB, M, N_vec,
+                          K, alpha, src_ptr, lda, ref_weight_ptr, ldb, bias,
+                          beta, ref_ptr, ldc, weights_const, ref_params,
+                          /*moe_postop=*/nullptr, /*gated_act=*/nullptr),
+                status_t::success);
+    }
+    for (int e = 1; e < E; ++e) {
+        for (size_t i = 0; i < dst[e].size(); ++i) {
+            const float expected = static_cast<float>(ref[e][i]);
+            const float actual = static_cast<float>(dst[e][i]);
+            EXPECT_NEAR(actual, expected, 0.01f + 0.01f * std::fabs(expected))
+                    << "expert=" << e << " i=" << i;
+        }
+    }
+    ::reset_grp_matmul_caches();
+}
+
+TEST(TestMatmulUnreorderRoute, MultiExpertSymmetricInt8AoclPackedRoutesToCk) {
+    run_multi_expert_prepacked_int8(/*heterogeneous_k=*/false);
+}
+
+TEST(TestMatmulUnreorderRoute,
+        HeterogeneousAoclPackedGroupSizesFallBackAtFullN) {
+    run_multi_expert_prepacked_int8(/*heterogeneous_k=*/true);
+}
+
+TEST(TestMatmulUnreorderRoute, HeterogeneousCkPrepackedInt8StaysOnCk) {
+    run_multi_expert_prepacked_int8(
+            /*heterogeneous_k=*/true, /*ck_prepacked=*/true);
+}
+
+void run_heterogeneous_s4_effective_group_case(
+        bool compatible_effective_groups) {
+    if (!ck::avx512vnni_available()) {
+        GTEST_SKIP() << "AVX-512 VNNI custom kernel is unavailable";
+    }
+
+    constexpr int E = 2, rows = 4, N = 256, threads = 4;
+    const std::vector<int> M(E, rows), K {64, 128}, N_vec(E, N);
+    const std::vector<int> groups {4, compatible_effective_groups ? 8 : 4};
+    std::vector<std::vector<bfloat16_t>> src(E), dst(E), ref(E);
+    std::vector<std::vector<int8_t>> raw_weight(E);
+    std::vector<std::vector<float>> src_scale(E), wei_scale(E);
+    std::vector<aligned_ptr_t> packed(E);
+    std::vector<const void *> src_ptr(E), weight_ptr(E);
+    std::vector<void *> dst_ptr(E), ref_ptr(E);
+    std::vector<matmul::matmul_params> params(E);
+
+    for (int e = 0; e < E; ++e) {
+        src[e].resize(static_cast<size_t>(rows) * K[e]);
+        dst[e].resize(static_cast<size_t>(rows) * N);
+        ref[e].resize(static_cast<size_t>(rows) * N);
+        raw_weight[e].assign((static_cast<size_t>(N) * K[e] + 1) / 2, 0);
+        src_scale[e].resize(rows);
+        wei_scale[e].resize(static_cast<size_t>(groups[e]) * N);
+        for (size_t i = 0; i < src[e].size(); ++i) {
+            src[e][i] = bfloat16_t(0.025f
+                    * static_cast<float>(
+                            static_cast<int>((i + e * 3) % 19) - 9));
+        }
+        const size_t weight_elems = static_cast<size_t>(N) * K[e];
+        for (size_t i = 0; i < weight_elems; ++i) {
+            const uint8_t nibble
+                    = static_cast<uint8_t>(
+                              static_cast<int>((i * 7 + e) % 15) - 7)
+                    & 0x0F;
+            uint8_t &byte
+                    = reinterpret_cast<uint8_t *>(raw_weight[e].data())[i >> 1];
+            byte = (i & 1U) ? static_cast<uint8_t>((byte & 0x0F) | nibble << 4)
+                            : static_cast<uint8_t>((byte & 0xF0) | nibble);
+        }
+        for (int g = 0; g < groups[e]; ++g) {
+            for (int n = 0; n < N; ++n) {
+                wei_scale[e][static_cast<size_t>(g) * N + n] = 0.02f
+                        + 0.00025f * static_cast<float>((g + n + e) % 5);
+            }
+        }
+
+        reorder::reorder_params_t prepack;
+        prepack.is_prepack = true;
+        prepack.num_threads = threads;
+        prepack.prepack.algo = matmul_algo_t::aocl_dlp_blocked;
+        prepack.prepack.wei_dtype = data_type_t::s4;
+        prepack.prepack.src_dtype = data_type_t::s8;
+        prepack.prepack.K = K[e];
+        prepack.prepack.N = N;
+        prepack.prepack.ldb = K[e];
+        prepack.prepack.transposed = true;
+        prepack.prepack.sym_group_size = K[e] / groups[e];
+        const size_t packed_bytes = reorder::weight_prepack_size(prepack);
+        if (packed_bytes == 0) {
+            GTEST_SKIP() << "AOCL native S4 reorder is unavailable";
+        }
+        packed[e].reset(zendnnl_aligned_alloc(64, packed_bytes));
+        ASSERT_NE(packed[e], nullptr);
+        ASSERT_EQ(reorder::reorder_direct(
+                          raw_weight[e].data(), packed[e].get(), prepack),
+                status_t::success);
+
+        auto &p = params[e];
+        p.dtypes.src = data_type_t::bf16;
+        p.dtypes.wei = data_type_t::s4;
+        p.dtypes.dst = data_type_t::bf16;
+        p.dtypes.compute = data_type_t::s8;
+        p.dynamic_quant = true;
+        p.mem_format_b = 'r';
+        p.lowoha_algo = matmul_algo_t::aocl_dlp_blocked;
+        p.weight_cache_type = 1;
+        p.num_threads = threads;
+        p.quant_params.src_scale.buff = src_scale[e].data();
+        p.quant_params.src_scale.dt = data_type_t::f32;
+        p.quant_params.src_scale.dims = {rows, 1};
+        p.quant_params.wei_scale.buff = wei_scale[e].data();
+        p.quant_params.wei_scale.dt = data_type_t::f32;
+        p.quant_params.wei_scale.dims = {groups[e], N};
+        src_ptr[e] = src[e].data();
+        weight_ptr[e] = packed[e].get();
+        dst_ptr[e] = dst[e].data();
+        ref_ptr[e] = ref[e].data();
+    }
+
+    const std::vector<char> layout(E, 'r');
+    const std::vector<bool> transA(E, false), transB(E, true);
+    const std::vector<int> lda = K, ldb = K, ldc(E, N);
+    const std::vector<float> alpha(E, 1.0f), beta(E, 0.0f);
+    const std::vector<const void *> bias(E, nullptr);
+    const std::vector<bool> weights_const(E, true);
+
+    RouteConfigGuard route_config;
+    WeightCacheGuard cache_mode(1);
+    mt::AlgoEnvGuard algo3(3);
+    mt::CustomKernelOverride custom_on(true);
+    mt::CustomKernelInt8Override int8_on(true);
+    mt::NTileStrategyOverride rounds(2);
+    ::reset_grp_matmul_caches();
+    mt::ExecutionPathCaptureGuard mode_capture;
+    ASSERT_EQ(matmul::group_matmul_direct(layout, transA, transB, M, N_vec, K,
+                      alpha, src_ptr, lda, weight_ptr, ldb, bias, beta, dst_ptr,
+                      ldc, weights_const, params, /*moe_postop=*/nullptr,
+                      /*gated_act=*/nullptr),
+            status_t::success);
+    const char *mode
+            = matmul::test_api::s_last_group_matmul_direct_execution_path.load(
+                    std::memory_order_relaxed);
+    ASSERT_NE(mode, nullptr);
+    if (compatible_effective_groups) {
+        EXPECT_NE(std::string(mode).find("custom"), std::string::npos) << mode;
+    } else {
+        EXPECT_EQ(std::string(mode).find("custom"), std::string::npos) << mode;
+    }
+
+    ::reset_grp_matmul_caches();
+    matmul_config_t::instance().set_custom_kernel_route(false);
+    {
+        mt::AlgoEnvGuard algo1(1);
+        ASSERT_EQ(matmul::group_matmul_direct(layout, transA, transB, M, N_vec,
+                          K, alpha, src_ptr, lda, weight_ptr, ldb, bias, beta,
+                          ref_ptr, ldc, weights_const, params,
+                          /*moe_postop=*/nullptr, /*gated_act=*/nullptr),
+                status_t::success);
+    }
+    for (int e = 0; e < E; ++e) {
+        for (size_t i = 0; i < dst[e].size(); ++i) {
+            const float expected = static_cast<float>(ref[e][i]);
+            const float actual = static_cast<float>(dst[e][i]);
+            EXPECT_NEAR(actual, expected, 0.01f + 0.01f * std::fabs(expected))
+                    << "expert=" << e << " i=" << i;
+        }
+    }
+    ::reset_grp_matmul_caches();
+}
+
+TEST(TestMatmulUnreorderRoute,
+        HeterogeneousS4EffectiveGroupSizesFallBackAtFullN) {
+    run_heterogeneous_s4_effective_group_case(
+            /*compatible_effective_groups=*/false);
+}
+
+TEST(TestMatmulUnreorderRoute,
+        HeterogeneousS4GroupCountsWithSameEffectiveGroupStayOnCk) {
+    run_heterogeneous_s4_effective_group_case(
+            /*compatible_effective_groups=*/true);
+}
+
+TEST(TestMatmulUnreorderRoute,
+        MixedPlainAoclPackCannotMutateRawExpertBeforeFallback) {
+    if (!ck::avx512vnni_available()) {
+        GTEST_SKIP() << "AVX-512 VNNI custom kernel is unavailable";
+    }
+
+    constexpr int E = 2, Mv = 1, K = 64, N = 256, threads = 4;
+    const int pack_nr = ck::plan_pack_nr(K, N);
+    const size_t raw_bytes = static_cast<size_t>(N) * K;
+    const size_t raw_capacity
+            = std::max(raw_bytes, ck::packed_weight_size_int8(K, N, pack_nr));
+    aligned_ptr_t raw_first(zendnnl_aligned_alloc(64, raw_capacity));
+    ASSERT_NE(raw_first, nullptr);
+    std::vector<int8_t> raw_second(raw_bytes);
+    auto *raw_first_bytes = static_cast<int8_t *>(raw_first.get());
+    for (size_t i = 0; i < raw_bytes; ++i) {
+        raw_first_bytes[i] = static_cast<int8_t>(static_cast<int>(i % 23) - 11);
+        raw_second[i]
+                = static_cast<int8_t>(static_cast<int>((i * 5) % 23) - 11);
+    }
+    std::vector<int8_t> raw_first_snapshot(
+            raw_first_bytes, raw_first_bytes + raw_bytes);
+
+    reorder::reorder_params_t prepack;
+    prepack.is_prepack = true;
+    prepack.num_threads = threads;
+    prepack.prepack.algo = matmul_algo_t::aocl_dlp_blocked;
+    prepack.prepack.wei_dtype = data_type_t::s8;
+    prepack.prepack.src_dtype = data_type_t::s8;
+    prepack.prepack.K = K;
+    prepack.prepack.N = N;
+    prepack.prepack.ldb = K;
+    prepack.prepack.transposed = true;
+    prepack.prepack.sym_group_size = 0;
+    const size_t blocked_bytes = reorder::weight_prepack_size(prepack);
+    ASSERT_GT(blocked_bytes, 0u);
+    aligned_ptr_t blocked(zendnnl_aligned_alloc(64, blocked_bytes));
+    ASSERT_NE(blocked, nullptr);
+    ASSERT_EQ(
+            reorder::reorder_direct(raw_second.data(), blocked.get(), prepack),
+            status_t::success);
+
+    std::vector<std::vector<int8_t>> src(
+            E, std::vector<int8_t>(static_cast<size_t>(Mv) * K));
+    std::vector<std::vector<bfloat16_t>> dst(
+            E, std::vector<bfloat16_t>(static_cast<size_t>(Mv) * N));
+    std::vector<std::vector<float>> wei_scale(E, std::vector<float>(N));
+    std::vector<float> src_scale(E, 0.02f);
+    std::vector<matmul::matmul_params> params(E);
+    std::vector<const void *> src_ptr(E),
+            weight_ptr {
+                    raw_first.get(),
+                    blocked.get(),
+            };
+    std::vector<void *> dst_ptr(E);
+    for (int e = 0; e < E; ++e) {
+        for (size_t i = 0; i < src[e].size(); ++i) {
+            src[e][i] = static_cast<int8_t>(static_cast<int>((i + e) % 17) - 8);
+        }
+        for (int n = 0; n < N; ++n) {
+            wei_scale[e][n]
+                    = 0.0125f + 0.00025f * static_cast<float>((n + e) % 7);
+        }
+        auto &p = params[e];
+        p.dtypes.src = data_type_t::s8;
+        p.dtypes.wei = data_type_t::s8;
+        p.dtypes.dst = data_type_t::bf16;
+        p.dtypes.compute = data_type_t::s8;
+        p.mem_format_b = e == 0 ? 'n' : 'r';
+        p.lowoha_algo = e == 0 ? matmul_algo_t::none
+                               : matmul_algo_t::aocl_dlp_blocked;
+        p.weight_cache_type = 2;
+        p.wei_buffer_capacity_bytes = e == 0 ? raw_capacity : 0;
+        p.num_threads = threads;
+        p.quant_params.src_scale.buff = &src_scale[e];
+        p.quant_params.src_scale.dt = data_type_t::f32;
+        p.quant_params.src_scale.dims = {1, 1};
+        p.quant_params.wei_scale.buff = wei_scale[e].data();
+        p.quant_params.wei_scale.dt = data_type_t::f32;
+        p.quant_params.wei_scale.dims = {N};
+        src_ptr[e] = src[e].data();
+        dst_ptr[e] = dst[e].data();
+    }
+
+    const std::vector<char> layout(E, 'r');
+    const std::vector<bool> transA(E, false), transB(E, true);
+    const std::vector<int> M(E, Mv), N_vec(E, N), K_vec(E, K), lda(E, K),
+            ldb(E, K), ldc(E, N);
+    const std::vector<float> alpha(E, 1.0f), beta(E, 0.0f);
+    const std::vector<const void *> bias(E, nullptr);
+    const std::vector<bool> weights_const(E, true);
+
+    RouteConfigGuard route_config;
+    WeightCacheGuard cache_mode(2);
+    mt::AlgoEnvGuard algo3(3);
+    mt::CustomKernelOverride custom_on(true);
+    mt::CustomKernelInt8Override int8_on(true);
+    mt::NTileStrategyOverride rounds(2);
+    ::reset_grp_matmul_caches();
+    mt::ExecutionPathCaptureGuard mode_capture;
+    ASSERT_EQ(matmul::group_matmul_direct(layout, transA, transB, M, N_vec,
+                      K_vec, alpha, src_ptr, lda, weight_ptr, ldb, bias, beta,
+                      dst_ptr, ldc, weights_const, params,
+                      /*moe_postop=*/nullptr, /*gated_act=*/nullptr),
+            status_t::success);
+    EXPECT_EQ(
+            std::memcmp(raw_first.get(), raw_first_snapshot.data(), raw_bytes),
+            0);
+    EXPECT_FALSE(ck::any_weight_packed_in_place(weight_ptr, M));
+    const char *mode
+            = matmul::test_api::s_last_group_matmul_direct_execution_path.load(
+                    std::memory_order_relaxed);
+    ASSERT_NE(mode, nullptr);
+    EXPECT_EQ(std::string(mode).find("custom"), std::string::npos) << mode;
+    ::reset_grp_matmul_caches();
+}
+
+TEST(TestMatmulUnreorderRoute, SimulatedW4A8SkipsAoclBlockedPlainConversion) {
+    constexpr int K = 64, N = 256;
+    int8_t blocked_dummy = 0;
+    std::vector<const void *> weight {&blocked_dummy};
+    std::vector<matmul::matmul_params> params(1);
+    params[0].dtypes.src = data_type_t::bf16;
+    params[0].dtypes.wei = data_type_t::s4;
+    params[0].dtypes.dst = data_type_t::bf16;
+    params[0].dtypes.compute = data_type_t::s8;
+    params[0].dynamic_quant = true;
+    params[0].mem_format_b = 'r';
+    static float src_scale = 1.0f, wei_scale = 1.0f;
+    params[0].quant_params.src_scale.buff = &src_scale;
+    params[0].quant_params.src_scale.dt = data_type_t::f32;
+    params[0].quant_params.src_scale.dims = {1, 1};
+    params[0].quant_params.wei_scale.buff = &wei_scale;
+    params[0].quant_params.wei_scale.dt = data_type_t::f32;
+    params[0].quant_params.wei_scale.dims = {K / 16, N};
+    std::vector<void *> converted;
+    bool any_w4a8 = true;
+    ASSERT_TRUE(matmul::w4a8_populate_plain_s8_cache(weight,
+            /*K=*/ {K}, /*N=*/ {N}, /*ldb=*/ {K}, /*transB=*/ {true}, params,
+            /*is_weights_const=*/ {true}, /*num_ops=*/1, converted, any_w4a8));
+    ASSERT_EQ(converted.size(), 1u);
+    EXPECT_EQ(converted[0], nullptr);
+    EXPECT_FALSE(any_w4a8);
 }
 
 TEST(TestMatmulUnreorderRoute, ScalarCkPrepackedWeightFailsClosed) {

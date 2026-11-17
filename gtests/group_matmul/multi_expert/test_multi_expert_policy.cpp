@@ -187,7 +187,12 @@ TEST_F(MoeAlgo3Quant, LayersOutsideTheKernelKeepTheShapeRules) {
             p.mem_format_b = 'r';
             p.lowoha_algo = zendnnl::common::matmul_algo_t::aocl_dlp_blocked;
         }
-        refused(s, "AOCL-prepacked INT8 weight");
+        EXPECT_TRUE(algo3_call(s));
+        EXPECT_EQ(mm::grp_matmul_auto_algo3_family(s.M, s.N, s.K, s.params),
+                mm::grp_matmul_algo3_family::quant_family);
+        int algo = 0;
+        EXPECT_EQ(pick_reason(s, &algo), "auto_algo3");
+        EXPECT_EQ(algo, 3);
     }
     {
         AutoProbeShape s = quant_layer(quant_t::dq_int8, 512, 8, 8);
@@ -282,7 +287,9 @@ TEST_F(MoeAlgo3Quant, LayersOutsideTheKernelKeepTheShapeRules) {
                 p.lowoha_algo
                         = zendnnl::common::matmul_algo_t::aocl_dlp_blocked;
             }
-            refused(s, "an AOCL-prepacked weight");
+            EXPECT_TRUE(algo3_call(s));
+            EXPECT_EQ(mm::grp_matmul_auto_algo3_family(s.M, s.N, s.K, s.params),
+                    mm::grp_matmul_algo3_family::quant_family);
         }
     }
 }

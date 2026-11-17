@@ -108,8 +108,8 @@ using zendnnl::memory::status_t;
  *
  * @return @c status_t::success on success;
  *         @c status_t::unimplemented when the selected mode is not
- *         available (e.g. unreorder of a non-AOCL layout or dtype, a
- *         build without AOCL-DLP, or s8 sym-quant);
+ *         available (e.g. unreorder of a non-AOCL layout or unsupported
+ *         dtype, or a build without AOCL-DLP);
  *         @c status_t::failure otherwise (invalid parameters, both
  *         @c is_prepack and @c is_unreorder, null pointers, an AOCL
  *         unreorder error, ...).

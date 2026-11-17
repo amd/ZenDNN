@@ -79,6 +79,20 @@ inline size_t colsum_buffer_bytes(const prepack_params_t &params) {
             static_cast<size_t>(params.N) * sizeof(int32_t), kPrepackAlign);
 }
 
+inline bool is_symmetric_pack_family(const prepack_params_t &params) {
+    return (params.wei_dtype == data_type_t::s8
+                   && (params.src_dtype == data_type_t::bf16
+                           || params.src_dtype == data_type_t::s8))
+            || (params.wei_dtype == data_type_t::s4
+                    && params.src_dtype == data_type_t::s8);
+}
+
+inline bool valid_symmetric_group(const prepack_params_t &params) {
+    const int64_t group = params.sym_group_size;
+    return group <= 0
+            || (group <= params.K && (group == params.K || (group % 4) == 0));
+}
+
 #if ZENDNNL_DEPENDS_AOCLDLP
 void write_weight_colsum(
         const void *weights, const prepack_params_t &params, void *dst) {
@@ -235,20 +249,25 @@ status_t validate_prepack_params(
         return status_t::success;
     }
 
-    if (params.algo == matmul_algo_t::aocl_dlp_blocked
-            && params.src_dtype == data_type_t::u8
-            && params.sym_group_size > 0) {
-        apilog_error(caller,
-                ": src_dtype u8 with sym_group_size > 0 is unsupported");
-        return status_t::failure;
-    }
-
     // Prepack only supports the AOCL DLP blocked layout. (libxsmm_blocked
     // and onednn_blocked were intentionally dropped -- see lowoha_prepack.hpp
     // for the rationale.)
     if (params.algo != matmul_algo_t::aocl_dlp_blocked) {
         apilog_error(caller, ": prepack.algo must be aocl_dlp_blocked (got ",
                 kernel_to_string(params.algo), ")");
+        return status_t::failure;
+    }
+    if (params.sym_group_size > 0 && !is_symmetric_pack_family(params)) {
+        apilog_error(caller,
+                ": sym_group_size > 0 requires s8 weights with bf16/s8 "
+                "effective source, or s4 weights with s8 effective source");
+        return status_t::failure;
+    }
+    if (!valid_symmetric_group(params)) {
+        apilog_error(caller, ": invalid symmetric quantization group_size=",
+                params.sym_group_size, " for K=", params.K,
+                " (expected group <= K and either group == K or group % 4 "
+                "== 0)");
         return status_t::failure;
     }
     return status_t::success;
@@ -274,7 +293,7 @@ status_t validate_prepack_inputs(const char *caller, const void *weights,
 }
 
 // Not diagnostic-gated. failure: bad K/N/ldb.
-// unimplemented: unsupported algo, dtype, or sym-quant.
+// unimplemented: unsupported algo or dtype.
 status_t validate_unreorder_params(
         const char *caller, const prepack_params_t &params) {
     if (params.K <= 0 || params.N <= 0) {
@@ -303,23 +322,33 @@ status_t validate_unreorder_params(
         return status_t::unimplemented;
     }
 
-    if (params.sym_group_size > 0) {
+    if (params.sym_group_size > 0 && !is_symmetric_pack_family(params)) {
         apilog_error(caller,
-                ": sym_group_size > 0 (s8 sym-quant) has no AOCL unreorder "
-                "API (reorder and GEMM sym-quant symbols exist; unreorder "
-                "does not)");
+                ": sym_group_size > 0 is only supported for s8 or native "
+                "s8xs4 symmetric-quantized weights (wei_dtype=",
+                dtype_info(params.wei_dtype), ")");
         return status_t::unimplemented;
+    }
+    if (!valid_symmetric_group(params)) {
+        apilog_error(caller, ": invalid symmetric quantization group_size=",
+                params.sym_group_size, " for K=", params.K,
+                " (expected group <= K and either group == K or group % 4 "
+                "== 0)");
+        return status_t::failure;
     }
 
     switch (params.wei_dtype) {
         case data_type_t::f32:
         case data_type_t::bf16:
         case data_type_t::f16:
-        case data_type_t::s8: break;
+        case data_type_t::s8:
+        case data_type_t::s4:
+        case data_type_t::u4: break;
         default:
             apilog_error(caller,
                     ": unsupported wei_dtype=", dtype_info(params.wei_dtype),
-                    " for unreorder (supported: f32 / bf16 / f16 / s8)");
+                    " for unreorder (supported: f32 / bf16 / f16 / s8 / "
+                    "s4 / u4)");
             return status_t::unimplemented;
     }
     return status_t::success;
@@ -577,7 +606,8 @@ status_t aocl_prepack(const void *weights, const prepack_params_t &params,
 #endif
 }
 
-// Unpack an AOCL blocked weight into dst. Size is rows * ldb * elem.
+// Unpack an AOCL blocked weight into dst. S4/U4 output is nibble-packed, so
+// its size is ceil(rows * ldb / 2); every other family is rows * ldb * elem.
 size_t aocl_unreorder_compute_size(const prepack_params_t &params) {
 #if !ZENDNNL_DEPENDS_AOCLDLP
     (void)params;
@@ -586,12 +616,6 @@ size_t aocl_unreorder_compute_size(const prepack_params_t &params) {
             "support (ZENDNNL_DEPENDS_AOCLDLP=0); unreorder is unavailable.");
     return 0;
 #else
-    const size_t elem = zendnnl::common::size_of(params.wei_dtype);
-    if (elem == 0) {
-        apilog_error("weight_unreorder(aocl_dlp): unsupported wei_dtype=",
-                dtype_info(params.wei_dtype));
-        return 0;
-    }
     const uint64_t rows
             = static_cast<uint64_t>(params.transposed ? params.N : params.K);
     const uint64_t ldb = static_cast<uint64_t>(params.ldb);
@@ -600,6 +624,19 @@ size_t aocl_unreorder_compute_size(const prepack_params_t &params) {
         return 0;
     }
     const uint64_t n_elem = rows * ldb;
+    if (params.wei_dtype == data_type_t::s4
+            || params.wei_dtype == data_type_t::u4) {
+        // Packed 4-bit values are contiguous nibbles, including across a
+        // row boundary when ldb is odd. This matches AOCL's raw s4 layout.
+        return static_cast<size_t>((n_elem / 2) + (n_elem & 1));
+    }
+
+    const size_t elem = zendnnl::common::size_of(params.wei_dtype);
+    if (elem == 0) {
+        apilog_error("weight_unreorder(aocl_dlp): unsupported wei_dtype=",
+                dtype_info(params.wei_dtype));
+        return 0;
+    }
     if (n_elem > std::numeric_limits<uint64_t>::max() / elem) {
         apilog_error("weight_unreorder(aocl_dlp): output byte size overflows");
         return 0;
@@ -664,7 +701,21 @@ status_t aocl_unreorder(const void *packed, const prepack_params_t &params,
         }
     } else if (params.wei_dtype == data_type_t::s8) {
         // u8 source: recover the s8 weights. The column-sum tail is not written.
-        if (params.src_dtype == data_type_t::u8) {
+        if (params.sym_group_size > 0
+                && (params.src_dtype == data_type_t::bf16
+                        || params.src_dtype == data_type_t::s8)) {
+            dlp_quant_op_t symq_b_quant_op = {};
+            symq_b_quant_op.quant_op_kind = DLP_QUANT_OP_QUANTIZE;
+            symq_b_quant_op.group_size = params.sym_group_size;
+            // Symmetric prepack never attaches GEMM hints. A plain S8 source
+            // otherwise satisfies aocl_pack_uses_m_hint(), so explicitly
+            // remove the hints before calling the matching inverse.
+            md.gemm_hints = nullptr;
+            md.b_quant_op = &symq_b_quant_op;
+            aocl_unreorder_s8s8s32os32_sym_quant(order, trans, mat_type,
+                    static_cast<const int8_t *>(packed),
+                    static_cast<int8_t *>(dst), k, n, ldb, &md);
+        } else if (params.src_dtype == data_type_t::u8) {
             aocl_unreorder_u8s8s32os32_reference(order, trans, mat_type,
                     static_cast<const int8_t *>(packed),
                     static_cast<int8_t *>(dst), k, n, ldb, unreorder_meta);
@@ -673,6 +724,24 @@ status_t aocl_unreorder(const void *packed, const prepack_params_t &params,
                     static_cast<const int8_t *>(packed),
                     static_cast<int8_t *>(dst), k, n, ldb, unreorder_meta);
         }
+    } else if (params.wei_dtype == data_type_t::s4
+            && params.src_dtype == data_type_t::s8) {
+        dlp_quant_op_t symq_b_quant_op = {};
+        symq_b_quant_op.quant_op_kind = DLP_QUANT_OP_QUANTIZE;
+        symq_b_quant_op.group_size = params.sym_group_size > 0
+                ? params.sym_group_size
+                : static_cast<int>(params.K);
+        md.b_quant_op = &symq_b_quant_op;
+        aocl_unreorder_s8s4s32os32(order, trans, mat_type,
+                static_cast<const int8_t *>(packed), static_cast<int8_t *>(dst),
+                k, n, ldb, &md);
+    } else if (params.wei_dtype == data_type_t::s4
+            || params.wei_dtype == data_type_t::u4) {
+        // The matching prepack path does not attach quant metadata for the
+        // BF16xS4 family; a null b_quant_op denotes one group over K.
+        aocl_unreorder_bf16s4f32of32(order, trans, mat_type,
+                static_cast<const int8_t *>(packed), static_cast<int8_t *>(dst),
+                k, n, ldb, &md);
     } else {
         apilog_error("weight_unreorder(aocl_dlp): unsupported wei_dtype=",
                 dtype_info(params.wei_dtype));

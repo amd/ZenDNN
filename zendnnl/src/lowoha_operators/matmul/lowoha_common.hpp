@@ -29,6 +29,18 @@
 
 namespace zendnnl {
 namespace lowoha {
+
+/**
+ * @brief User-provided kernel shape and thread-count hints.
+ *
+ * These values are carried by operator parameter structures for backend use.
+ * Zero values mean unspecified.
+ */
+struct kernel_hints {
+    int64_t m_hint = 0;
+    int32_t nt_hint = 0;
+};
+
 namespace matmul {
 
 using namespace zendnnl::memory;
@@ -272,6 +284,7 @@ struct matmul_params {
     matmul_algo_t lowoha_algo; ///< Selected algorithm
     //num_threads is int32_t to match the type used by OpenMP APIs
     int32_t num_threads; ///< Number of threads
+    kernel_hints hints; ///< Optional kernel M/thread hints
     std::string plugin_op; ///< Plugin op name
     bool dynamic_quant; ///< Enable dynamic quantization of source
     pack_format packing; ///< Weight packing format for matrix B
@@ -342,6 +355,7 @@ struct matmul_params {
         , mem_format_b('n')
         , lowoha_algo(matmul_algo_t::none)
         , num_threads(0)
+        , hints()
         , plugin_op("")
         , dynamic_quant(false)
         , packing()

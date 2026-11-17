@@ -498,7 +498,9 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
         int wei_scale_grp_stride,
         const std::vector<bool> &weights_aocl_prepacked, int32_t num_threads,
         int32_t weight_cache_mode, bool allow_in_place,
-        const std::vector<size_t> &wei_capacities, int src_scale_groups) {
+        const std::vector<size_t> &wei_capacities, int src_scale_groups,
+        const std::vector<bool> &weights_aocl_sym_prepacked,
+        int aocl_unreorder_group_size) {
 
     // Reset the full CallContext to defaults on entry.  Callers may
     // reuse a single context across calls (e.g. an OMP region that
@@ -1168,6 +1170,9 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
         const bool aocl_prepacked_i = !weights_aocl_prepacked.empty()
                 && static_cast<size_t>(i) < weights_aocl_prepacked.size()
                 && weights_aocl_prepacked[i];
+        const bool aocl_sym_prepacked_i = !weights_aocl_sym_prepacked.empty()
+                && static_cast<size_t>(i) < weights_aocl_sym_prepacked.size()
+                && weights_aocl_sym_prepacked[i];
         if (prepacked_i && aocl_prepacked_i) {
             return refuse("conflicting_prepacked_weight_provenance",
                     "one expert cannot be both CK-VNNI-packed and "
@@ -1215,23 +1220,37 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
             const bool bf16_variant
                     = out.variant == KernelVariant::kBF16_BF16_BF16
                     || out.variant == KernelVariant::kBF16_BF16_F32;
-            // AOCL exposes an inverse for pure U8xS8 packing, which is the
-            // static per-tensor scalar route merged with PR #745. DQ/grouped
-            // S8 uses AOCL's sym-quant pack; that format has no unreorder API
-            // and must retain its AOCL fallback.
             const bool static_u8s8_variant = variant_is_int8
                     && src_dtype == data_type_t::u8
                     && wei_dtype == data_type_t::s8 && !dynamic_quant;
-            if (!bf16_variant && !variant_is_f16 && !static_u8s8_variant) {
+            const bool sym_int8_variant = variant_is_int8
+                    && !static_u8s8_variant
+                    && out.compute_int == IntCompute::kS8_Sym
+                    && aocl_sym_prepacked_i;
+            if (!bf16_variant && !variant_is_f16 && !variant_is_s4
+                    && !static_u8s8_variant && !sym_int8_variant) {
                 return refuse("aocl_unreorder_unsupported_variant",
-                        "AOCL unreorder-to-CK supports BF16, FP16, and pure "
-                        "static U8xS8 only; sym-quant INT8 has no inverse API");
+                        "AOCL unreorder-to-CK does not support this variant; "
+                        "dynamic asymmetric INT8 keeps its AOCL fallback");
             }
             bool derived_cache_hit = false;
             std::shared_ptr<void> derived_ck_weight;
             status_t conversion_status = status_t::failure;
             const char *family_name = "bf16";
-            if (static_u8s8_variant) {
+            if (variant_is_s4) {
+                family_name = "s8s4_sym";
+                conversion_status = get_or_cache_aocl_ck_weight_s4(weight[i],
+                        K[i], N[i], ldb[i], transB[i], num_threads, pack_nr,
+                        interleave_split_halves, group_size, derived_ck_weight,
+                        &derived_cache_hit, wc_mode);
+            } else if (sym_int8_variant) {
+                family_name = "s8s8_sym";
+                conversion_status = get_or_cache_aocl_ck_weight_int8_sym(
+                        weight[i], K[i], N[i], ldb[i], transB[i], num_threads,
+                        pack_nr, interleave_split_halves,
+                        aocl_unreorder_group_size, derived_ck_weight,
+                        &derived_cache_hit, wc_mode);
+            } else if (static_u8s8_variant) {
                 family_name = "u8s8";
                 conversion_status = get_or_cache_aocl_ck_weight_int8(weight[i],
                         K[i], N[i], ldb[i], transB[i], num_threads, pack_nr,
@@ -1255,7 +1274,10 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
                         "blocked weight");
             }
             out.aocl_custom_kernel_weight_leases[i] = derived_ck_weight;
-            if (static_u8s8_variant) {
+            if (variant_is_s4) {
+                out.packed_ptrs_s4[i]
+                        = static_cast<const int8_t *>(derived_ck_weight.get());
+            } else if (variant_is_int8) {
                 out.packed_ptrs_int8[i]
                         = static_cast<const int8_t *>(derived_ck_weight.get());
             } else if (variant_is_f16) {

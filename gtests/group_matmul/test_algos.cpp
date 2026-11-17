@@ -2903,6 +2903,29 @@ TEST(TestGroupMatmulAutoSelectAlgo,
             group_matmul_algo_select(layout, M, N, K, params, /*threads=*/E), 1)
             << "packed bytes explicitly owned by another backend must never "
                "reach AOCL unreorder or CK";
+
+    for (auto &p : params) {
+        p.dtypes.src = data_type_t::bf16;
+        p.dtypes.wei = data_type_t::s8;
+        p.dtypes.dst = data_type_t::bf16;
+        p.dtypes.compute = data_type_t::u8;
+        p.dynamic_quant = true;
+        p.lowoha_algo = matmul_algo_t::aocl_dlp_blocked;
+        p.quant_params.src_scale.dims = {M[0], 2};
+        p.quant_params.src_zp.dims = {M[0], 2};
+        p.quant_params.wei_scale.dims = {2, N[0]};
+    }
+    EXPECT_FALSE(m_tile_supported(
+            layout, M, params, /*num_ops=*/E, /*allow_prepacked_b=*/true))
+            << "AOCL-prepacked asymmetric DQ-INT8 has no inverse-to-CK route";
+    {
+        AlgoEnvGuard forced_m_tile(2);
+        EXPECT_EQ(group_matmul_algo_select(
+                          layout, M, N, K, params, /*threads=*/E),
+                1)
+                << "forced M-tile must clamp asymmetric per-group AOCL "
+                   "weights to the full-N fallback";
+    }
 }
 
 // Grid: enumerate at least one canonical workload per rule plus

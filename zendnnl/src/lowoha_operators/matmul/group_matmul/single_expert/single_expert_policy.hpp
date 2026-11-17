@@ -406,10 +406,10 @@ struct single_expert_ck_t {
 /// The policy for one weight's dtype tuple.  `K`/`N` > 0 also require a
 /// custom-kernel pack width that divides N.  When `num_threads` > 0, a dtype
 /// `..._FORCE_CK` does not list also needs
-/// `has_enough_single_expert_tiles(N, K, num_threads)`.  `static_u8s8` marks the static
-/// U8xS8 form; `aocl_prepacked` an AOCL-DLP blocked weight, which the custom
-/// kernel converts only for BF16 and static U8xS8.  Defined in
-/// single_expert_policy.cpp.
+/// `has_enough_single_expert_tiles(N, K, num_threads)`. `static_u8s8` marks
+/// the static U8xS8 form; `aocl_prepacked` marks an AOCL-DLP blocked weight,
+/// which the custom kernel converts through the matching family inverse.
+/// Defined in single_expert_policy.cpp.
 single_expert_ck_t grp_matmul_single_expert_ck(data_type_t src, data_type_t wei,
         data_type_t dst, bool dynamic_quant, data_type_t compute,
         bool static_u8s8, bool aocl_prepacked, int K = 0, int N = 0,

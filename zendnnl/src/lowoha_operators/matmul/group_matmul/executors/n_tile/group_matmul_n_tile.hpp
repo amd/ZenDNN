@@ -258,7 +258,7 @@ inline void prepare_n_tile_custom_kernel(grp_matmul_gated_act_t act,
         // `prepare_for_call` (built from the caller's per-expert
         // `mem_format_b == 'r'`).  Empty ⇒ no prepacked experts.
         const std::vector<bool> &weights_prepacked = {},
-        // W4A8 only; 0 elsewhere, which is the "not an s4 call" signal.
+        // CK execution group size for W4A8 or Q8. Zero for ordinary INT8.
         int group_size = 0, int wei_scale_grp_stride = 0,
         // Explicit AOCL-DLP-blocked provenance. These weights are normalized
         // to raw only inside a validated CK preparation.
@@ -269,7 +269,9 @@ inline void prepare_n_tile_custom_kernel(grp_matmul_gated_act_t act,
         bool allow_in_place = true,
         const std::vector<size_t> &wei_capacities = {},
         // W4A8 source-scale groups per row; one keeps the per-token path.
-        int src_scale_groups = 1) {
+        int src_scale_groups = 1,
+        const std::vector<bool> &weights_aocl_sym_prepacked = {},
+        int aocl_unreorder_group_size = 0) {
     if (!get_grp_matmul_custom_kernel()) { return; }
     // Master CK env is ON; gate the DQ-INT8 sub-toggle separately so
     // operators can toggle int8 without disabling bf16.  The int8 CK path
@@ -298,7 +300,8 @@ inline void prepare_n_tile_custom_kernel(grp_matmul_gated_act_t act,
             weight, is_weights_const, kctx, dynamic_quant, compute_dtype,
             weights_prepacked, group_size, wei_scale_grp_stride,
             weights_aocl_prepacked, num_threads, weight_cache_mode,
-            allow_in_place, wei_capacities, src_scale_groups);
+            allow_in_place, wei_capacities, src_scale_groups,
+            weights_aocl_sym_prepacked, aocl_unreorder_group_size);
 }
 
 /// Effective N-column alignment for the per-thread split:

@@ -494,8 +494,8 @@ struct CallContext {
     /// table's.
     w4a8_ukernel_fn_t kernel_table_s4[kMaxMR + 1] = {};
 
-    /// W4A8 K-group size, 0 for other variants.  `prepare_for_call()`
-    /// validates it as a positive multiple of `kS4Octet` dividing K.
+    /// CK execution K-group size: W4A8's scale group or 32 for Q8. Zero for
+    /// ordinary INT8 and floating-point variants.
     int group_size = 0;
     /// Group stride in the caller's `{G, N}` weight-scale buffer: the
     /// expert's FULL N, not the tile width, because an N-tile slices
@@ -509,12 +509,11 @@ struct CallContext {
     /// Maximum experts per call we cache packed pointers for.  Must
     /// match (or exceed) each caller's own expert-count cap.
     static constexpr int kMaxExperts = 256;
-    /// Call-scoped leases for final BF16, FP16, or static-U8xS8 CK packs
-    /// derived from AOCL-DLP blocked inputs. AOCL unreorders into temporary raw
-    /// storage and CK packs directly into the cached final arena. Keeping the
-    /// leases here prevents eviction or explicit clear from freeing a pack
-    /// while a CK tile uses it. AOCL sym-quant S8 is excluded because it has no
-    /// unreorder API.
+    /// Call-scoped leases for final BF16, FP16, INT8, or W4A8 CK packs derived
+    /// from AOCL-DLP blocked inputs. AOCL unreorders into temporary raw storage
+    /// and CK packs directly into the cached final arena. Keeping the leases
+    /// here prevents eviction or explicit clear from freeing a pack while a CK
+    /// tile uses it.
     std::array<std::shared_ptr<void>, kMaxExperts>
             aocl_custom_kernel_weight_leases {};
     std::array<const bfloat16_t *, kMaxExperts> packed_ptrs {};
@@ -761,8 +760,8 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
         // (caller owns the buffer lifetime).  Empty vector ⇒ no expert is
         // prepacked (the default — every weight is packed as before).
         const std::vector<bool> &weights_prepacked = {},
-        // W4A8 only.  Both default to 0, the "not an s4 call" signal;
-        // a `wei_dtype == s4` tuple with `group_size == 0` is refused.
+        // CK execution group size: required by W4A8 and set to 32 for the
+        // Q8 per-group kernel. Zero for ordinary INT8 families.
         int group_size = 0, int wei_scale_grp_stride = 0,
         // Per-expert AOCL-DLP-blocked provenance. Unlike
         // `weights_prepacked`, these buffers are NOT CK-ready. A true slot is
@@ -777,7 +776,13 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
         bool allow_in_place = true,
         const std::vector<size_t> &wei_capacities = {},
         // W4A8 only: 1 for `{M,1}`, G for matching `{M,G}` / `{G,N}`.
-        int src_scale_groups = 1);
+        int src_scale_groups = 1,
+        // Subset of weights_aocl_prepacked whose physical image was produced
+        // by the symmetric-S8 reorder rather than the plain S8 reorder.
+        const std::vector<bool> &weights_aocl_sym_prepacked = {},
+        // Group metadata for that symmetric AOCL inverse. Separate from
+        // group_size, which selects the CK Q8/S4 execution layout.
+        int aocl_unreorder_group_size = 0);
 
 // (`PackProbeStats` and `warm_pack_all_custom_kernel_experts` moved
 // to `group_matmul/prepack/prepack_custom_kernel.{hpp,cpp}` so the

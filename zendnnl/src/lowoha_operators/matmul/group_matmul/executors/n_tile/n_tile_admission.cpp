@@ -159,10 +159,6 @@ bool n_tile_supported(const std::vector<int> &M, const std::vector<int> &N,
                 // sym-quant reorder, broadcast_w4a8_src_scale).  Without AOCL
                 // the ALGO-1 path falls through to the reference W4A8 kernel.
                 return false;
-#else
-                // ALGO 3 needs raw packed s4 (mem_format_b='n'); native
-                // prepack is full-N only.
-                if (params[i].mem_format_b != 'n') { return false; }
 #endif
                 const bool w4a8_src_ok
                         = quant_param_is_per_token(qp.src_scale, M[i])

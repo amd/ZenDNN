@@ -77,6 +77,7 @@
 #include "../../single_expert/single_expert_hooks.hpp"
 #include "group_matmul_n_tile.hpp" // (re-includes planner header)
 #include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
+#include "lowoha_operators/matmul/backends/aocl/aocl_postop.hpp"
 #include "lowoha_operators/matmul/group_matmul/multi_expert/multi_expert_policy.hpp"
 #include "lowoha_operators/matmul/quantization/reorder_quantization.hpp"
 #include "n_tile_admission.hpp"
@@ -4584,6 +4585,8 @@ void n_tile_execute(const std::vector<char> &layout,
     std::vector<bool> weights_prepacked(static_cast<size_t>(num_ops), false);
     std::vector<bool> weights_aocl_prepacked(
             static_cast<size_t>(num_ops), false);
+    std::vector<bool> weights_aocl_sym_prepacked(
+            static_cast<size_t>(num_ops), false);
     bool any_ck_prepacked_b = false;
     bool any_aocl_prepacked_b = false;
     bool any_unsupported_prepacked_b = false;
@@ -4603,21 +4606,37 @@ void n_tile_execute(const std::vector<char> &layout,
             // currently marks AOCL layout through mem_format_b='r' alone;
             // explicit moe_custom_kernel provenance was handled above.
             weights_aocl_prepacked[i] = true;
+            const auto &p = params[static_cast<size_t>(i)];
+            const size_t src_scale_count
+                    = get_num_elements(p.quant_params.src_scale.dims);
+            const auto &src_scale_dims = p.quant_params.src_scale.dims;
+            const bool pending_dynamic_sym_scale = p.dynamic_quant
+                    && p.dtypes.compute == data_type_t::s8
+                    && p.quant_params.src_scale.buff == nullptr && M[i] == 1
+                    && src_scale_dims.size() == 2 && src_scale_dims[0] == M[i]
+                    && src_scale_dims[1] == 1
+                    && (has_per_group_wei_scale(p.quant_params, N[i])
+                            || has_per_channel_wei_scale(p.quant_params, N[i]));
+            weights_aocl_sym_prepacked[i] = p.dtypes.wei == data_type_t::s8
+                    && p.dtypes.compute == data_type_t::s8
+                    && p.quant_params.src_zp.buff == nullptr
+                    && (src_scale_selects_sym_quant(
+                                p.quant_params, src_scale_count, M[i], N[i])
+                            || pending_dynamic_sym_scale);
             any_aocl_prepacked_b = true;
         } else {
             any_unsupported_prepacked_b = true;
         }
     }
 
-    // One probe is enough: `n_tile_supported` has already verified
-    // every active expert presents a `{G, N}` scale.  Left at 0 for
-    // non-s4 calls, which `prepare_for_call` reads as "not s4".
-    int ck_s4_group_size = 0;
+    // CK S4 and Q8 execution use one group mode for the call. AOCL symmetric
+    // inverses also need a group, but that describes the input image rather
+    // than the CK execution layout and therefore travels separately.
+    int ck_group_size = 0;
     int ck_s4_wei_scale_grp_stride = 0;
     int ck_s4_src_scale_groups = 1;
     bool ck_s4_scale_group_mismatch = false;
-    int ck_s8_group_size = 0;
-    int ck_s8_wei_scale_grp_stride = 0;
+    int aocl_unreorder_group_size = 0;
     // One group mode is shared by the call. Use the Q8 pack only when
     // every active expert is that shape; a mixed call keeps the
     // per-group exclusion below and stays on AOCL.
@@ -4633,11 +4652,10 @@ void n_tile_execute(const std::vector<char> &layout,
                 break;
             }
         }
-        if (q8_uniform) {
-            ck_s8_group_size = 32;
-            ck_s8_wei_scale_grp_stride = N[rep];
-        }
     }
+    if (q8_uniform) ck_group_size = 32;
+
+    bool ck_quant_metadata_uniform = true;
     if (params[rep].dtypes.wei == data_type_t::s4) {
         const auto &ws = params[rep].quant_params.wei_scale;
         int64_t weight_groups = 0;
@@ -4645,21 +4663,23 @@ void n_tile_execute(const std::vector<char> &layout,
         if (ws.dims.size() == 2 && ws.dims[0] > 0 && K[rep] > 0) {
             weight_groups = ws.dims[0];
             if (K[rep] % weight_groups == 0) {
-                ck_s4_group_size = static_cast<int>(K[rep] / weight_groups);
+                ck_group_size = static_cast<int>(K[rep] / weight_groups);
             }
             ck_s4_wei_scale_grp_stride = static_cast<int>(ws.dims[1]);
         }
         // TODO: Carry a per-expert weight-scale group stride in CallContext.
         // Until then every active expert must share the representative
-        // expert's N; otherwise the kernel walks `{G, N}` scale rows with the
-        // wrong stride.
+        // expert's effective K/G group size and N stride; otherwise the kernel
+        // walks a different number or width of `{G, N}` scale rows.
         for (int i = 0; i < num_ops; ++i) {
             if (M[i] <= 0) continue;
             const auto &ss = params[i].quant_params.src_scale;
             const auto &ews = params[i].quant_params.wei_scale;
             if (ss.dims.size() != 2 || ss.dims[0] != M[i] || ss.dims[1] <= 0
-                    || ews.dims.size() != 2 || ews.dims[0] != weight_groups
-                    || ews.dims[1] != ck_s4_wei_scale_grp_stride) {
+                    || ews.dims.size() != 2 || ews.dims[0] <= 0
+                    || ews.dims[1] != ck_s4_wei_scale_grp_stride || K[i] <= 0
+                    || (K[i] % ews.dims[0]) != 0
+                    || (K[i] / ews.dims[0]) != ck_group_size) {
                 ck_s4_scale_group_mismatch = true;
                 break;
             }
@@ -4670,13 +4690,33 @@ void n_tile_execute(const std::vector<char> &layout,
                 ck_s4_scale_group_mismatch = true;
                 break;
             }
-            if (src_groups > 1 && src_groups != weight_groups) {
+            if (src_groups > 1 && src_groups != ews.dims[0]) {
                 ck_s4_scale_group_mismatch = true;
                 break;
             }
         }
         if (!ck_s4_scale_group_mismatch && observed_src_groups > 0)
             ck_s4_src_scale_groups = observed_src_groups;
+    }
+
+    bool have_aocl_sym_metadata = false;
+    for (int i = 0; i < num_ops; ++i) {
+        if (M[i] <= 0 || !weights_aocl_sym_prepacked[i]) continue;
+        const int64_t group_size = sym_quant_group_size(
+                params[static_cast<size_t>(i)].quant_params, M[i], N[i], K[i]);
+        if (group_size <= 0
+                || group_size > static_cast<int64_t>(
+                           std::numeric_limits<int>::max())) {
+            ck_quant_metadata_uniform = false;
+            break;
+        }
+        if (!have_aocl_sym_metadata) {
+            aocl_unreorder_group_size = static_cast<int>(group_size);
+            have_aocl_sym_metadata = true;
+        } else if (aocl_unreorder_group_size != group_size) {
+            ck_quant_metadata_uniform = false;
+            break;
+        }
     }
 
     custom_kernel::CallContext kctx;
@@ -4708,7 +4748,7 @@ void n_tile_execute(const std::vector<char> &layout,
         ck_wei_caps[static_cast<size_t>(i)]
                 = params[static_cast<size_t>(i)].wei_buffer_capacity_bytes;
     }
-    const bool q8_ck_inplace = ck_s8_group_size == 32;
+    const bool q8_ck_inplace = q8_uniform && ck_quant_metadata_uniform;
     // A {G, N} s8 weight that is not group-32 is an AOCL shape. Preparing
     // it here can write a full-K pack into the caller's buffer before the
     // per-group guard below drops the call off the custom kernel.
@@ -4729,7 +4769,11 @@ void n_tile_execute(const std::vector<char> &layout,
         }
     }
     if (!ck_s4_scale_group_mismatch && !grouped_s8_not_q8
+            && ck_quant_metadata_uniform
             && group_matmul_custom_kernel_candidate(params, M, N, custom_act)) {
+        // An AOCL inverse can still decline after an earlier raw expert was
+        // prepared. Keep every raw weight out-of-place in mixed AOCL calls so
+        // the full-N fallback always sees its original bytes.
         prepare_n_tile_custom_kernel(custom_act,
                 /*src_dtype=*/params[rep].dtypes.src,
                 /*wei_dtype=*/params[rep].dtypes.wei,
@@ -4737,14 +4781,14 @@ void n_tile_execute(const std::vector<char> &layout,
                 /*bias_dtype=*/params[rep].dtypes.bias, transA, transB, M, N, K,
                 ldb, alpha, beta, weight, is_weights_const, kctx,
                 ck_dynamic_quant, ck_compute_dtype, weights_prepacked,
-                ck_s8_group_size > 0 ? ck_s8_group_size : ck_s4_group_size,
-                ck_s8_group_size > 0 ? ck_s8_wei_scale_grp_stride
-                                     : ck_s4_wei_scale_grp_stride,
+                ck_group_size, ck_s4_wei_scale_grp_stride,
                 weights_aocl_prepacked, num_threads, ck_weight_cache_mode,
                 /*allow_in_place=*/(!fused_epilogue || tight_fused_epilogue)
+                        && !any_aocl_prepacked_b
                         && (q8_ck_inplace || ck_inplace_licence
                                 || !is_grp_auto_mixed_inplace_active()),
-                ck_wei_caps, ck_s4_src_scale_groups);
+                ck_wei_caps, ck_s4_src_scale_groups, weights_aocl_sym_prepacked,
+                aocl_unreorder_group_size);
     }
     custom_kernel::Bf16DecodeRoute qwen_bf16_route
             = custom_kernel::Bf16DecodeRoute::none;

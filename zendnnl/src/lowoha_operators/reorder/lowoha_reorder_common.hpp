@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <vector>
 #include "common/zendnnl_global.hpp"
+#include "lowoha_operators/matmul/lowoha_common.hpp"
 #include "lowoha_operators/reorder/prepack/lowoha_prepack.hpp"
 #include "memory/memory_utils.hpp"
 
@@ -151,6 +152,7 @@ struct reorder_params_t {
     reorder_algo_t algo; ///< Selected algorithm
     //num_threads is int32_t to match the type used by OpenMP APIs
     int32_t num_threads; ///< Number of threads (0 = auto)
+    kernel_hints hints; ///< Optional kernel M/thread hints
     std::vector<int64_t>
             src_shape; ///< Source shape: [nelems] or [M, N] or [batch, M, N]
     std::vector<int64_t> dst_shape; ///< Destination shape: must match src_shape
@@ -201,6 +203,7 @@ struct reorder_params_t {
         , quant_params()
         , algo(reorder_algo_t::DT)
         , num_threads(0)
+        , hints()
         , src_shape()
         , dst_shape()
         , src_strides()

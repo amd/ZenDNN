@@ -125,6 +125,106 @@ void run_unreorder_roundtrip(tensor_factory_t &tf, const ReorderType &params,
     free_packed();
 }
 
+#if ZENDNNL_DEPENDS_AOCLDLP
+uint8_t packed_nibble(const std::vector<uint8_t> &v, size_t idx) {
+    return static_cast<uint8_t>((v[idx >> 1] >> ((idx & 1U) ? 4 : 0)) & 0x0F);
+}
+
+void set_packed_nibble(std::vector<uint8_t> &v, size_t idx, uint8_t value) {
+    uint8_t &byte = v[idx >> 1];
+    const uint8_t nibble = value & 0x0F;
+    byte = (idx & 1U) ? static_cast<uint8_t>((byte & 0x0F) | (nibble << 4))
+                      : static_cast<uint8_t>((byte & 0xF0) | nibble);
+}
+
+void run_s4_unreorder_roundtrip(
+        data_type_t wei_dtype, bool transposed, int K, int N, int ldb) {
+    const int rows = transposed ? N : K;
+    const size_t logical_storage = static_cast<size_t>(rows) * ldb;
+    const size_t raw_bytes = (logical_storage + 1) / 2;
+    std::vector<uint8_t> raw(raw_bytes, 0);
+    for (size_t i = 0; i < logical_storage; ++i)
+        set_packed_nibble(raw, i, static_cast<uint8_t>((i * 7 + 3) & 0x0F));
+
+    reorder_params_t rp;
+    rp.is_prepack = true;
+    rp.prepack.algo = matmul_algo_t::aocl_dlp_blocked;
+    rp.prepack.wei_dtype = wei_dtype;
+    rp.prepack.src_dtype = data_type_t::bf16;
+    rp.prepack.K = K;
+    rp.prepack.N = N;
+    rp.prepack.ldb = ldb;
+    rp.prepack.transposed = transposed;
+    const size_t packed_bytes = weight_prepack_size(rp);
+    if (packed_bytes == 0) {
+        GTEST_SKIP() << "BF16xS4 AOCL reorder is unavailable";
+    }
+    void *packed = zendnnl_aligned_alloc(64, packed_bytes);
+    ASSERT_NE(packed, nullptr);
+    ASSERT_EQ(reorder_direct(raw.data(), packed, rp), status_t::success);
+
+    rp.is_prepack = false;
+    rp.is_unreorder = true;
+    EXPECT_EQ(weight_unreorder_size(rp), raw_bytes);
+    constexpr size_t guard_bytes = 64;
+    std::vector<uint8_t> recovered(raw_bytes + guard_bytes, 0xA5);
+    ASSERT_EQ(reorder_direct(packed, recovered.data(), rp), status_t::success);
+
+    for (int k = 0; k < K; ++k) {
+        for (int n = 0; n < N; ++n) {
+            const size_t idx = transposed ? static_cast<size_t>(n) * ldb + k
+                                          : static_cast<size_t>(k) * ldb + n;
+            EXPECT_EQ(packed_nibble(recovered, idx), packed_nibble(raw, idx))
+                    << "k=" << k << " n=" << n;
+        }
+    }
+    for (size_t i = raw_bytes; i < recovered.size(); ++i)
+        EXPECT_EQ(recovered[i], 0xA5) << "guard byte " << i - raw_bytes;
+    zendnnl_aligned_free(packed);
+}
+
+void run_symmetric_s8_unreorder_roundtrip() {
+    constexpr int K = 17, N = 9, ldb = 11, group_size = 4;
+    std::vector<int8_t> raw(static_cast<size_t>(K) * ldb, 0);
+    for (int k = 0; k < K; ++k)
+        for (int n = 0; n < N; ++n)
+            raw[static_cast<size_t>(k) * ldb + n]
+                    = static_cast<int8_t>((k * 5 + n * 3) % 23 - 11);
+
+    reorder_params_t rp;
+    rp.is_prepack = true;
+    rp.prepack.algo = matmul_algo_t::aocl_dlp_blocked;
+    rp.prepack.wei_dtype = data_type_t::s8;
+    rp.prepack.src_dtype = data_type_t::s8;
+    rp.prepack.K = K;
+    rp.prepack.N = N;
+    rp.prepack.ldb = ldb;
+    rp.prepack.sym_group_size = group_size;
+    const size_t packed_bytes = weight_prepack_size(rp);
+    if (packed_bytes == 0) {
+        GTEST_SKIP() << "symmetric S8 AOCL reorder is unavailable";
+    }
+    void *packed = zendnnl_aligned_alloc(64, packed_bytes);
+    ASSERT_NE(packed, nullptr);
+    ASSERT_EQ(reorder_direct(raw.data(), packed, rp), status_t::success);
+
+    rp.is_prepack = false;
+    rp.is_unreorder = true;
+    const size_t raw_bytes = static_cast<size_t>(K) * ldb;
+    EXPECT_EQ(weight_unreorder_size(rp), raw_bytes);
+    std::vector<int8_t> recovered(raw_bytes + 64, int8_t {0x5A});
+    DlpMHintGuard hint_guard(32);
+    ASSERT_EQ(reorder_direct(packed, recovered.data(), rp), status_t::success);
+    for (int k = 0; k < K; ++k)
+        for (int n = 0; n < N; ++n)
+            EXPECT_EQ(recovered[static_cast<size_t>(k) * ldb + n],
+                    raw[static_cast<size_t>(k) * ldb + n]);
+    for (size_t i = raw_bytes; i < recovered.size(); ++i)
+        EXPECT_EQ(recovered[i], int8_t {0x5A});
+    zendnnl_aligned_free(packed);
+}
+#endif
+
 } // namespace
 
 /** @fn TEST_P
@@ -312,6 +412,30 @@ TEST_P(TestReorder, AOCL_UNREORDER_M_HINT_OPT_OUT) {
     free_packed();
 }
 
+TEST(AoclQuantUnreorder, SymmetricS8UnhintedRoundTrip) {
+#if ZENDNNL_DEPENDS_AOCLDLP
+    run_symmetric_s8_unreorder_roundtrip();
+#else
+    GTEST_SKIP() << "AOCL-DLP quantized unreorder APIs are unavailable";
+#endif
+}
+
+TEST(AoclQuantUnreorder, SignedS4NonTransposedOddPaddedLdb) {
+#if ZENDNNL_DEPENDS_AOCLDLP
+    run_s4_unreorder_roundtrip(data_type_t::s4, /*transposed=*/false, 16, 7, 9);
+#else
+    GTEST_SKIP() << "AOCL-DLP quantized unreorder APIs are unavailable";
+#endif
+}
+
+TEST(AoclQuantUnreorder, UnsignedU4TransposedOddPaddedLdb) {
+#if ZENDNNL_DEPENDS_AOCLDLP
+    run_s4_unreorder_roundtrip(data_type_t::u4, /*transposed=*/true, 16, 7, 17);
+#else
+    GTEST_SKIP() << "AOCL-DLP quantized unreorder APIs are unavailable";
+#endif
+}
+
 namespace {
 
 constexpr int64_t kGuardK = 8;
@@ -336,6 +460,11 @@ reorder_params_t make_unreorder_params(data_type_t wei_dtype, int64_t K,
 // ──────────────────────────────────────────────────────────────────
 // is_prepack and is_unreorder together -> failure.
 // ──────────────────────────────────────────────────────────────────
+TEST(AoclUnreorderGuard, PrepackAlgoDefaultsToAoclDlpBlocked) {
+    reorder_params_t rp;
+    EXPECT_EQ(rp.prepack.algo, matmul_algo_t::aocl_dlp_blocked);
+}
+
 TEST(AoclUnreorderGuard, BothFlagsFail) {
     reorder_params_t rp;
     rp.is_prepack = true;
@@ -382,30 +511,71 @@ TEST(AoclUnreorderGuard, UnsupportedAlgoSizeZero) {
 }
 
 // ──────────────────────────────────────────────────────────────────
-// s4 and s8 sym-quant have no unreorder kernel.
+// Unsupported symmetric dtype/source pairs and bad groups fail before AOCL.
 // ──────────────────────────────────────────────────────────────────
 TEST(AoclUnreorderGuard, UnsupportedDtypeSizeZero) {
     tensor_factory_t tf;
     char dummy = 0;
 
-    reorder_params_t s4
-            = make_unreorder_params(data_type_t::s4, kGuardK, kGuardN, kGuardN);
-    EXPECT_EQ(weight_unreorder_size(s4), 0u) << "s4 must be rejected";
-    auto dst_s4 = tf.zero_tensor(
-            {static_cast<uint64_t>(kGuardK), static_cast<uint64_t>(kGuardN)},
-            data_type_t::s4);
-    EXPECT_EQ(reorder_direct(&dummy, dst_s4.get_raw_handle_unsafe(), s4),
-            status_t::unimplemented);
-
-    reorder_params_t sym = make_unreorder_params(data_type_t::s8, kGuardK,
-            kGuardN, kGuardN, matmul_algo_t::aocl_dlp_blocked,
-            data_type_t::bf16, /*sym_group_size=*/16);
-    EXPECT_EQ(weight_unreorder_size(sym), 0u) << "sym-quant must be rejected";
+    reorder_params_t wrong_source = make_unreorder_params(data_type_t::s8,
+            kGuardK, kGuardN, kGuardN, matmul_algo_t::aocl_dlp_blocked,
+            data_type_t::f32, /*sym_group_size=*/4);
+    EXPECT_EQ(weight_unreorder_size(wrong_source), 0u);
     auto dst_s8 = tf.zero_tensor(
             {static_cast<uint64_t>(kGuardK), static_cast<uint64_t>(kGuardN)},
             data_type_t::s8);
-    EXPECT_EQ(reorder_direct(&dummy, dst_s8.get_raw_handle_unsafe(), sym),
+    EXPECT_EQ(reorder_direct(
+                      &dummy, dst_s8.get_raw_handle_unsafe(), wrong_source),
             status_t::unimplemented);
+
+    reorder_params_t wrong_dtype = make_unreorder_params(data_type_t::u4,
+            kGuardK, kGuardN, kGuardN, matmul_algo_t::aocl_dlp_blocked,
+            data_type_t::s8, /*sym_group_size=*/4);
+    EXPECT_EQ(weight_unreorder_size(wrong_dtype), 0u);
+    auto dst_u4 = tf.zero_tensor(
+            {static_cast<uint64_t>(kGuardK), static_cast<uint64_t>(kGuardN)},
+            data_type_t::u4);
+    EXPECT_EQ(
+            reorder_direct(&dummy, dst_u4.get_raw_handle_unsafe(), wrong_dtype),
+            status_t::unimplemented);
+
+    reorder_params_t oversized = make_unreorder_params(data_type_t::s8, kGuardK,
+            kGuardN, kGuardN, matmul_algo_t::aocl_dlp_blocked,
+            data_type_t::bf16, /*sym_group_size=*/16);
+    EXPECT_EQ(weight_unreorder_size(oversized), 0u);
+    EXPECT_EQ(reorder_direct(&dummy, dst_s8.get_raw_handle_unsafe(), oversized),
+            status_t::failure);
+
+    reorder_params_t misaligned = make_unreorder_params(data_type_t::s4,
+            kGuardK, kGuardN, kGuardN, matmul_algo_t::aocl_dlp_blocked,
+            data_type_t::s8, /*sym_group_size=*/6);
+    EXPECT_EQ(weight_unreorder_size(misaligned), 0u);
+    auto dst_s4 = tf.zero_tensor(
+            {static_cast<uint64_t>(kGuardK), static_cast<uint64_t>(kGuardN)},
+            data_type_t::s4);
+    EXPECT_EQ(
+            reorder_direct(&dummy, dst_s4.get_raw_handle_unsafe(), misaligned),
+            status_t::failure);
+}
+
+TEST(AoclUnreorderGuard, PrepackRejectsMismatchedSymmetricIdentity) {
+    const auto prepack_size = [](data_type_t wei, data_type_t src, int group) {
+        reorder_params_t rp;
+        rp.is_prepack = true;
+        rp.prepack.algo = matmul_algo_t::aocl_dlp_blocked;
+        rp.prepack.wei_dtype = wei;
+        rp.prepack.src_dtype = src;
+        rp.prepack.K = kGuardK;
+        rp.prepack.N = kGuardN;
+        rp.prepack.ldb = kGuardN;
+        rp.prepack.sym_group_size = group;
+        return weight_prepack_size(rp);
+    };
+
+    EXPECT_EQ(prepack_size(data_type_t::s8, data_type_t::f32, 4), 0u);
+    EXPECT_EQ(prepack_size(data_type_t::s4, data_type_t::bf16, 4), 0u);
+    EXPECT_EQ(prepack_size(data_type_t::s8, data_type_t::bf16, 16), 0u);
+    EXPECT_EQ(prepack_size(data_type_t::s4, data_type_t::s8, 6), 0u);
 }
 
 // ──────────────────────────────────────────────────────────────────
