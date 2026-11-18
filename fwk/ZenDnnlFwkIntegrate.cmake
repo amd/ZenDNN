@@ -210,6 +210,22 @@ zendnnl_add_option(NAME ZENDNNL_FBGEMM_INJECT_DIR
   CACHE_STRING "zendnnl fbgemm injection path"
   COMMAND_LIST ZNL_CMAKE_ARGS)
 
+# Empty = ZenDNN downloads the dependency. Non-empty builds it from that source
+# tree, with no download. Clearing one later needs a new ZENDNNL_BINARY_DIR.
+foreach(_znl_dep AOCLDLP AOCLUTILS JSON)
+  zendnnl_add_option(NAME ZENDNNL_${_znl_dep}_SOURCE_DIR
+    VALUE ""
+    TYPE PATH
+    CACHE_STRING "zendnnl local ${_znl_dep} source path"
+    EXCLUDE_FROM_COMMAND_LIST)
+  set(_znl_dep_src "$CACHE{ZENDNNL_${_znl_dep}_SOURCE_DIR}")
+  if(_znl_dep_src)
+    list(APPEND ZNL_CMAKE_ARGS
+      "-DZENDNNL_LOCAL_${_znl_dep}:BOOL=ON"
+      "-D${_znl_dep}_ROOT_DIR:PATH=${_znl_dep_src}")
+  endif()
+endforeach()
+
 message(STATUS "(ZENDNNL) Building zendnnl as an external project.")
 
 set(ZENDNNL_LIBRARY_INC_DIR "${ZENDNNL_INSTALL_PREFIX}/zendnnl/include")
