@@ -22,6 +22,7 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
   message(DEBUG "${ZENDNNL_MSG_PREFIX}Configurig AOCL-UTILS...")
 
   list(APPEND AU_CMAKE_ARGS "-DAU_BUILD_DOCS=OFF")
+  list(APPEND AU_CMAKE_ARGS "-DAU_BUILD_EXAMPLES=OFF")
   list(APPEND AU_CMAKE_ARGS "-DAU_BUILD_TESTS=OFF")
   list(APPEND AU_CMAKE_ARGS "-DAU_BUILD_STATIC_LIBS=ON")
   list(APPEND AU_CMAKE_ARGS "-DAU_BUILD_SHARED_LIBS=ON")
@@ -43,10 +44,9 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
 
   set(AU_PATCH_ARGS "")
   if(WIN32)
-    # Windows/MSVC: no -lpthread (a Linux-ism cl rejects); disable examples;
-    # silence CRT deprecation warnings; forward the build type so the sub-build
-    # does not silently default to Debug (/MTd) and mismatch the Release main
-    # build's C runtime.
+    # Windows/MSVC: silence CRT deprecation warnings; forward the build type
+    # so the sub-build does not silently default to Debug (/MTd) and mismatch
+    # the Release main build's C runtime.
     #
     # NOTE: this aocl-utils source accesses the Windows SDK processor-info union
     # members directly (anonymous union, e.g. `.Processor`), so it must NOT be
@@ -56,8 +56,6 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
     # absent. clang-tidy auto-enable is disabled in the aocl-utils source
     # (its CMakeLists.txt), matching the approach that avoids tidy erroring on
     # the cl build.
-    list(APPEND AU_CMAKE_ARGS "-DAU_BUILD_EXAMPLES=OFF")
-
     # Build aocl-utils static-only on Windows: this source's Cpuid CMake gives
     # its shared and static targets the same OUTPUT_NAME (aoclutils_c), so both
     # emit aoclutils_c.lib -> ninja "multiple rules generate" collision. Disable
@@ -69,8 +67,10 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
     set(AU_PATCH_ARGS PATCH_COMMAND ${CMAKE_COMMAND} -DDEPENDENCY=aoclutils
       -DSOURCE_DIR=<SOURCE_DIR> -P "${CMAKE_CURRENT_LIST_DIR}/StripAoclDllExport.cmake")
 
-    list(APPEND AU_CMAKE_ARGS "-DCMAKE_CXX_FLAGS=${AU_CXX_FLAGS} /D_CRT_SECURE_NO_WARNINGS")
-    list(APPEND AU_CMAKE_ARGS "-DCMAKE_C_FLAGS=${AU_C_FLAGS} /D_CRT_SECURE_NO_WARNINGS")
+    # Appended here so CMAKE_C_FLAGS / CMAKE_CXX_FLAGS can be forwarded once
+    # for every platform below.
+    string(APPEND AU_CXX_FLAGS " /D_CRT_SECURE_NO_WARNINGS")
+    string(APPEND AU_C_FLAGS " /D_CRT_SECURE_NO_WARNINGS")
     list(APPEND AU_CMAKE_ARGS "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}")
     # Force aocl-utils' STATIC libraries onto the dynamic CRT (/MD) so they
     # match ZenDNNL's Windows build (which links /MD). Without this the static
@@ -79,16 +79,10 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
     # Requires an aocl-utils that provides this option (the CRT-MD-capable
     # source); ignored with a harmless warning on sources that lack it.
     list(APPEND AU_CMAKE_ARGS "-DAU_STATIC_FORCE_CRT_MD=ON")
-  else()
-    # adding pthread to cxx flags is a manylinux docker requirement.
-    list(APPEND AU_CMAKE_ARGS "-DAU_BUILD_EXAMPLES=ON")
-    list(APPEND AU_CMAKE_ARGS "-DCMAKE_CXX_FLAGS=${AU_CXX_FLAGS} -lpthread")
-    # The C examples need it too: aocl-utils does not link Threads on those
-    # targets, and thread_pinning_example_linux.c calls pthread_join as of
-    # 5.3.2, so without this the C example fails to link (DSO missing from
-    # command line) even though the CXX example above builds.
-    list(APPEND AU_CMAKE_ARGS "-DCMAKE_C_FLAGS=${AU_C_FLAGS} -lpthread")
   endif()
+
+  list(APPEND AU_CMAKE_ARGS "-DCMAKE_CXX_FLAGS=${AU_CXX_FLAGS}")
+  list(APPEND AU_CMAKE_ARGS "-DCMAKE_C_FLAGS=${AU_C_FLAGS}")
 
   # Windows produces .lib (with build-configuration-dependent names/paths), so
   # do not pin the .a byproducts there; keep them on Unix for Ninja tracking.
