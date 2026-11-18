@@ -63,14 +63,14 @@ using zendnnl::error_handling::log_info;
 namespace {
 
 /// dst[m][k] = src[k * lda + m] for a transposed bf16 or f32 source, in
-/// side x side blocks, on threads threads when M * K >= par_min.
+/// side x side blocks, on threads threads when M * K >= par_min.  Out of
+/// line: its loop would otherwise sit in run_tiles, which every call enters.
 template <typename T>
-void copy_transposed(const T *src, int lda, int M, int K, T *dst, int side,
-        int threads, int64_t par_min) {
+ZENDNNL_NOINLINE void copy_transposed(const T *src, int lda, int M, int K,
+        T *dst, int side, int threads, int64_t par_min) {
     const int m_blocks = ceil_div(M, side);
-    const bool parallel = threads > 1 && static_cast<int64_t>(M) * K >= par_min;
-#pragma omp parallel for num_threads(threads) schedule(static) if (parallel)
-    for (int mbk = 0; mbk < m_blocks; ++mbk) {
+    const bool parallel = static_cast<int64_t>(M) * K >= par_min;
+    native_for(m_blocks, threads, parallel, [=](int mbk) {
         // A block ends at its start plus what is left, at most side: the
         // start plus side may pass the int bound.
         const int m0 = mbk * side;
@@ -83,7 +83,7 @@ void copy_transposed(const T *src, int lda, int M, int K, T *dst, int side,
                             = src[static_cast<size_t>(k) * lda + m];
             k0 = k_end;
         }
-    }
+    });
 }
 
 /// The lanes below lanes (0 .. 16) of a 16-lane mask.
@@ -150,9 +150,9 @@ void widen_f16_rows(const uint16_t *src, int lda, bool trans, int M, int K,
             && elems >= std::max(par_min, kF16WidenParMin);
     const int rows = parallel ? std::min(side, ceil_div(M, threads)) : side;
     const int m_blocks = ceil_div(M, rows);
-#pragma omp parallel for num_threads(threads) schedule(static) if (parallel)
-    for (int mbk = 0; mbk < m_blocks; ++mbk)
+    native_for(m_blocks, threads, parallel, [=](int mbk) {
         native_widen_f16_block(src, lda, trans, M, K, dst, ld, rows, side, mbk);
+    });
 }
 
 /// The source rows of a BF16, FP32 or F16_PH call, elements of T, and the
@@ -276,17 +276,18 @@ void bf16_block(const native_plan_t &p, const bf16_operands_t &op,
             const uint16_t
                     *slab_b[kNativeBf16MaxTileCols / kNativeBf16SlabCols];
             for (int s = 0; s < slabs; ++s)
-                slab_b[s] = reinterpret_cast<const uint16_t *>(
-                                    w.column(w.tile_col(n, p.nr, s * slab)))
+                slab_b[s] = reinterpret_cast<const uint16_t *>(w.layout_column(
+                                    w.tile_col(n, p.nr, s * slab)))
                         + k_off;
             float *tile_acc
                     = one_pass ? acc : acc + static_cast<size_t>(t) * mb * p.nr;
             if (w.paired) {
                 for (int s = 0; s < slabs; ++s) {
-                    const size_t second
-                            = w.column_distance(w.tile_col(n, p.nr, s * slab),
-                                      w.tile_col(n, p.nr, s * slab + 16))
-                            / 2;
+                    const uint8_t *gate
+                            = w.layout_column(w.tile_col(n, p.nr, s * slab));
+                    const uint8_t *up = w.layout_column(
+                            w.tile_col(n, p.nr, s * slab + 16));
+                    const size_t second = static_cast<size_t>(up - gate) / 2;
                     for (int ir = 0; ir < mb; ir += p.mr) {
                         const int mr = std::min(p.mr, mb - ir);
                         const uint16_t *a = op.A
@@ -613,13 +614,16 @@ status_t prepare_call_epilogue(const execute_call_t &c,
             buffers);
 }
 
-/// The INT8 call of the plan and, when the epilogue is left with only the
-/// store, the direct store.
+/// The INT8 call of the plan, with its group shifts and chunk claims each
+/// in shift_store when it is given and that part fits it, and, when the
+/// epilogue is left with only the store, the direct store.
 status_t prepare_int8_operands(const execute_call_t &c,
         const native_int8_decision_t &decision, const native_plan_t &p,
-        bool bias_in_dequant, const native_epilogue_t &ep, int8_operands_t &op,
+        bool bias_in_dequant, const native_epilogue_t &ep,
+        native_int8_shift_store_t *shift_store, int8_operands_t &op,
         const char **why) {
     const GemmDescriptor &desc = c.desc;
+    op.call.shift_store = shift_store;
     const status_t st = prepare_int8_call(desc, c.params, decision, c.src,
             p.copy_block, p.copy_par_min, op.call, why);
     if (st != status_t::success) return st;
@@ -766,9 +770,10 @@ status_t prepare_f16_ph_operands(const execute_call_t &c,
 
 /// copy = the N pre-activation columns of the call's dst, rows N apart, in
 /// blocks of the plan's copy_block rows, on threads threads when M * N >=
-/// its copy_par_min.
-status_t copy_pre_activation(const execute_call_t &c, const native_plan_t &p,
-        int threads, std::unique_ptr<uint8_t[]> &copy) {
+/// its copy_par_min.  Out of line: its loop would otherwise sit in
+/// run_tiles, which every call enters.
+ZENDNNL_NOINLINE status_t copy_pre_activation(const execute_call_t &c,
+        const native_plan_t &p, int threads, std::unique_ptr<uint8_t[]> &copy) {
     const GemmDescriptor &desc = c.desc;
     const size_t esz = size_of(desc.dst_dt);
     const size_t row_bytes = static_cast<size_t>(desc.N) * esz;
@@ -782,17 +787,15 @@ status_t copy_pre_activation(const execute_call_t &c, const native_plan_t &p,
     }
     const uint8_t *src = static_cast<const uint8_t *>(c.dst);
     uint8_t *out = copy.get();
-    const int blocks = ceil_div(desc.M, p.copy_block);
-    const bool parallel = threads > 1
-            && static_cast<int64_t>(desc.M) * desc.N >= p.copy_par_min;
-#pragma omp parallel for num_threads(threads) schedule(static) if (parallel)
-    for (int b = 0; b < blocks; ++b) {
-        const int m0 = b * p.copy_block;
-        const int m_end = m0 + std::min(p.copy_block, desc.M - m0);
+    const int M = desc.M, block = p.copy_block;
+    const bool parallel = static_cast<int64_t>(M) * desc.N >= p.copy_par_min;
+    native_for(ceil_div(M, block), threads, parallel, [=](int b) {
+        const int m0 = b * block;
+        const int m_end = m0 + std::min(block, M - m0);
         for (int m = m0; m < m_end; ++m)
             std::memcpy(out + static_cast<size_t>(m) * row_bytes,
                     src + static_cast<size_t>(m) * ld_bytes, row_bytes);
-    }
+    });
     return status_t::success;
 }
 
@@ -998,13 +1001,13 @@ void gemv_units_call(
         tiles[i] = gemv_tile(g, u);
         if (whole_pairs) {
             const int gate = u * kNativeLayoutPackNr;
-            cols.lo[cols.nb++] = w.column(gate);
-            cols.lo[cols.nb++] = w.column(N / 2 + gate);
+            cols.lo[cols.nb++] = w.layout_column(gate);
+            cols.lo[cols.nb++] = w.layout_column(N / 2 + gate);
         } else if (g.runs) {
-            cols.lo[cols.nb] = w.column(u * 16);
-            cols.hi[cols.nb++] = w.column(N / 2 + u * 16);
+            cols.lo[cols.nb] = w.layout_column(u * 16);
+            cols.hi[cols.nb++] = w.layout_column(N / 2 + u * 16);
         } else {
-            cols.lo[cols.nb++] = w.column(u * kNativeLayoutPackNr);
+            cols.lo[cols.nb++] = w.layout_column(u * kNativeLayoutPackNr);
         }
     }
     // The epilogue of each tile.
@@ -1051,8 +1054,8 @@ void gemv_units_call(
                 for (int h = 0; h < t.nr; h += kNativeLayoutPackNr, ++b) {
                     a.col_lo[b] = w.tile_col(t.n0, t.nr, h);
                     a.col_hi[b] = w.tile_col(t.n0, t.nr, h + 16);
-                    a.cs_lo[b] = w.col_sum(a.col_lo[b]);
-                    a.cs_hi[b] = w.col_sum(a.col_hi[b]);
+                    a.cs_lo[b] = w.layout_col_sum(a.col_lo[b]);
+                    a.cs_hi[b] = w.layout_col_sum(a.col_hi[b]);
                 }
             }
             a.zp = call.src_zp != nullptr ? call.src_zp[0] : 0;
@@ -1138,41 +1141,40 @@ void gemv_units_call(
 
 /// Blocks one GEMV kernel call reads side by side, each a stream of its own:
 /// two, the streams per core DRAM and the L3 serve best, unless a worker's
-/// share of a bf16, f32 or f16 layout fits half its L2, where four blocks
-/// give the multiply-adds the accumulators that hide their latency.  The
-/// INT8 and s4 kernels split their exact sums over more accumulators of
-/// their own.
-int gemv_call_blocks(
-        gemv_kind_t kind, const native_weight_view_t &view, int workers) {
+/// share of a bf16, f32 or f16 layout (packed bytes) fits half its L2 (l2
+/// bytes), where four blocks give the multiply-adds the accumulators that
+/// hide their latency.  The INT8 and s4 kernels split their exact sums over
+/// more accumulators of their own.
+int gemv_call_blocks(gemv_kind_t kind, size_t packed, size_t l2, int workers) {
     switch (kind) {
         case gemv_kind_t::bf16:
         case gemv_kind_t::f32:
         case gemv_kind_t::f16:
         case gemv_kind_t::f16_ph: {
-            const size_t share = native_packed_bytes(view.wei_dt, view.K,
-                                         view.N, view.pack_nr)
-                    / static_cast<size_t>(std::max(1, workers));
-            return share <= static_cast<size_t>(detect_uarch().l2_bytes) / 2
-                    ? 4
-                    : 2;
+            const size_t share = workers <= 1
+                    ? packed
+                    : packed / static_cast<size_t>(workers);
+            return share <= l2 / 2 ? 4 : 2;
         }
         default: return kNativeGemvMaxIntBlocks;
     }
 }
 
 /// Runs the call's units on the GEMV kernels: each worker its share of whole
-/// units, all of K each, in kernel calls of at most gemv_call_blocks blocks;
-/// one worker inline, else a region of the caller's team as
-/// native_run_cpu_team opens it, the workers spread over its threads.
-/// Staged gated rows pair as run_units pairs them.
-status_t run_gemv(gemv_call_t &g, int workers, int threads, int &team) {
+/// units, all of K each, in kernel calls of at most gemv_call_blocks blocks
+/// (packed the layout's bytes, l2 the L2's); one worker inline, else a
+/// region of the caller's team as native_run_cpu_team opens it, the workers
+/// spread over its threads.  Staged gated rows pair as run_units pairs them.
+status_t run_gemv(gemv_call_t &g, int workers, int threads, size_t packed,
+        size_t l2, int &team) {
     gemv_units(g);
     const int units = g.units;
     workers = std::max(1, std::min(workers, units));
     // Blocks a unit reads.
     const int unit_blocks = g.view.paired && !g.runs ? 2 : 1;
-    const int per_call = std::max(
-            1, gemv_call_blocks(g.kind, g.view, workers) / unit_blocks);
+    const int call_blocks = gemv_call_blocks(g.kind, packed, l2, workers);
+    const int per_call
+            = std::max(1, unit_blocks == 2 ? call_blocks / 2 : call_blocks);
     // A worker splits its units into fronts, as many as a kernel call
     // takes, and each call takes the next unit of every front: a front
     // walks its units in memory order, so each of a call's streams goes on
@@ -1181,18 +1183,22 @@ status_t run_gemv(gemv_call_t &g, int workers, int threads, int &team) {
         alignas(64) float acc[kNativeGemvMaxBlocks * kNativeLayoutPackNr];
         if (g.c.int8 && g.int8_op->call.group_shift != nullptr)
             ready_group_shifts(g.int8_op->call, 0, 1);
-        const int u0 = static_cast<int>(static_cast<int64_t>(units) * w / n);
-        const int u1
-                = static_cast<int>(static_cast<int64_t>(units) * (w + 1) / n);
+        const int u0 = n == 1
+                ? 0
+                : static_cast<int>(static_cast<int64_t>(units) * w / n);
+        const int u1 = n == 1
+                ? units
+                : static_cast<int>(static_cast<int64_t>(units) * (w + 1) / n);
         const int count = u1 - u0;
         if (count <= 0) return;
         const int fronts = std::min(per_call, count);
         int first[kNativeGemvMaxBlocks], last[kNativeGemvMaxBlocks];
         for (int f = 0; f < fronts; ++f) {
-            first[f] = u0 + count * f / fronts;
-            last[f] = u0 + count * (f + 1) / fronts;
+            first[f] = u0 + (fronts == count ? f : count * f / fronts);
+            last[f] = u0 + (fronts == count ? f + 1 : count * (f + 1) / fronts);
         }
-        for (int step = 0; step < ceil_div(count, fronts); ++step) {
+        const int steps = fronts == count ? 1 : ceil_div(count, fronts);
+        for (int step = 0; step < steps; ++step) {
             int list[kNativeGemvMaxBlocks];
             int nu = 0;
             for (int f = 0; f < fronts; ++f)
@@ -1337,15 +1343,28 @@ void log_plan_line(const execute_call_t &c, const native_plan_t &p,
             pairing_field);
 }
 
+/// The storage run_tiles may take from its caller, and whether the call
+/// runs on the tiles only.
+struct run_options_t {
+    bool tiles_only = false;
+    native_int8_shift_store_t *shift_store = nullptr;
+};
+
+constexpr run_options_t kTilesOnly {true, nullptr};
+
 /// The native tiles of the call: every step up to the acquisition of the
 /// weight's layout, which is the first that may change the weight, then
 /// (without CheckOnly) the run, an M = 1 call on the GEMV kernels unless
-/// tiles_only.
+/// opt->tiles_only.  opt->shift_store, when given, holds the group shifts of
+/// a per-group call and outlives the run.  A null opt is neither.
 template <bool CheckOnly>
 status_t run_tiles(const GemmDescriptor &desc,
         const native_weight_ref_t &weight, const void *src, void *dst,
         const void *bias, const matmul_params &params, const char **why,
-        bool tiles_only = false) {
+        const run_options_t *opt) {
+    const bool tiles_only = opt != nullptr && opt->tiles_only;
+    native_int8_shift_store_t *const shift_store
+            = opt != nullptr ? opt->shift_store : nullptr;
     static const bool s_log = apilog_verbose_enabled();
     const execute_call_t c = make_call(desc, weight, src, dst, bias, params);
     status_t st = check_call(c, why);
@@ -1382,8 +1401,8 @@ status_t run_tiles(const GemmDescriptor &desc,
     if (st != status_t::success) return st;
     std::optional<int8_operands_t> int8_op;
     if (c.int8) {
-        st = prepare_int8_operands(
-                c, decision, p, bias_in_dequant, ep, int8_op.emplace(), why);
+        st = prepare_int8_operands(c, decision, p, bias_in_dequant, ep,
+                shift_store, int8_op.emplace(), why);
         if (st != status_t::success) return st;
     }
     if (CheckOnly) return status_t::success;
@@ -1439,12 +1458,14 @@ status_t run_tiles(const GemmDescriptor &desc,
     if (gemv != gemv_kind_t::none) {
         gemv_call_t g {c, p, view, ep, gemv, bf16_op, int8_ops, f32_op, f16_op,
                 f16_ph_op};
+        const size_t packed = native_packed_bytes(
+                view.wei_dt, view.K, view.N, view.pack_nr);
+        const size_t l2 = static_cast<size_t>(detect_uarch().l2_bytes);
         // An M = 1 call on a layout of at most a quarter of the L2 runs on
         // the calling thread (see run_units).
-        const bool one_thread
-                = native_packed_bytes(view.wei_dt, view.K, view.N, view.pack_nr)
-                <= static_cast<size_t>(detect_uarch().l2_bytes) / 4;
-        st = run_gemv(g, one_thread ? 1 : p.threads, problem.threads, team);
+        const bool one_thread = packed <= l2 / 4;
+        st = run_gemv(g, one_thread ? 1 : p.threads, problem.threads, packed,
+                l2, team);
     } else {
         st = run_team(c, p, problem.threads, view, ep, bf16_op, int8_ops,
                 f32_op, f16_op, f16_ph_op, team);
@@ -1455,6 +1476,34 @@ status_t run_tiles(const GemmDescriptor &desc,
         log_plan_line(c, p, decision, bias_in_dequant,
                 int8_op && int8_op->direct, view.pack_nr, team, paired, gemv);
     return status_t::success;
+}
+
+/// run_tiles of an INT8 call that may need group shifts
+/// (int8_may_need_group_shifts), with the storage of the shifts in this
+/// frame, which no other call enters.
+template <bool CheckOnly>
+ZENDNNL_NOINLINE status_t run_tiles_per_group(const GemmDescriptor &desc,
+        const native_weight_ref_t &weight, const void *src, void *dst,
+        const void *bias, const matmul_params &params, const char **why) {
+    native_int8_shift_store_t shift_store;
+    const run_options_t opt {false, &shift_store};
+    return run_tiles<CheckOnly>(
+            desc, weight, src, dst, bias, params, why, &opt);
+}
+
+/// run_tiles, with the storage of the group shifts of a per-group INT8 call
+/// over an s8 source in a frame only those calls enter.  Its checks make no
+/// call, so a call that needs no such storage holds no more stack than
+/// run_tiles'.
+template <bool CheckOnly>
+ZENDNNL_ALWAYS_INLINE inline status_t run_call(const GemmDescriptor &desc,
+        const native_weight_ref_t &weight, const void *src, void *dst,
+        const void *bias, const matmul_params &params, const char **why) {
+    if (int8_may_need_group_shifts(desc, params))
+        return run_tiles_per_group<CheckOnly>(
+                desc, weight, src, dst, bias, params, why);
+    return run_tiles<CheckOnly>(
+            desc, weight, src, dst, bias, params, why, nullptr);
 }
 
 } // namespace
@@ -1536,19 +1585,20 @@ size_t native_f16_kept_source_bytes() {
 status_t native_brgemm_execute(const GemmDescriptor &desc,
         const native_weight_ref_t &weight, const void *src, void *dst,
         const void *bias, const matmul_params &params, const char **why) {
-    return run_tiles<false>(desc, weight, src, dst, bias, params, why);
+    return run_call<false>(desc, weight, src, dst, bias, params, why);
 }
 
 status_t native_brgemm_check(const GemmDescriptor &desc,
         const native_weight_ref_t &weight, const void *src, void *dst,
         const void *bias, const matmul_params &params, const char **why) {
-    return run_tiles<true>(desc, weight, src, dst, bias, params, why);
+    return run_call<true>(desc, weight, src, dst, bias, params, why);
 }
 
 status_t native_brgemm_execute_on_tiles(const GemmDescriptor &desc,
         const native_weight_ref_t &weight, const void *src, void *dst,
         const void *bias, const matmul_params &params, const char **why) {
-    return run_tiles<false>(desc, weight, src, dst, bias, params, why, true);
+    return run_tiles<false>(
+            desc, weight, src, dst, bias, params, why, &kTilesOnly);
 }
 
 } // namespace native

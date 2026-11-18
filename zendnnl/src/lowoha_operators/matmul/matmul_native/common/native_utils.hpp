@@ -19,6 +19,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <type_traits>
+
 #include "common/error_status.hpp"
 #include "common/zendnnl_compat.hpp"
 
@@ -44,6 +46,35 @@ inline zendnnl::error_handling::status_t turned_away(
 /// a / b rounded up, for a >= 0 and b > 0; no intermediate overflows.
 inline int ceil_div(int a, int b) {
     return a / b + (a % b != 0);
+}
+
+/// range(fn, i0, i1) on each thread of a region of threads threads, over the
+/// iterations i0 .. i1 of 0 .. n that schedule(static) gives the thread.
+void native_for_parallel(
+        int n, int threads, void (*range)(void *, int, int), void *fn);
+
+/// (*fn)(i0) .. (*fn)(i1 - 1) for the Fn at fn on the calling thread: the
+/// one copy of the body both loops of native_for run.
+template <typename Fn>
+ZENDNNL_NOINLINE void native_for_range(void *fn, int i0, int i1) {
+    Fn &f = *static_cast<Fn *>(fn);
+    for (int i = i0; i < i1; ++i)
+        f(i);
+}
+
+/// fn(0) .. fn(n - 1): with parallel and threads > 1 in a region of threads
+/// threads (native_for_parallel); else on the calling thread with no region
+/// of its own (a region whose if clause is false still makes the runtime
+/// start a team of one), so inside a caller's region on that region's
+/// thread.  fn must not depend on the OpenMP thread number, team or level.
+template <typename Fn>
+inline void native_for(int n, int threads, bool parallel, Fn &&fn) {
+    using F = std::remove_reference_t<Fn>;
+    void *const f = const_cast<void *>(static_cast<const void *>(&fn));
+    if (!parallel || threads <= 1)
+        native_for_range<F>(f, 0, n);
+    else
+        native_for_parallel(n, threads, &native_for_range<F>, f);
 }
 
 /// The K passes of at most kc values over K (K >= 0, kc >= 1) in order:

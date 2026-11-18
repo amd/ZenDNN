@@ -17,13 +17,17 @@
 #ifndef MATMUL_NATIVE_BRGEMM_LOOPER_NATIVE_INT8_CALL_HPP
 #define MATMUL_NATIVE_BRGEMM_LOOPER_NATIVE_INT8_CALL_HPP
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <vector>
 
 #include "common/error_status.hpp"
+#include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/lowoha_common.hpp"
+#include "lowoha_operators/matmul/lowoha_quant_layout.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/gemm_descriptor.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_int8_scheme.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_operator_bridge.hpp"
@@ -60,6 +64,8 @@ using zendnnl::error_handling::status_t;
 ///     bf16 destination.
 native_int8_decision_t decide_int8_call(const GemmDescriptor &desc,
         const matmul_params &params, const void *bias);
+
+struct native_int8_shift_store_t;
 
 /// Per-call INT8 operands, prepared once before the tile loop.
 struct native_int8_call_t {
@@ -112,15 +118,19 @@ struct native_int8_call_t {
     /// source values over group g, at m * groups + g: it cancels what the
     /// group kernel's reading of the weight as w + 128 (an s8 weight,
     /// shift_bits 7) or w + 8 (an s4 weight, shift_bits 3) adds to the
-    /// group's sum.  Written by ready_group_shifts.
+    /// group's sum.  Written by ready_group_shifts.  In shift_store when
+    /// they fit it (the store then has to outlive every use of the call),
+    /// else in shift_buf.
     int32_t *group_shift = nullptr;
     int shift_bits = 7;
     /// per_group, s8 source: the rows, claimed shift_chunk at a time;
     /// shift_rows[0] is the next chunk a tile may claim, shift_rows[1 + c] is
-    /// set once the shifts of chunk c are written.
+    /// set once the shifts of chunk c are written.  shift_rows is in
+    /// shift_store when the claims fit it (as group_shift), else in
+    /// shift_rows_buf.
     int rows = 0;
     int shift_chunk = 1;
-    std::unique_ptr<std::atomic<int>[]> shift_rows;
+    std::atomic<int> *shift_rows = nullptr;
     /// Weight column order (f32, bf16 or f16); set when the dequantization
     /// takes the bias (bias_in_dequant, when the plan allows it).
     const void *bias = nullptr;
@@ -147,7 +157,14 @@ struct native_int8_call_t {
     std::vector<uint8_t> a_buf;
     std::vector<float> scale_buf;
     std::vector<int32_t> zp_buf;
+    /// Storage the caller lends for the group shifts and chunk claims, set
+    /// before prepare_int8_call (native_int8_shift_store_t), or null.  A
+    /// field rather than an argument of prepare_int8_call, where it would
+    /// take a stack slot on the path of every INT8 call.
+    native_int8_shift_store_t *shift_store = nullptr;
+    /// group_shift and shift_rows when they are not in shift_store.
     std::unique_ptr<int32_t[]> shift_buf;
+    std::unique_ptr<std::atomic<int>[]> shift_rows_buf;
     /// A dynamically quantized source and the scales and zero points the
     /// quantizer allocated.
     native_quant_buffers_t src_buffers;
@@ -173,8 +190,26 @@ status_t check_int8_call(const GemmDescriptor &desc,
         const matmul_params &params, const native_int8_decision_t &decision,
         const char **why = nullptr);
 
+/// A dynamic quantization of the source: bf16 / f32 quantized in the call.
+inline bool dynamic_source(const matmul_params &params) {
+    return params.dynamic_quant
+            && (params.dtypes.src == data_type_t::bf16
+                    || params.dtypes.src == data_type_t::f32);
+}
+
+/// The call's source is s8: given, or quantized to s8 in the call.
+inline bool int8_s8_source(const matmul_params &params) {
+    return dynamic_source(params) ? params.dtypes.compute == data_type_t::s8
+                                  : params.dtypes.src == data_type_t::s8;
+}
+
 /// G of a per-group {G > 1, N} weight scale, 0 for any other.
-int int8_scale_groups(const matmul_params &params, int N);
+inline int int8_scale_groups(const matmul_params &params, int N) {
+    if (!has_per_group_wei_scale(params.quant_params, N)) return 0;
+    return static_cast<int>(
+            std::min<int64_t>(params.quant_params.wei_scale.dims[0],
+                    std::numeric_limits<int>::max()));
+}
 
 /// G of a {G >= 1, N} weight scale, 0 for any other: the groups of an s4
 /// weight.
@@ -183,7 +218,57 @@ int int4_scale_groups(const matmul_params &params, int N);
 /// G of a per-group {M, G > 1} source scale over a weight scale that
 /// int8_scale_groups does not take, 0 otherwise; 0 for a null source-scale
 /// buffer, unless the call quantizes its source.
-int int8_source_groups(const matmul_params &params, int M, int N);
+inline int int8_source_groups(const matmul_params &params, int M, int N) {
+    const auto &qp = params.quant_params;
+    const auto &dims = qp.src_scale.dims;
+    // Dims on a null buffer scale nothing, except those of a source the
+    // call quantizes, whose quantizer makes the scales.
+    if (has_per_group_wei_scale(qp, N) || dims.size() != 2 || dims[0] != M
+            || dims[1] <= 1
+            || (qp.src_scale.buff == nullptr && !dynamic_source(params)))
+        return 0;
+    return static_cast<int>(
+            std::min<int64_t>(dims[1], std::numeric_limits<int>::max()));
+}
+
+/// The call may need group shifts (native_int8_call_t::group_shift): the
+/// per-group scheme of decide_int8_call (an s4 weight, or an s8 weight with
+/// int8_scale_groups or int8_source_groups) over an s8 source.  Makes no
+/// call.
+ZENDNNL_ALWAYS_INLINE inline bool int8_may_need_group_shifts(
+        const GemmDescriptor &desc, const matmul_params &params) {
+    if (desc.wei_dt != data_type_t::s4 && desc.wei_dt != data_type_t::s8)
+        return false;
+    return int8_s8_source(params)
+            && (desc.wei_dt == data_type_t::s4
+                    || int8_scale_groups(params, desc.N) > 0
+                    || int8_source_groups(params, desc.M, desc.N) > 0);
+}
+
+/// Storage a caller lends a call (native_int8_call_t::shift_store) for the
+/// group shifts and chunk claims of a per-group call over an s8 source,
+/// which prepare_int8_call fills.  Each part goes into it
+/// when that part fits, whether or not the other does: the M x groups
+/// shifts when they are at most kShifts, the claims when the call has at
+/// most kChunks chunks; a part that does not fit is allocated.  Not
+/// initialized; it must outlive every use of the call.
+struct native_int8_shift_store_t {
+    static constexpr int kShifts = 256;
+    static constexpr int kChunks = 7;
+    int32_t shifts[kShifts];
+    std::atomic<int> rows[kChunks + 1];
+};
+
+/// Source bytes whose group shifts one claim of ready_group_shifts covers:
+/// the claims, on one shared counter, stay few next to the work they hand
+/// out.
+constexpr int kShiftClaimBytes = 65536;
+
+/// The rows of one claim of a per-group call over K source bytes a row
+/// (K >= 1).
+inline int int8_shift_claim_rows(int K) {
+    return std::max(1, kShiftClaimBytes / K);
+}
 
 /// Quantizes a bf16 / f32 source per token or per tensor (or per group to
 /// s8, with per-group weight scales) with matmul's
@@ -199,9 +284,11 @@ int int8_source_groups(const matmul_params &params, int M, int N);
 /// quantization of the rows) work in blocks of copy_block rows (by
 /// copy_block columns when they transpose), on the requested threads when
 /// M * K >= copy_par_min.  The group shifts of a per-group call with an s8
-/// source are left to its tiles (ready_group_shifts).  A call whose
-/// quantization params it cannot use is unimplemented, with *why (when why
-/// is not null) naming the reason.
+/// source are left to its tiles (ready_group_shifts); the shifts and the
+/// chunk claims each go into call.shift_store when the caller set it and
+/// that part fits it, else they are allocated.  A call whose quantization
+/// params it cannot use is unimplemented, with *why (when why is not null)
+/// naming the reason.
 status_t prepare_int8_call(const GemmDescriptor &desc,
         const matmul_params &params, const native_int8_decision_t &decision,
         const void *src, int copy_block, int64_t copy_par_min,

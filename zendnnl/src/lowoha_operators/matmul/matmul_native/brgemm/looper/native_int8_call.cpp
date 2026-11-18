@@ -51,8 +51,6 @@ using quant_t = matmul_quantization_params_t::matmul_quant_t;
 
 constexpr float kUnitScale = 1.0f;
 
-/// Source bytes whose group shifts one claim of ready_group_shifts covers.
-constexpr int kShiftClaimBytes = 65536;
 /// Pauses a wait of ready_group_shifts spins before it yields.
 constexpr int kShiftSpinPauses = 4096;
 
@@ -71,13 +69,6 @@ bool zero_points_fit(const int32_t *zp, int64_t n, bool src_signed, int K) {
             <= std::numeric_limits<int32_t>::max();
 }
 
-/// A dynamic quantization of the source: bf16 / f32 quantized in the call.
-bool dynamic_source(const matmul_params &params) {
-    return params.dynamic_quant
-            && (params.dtypes.src == data_type_t::bf16
-                    || params.dtypes.src == data_type_t::f32);
-}
-
 /// The buffer itself when it is f32, else its n values converted into buf.
 const float *f32_values(
         const void *buff, data_type_t dt, int64_t n, std::vector<float> &buf) {
@@ -94,18 +85,18 @@ const float *f32_values(
 /// dst[m * ldd + k] = element (m, k) of an M x K matrix stored row-major
 /// (lds apart), or column-major when trans; columns K .. ldd are zeroed.
 /// Blocks of block rows (by block columns when trans), on nt threads when
-/// M * K >= par_min.
+/// M * K >= par_min.  Out of line: its loop would otherwise widen the frame
+/// of quantize_source, which every dynamically quantized call enters.
 template <typename T>
-void copy_rows(const void *src, int lds, bool trans, int M, int K, void *dst,
-        int ldd, int nt, int block, int64_t par_min) {
+ZENDNNL_NOINLINE void copy_rows(const void *src, int lds, bool trans, int M,
+        int K, void *dst, int ldd, int nt, int block, int64_t par_min) {
     const T *s = static_cast<const T *>(src);
     T *d = static_cast<T *>(dst);
     const size_t ls = static_cast<size_t>(lds);
     const size_t ld = static_cast<size_t>(ldd);
     const int m_blocks = ceil_div(M, block);
-    const bool parallel = nt > 1 && static_cast<int64_t>(M) * K >= par_min;
-#pragma omp parallel for num_threads(nt) if (parallel) schedule(static)
-    for (int mb = 0; mb < m_blocks; ++mb) {
+    const bool parallel = static_cast<int64_t>(M) * K >= par_min;
+    native_for(m_blocks, nt, parallel, [=](int mb) {
         // A block ends at its start plus what is left, at most block: the
         // start plus block may pass the int bound.
         const int m0 = mb * block;
@@ -115,7 +106,7 @@ void copy_rows(const void *src, int lds, bool trans, int M, int K, void *dst,
         if (!trans) {
             for (int m = m0; m < m_end; ++m)
                 std::memcpy(d + m * ld, s + m * ls, sizeof(T) * K);
-            continue;
+            return;
         }
         for (int k0 = 0; k0 < K;) {
             const int k_end = k0 + std::min(block, K - k0);
@@ -124,7 +115,7 @@ void copy_rows(const void *src, int lds, bool trans, int M, int K, void *dst,
                     d[m * ld + k] = s[k * ls + m];
             k0 = k_end;
         }
-    }
+    });
 }
 
 /// shift[g] = -(1 << bits) times the sum of the s8 values of group g of one
@@ -181,8 +172,9 @@ void row_group_shifts(const uint8_t *row, int groups, int group_bytes, int bits,
 /// Dynamic quantization of a bf16 / f32 source by matmul's per-call reorder
 /// quantization into call.src_buffers.  On success q describes the quantized
 /// source (reorder_quantize_source), and trans says whether its rows are
-/// still transposed.
-status_t quantize_source(const GemmDescriptor &desc,
+/// still transposed.  Out of line: it would otherwise sit in
+/// prepare_int8_call, which every INT8 call enters.
+ZENDNNL_NOINLINE status_t quantize_source(const GemmDescriptor &desc,
         const matmul_params &params, const void *src, int nt, int copy_block,
         int64_t copy_par_min, int groups, native_int8_call_t &call,
         const void *&a, int &lda, bool &trans, const matmul_params *&q,
@@ -379,13 +371,11 @@ status_t check_source_group_call(const GemmDescriptor &desc,
                 "an {M, G} source scale with a zero point, a dst, groups or "
                 "weight scales the per-group tile does not take",
                 why);
-    const bool s8 = dynamic_source(params)
-            ? params.dtypes.compute == data_type_t::s8
-            : params.dtypes.src == data_type_t::s8;
-    return s8 ? status_t::success
-              : turned_away(status_t::unimplemented,
-                        "an {M, G} source scale with a source other than s8",
-                        why);
+    return int8_s8_source(params)
+            ? status_t::success
+            : turned_away(status_t::unimplemented,
+                      "an {M, G} source scale with a source other than s8",
+                      why);
 }
 
 } // namespace
@@ -561,13 +551,6 @@ status_t check_int8_call(const GemmDescriptor &desc,
     return status_t::success;
 }
 
-int int8_scale_groups(const matmul_params &params, int N) {
-    if (!has_per_group_wei_scale(params.quant_params, N)) return 0;
-    return static_cast<int>(
-            std::min<int64_t>(params.quant_params.wei_scale.dims[0],
-                    std::numeric_limits<int>::max()));
-}
-
 int int4_scale_groups(const matmul_params &params, int N) {
     const quant_t &ws = params.quant_params.wei_scale;
     if (ws.buff == nullptr || ws.dims.size() != 2 || ws.dims[0] < 1
@@ -575,19 +558,6 @@ int int4_scale_groups(const matmul_params &params, int N) {
         return 0;
     return static_cast<int>(
             std::min<int64_t>(ws.dims[0], std::numeric_limits<int>::max()));
-}
-
-int int8_source_groups(const matmul_params &params, int M, int N) {
-    const auto &qp = params.quant_params;
-    const auto &dims = qp.src_scale.dims;
-    // Dims on a null buffer scale nothing, except those of a source the
-    // call quantizes, whose quantizer makes the scales.
-    if (has_per_group_wei_scale(qp, N) || dims.size() != 2 || dims[0] != M
-            || dims[1] <= 1
-            || (qp.src_scale.buff == nullptr && !dynamic_source(params)))
-        return 0;
-    return static_cast<int>(
-            std::min<int64_t>(dims[1], std::numeric_limits<int>::max()));
 }
 
 void copy_int8_source(const void *src, int lds, bool trans, int M, int K,
@@ -655,8 +625,8 @@ status_t prepare_int8_call(const GemmDescriptor &desc,
     call.src_signed = a_dt == data_type_t::s8;
     // The INT4 group kernel reads the source by K octets, the others by
     // quads; a zero source value adds nothing against any padded weight.
-    const int k_unit = desc.wei_dt == data_type_t::s4 ? 8 : 4;
-    const int k_pad = ceil_div(K, k_unit) * k_unit;
+    const int k_pad = desc.wei_dt == data_type_t::s4 ? ceil_div(K, 8) * 8
+                                                     : ceil_div(K, 4) * 4;
     if (trans || k_pad != K) {
         call.a_buf.resize(static_cast<size_t>(M) * k_pad);
         copy_int8_source(a, lda, trans, M, K, call.a_buf.data(), k_pad, nt,
@@ -761,16 +731,26 @@ status_t prepare_int8_call(const GemmDescriptor &desc,
     if (call.scheme == native_int8_scheme_t::per_group && call.src_signed) {
         // Every shift is written before its chunk is marked ready, and read
         // only after: the buffer needs no fill.
-        call.shift_buf.reset(new int32_t[static_cast<size_t>(M) * groups]);
-        call.group_shift = call.shift_buf.get();
+        native_int8_shift_store_t *const shift_store = call.shift_store;
+        const size_t shifts = static_cast<size_t>(M) * groups;
+        if (shift_store != nullptr
+                && shifts <= native_int8_shift_store_t::kShifts) {
+            call.group_shift = shift_store->shifts;
+        } else {
+            call.shift_buf.reset(new int32_t[shifts]);
+            call.group_shift = call.shift_buf.get();
+        }
         call.shift_bits = desc.wei_dt == data_type_t::s4 ? 3 : 7;
         call.rows = M;
-        // A claim covers about kShiftClaimBytes of source, so that the
-        // claims, on one shared counter, stay few next to the work they hand
-        // out.
-        call.shift_chunk = std::max(1, kShiftClaimBytes / K);
+        call.shift_chunk = int8_shift_claim_rows(K);
         const int chunks = ceil_div(M, call.shift_chunk);
-        call.shift_rows.reset(new std::atomic<int>[chunks + 1]);
+        if (shift_store != nullptr
+                && chunks <= native_int8_shift_store_t::kChunks) {
+            call.shift_rows = shift_store->rows;
+        } else {
+            call.shift_rows_buf.reset(new std::atomic<int>[chunks + 1]);
+            call.shift_rows = call.shift_rows_buf.get();
+        }
         for (int i = 0; i <= chunks; ++i)
             call.shift_rows[i].store(0, std::memory_order_relaxed);
     }

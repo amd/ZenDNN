@@ -23,7 +23,8 @@ set(matmul_native_common_sources
   native_weight_view.cpp
   native_epilogue.cpp
   native_operator_bridge.cpp
-  native_hw.cpp)
+  native_hw.cpp
+  native_utils.cpp)
 
 set(matmul_native_common_headers
   gemm_descriptor.hpp

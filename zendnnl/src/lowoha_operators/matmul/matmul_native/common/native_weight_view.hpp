@@ -18,12 +18,14 @@
 #define MATMUL_NATIVE_COMMON_NATIVE_WEIGHT_VIEW_HPP
 
 #include <algorithm>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 
 #include "common/error_status.hpp"
 #include "lowoha_operators/matmul/lowoha_common.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_weight_cache.hpp"
+#include "lowoha_operators/matmul/matmul_native/native_layout_policy.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -100,6 +102,23 @@ struct native_weight_view_t {
     /// block after it.
     const int32_t *col_sum(int c) const {
         return col_sums(c / pack_nr) + c % pack_nr;
+    }
+
+    /// column(c) and col_sum(c), c >= 0, of a view whose blocks are the
+    /// layout's kNativeLayoutPackNr columns, as every view
+    /// acquire_native_weight fills is (native_layout_fits admits no other):
+    /// by the constant.
+    const uint8_t *layout_column(int c) const {
+        assert(pack_nr == kNativeLayoutPackNr);
+        const unsigned u = static_cast<unsigned>(c);
+        return block(static_cast<int>(u / kNativeLayoutPackNr))
+                + static_cast<size_t>(u % kNativeLayoutPackNr) * 4;
+    }
+    const int32_t *layout_col_sum(int c) const {
+        assert(pack_nr == kNativeLayoutPackNr);
+        const unsigned u = static_cast<unsigned>(c);
+        return col_sums(static_cast<int>(u / kNativeLayoutPackNr))
+                + u % kNativeLayoutPackNr;
     }
 
     /// Weight column of column t of the tile of pack columns n0 .. n0 + nr.

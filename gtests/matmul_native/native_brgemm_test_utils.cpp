@@ -136,6 +136,29 @@ int call_t::out_cols() const {
     return gated == mm::matmul_gated_act_t::none ? N : N / 2;
 }
 
+zendnnl::lowoha::matmul::native::GemmDescriptor call_descriptor(
+        const call_t &c) {
+    zendnnl::lowoha::matmul::native::GemmDescriptor desc;
+    desc.M = c.M;
+    desc.N = c.N;
+    desc.K = c.K;
+    desc.lda = c.lda_or_tight();
+    desc.ldb = c.ldb_or_tight();
+    desc.ldc = c.ldc_or_tight();
+    desc.transA = c.transA;
+    desc.transB = c.transB;
+    desc.alpha = c.alpha;
+    desc.beta = c.beta;
+    desc.src_dt = c.params.dtypes.src;
+    desc.wei_dt = c.params.dtypes.wei;
+    desc.dst_dt = c.params.dtypes.dst;
+    desc.bias_dt = c.params.dtypes.bias;
+    desc.bias = c.bias;
+    desc.num_threads = c.params.num_threads;
+    desc.gated_act = c.gated;
+    return desc;
+}
+
 status_t run_matmul(const call_t &c) {
     mm::matmul_batch_params_t batch;
     mm::matmul_gated_act_params gated;

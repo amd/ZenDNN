@@ -990,6 +990,16 @@ std::vector<gcase_t> model_cases() {
             }
         }
     }
+    // An f16 source of K 4096, whose rows the widening kernels pad to 4112
+    // floats, and one of K 4113, whose rows they do not pad.
+    for (const int K : {4096, 4113}) {
+        gcase_t c;
+        c.form = form_t::f16;
+        c.N = 48;
+        c.K = K;
+        c.dst = kF16;
+        v.push_back(c);
+    }
     return named(v);
 }
 
@@ -1268,6 +1278,62 @@ TEST(NativeGemv, OneLayoutServesM1AndLargerCalls) {
             }
         }
     }
+}
+
+// ── The widened f16 source ───────────────────────────────────────────────
+
+// An M = 1 f16 call on the widening kernels leaves a kept buffer of exactly
+// its widened row rounded up to 64 bytes: 4112 floats at K 4096, 4113 at K
+// 4113.  The GEMV kernels give the tiles' bits.  In a child with
+// ZENDNNL_MATMUL_NATIVE_F16_ACCUM=f32, which keeps f16 calls on the widening
+// kernels on every CPU.
+TEST(NativeGemv, WidenedF16SourceKeepsItsRow) {
+    if (!cpu_serves(form_t::f16)) GTEST_SKIP() << "needs AVX-512";
+    auto body = [] {
+        const nt::algo_pin_t algo(matmul_algo_t::native_brgemm);
+        if (nat::native_kernel_registry().f16_kind()
+                != nat::native_kernel_kind_t::f16) {
+            std::fprintf(stderr, "f16 calls are not on the widening kernels\n");
+            return 1;
+        }
+        int bad = 0;
+        const std::pair<int, size_t> sizes[]
+                = {{4096, 4112 * 4}, {4113, (4113 * 4 + 63) & ~63}};
+        for (const auto &[K, kept] : sizes) {
+            gcase_t c;
+            c.form = form_t::f16;
+            c.N = 64;
+            c.K = K;
+            c.dst = kF16;
+            c.name = "widened_k" + std::to_string(K);
+            const operands_t o = make_operands(c);
+            const buffer_t wei = nt::kept_until_exit(copy_of(o.wei));
+            const buffer_t tiles = copy_of(o.init);
+            const status_t st0
+                    = run_tiles(make_call(c, o, wei.get(), tiles.get()));
+            nat::release_native_f16_sources();
+            const buffer_t gemv = copy_of(o.init);
+            const status_t st1
+                    = nt::run_matmul(make_call(c, o, wei.get(), gemv.get()));
+            const size_t after = nat::native_f16_kept_source_bytes();
+            const bool bits
+                    = std::memcmp(gemv.get(), tiles.get(), dst_bytes(c)) == 0;
+            if (st0 != status_t::success || st1 != status_t::success || !bits
+                    || after != kept) {
+                std::fprintf(stderr,
+                        "%s: status %d / %d, kept %zu (expected %zu), %s "
+                        "bits\n",
+                        c.name.c_str(), static_cast<int>(st0),
+                        static_cast<int>(st1), after, kept,
+                        bits ? "the tiles'" : "not the tiles'");
+                ++bad;
+            }
+        }
+        nat::release_native_f16_sources();
+        return bad;
+    };
+    nt::expect_in_child({{"ZENDNNL_MATMUL_NATIVE_F16_ACCUM", "f32"}}, body,
+            "ZENDNNL_MATMUL_NATIVE_F16_ACCUM=f32");
 }
 
 } // namespace

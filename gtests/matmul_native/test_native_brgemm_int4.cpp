@@ -1090,6 +1090,28 @@ std::vector<case_t> call_cases() {
         c.M = 9;
         add(c);
     }
+    // Each part of the storage a per-group call lends itself on either side
+    // of its bound (NativeBrgemmInt4Bounds.EachPartTakesTheLentStoreWhenItFits
+    // checks where it goes): one row of kShifts and kShifts + 1 groups moves
+    // the shifts across theirs; kChunks and kChunks + 1 claims of rows of 64
+    // groups, whose shifts are allocated either way, move the claims.
+    using store_t = nat::native_int8_shift_store_t;
+    for (int G : {store_t::kShifts, store_t::kShifts + 1}) {
+        case_t c;
+        c.M = 1;
+        c.N = 32;
+        c.gs = 32;
+        c.G = G;
+        add(c);
+    }
+    for (int chunks : {store_t::kChunks, store_t::kChunks + 1}) {
+        case_t c;
+        c.M = chunks * nat::int8_shift_claim_rows(128 * 64);
+        c.N = 16;
+        c.gs = 128;
+        c.G = 64;
+        add(c);
+    }
     // One source row of per-group scales, quantized on the calling thread:
     // fewer and more groups than a team of every thread, from a bf16 or an
     // f32 source.
@@ -1569,6 +1591,36 @@ TEST(NativeBrgemmInt4Decision, ProblemOfTheCall) {
     EXPECT_EQ(r.int8_scheme, nat::native_int8_scheme_t::per_group);
     EXPECT_EQ(r.wei_group_size, 0);
     EXPECT_EQ(r.wei_scale_bytes, 0);
+}
+
+// int8_may_need_group_shifts, which picks the calls that lend themselves a
+// shift store, holds for every call of the list the checks take exactly
+// when prepare_int8_call gives the call group shifts.
+TEST(NativeBrgemmInt4Decision, CallsThatMayNeedGroupShifts) {
+    if (!vnni()) GTEST_SKIP() << "no AVX-512 VNNI";
+    int checked = 0;
+    for (const case_t &c : call_cases()) {
+        const operands_t o = make_operands(c);
+        const buffer_t scale = copy_of(o.src_scale);
+        const nt::call_t k = make_call(c, o, o.wei.get(), nullptr, scale);
+        const nat::GemmDescriptor d = nt::call_descriptor(k);
+        const nat::native_int8_decision_t decision
+                = nat::decide_int8_call(d, k.params, k.bias);
+        if (nat::check_int8_call(d, k.params, decision) != status_t::success)
+            continue;
+        nat::native_int8_shift_store_t store;
+        nat::native_int8_call_t call;
+        call.shift_store = &store;
+        ASSERT_EQ(nat::prepare_int8_call(d, k.params, decision, k.src, 64,
+                          int64_t {1} << 40, call),
+                status_t::success)
+                << c.name;
+        EXPECT_EQ(nat::int8_may_need_group_shifts(d, k.params),
+                call.group_shift != nullptr)
+                << c.name;
+        ++checked;
+    }
+    EXPECT_GT(checked, 0);
 }
 
 // The layout rule takes an s4 weight with an s8 source (or one the call
@@ -2130,6 +2182,76 @@ TEST(NativeBrgemmInt4Bounds, SourceRowsOfTheLargestK) {
     EXPECT_TRUE(call.a_buf.empty());
     EXPECT_EQ(call.groups, groups);
     EXPECT_EQ(call.group_quads, K / groups / 4);
+}
+
+// Where a per-group call puts its M x G group shifts and its claims, one per
+// int8_shift_claim_rows(K) rows, when its caller lends it a store: each part
+// in the store when it fits there, whether or not the other one does, else
+// in an allocation of its own.  The cases sit on either side of each bound.
+TEST(NativeBrgemmInt4Bounds, EachPartTakesTheLentStoreWhenItFits) {
+    if (!vnni()) GTEST_SKIP() << "no AVX-512 VNNI";
+    using store_t = nat::native_int8_shift_store_t;
+    const int shifts = store_t::kShifts, chunks = store_t::kChunks;
+    const int N = 32, K = 8192;
+    const int rows = nat::int8_shift_claim_rows(K);
+    // The most groups whose shifts fit the store at chunks + 1 claims.
+    const int few = shifts / ((chunks + 1) * rows);
+    ASSERT_GE(few, 1);
+    ASSERT_EQ(K % (few * 4), 0);
+    struct bound_t {
+        int M, G, K;
+        bool shifts_in_store, claims_in_store;
+    };
+    const bound_t cases[] = {{1, shifts, shifts * 32, true, true},
+            {1, shifts + 1, (shifts + 1) * 32, false, true},
+            {chunks * rows, few, K, true, true},
+            {(chunks + 1) * rows, few, K, true, false},
+            {chunks * rows, 64, K, false, true},
+            {(chunks + 1) * rows, 64, K, false, false}};
+    for (const bound_t &b : cases) {
+        const std::string what = "M " + std::to_string(b.M) + " G "
+                + std::to_string(b.G) + " K " + std::to_string(b.K);
+        const int claim_rows = nat::int8_shift_claim_rows(b.K);
+        const int claims = (b.M + claim_rows - 1) / claim_rows;
+        ASSERT_EQ(int64_t {b.M} * b.G <= shifts, b.shifts_in_store) << what;
+        ASSERT_EQ(claims <= chunks, b.claims_in_store) << what;
+        const std::vector<float> wei_scale(static_cast<size_t>(b.G) * N, 1.0f);
+        const std::vector<float> src_scale(b.M, 1.0f);
+        const std::vector<int8_t> src(static_cast<size_t>(b.M) * b.K, 0);
+        nat::GemmDescriptor d;
+        d.M = b.M;
+        d.N = N;
+        d.K = b.K;
+        d.lda = b.K;
+        d.ldb = b.K;
+        d.ldc = N;
+        d.transB = true;
+        d.src_dt = kS8;
+        d.wei_dt = kS4;
+        d.dst_dt = kF32;
+        mm::matmul_params p;
+        p.dtypes.src = kS8;
+        p.dtypes.wei = kS4;
+        p.dtypes.dst = kF32;
+        p.dtypes.compute = kS8;
+        set_quant(p.quant_params.wei_scale, wei_scale.data(), kF32, {b.G, N});
+        set_quant(p.quant_params.src_scale, src_scale.data(), kF32, {b.M, 1});
+        const nat::native_int8_decision_t decision
+                = nat::decide_int8_call(d, p, nullptr);
+        ASSERT_EQ(nat::check_int8_call(d, p, decision), status_t::success)
+                << what;
+        nat::native_int8_shift_store_t store;
+        nat::native_int8_call_t call;
+        call.shift_store = &store;
+        ASSERT_EQ(nat::prepare_int8_call(d, p, decision, src.data(), 64,
+                          int64_t {1} << 40, call),
+                status_t::success)
+                << what;
+        ASSERT_NE(call.group_shift, nullptr) << what;
+        EXPECT_EQ(call.group_shift == store.shifts, b.shifts_in_store) << what;
+        EXPECT_EQ(call.shift_rows == store.rows, b.claims_in_store) << what;
+        EXPECT_EQ(call.shift_chunk, claim_rows) << what;
+    }
 }
 
 // The same call with a transposed source: the checks take it, and its rows

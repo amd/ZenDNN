@@ -1954,6 +1954,42 @@ TEST(NativeBrgemmInt8SourceGroups, DimsWithoutAScaleKeepThePerChannelCall) {
     mm::clear_matmul_weight_caches();
 }
 
+// int8_may_need_group_shifts, which picks the calls that lend themselves a
+// shift store, holds for every call of the per-group and source-group lists
+// the checks take (u8 and s8 sources, given or quantized in the call)
+// exactly when prepare_int8_call gives the call group shifts.
+TEST(NativeBrgemmInt8SourceGroups, CallsThatMayNeedGroupShifts) {
+    if (!vnni()) GTEST_SKIP() << "no AVX-512 VNNI";
+    int checked = 0, shifted = 0;
+    std::vector<gcase_t> all = cases();
+    const std::vector<gcase_t> more = source_group_cases();
+    all.insert(all.end(), more.begin(), more.end());
+    for (const gcase_t &c : all) {
+        const operands_t o = make_operands(c);
+        const buffer_t scale = copy_of(o.src_scale);
+        const nt::call_t k = make_call(c, o, o.wei.get(), nullptr, scale);
+        const nat::GemmDescriptor d = nt::call_descriptor(k);
+        const nat::native_int8_decision_t decision
+                = nat::decide_int8_call(d, k.params, k.bias);
+        if (nat::check_int8_call(d, k.params, decision) != status_t::success)
+            continue;
+        nat::native_int8_shift_store_t store;
+        nat::native_int8_call_t call;
+        call.shift_store = &store;
+        ASSERT_EQ(nat::prepare_int8_call(d, k.params, decision, k.src, 64,
+                          int64_t {1} << 40, call),
+                status_t::success)
+                << c.name;
+        EXPECT_EQ(nat::int8_may_need_group_shifts(d, k.params),
+                call.group_shift != nullptr)
+                << c.name;
+        ++checked;
+        shifted += call.group_shift != nullptr;
+    }
+    EXPECT_GT(shifted, 0);
+    EXPECT_GT(checked, shifted);
+}
+
 TEST(NativeBrgemmInt8GroupKernel, Table) {
     for (int nv : {1, 2}) {
         const int max_mr = nat::native_int8_group_ukernel_max_mr(nv);

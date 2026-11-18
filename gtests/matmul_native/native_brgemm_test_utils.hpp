@@ -95,6 +95,10 @@ struct call_t {
 
 status_t run_matmul(const call_t &c);
 
+/// The descriptor of c, as matmul_direct makes it for the native BRGEMM.
+zendnnl::lowoha::matmul::native::GemmDescriptor call_descriptor(
+        const call_t &c);
+
 /// The status native_brgemm_refusal gives c (success when the native BRGEMM
 /// serves it or does not take it), with reason its reason.
 status_t refusal_of(const call_t &c, std::string *reason = nullptr);

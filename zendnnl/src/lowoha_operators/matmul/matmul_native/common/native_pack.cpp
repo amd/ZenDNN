@@ -637,11 +637,7 @@ void for_each_part(int parts, int num_threads, Fn fn) {
     // The caller's team, which the other regions of its call use: a region
     // of another size makes the runtime resize the team, for it and again
     // for the call's next region.
-    const int nt
-            = omp_in_parallel() || parts < 2 ? 1 : std::max(1, num_threads);
-#pragma omp parallel for num_threads(nt) schedule(static) if (nt > 1)
-    for (int i = 0; i < parts; ++i)
-        fn(i);
+    native_for(parts, num_threads, parts > 1 && !omp_in_parallel(), fn);
 }
 
 template <bool TransB>
@@ -789,8 +785,10 @@ int native_pack_tiles(int n_blocks, int k_groups) {
 
 size_t native_packed_bytes(data_type_t wei_dt, int K, int N, int pack_nr) {
     assert(native_layout_fits(wei_dt, K, N, pack_nr));
-    const size_t bytes = native_block_bytes(wei_dt, K, pack_nr)
-            * static_cast<size_t>(native_padded_n(N, pack_nr) / pack_nr);
+    assert(pack_nr == kNativeLayoutPackNr);
+    const size_t blocks = (static_cast<size_t>(N) + kNativeLayoutPackNr - 1)
+            / kNativeLayoutPackNr;
+    const size_t bytes = native_block_bytes(wei_dt, K, pack_nr) * blocks;
     return (bytes + 63) & ~size_t {63};
 }
 

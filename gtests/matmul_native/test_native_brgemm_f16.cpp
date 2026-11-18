@@ -35,6 +35,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <future>
 #include <limits>
 #include <memory>
@@ -44,6 +45,7 @@
 #include <vector>
 
 #if defined(__linux__)
+#include <pthread.h>
 #include <unistd.h>
 #include <sys/mman.h>
 #endif
@@ -2415,6 +2417,162 @@ TEST(NativeBrgemmF16Route, WidenedSourcesAreBoundedAndReleased) {
     EXPECT_EQ(nat::native_f16_kept_source_bytes(), one);
     mm::clear_matmul_weight_caches();
     EXPECT_EQ(nat::native_f16_kept_source_bytes(), 0u);
+}
+
+// On the widening kernels a call's M widened rows, K floats apart or K + 16
+// at a multiple of 1024, go into a kept buffer of exactly those rows
+// rounded up to 64 bytes: calls of M 1, 2 and 4, also of transposed sources,
+// each with the model's bits and the kept bytes after it.  In a child with
+// ZENDNNL_MATMUL_NATIVE_F16_ACCUM=f32, which keeps f16 calls on the widening
+// kernels on every CPU.
+TEST(NativeBrgemmF16Route, AKeptBufferHoldsTheWidenedRows) {
+    SKIP_WITHOUT_NATIVE_ISA();
+    nt::expect_in_child({{"ZENDNNL_MATMUL_NATIVE_F16_ACCUM", "f32"}}, [] {
+        if (f16_ph_calls()) {
+            std::fprintf(stderr, "f16 calls are not on the widening kernels\n");
+            return 1;
+        }
+        const nt::algo_pin_t pin(matmul_algo_t::native_brgemm);
+        struct rows_t {
+            int M, K;
+            bool transA;
+            size_t kept;
+        };
+        const rows_t calls[] = {{1, 256, false, 256 * 4},
+                {1, 4112, false, 4112 * 4}, {2, 2056, false, 2 * 2056 * 4},
+                {4, 1028, true, 4 * 1028 * 4}, {4, 1024, false, 4 * 1040 * 4},
+                {2, 2048, false, 2 * 2064 * 4}, {4, 1029, false, 16512},
+                {4, 1024, true, 4 * 1040 * 4}};
+        int bad = 0;
+        uint32_t seed = 2200;
+        for (const rows_t &r : calls) {
+            nat::release_native_f16_sources();
+            f16_call_t s;
+            s.M = r.M;
+            s.N = 64;
+            s.K = r.K;
+            s.transA = r.transA;
+            direct_t d = make_direct(s, seed++);
+            const std::vector<float> want = model_of(d);
+            const status_t st = nt::run_matmul(d.call);
+            const size_t kept = nat::native_f16_kept_source_bytes();
+            const bool bits = same_bits(s, d.dst, want);
+            if (st != status_t::success || !bits || kept != r.kept) {
+                std::fprintf(stderr,
+                        "%s: status %d, %s bits, kept %zu (expected %zu)\n",
+                        str(s).c_str(), static_cast<int>(st),
+                        bits ? "the model's" : "not the model's", kept, r.kept);
+                ++bad;
+            }
+        }
+        nat::release_native_f16_sources();
+        return bad;
+    }, "ZENDNNL_MATMUL_NATIVE_F16_ACCUM=f32");
+}
+
+// An f16 call on the widening kernels takes at most 2 KiB more of the
+// calling thread's stack than a bf16 call of its size, and both run on a
+// thread of a 64 KiB stack: warm M = 1 calls on one thread, each on a
+// painted stack of its own above a guard page.  In a child with
+// ZENDNNL_MATMUL_NATIVE_F16_ACCUM=f32, which keeps f16 calls on the widening
+// kernels on every CPU.  Only in optimized builds without a sanitizer, whose
+// frames the bound is for (Clang names its sanitizers in __has_feature only).
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) \
+        || __has_feature(memory_sanitizer)
+#define NATIVE_F16_STACK_TEST_SANITIZED 1
+#endif
+#endif
+TEST(NativeBrgemmF16Route, AWidenedCallTakesTheStackOfOtherCalls) {
+#if !defined(__linux__) || !defined(__OPTIMIZE__) \
+        || defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__) \
+        || defined(NATIVE_F16_STACK_TEST_SANITIZED)
+    GTEST_SKIP() << "needs an optimized Linux build without a sanitizer";
+#else
+    SKIP_WITHOUT_NATIVE_ISA();
+    if (!nat::detect_uarch().avx512bf16) GTEST_SKIP() << "needs AVX512-BF16";
+    // The bytes of a stack of bytes that fn wrote on a new thread (with the
+    // thread's storage at its top), or 0 when no thread ran.
+    const auto stack_bytes_used
+            = [](size_t bytes, const std::function<void()> &fn) {
+        const size_t page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+        void *map = mmap(nullptr, page + bytes, PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (map == MAP_FAILED) return size_t {0};
+        constexpr uint8_t kPaint = 0xa5;
+        uint8_t *const low = static_cast<uint8_t *>(map) + page;
+        std::memset(low, kPaint, bytes);
+        size_t used = 0;
+        pthread_attr_t attr;
+        if (mprotect(map, page, PROT_NONE) == 0
+                && pthread_attr_init(&attr) == 0) {
+            const auto run = [](void *f) -> void * {
+                (*static_cast<const std::function<void()> *>(f))();
+                return nullptr;
+            };
+            pthread_t thread;
+            if (pthread_attr_setstack(&attr, low, bytes) == 0
+                    && pthread_create(&thread, &attr, run,
+                               const_cast<std::function<void()> *>(&fn))
+                            == 0) {
+                pthread_join(thread, nullptr);
+                size_t clean = 0;
+                while (clean < bytes && low[clean] == kPaint)
+                    ++clean;
+                used = bytes - clean;
+            }
+            pthread_attr_destroy(&attr);
+        }
+        munmap(map, page + bytes);
+        return used;
+    };
+    nt::expect_in_child({{"ZENDNNL_MATMUL_NATIVE_F16_ACCUM", "f32"}}, [&] {
+        const nt::algo_pin_t pin(matmul_algo_t::native_brgemm);
+        f16_call_t s;
+        s.M = 1;
+        s.N = 64;
+        s.K = 256;
+        direct_t f16 = make_direct(s, 2300);
+        const std::vector<float> want = model_of(f16);
+        nt::call_t bf16;
+        bf16.M = s.M;
+        bf16.N = s.N;
+        bf16.K = s.K;
+        const buffer_t src = nt::random_buffer(kBf16, s.K, 2301, -1, 1);
+        const buffer_t wei = nt::kept_until_exit(nt::random_buffer(
+                kBf16, static_cast<size_t>(s.K) * s.N, 2302, -1, 1));
+        const buffer_t dst = nt::make_buffer(static_cast<size_t>(s.N) * 2);
+        bf16.src = src.get();
+        bf16.wei = wei.get();
+        bf16.dst = dst.get();
+        bf16.params.dtypes.src = bf16.params.dtypes.wei = bf16.params.dtypes.dst
+                = kBf16;
+        bf16.params.num_threads = 1;
+        if (nt::run_matmul(f16.call) != status_t::success
+                || nt::run_matmul(bf16) != status_t::success) {
+            std::fprintf(stderr, "the calls fail on the calling thread\n");
+            return 1;
+        }
+        const size_t stack = 64 * 1024;
+        status_t st_f16 = status_t::failure, st_bf16 = status_t::failure;
+        const size_t f16_bytes = stack_bytes_used(
+                stack, [&] { st_f16 = nt::run_matmul(f16.call); });
+        const size_t bf16_bytes = stack_bytes_used(
+                stack, [&] { st_bf16 = nt::run_matmul(bf16); });
+        const size_t most = bf16_bytes + 2048;
+        if (st_f16 != status_t::success || st_bf16 != status_t::success
+                || !same_bits(s, f16.dst, want) || bf16_bytes == 0
+                || f16_bytes > most) {
+            std::fprintf(stderr,
+                    "f16: status %d, %zu bytes of stack; bf16: status %d, "
+                    "%zu bytes (f16 at most %zu)\n",
+                    static_cast<int>(st_f16), f16_bytes,
+                    static_cast<int>(st_bf16), bf16_bytes, most);
+            return 1;
+        }
+        return 0;
+    }, "ZENDNNL_MATMUL_NATIVE_F16_ACCUM=f32");
+#endif
 }
 
 // A buffer goes back to the pool without allocating: into a free slot, in
