@@ -1563,8 +1563,7 @@ TEST(PromptTileExecutor, BitwiseMatchesRoundsAcrossActs) {
                     grp_matmul_gated_act_t::gelu_and_mul,
                     grp_matmul_gated_act_t::swiglu_oai_mul}) {
         for (const auto &M : ab_dists()) {
-            Case c;
-            c.M = M;
+            Case c {M};
             c.act = act;
             expect_bitwise_equal(c);
         }
@@ -1577,8 +1576,7 @@ TEST(PromptTileExecutor, BitwiseMatchesRoundsAcrossThreadCounts) {
         for (const auto act : {grp_matmul_gated_act_t::none,
                      grp_matmul_gated_act_t::swiglu_oai_mul}) {
             for (const size_t d : {size_t(0), size_t(2)}) {
-                Case c;
-                c.M = ab_dists()[d];
+                Case c {ab_dists()[d]};
                 c.act = act;
                 c.threads = T;
                 expect_bitwise_equal(c);
