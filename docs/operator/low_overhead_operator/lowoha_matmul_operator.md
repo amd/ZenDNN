@@ -1273,6 +1273,8 @@ Its error line says why: `matmul_direct: native BRGEMM did not serve the call (<
 
 Under `ZENDNNL_MATMUL_ALGO=10` a call on an AOCL-DLP blocked prepack whose `lowoha_algo` names AOCL-DLP blocked keeps its AOCL-DLP route when the native BRGEMM does not serve it. Group matmul never reaches the native BRGEMM: under `ZENDNNL_MATMUL_ALGO=10`, and for an op whose `lowoha_algo` is `native_brgemm`, it runs as with the algorithm unset.
 
+Each call's plan (tile widths, rows per call, M blocks, K passes, schedule and team) comes from the native BRGEMM's built-in planner, which reads the CPU's cache sizes and L3 domains. `ZENDNNL_MATMUL_NATIVE_CONFIG` and a tuning file (`ZENDNNL_MATMUL_NATIVE_TUNING_FILE`) set it for classes of calls (see [runtime_env.md](../../runtime_env.md)); the offline tuner in `tools/native_brgemm_tuning` measures plans on a machine and writes such a file, for M from 2: an M = 1 call runs on the GEMV kernels (see M = 1 calls above), which take none of the plan's tiles, M blocks or K passes.
+
 ### AOCL-DLP route
 
 With `lowoha_algo` left `none` and the algorithm unset, a single call runs on `aocl_dlp_blocked`. `aocl_dlp`, `aocl_dlp_blocked`, and every other kernel except the reference kernel and oneDNN pass the calls they do not serve to AOCL-DLP. On that route:

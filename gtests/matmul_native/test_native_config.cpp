@@ -28,6 +28,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -46,6 +47,7 @@
 #include "lowoha_operators/matmul/matmul_native/common/native_hw.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_pack.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_utils.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_weight_cache.hpp"
 #include "lowoha_operators/matmul/matmul_native/native_layout_policy.hpp"
 #include "matmul_native/native_brgemm_test_utils.hpp"
 #include "nlohmann/json.hpp"
@@ -59,6 +61,7 @@ namespace {
 using namespace zendnnl::lowoha::matmul::native;
 using json = nlohmann::json;
 using source_kind = native_plan_source_t;
+namespace mm = zendnnl::lowoha::matmul;
 
 bool has_isa() {
     const UarchParams &u = detect_uarch();
@@ -252,7 +255,7 @@ const key_doc_t kKeyDocs[] = {
                 &field_value<int, &hp_t::threads_cap>},
         {"min_tiles_per_thread", "both", true, false, "1",
                 &field_value<int, &hp_t::min_tiles_per_thread>},
-        {"row_unit", "both", true, true, "12",
+        {"row_unit", "both", true, true, "auto",
                 &field_value<int, &hp_t::row_unit>},
         {"tile_rows", "both", true, false, "6",
                 &field_value<int, &hp_t::tile_rows>},
@@ -452,10 +455,14 @@ TEST(NativeConfigText, KeyDocsMatchTheKeyTable) {
         const bool integer = k.type == native_key_type_t::int32
                 || k.type == native_key_type_t::int64;
         if (integer && !native_text_int64(d.builtin, text_value)) {
-            // -1: col_groups by the schedule, cm_tall_pct by the L3 domain.
-            const bool minus_one = std::string(k.name) == "col_groups"
-                    || std::string(k.name) == "cm_tall_pct";
-            EXPECT_EQ(v, minus_one ? -1 : 0) << k.name;
+            // -1: col_groups by the schedule, cm_tall_pct by the L3 domain;
+            // row_unit 12: the rules' unit, which the cost model's row groups
+            // of short calls replace by cm_short_rows.
+            const std::string name = k.name;
+            const int64_t auto_value = name == "row_unit"           ? 12
+                    : name == "col_groups" || name == "cm_tall_pct" ? -1
+                                                                    : 0;
+            EXPECT_EQ(v, auto_value) << k.name;
         } else {
             const native_config_t c
                     = config(std::string(k.name) + "=" + d.builtin);
@@ -2081,6 +2088,10 @@ uint32_t kernel_rows(native_kernel_kind_t kind, int nr) {
                     != nullptr;
         else if (kind == native_kernel_kind_t::f32)
             served = select_native_fp32_ukernel(mr, nr / 16) != nullptr;
+        else if (kind == native_kernel_kind_t::f16)
+            served = select_native_f16_ukernel(mr, nr / 16) != nullptr;
+        else if (kind == native_kernel_kind_t::f16_ph)
+            served = select_native_f16_ph_ukernel(mr, nr / 16) != nullptr;
         else
             served = select_native_int8_ukernel(mr, nr / 16, false) != nullptr
                     && select_native_int8_ukernel(mr, nr / 16, true) != nullptr;
@@ -2326,10 +2337,27 @@ nlohmann::ordered_json key_json(const native_config_key_t &k) {
     return j;
 }
 
+/// The fields a [MATMUL.NATIVE_BRGEMM] line prints, each for some calls:
+/// the call, the plan, the call's choices that are not plan fields (gemv,
+/// direct, dequant_bias, wei, order, team, padded_n, pairing) and the
+/// plan's provenance (source, cfg).
+const char *const kPlanLineFields[] = {"M", "N", "K", "pack_nr", "nr", "mb",
+        "kc", "kernels", "tiles", "threads", "col_groups", "unit_tiles",
+        "domain_threads", "transA", "gemv", "mr", "row_unit", "traversal",
+        "int8_rows", "int8_cw", "int8_scheme", "direct", "wei", "gs", "order",
+        "pass_budget", "int8_pass", "dequant_bias", "copy_block", "source",
+        "cfg", "team", "padded_n", "pairing"};
+
+/// The values of the plan line's gemv field: the GEMV kernels an M = 1 call
+/// runs on, by its type, and none for a call on the tiles.
+const char *const kPlanLineGemv[]
+        = {"none", "bf16", "f32", "f16", "f16_ph", "s8", "s8_group", "s4"};
+
 /// What the planner reads and offers on this build and CPU: the config keys,
 /// the match keys, rule features and comparisons, the kernels, the hardware
-/// and what the plan reads of it (uarch), and this CPU's value of every
-/// hardware key (hw_match).
+/// and what the plan reads of it (uarch), this CPU's value of every
+/// hardware key (hw_match), and the fields of the plan line and the values
+/// of its gemv field.
 nlohmann::ordered_json schema_json() {
     const native_hw_t &hw = native_hw();
     const UarchParams &u = native_plan_uarch();
@@ -2355,8 +2383,9 @@ nlohmann::ordered_json schema_json() {
     doc["uarch"] = {{"l1d_bytes", u.l1d_bytes}, {"l2_bytes", u.l2_bytes},
             {"l3_bytes", u.l3_domain_bytes}, {"num_cores", u.num_cores},
             {"family_l3_cores", u.family_l3_cores},
-            {"l3_domain_cores", u.l3_domain_cores}, {"avx512f", u.avx512f},
-            {"avx512bf16", u.avx512bf16}, {"avx512vnni", u.avx512vnni}};
+            {"l3_domain_cores", u.l3_domain_cores}, {"fma_ports", u.fma_ports},
+            {"avx512f", u.avx512f}, {"avx512bf16", u.avx512bf16},
+            {"avx512vnni", u.avx512vnni}, {"avx512fp16", u.avx512fp16}};
     doc["hw_match"] = nlohmann::ordered_json::parse(
             native_brgemm_test::hw_match_text(hw));
 
@@ -2438,6 +2467,19 @@ nlohmann::ordered_json schema_json() {
                 {"max_mr", c->max_mr}, {"k_unit", 1},
                 {"int8_schemes", scheme_names(c->int8_schemes)}});
     }
+    // An f16 call takes the F16_PH kernels where the registry has them, else
+    // the F16 kernels; F16_PH also has tiles of two blocks.
+    for (const auto &[kind, name] :
+            {std::pair {native_kernel_kind_t::f16, "f16"},
+                    std::pair {native_kernel_kind_t::f16_ph, "f16_ph"}})
+        for (const int nr : {16, 32, 64}) {
+            const native_kernel_caps_t *c = r.caps(kind, nr);
+            if (c == nullptr) continue;
+            kernels.push_back({{"kind", name}, {"nr", nr},
+                    {"mr_mask", kernel_rows(kind, nr)}, {"max_mr", c->max_mr},
+                    {"k_unit", 1},
+                    {"int8_schemes", scheme_names(c->int8_schemes)}});
+        }
     doc["kernels"] = kernels;
     doc["tuning_file"] = {{"format", kNativeTuningFormat},
             {"version", kNativeTuningVersion},
@@ -2447,7 +2489,96 @@ nlohmann::ordered_json schema_json() {
             {"isa",
                     std::vector<std::string>(std::begin(kNativeIsaNames),
                             std::end(kNativeIsaNames))}};
+    doc["plan_line"] = std::vector<std::string>(
+            std::begin(kPlanLineFields), std::end(kPlanLineFields));
+    doc["plan_line_gemv"] = std::vector<std::string>(
+            std::begin(kPlanLineGemv), std::end(kPlanLineGemv));
     return doc;
+}
+
+/// The fields of each [MATMUL.NATIVE_BRGEMM] line of text, in order, each a
+/// name and its value; a token without '=' is a name with no value.
+std::vector<std::vector<std::pair<std::string, std::string>>> plan_line_fields(
+        const std::string &text) {
+    const std::string tag = "[MATMUL.NATIVE_BRGEMM] ";
+    std::vector<std::vector<std::pair<std::string, std::string>>> lines;
+    for (size_t at = text.find(tag); at != std::string::npos;
+            at = text.find(tag, at + 1)) {
+        const size_t from = at + tag.size();
+        const size_t end = text.find('\n', from);
+        std::istringstream line(
+                text.substr(from, end == std::string::npos ? end : end - from));
+        std::vector<std::pair<std::string, std::string>> fields;
+        for (std::string token; line >> token;) {
+            const size_t eq = token.find('=');
+            fields.emplace_back(token.substr(0, eq),
+                    eq == std::string::npos ? "" : token.substr(eq + 1));
+        }
+        lines.push_back(fields);
+    }
+    return lines;
+}
+
+/// One native call whose plan line names some of kPlanLineFields: groups
+/// is the weight scale groups along K of an s8 or s4 weight (0: one scale
+/// per column), src_groups gives a dynamic source {M, groups} scales.
+struct line_call_t {
+    const char *what;
+    data_type_t dt; ///< the weight's type
+    int M, N, K;
+    int groups = 0;
+    bool src_groups = false;
+    mm::matmul_gated_act_t gated = mm::matmul_gated_act_t::none;
+};
+
+status_t run_line_call(const line_call_t &l) {
+    namespace nt = native_brgemm_test;
+    const bool int8 = l.dt == data_type_t::s8 || l.dt == data_type_t::s4;
+    const bool own = l.dt == data_type_t::f16 || l.dt == data_type_t::f32;
+    const data_type_t src_dt = own ? l.dt : data_type_t::bf16;
+    const int G = std::max(1, l.groups);
+    nt::call_t c;
+    c.M = l.M;
+    c.N = l.N;
+    c.K = l.K;
+    c.transB = true;
+    c.gated = l.gated;
+    const nt::buffer_t src = nt::random_buffer(
+            src_dt, static_cast<size_t>(l.M) * l.K, 11, -1.0f, 1.0f);
+    const nt::buffer_t wei = l.dt == data_type_t::s4
+            ? nt::random_buffer(data_type_t::u8,
+                      native_raw_weight_bytes(l.dt, l.K, l.N, l.K, true), 12, 0,
+                      255)
+            : nt::random_buffer(
+                      l.dt, static_cast<size_t>(l.N) * l.K, 12, -1.0f, 1.0f);
+    const nt::buffer_t wei_scale = nt::random_buffer(
+            data_type_t::f32, static_cast<size_t>(G) * l.N, 13, 0.002f, 0.01f);
+    const nt::buffer_t src_scale = nt::make_buffer(
+            static_cast<size_t>(l.M) * (l.src_groups ? G : 1) * sizeof(float));
+    const nt::buffer_t dst = nt::make_buffer(
+            static_cast<size_t>(l.M) * c.out_cols() * nt::dt_bytes(src_dt));
+    c.src = src.get();
+    c.wei = wei.get();
+    c.dst = dst.get();
+    mm::matmul_params &p = c.params;
+    p.dtypes.src = src_dt;
+    p.dtypes.wei = l.dt;
+    p.dtypes.dst = src_dt;
+    p.num_threads = 4;
+    p.weight_cache_type = 1;
+    p.lowoha_algo = zendnnl::common::matmul_algo_t::native_brgemm;
+    if (int8) {
+        p.dtypes.compute = data_type_t::s8;
+        p.dynamic_quant = true;
+        auto &q = p.quant_params;
+        q.wei_scale.buff = wei_scale.get();
+        q.wei_scale.dt = data_type_t::f32;
+        q.wei_scale.dims = {l.groups > 0 ? l.groups : 1, l.N};
+        q.src_scale.buff = src_scale.get();
+        q.src_scale.dt = data_type_t::f32;
+        q.src_scale.dims = {l.M, l.src_groups ? G : 1};
+    }
+    return nt::run_matmul(c);
 }
 
 } // namespace
@@ -2619,6 +2750,30 @@ TEST(NativeConfigSchema, SchemaDump) {
     } else {
         EXPECT_TRUE(f32_kernels.empty());
     }
+    // The F16 kernels at 16 and 32 columns, with AVX-512 F; the F16_PH
+    // kernels, where the registry has them, also at 64 (two blocks).
+    std::vector<int> f16_widths, f16_ph_widths;
+    for (const json &c : doc.at("kernels")) {
+        if (c.at("kind") != "f16" && c.at("kind") != "f16_ph") continue;
+        (c.at("kind") == "f16" ? f16_widths : f16_ph_widths)
+                .push_back(c.at("nr").get<int>());
+        EXPECT_EQ(c.at("max_mr"), 12) << c.at("kind") << " " << c.at("nr");
+        EXPECT_EQ(c.at("mr_mask"), 0xfff) << c.at("kind") << " " << c.at("nr");
+        EXPECT_EQ(c.at("k_unit"), 1);
+        EXPECT_EQ(c.at("int8_schemes"), json::array());
+    }
+    EXPECT_EQ(f16_widths,
+            detect_uarch().avx512f ? std::vector<int>({16, 32})
+                                   : std::vector<int>());
+    EXPECT_EQ(f16_ph_widths,
+            native_kernel_registry().f16_kind() == native_kernel_kind_t::f16_ph
+                    ? std::vector<int>({16, 32, 64})
+                    : std::vector<int>());
+    // row_unit's auto value is the rules' unit: a set unit of another value
+    // pins the unit of the cost model's row groups of short calls.
+    EXPECT_EQ(key("row_unit").value("default", json()), "auto");
+    EXPECT_EQ(key("row_unit").value("auto", json()), 12);
+    EXPECT_EQ(doc.at("uarch").at("fma_ports"), native_plan_uarch().fma_ports);
     EXPECT_EQ(doc.at("match_keys").size(), 13u);
     EXPECT_EQ(doc.at("match_keys").at("group"), "range");
     EXPECT_EQ(doc.at("match_keys").at("dtype"),
@@ -2628,4 +2783,156 @@ TEST(NativeConfigSchema, SchemaDump) {
     EXPECT_EQ(
             doc.at("tuning_file").at("format"), "zendnnl-native-brgemm-tuning");
     EXPECT_EQ(doc.at("tuning_file").at("version"), 2);
+}
+
+// The [MATMUL.NATIVE_BRGEMM] lines of a call of each weight type, INT8
+// scheme, schedule and epilogue the line tells apart, and of an M = 1 call
+// of each weight type and INT8 scheme, print the fields kPlanLineFields
+// lists and the gemv values kPlanLineGemv lists, which the schema dump
+// hands the offline tuner: every field and gemv value of every line is
+// listed, an M = 1 call names GEMV kernels and every other call none, and
+// every listed field and value is in a line (of f16 and f16_ph, the one
+// this CPU's f16 calls take).
+TEST(NativeConfigSchema, PlanLineFields) {
+    if (!has_isa())
+        GTEST_SKIP() << "the native kernels need AVX512-BF16 and AVX512-VNNI";
+    native_brgemm_test::expect_in_child(
+            {{"ZENDNNL_API_LOG_LEVEL", "4"},
+                    {"ZENDNNL_MATMUL_NATIVE_CONFIG", "m=3:schedule=blocks"}},
+            [] {
+        const line_call_t calls[] = {
+                {"bf16, padded columns", data_type_t::bf16, 8, 40, 64},
+                {"bf16, blocks schedule", data_type_t::bf16, 3, 128, 64},
+                {"bf16, gated", data_type_t::bf16, 8, 128, 64, 0, false,
+                        mm::matmul_gated_act_t::silu_and_mul},
+                {"s8, per column", data_type_t::s8, 8, 64, 64},
+                {"s8, per group", data_type_t::s8, 8, 64, 128, 4, true},
+                {"s4", data_type_t::s4, 8, 64, 128, 2},
+                {"f16", data_type_t::f16, 8, 64, 64},
+                {"f32", data_type_t::f32, 8, 64, 64},
+                {"bf16, M = 1", data_type_t::bf16, 1, 64, 64},
+                {"s8 per column, M = 1", data_type_t::s8, 1, 64, 64},
+                {"s8 per group, M = 1", data_type_t::s8, 1, 64, 128, 4, true},
+                {"s4, M = 1", data_type_t::s4, 1, 64, 128, 2},
+                {"f16, M = 1", data_type_t::f16, 1, 64, 64},
+                {"f32, M = 1", data_type_t::f32, 1, 64, 64}};
+        const std::string f16_unused = native_kernel_registry().f16_kind()
+                        == native_kernel_kind_t::f16_ph
+                ? "f16"
+                : "f16_ph";
+        int bad = 0;
+        std::set<std::string> seen, seen_gemv;
+        for (const line_call_t &l : calls) {
+            ::testing::internal::CaptureStdout();
+            const status_t st = run_line_call(l);
+            const auto lines = plan_line_fields(
+                    ::testing::internal::GetCapturedStdout());
+            if (st != status_t::success || lines.size() != 1) {
+                std::fprintf(stderr, "%s: status %d, %zu plan lines\n", l.what,
+                        static_cast<int>(st), lines.size());
+                ++bad;
+                continue;
+            }
+            for (const auto &[f, value] : lines[0]) {
+                seen.insert(f);
+                if (std::find(std::begin(kPlanLineFields),
+                            std::end(kPlanLineFields), f)
+                        == std::end(kPlanLineFields)) {
+                    std::fprintf(stderr, "%s: %s is not listed\n", l.what,
+                            f.c_str());
+                    ++bad;
+                }
+                if (f != "gemv") continue;
+                seen_gemv.insert(value);
+                const bool listed = std::find(std::begin(kPlanLineGemv),
+                                            std::end(kPlanLineGemv), value)
+                        != std::end(kPlanLineGemv);
+                if (!listed || (value == "none") != (l.M != 1)) {
+                    std::fprintf(
+                            stderr, "%s: gemv=%s\n", l.what, value.c_str());
+                    ++bad;
+                }
+            }
+        }
+        for (const char *f : kPlanLineFields) {
+            if (seen.count(f) != 0) continue;
+            std::fprintf(stderr, "no line printed %s\n", f);
+            ++bad;
+        }
+        for (const char *g : kPlanLineGemv) {
+            if (seen_gemv.count(g) != 0 || g == f16_unused) continue;
+            std::fprintf(stderr, "no line printed gemv=%s\n", g);
+            ++bad;
+        }
+        return bad;
+    }, "the fields of the plan line");
+}
+
+// The offline tuner (tools/native_brgemm_tuning) knows the planner through
+// its schema fixture, the dump above: this build's config keys, match keys,
+// rule features and comparisons, tuning-file names, plan-line fields and
+// gemv values, the kernels of every kind this CPU has, and the fields of
+// the hw and uarch blocks.  A change to any of them fails here until the tuner follows
+// it and its fixtures are refreshed (refresh_fixtures.sh), and its own
+// tests pass on the new fixture.
+TEST(NativeConfigSchema, TheTunerFollowsThePlanner) {
+#ifndef ZENDNNL_TUNER_SCHEMA
+    GTEST_SKIP() << "built without the path of the tuner's schema";
+#else
+    std::ifstream in(ZENDNNL_TUNER_SCHEMA);
+    if (!in) GTEST_SKIP() << "no tuner schema at " << ZENDNNL_TUNER_SCHEMA;
+    std::stringstream text;
+    text << in.rdbuf();
+    const json tuner = json::parse(text.str(), nullptr, false);
+    ASSERT_TRUE(tuner.is_object()) << ZENDNNL_TUNER_SCHEMA;
+    const json live = json::parse(schema_json().dump());
+    const std::string fix
+            = ": tools/native_brgemm_tuning does not follow the "
+              "planner (refresh_fixtures.sh, then its tests)";
+    for (const char *member : {"format", "version", "match_keys", "features",
+                 "rule_ops", "tuning_file", "plan_line", "plan_line_gemv"})
+        EXPECT_EQ(tuner.value(member, json()), live.at(member))
+                << member << fix;
+    const json &keys = live.at("keys");
+    const json tuner_keys = tuner.value("keys", json::array());
+    std::vector<std::string> names, tuner_names;
+    for (const json &k : keys)
+        names.push_back(k.at("name"));
+    for (const json &k : tuner_keys)
+        tuner_names.push_back(k.value("name", ""));
+    EXPECT_EQ(tuner_names, names) << "keys" << fix;
+    for (const json &k : keys) {
+        const auto it = std::find_if(
+                tuner_keys.begin(), tuner_keys.end(), [&k](const json &t) {
+            return t.value("name", "") == k.at("name");
+        });
+        if (it == tuner_keys.end()) continue;
+        EXPECT_EQ(*it, k) << "key " << k.at("name") << fix;
+    }
+    // A kind of kernel this CPU has none of is the dump machine's.
+    const json &kernels = live.at("kernels");
+    const json tuner_kernels = tuner.value("kernels", json::array());
+    std::set<std::string> kinds;
+    for (const json &c : kernels)
+        kinds.insert(c.at("kind").get<std::string>());
+    for (const json &c : kernels)
+        EXPECT_TRUE(std::find(tuner_kernels.begin(), tuner_kernels.end(), c)
+                != tuner_kernels.end())
+                << "kernel " << c.dump() << fix;
+    for (const json &c : tuner_kernels)
+        EXPECT_TRUE(
+                std::find(kernels.begin(), kernels.end(), c) != kernels.end()
+                || kinds.count(c.value("kind", "")) == 0)
+                << "kernel " << c.dump() << fix;
+    for (const char *member : {"hw", "uarch"}) {
+        std::vector<std::string> fields, tuner_fields;
+        for (auto it = live.at(member).begin(); it != live.at(member).end();
+                ++it)
+            fields.push_back(it.key());
+        const json t = tuner.value(member, json::object());
+        for (auto it = t.begin(); it != t.end(); ++it)
+            tuner_fields.push_back(it.key());
+        EXPECT_EQ(tuner_fields, fields) << member << fix;
+    }
+#endif
 }

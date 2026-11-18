@@ -53,3 +53,11 @@ target_sources(gtests
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_one_layout.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_postop_chain.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_cache_fallback.cpp)
+
+# The offline tuner's schema fixture, which NativeConfigSchema compares with
+# the planner's schema.
+get_filename_component(native_tuner_schema
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/native_brgemm_tuning/fixtures/schema_dump.json"
+  ABSOLUTE)
+target_compile_definitions(gtests
+  PRIVATE "ZENDNNL_TUNER_SCHEMA=\"${native_tuner_schema}\"")

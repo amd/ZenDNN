@@ -227,6 +227,24 @@ it. `native_brgemm_selected` is `lowoha_algo == native_brgemm` or
   line does not say why it is not handed back.
 - Do not call native code from the `aocl_dlp_blocked`, oneDNN, libxsmm, BMM,
   or reference paths.
+- The offline tuner (`tools/native_brgemm_tuning`) follows the native
+  planner: its schema fixture holds the planner's keys, match keys, rule
+  features, kernels and plan-line fields, and `plan.py` / `cost_model.py`
+  reproduce every rule of the built-in plan and the cost model. A change to
+  `matmul_native/brgemm/planner/`, to a `ZENDNNL_MATMUL_NATIVE_CONFIG` key, a
+  match key or a rule feature, to the kernel registry, or to the
+  `[MATMUL.NATIVE_BRGEMM]` line updates the tuner in the same PR: the mirror
+  follows, `refresh_fixtures.sh` rewrites both fixtures, and
+  `NativeConfigSchema.TheTunerFollowsThePlanner`,
+  `NativeConfigSchema.PlanLineFields`,
+  `NativeConfigText.KeyDocsMatchTheKeyTable`, the plan comparison (the
+  build's plan dump of the `tests/plan_cases.py` cases against `plan.py`:
+  `plan_cases.py compare --schema <the SchemaDump log>`, 0 mismatches; the
+  schema checks do not see a rule, cost-model term or default) and the
+  tuner's tests
+  (`python3 -m unittest discover -s tools/native_brgemm_tuning/tests -t tools`)
+  pass. Flag a planner change that leaves the tuner behind, and a fixture
+  refreshed without the mirror following it.
 
 ## Caches and kept state
 
