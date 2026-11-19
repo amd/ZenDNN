@@ -135,6 +135,16 @@ cached; set them before the first grouped-matmul call.
 > custom-kernel pack divides and `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY` at any
 > value but `1`.
 >
+> MXFP4 (`f4_e2m1` weights) runs only on the ALGO 3 custom kernel.
+> `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=0`, or a grouped scheduler pin to ALGO 1,
+> 2, 5 or 6 (`ZENDNNL_GRP_MATMUL_ALGO` or a phase knob), fails an MXFP4 call
+> instead of choosing another backend.  ALGO 4, the W8A8 interceptor,
+> declines MXFP4, which then runs ALGO 3.  The `w4a8` token of the single-expert knobs
+> below and the W4A8 bit of `ZENDNNL_GRP_MATMUL_PROMPT_TILE` also cover
+> MXFP4: they can change which custom-kernel executor runs it, never the
+> backend.  `ZENDNNL_MATMUL_CUSTOM_KERNEL` and `ZENDNNL_MATMUL_ALGO` do not
+> apply: `matmul_direct` sends every MXFP4 call to the custom kernel.
+>
 > Group-matmul calls of exactly one expert (one expert in the pool, not one
 > active expert of an MoE pool) follow a single-expert custom-kernel policy
 > of three dtype-set knobs.  A value is a list of tokens joined by `,`, `+`
@@ -361,7 +371,7 @@ Forms of the gated activations (`silu_and_mul`, `gelu_and_mul`, `swiglu_oai_mul`
 
 | Variable | Description | Default | Valid Values |
 |----------|-------------|---------|--------------|
-| `ZENDNNL_GRP_MATMUL_GELU_TANH` | Computes `gelu_and_mul` with the tanh form of GELU, `0.5·x·(1 + tanh(√(2/π)·(x + 0.044715·x³)))` (PyTorch `gelu(approximate="tanh")`), instead of the erf form, on every path that computes it: the custom kernel's fused epilogue for BF16, FP16, DQ-INT8 and W4A8 experts, single and multi expert, the separate activation pass, the AOCL-DLP post-op and routed MoE. The two forms differ by at most 4.8e-4. | `0` | `0`, `1` |
+| `ZENDNNL_GRP_MATMUL_GELU_TANH` | Computes `gelu_and_mul` with the tanh form of GELU, `0.5·x·(1 + tanh(√(2/π)·(x + 0.044715·x³)))` (PyTorch `gelu(approximate="tanh")`), instead of the erf form, on every path that computes it: the custom kernel's fused epilogue for BF16, FP16, DQ-INT8, W4A8 and MXFP4 experts, single and multi expert, the separate activation pass, the AOCL-DLP post-op and routed MoE. The two forms differ by at most 4.8e-4. | `0` | `0`, `1` |
 | `ZENDNNL_GRP_MATMUL_FAST_ACT` | Shorter AVX-512 forms of SiLU, GELU and SwiGLU-OAI, and of the DQ-INT8 custom kernel's sigmoid post-op: a degree-3 exp polynomial (relative error 8.6e-5, against 5.1e-5) and the 14-bit reciprocal without its Newton step, with GELU in the tanh form. Each activation costs about 1.3–1.5× less on Zen 5; a MoE layer gains less, as the GEMM dominates its time. The AOCL-DLP fallback keeps its exact SiLU, and routed MoE its SiLU, which is a short form already. | `0` | `0`, `1` |
 
 ---

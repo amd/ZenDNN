@@ -115,7 +115,8 @@ size_t scale_bytes(const custom_kernel::CallContext &kctx) {
 }
 
 /// Bytes the CK streams per weight column beyond its K weights: the INT8
-/// compensation, or W4A8's per-group compensation and weight scale.
+/// compensation, W4A8's per-group compensation and weight scale, or
+/// MXFP4's one in-pack scale byte per group.
 int64_t wei_col_extra_bytes(
         const custom_kernel::CallContext &kctx, kernel_type_t fam, int64_t K) {
     if (fam == kernel_type_t::kInt8) {
@@ -126,7 +127,15 @@ int64_t wei_col_extra_bytes(
         return static_cast<int64_t>(sizeof(int32_t));
     }
     if (fam != kernel_type_t::kW4a8 || kctx.group_size <= 0) return 0;
-    return K / kctx.group_size * static_cast<int64_t>(4 + scale_bytes(kctx));
+    const custom_kernel::W4Format fmt
+            = custom_kernel::w4_format_for_variant(kctx.variant);
+    const int64_t per_group
+            = static_cast<int64_t>(
+                      custom_kernel::w4_tail_bytes_per_group_col(fmt))
+            + (custom_kernel::w4_scales_in_pack(fmt)
+                            ? 0
+                            : static_cast<int64_t>(scale_bytes(kctx)));
+    return K / kctx.group_size * per_group;
 }
 
 ShapeKey shape_key(kernel_type_t fam, const CallView &call, int T) {
@@ -354,6 +363,12 @@ void prompt_tile_execute(custom_kernel::CallContext &kctx, const CallView &call,
                 a = reinterpret_cast<const char *>(u8_base) + m0 * u8_ld;
                 lda = u8_ld;
             }
+            const int32_t *sums = nullptr;
+            if (q.src_group_sums != nullptr) {
+                const size_t groups
+                        = static_cast<size_t>(call.K[e] / kctx.group_size);
+                sums = q.src_group_sums + m0 * groups;
+            }
             custom_kernel::dispatch_tile(kctx, e, t.rows, call.K[e], t.ncols,
                     t.n0, a, lda, call.bias[e], d, call.ldc[e],
                     static_cast<const char *>(q.src_scale)
@@ -363,7 +378,7 @@ void prompt_tile_execute(custom_kernel::CallContext &kctx, const CallView &call,
                                                     : kctx.src_scale_groups)
                                     * scale_elem,
                     q.src_zp != nullptr ? q.src_zp + m0 : nullptr, q.wei_scale,
-                    epi);
+                    epi, sums);
             return;
         }
         const auto *a = static_cast<const char *>(call.src[e])

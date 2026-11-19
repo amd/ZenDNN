@@ -41,6 +41,15 @@ status_t reorder_impl_t::validate() {
     // output buffer. A dtype mismatch would therefore either reinterpret bits
     // (same-size types) or overrun the output buffer (different-size types).
     // Any dtype change must go through the LOWOHA reorder path instead.
+    // No reorder kernel has a branch for the MX types.
+    if (is_mx_type(input->get_data_type())
+            || is_mx_type(output->get_data_type())) {
+        apilog_error("Reorder does not support f4_e2m1 or f8_e8m0 tensors (",
+                dtype_info(input->get_data_type()), " -> ",
+                dtype_info(output->get_data_type()), ")");
+        return status_t::failure;
+    }
+
     if (input->get_data_type() != output->get_data_type()) {
         apilog_error(
                 "Reorder requires input and output to have the same data type "

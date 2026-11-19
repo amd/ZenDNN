@@ -33,6 +33,7 @@ target_sources(gtests
     ${CMAKE_CURRENT_SOURCE_DIR}/fused_moe/test_fused_moe_ggml.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/prepack/test_prepack.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/e2e/test_w4a8_per_group.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/e2e/test_e2m1_group_matmul.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/e2e/test_group_reorder_e2e.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/e2e/test_wei_buffer_capacity.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/prepack/test_int8_inplace_warm.cpp
@@ -61,8 +62,9 @@ target_sources(gtests
     # interleave + compensation row).
     ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_pack_int8.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_ukernel_int8.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_pack_s4.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_pack_w4.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_ukernel_s4.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_ukernel_mxfp4.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_features.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_dispatch_routing.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/qwen_gemma_llama/test_bf16_decode.cpp

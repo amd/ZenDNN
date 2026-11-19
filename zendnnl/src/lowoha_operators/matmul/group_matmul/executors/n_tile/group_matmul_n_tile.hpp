@@ -271,7 +271,11 @@ inline void prepare_n_tile_custom_kernel(grp_matmul_gated_act_t act,
         // W4A8 source-scale groups per row; one keeps the per-token path.
         int src_scale_groups = 1,
         const std::vector<bool> &weights_aocl_sym_prepacked = {},
-        int aocl_unreorder_group_size = 0) {
+        int aocl_unreorder_group_size = 0,
+        // Per-expert scales a four-bit format stores in its pack (MXFP4's
+        // f8_e8m0 `{G, N}`) and their row strides; empty for every other call.
+        const std::vector<const void *> &pack_scales = {},
+        const std::vector<int> &pack_scale_ld = {}) {
     if (!get_grp_matmul_custom_kernel()) { return; }
     // Master CK env is ON; gate the DQ-INT8 sub-toggle separately so
     // operators can toggle int8 without disabling bf16.  The int8 CK path
@@ -301,7 +305,8 @@ inline void prepare_n_tile_custom_kernel(grp_matmul_gated_act_t act,
             weights_prepacked, group_size, wei_scale_grp_stride,
             weights_aocl_prepacked, num_threads, weight_cache_mode,
             allow_in_place, wei_capacities, src_scale_groups,
-            weights_aocl_sym_prepacked, aocl_unreorder_group_size);
+            weights_aocl_sym_prepacked, aocl_unreorder_group_size, pack_scales,
+            pack_scale_ld);
 }
 
 /// Effective N-column alignment for the per-thread split:

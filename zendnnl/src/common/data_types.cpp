@@ -43,6 +43,10 @@ uint32_t size_of(data_type_t data_type) {
             return sizeof(prec_traits<data_type_t::u16>::type);
         case data_type_t::u8: return sizeof(prec_traits<data_type_t::u8>::type);
         case data_type_t::u4: return sizeof(prec_traits<data_type_t::u4>::type);
+        case data_type_t::f4_e2m1:
+            return sizeof(prec_traits<data_type_t::f4_e2m1>::type);
+        case data_type_t::f8_e8m0:
+            return sizeof(prec_traits<data_type_t::f8_e8m0>::type);
     }
 
     return 0;
@@ -63,6 +67,8 @@ std::string dtype_info(data_type_t data_type) {
         case data_type_t::u16: return "u16";
         case data_type_t::u8: return "u8";
         case data_type_t::u4: return "u4";
+        case data_type_t::f4_e2m1: return "f4_e2m1";
+        case data_type_t::f8_e8m0: return "f8_e8m0";
     }
 
     return 0;

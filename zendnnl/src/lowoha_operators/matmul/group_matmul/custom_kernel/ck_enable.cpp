@@ -61,7 +61,7 @@ custom_kernel::KernelVariant grp_matmul_ck_weight_variant(data_type_t src,
             && (K % custom_kernel::kVNNIInt8Quad != 0
                     || K > custom_kernel::kMaxSafeInt8AccumK))
         return kNone;
-    if (K > 0 && s4 && K % custom_kernel::kS4Octet != 0) return kNone;
+    if (K > 0 && s4 && K % custom_kernel::kW4Octet != 0) return kNone;
     // AOCL-prepacked dynamic asymmetric INT8 has no CK inverse route. Keep it
     // on the scalar/full-N AOCL path instead of entering grouped preparation
     // only to be refused there.
@@ -72,6 +72,31 @@ custom_kernel::KernelVariant grp_matmul_ck_weight_variant(data_type_t src,
     (void)aocl_prepacked;
     (void)static_u8s8;
     return v;
+}
+
+void grp_matmul_ck_pack_scales(const std::vector<matmul_params> &params,
+        size_t rep, const std::vector<int> &K, const std::vector<int> &N,
+        size_t count, std::vector<const void *> &scales,
+        std::vector<int> &scale_ld) {
+    scales.clear();
+    scale_ld.clear();
+    if (rep >= params.size()) return;
+    const custom_kernel::W4FormatEntry *w4
+            = custom_kernel::w4_format_entry(params[rep].dtypes.wei);
+    if (w4 == nullptr || !custom_kernel::w4_scales_in_pack(w4->fmt)) return;
+    scales.assign(count, nullptr);
+    scale_ld.assign(count, 0);
+    for (size_t i = 0;
+            i < count && i < params.size() && i < K.size() && i < N.size();
+            ++i) {
+        const uint8_t *s = nullptr;
+        int ld = 0;
+        if (w4->fmt == custom_kernel::kW4FormatMxfp4
+                && mxfp4_scale_view(params[i], K[i], N[i], s, ld)) {
+            scales[i] = s;
+            scale_ld[i] = ld;
+        }
+    }
 }
 
 } // namespace matmul

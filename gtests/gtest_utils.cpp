@@ -117,7 +117,7 @@ void reset_grp_matmul_caches() {
     // Same heap-address-reuse hazard as the siblings, but worse: the
     // s4 slab's length depends on `group_size`, so a stale entry can be
     // SHORTER than the kernel expects rather than merely wrong.
-    zendnnl::lowoha::matmul::custom_kernel::clear_custom_kernel_pack_cache_s4();
+    zendnnl::lowoha::matmul::custom_kernel::clear_custom_kernel_pack_cache_w4();
     zendnnl::lowoha::matmul::group_matmul_prepack::
             clear_fingerprint_cache_for_test();
     // The GGML unpack/reorder cache is ALSO pointer-keyed (weight_ptr + shape)

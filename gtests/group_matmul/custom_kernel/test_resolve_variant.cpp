@@ -386,6 +386,63 @@ TEST(CkResolveVariantS4, AcceptsW4A8SourceForms) {
             ck::KernelVariant::kS8_S4_F32_SYM);
 }
 
+// [Positive] The weight type picks the four-bit format and the dst the
+// variant: f4_e2m1 is MXFP4 and s4 is W4A8, each with a bf16 or f32 dst, from
+// a bf16 or f32 source under dynamic quant or a pre-quantized s8 one.
+TEST(CkResolveVariantS4, F4E2M1ResolvesToMxfp4) {
+    for (const auto src :
+            {data_type_t::bf16, data_type_t::f32, data_type_t::s8}) {
+        const bool dq = (src != data_type_t::s8);
+        EXPECT_EQ(ck::resolve_variant(src, data_type_t::f4_e2m1,
+                          data_type_t::bf16, dq, data_type_t::s8),
+                ck::KernelVariant::kS8_MXFP4_BF16_SYM);
+        EXPECT_EQ(ck::resolve_variant(src, data_type_t::f4_e2m1,
+                          data_type_t::f32, dq, data_type_t::s8),
+                ck::KernelVariant::kS8_MXFP4_F32_SYM);
+        EXPECT_EQ(ck::resolve_variant(src, data_type_t::s4, data_type_t::bf16,
+                          dq, data_type_t::s8),
+                ck::KernelVariant::kS8_S4_BF16_SYM);
+        EXPECT_EQ(ck::resolve_variant(src, data_type_t::s4, data_type_t::f32,
+                          dq, data_type_t::s8),
+                ck::KernelVariant::kS8_S4_F32_SYM);
+    }
+    // All four are four-bit variants; the two MXFP4 ones share its format.
+    for (const auto v : {ck::KernelVariant::kS8_S4_BF16_SYM,
+                 ck::KernelVariant::kS8_S4_F32_SYM,
+                 ck::KernelVariant::kS8_MXFP4_BF16_SYM,
+                 ck::KernelVariant::kS8_MXFP4_F32_SYM}) {
+        EXPECT_TRUE(ck::is_w4a8_variant(v));
+        const bool mx = v == ck::KernelVariant::kS8_MXFP4_BF16_SYM
+                || v == ck::KernelVariant::kS8_MXFP4_F32_SYM;
+        EXPECT_EQ(ck::is_mxfp4_variant(v), mx);
+        EXPECT_TRUE(ck::w4_format_for_variant(v)
+                == (mx ? ck::kW4FormatMxfp4 : ck::kW4FormatS4));
+    }
+    EXPECT_FALSE(ck::is_w4a8_variant(ck::KernelVariant::kS8_S8_BF16_SYM));
+    EXPECT_EQ(ck::dst_dt_for_variant(ck::KernelVariant::kS8_MXFP4_BF16_SYM),
+            ck::OutputType::kBf16);
+    EXPECT_EQ(ck::dst_dt_for_variant(ck::KernelVariant::kS8_MXFP4_F32_SYM),
+            ck::OutputType::kF32);
+}
+
+// [Negative] MXFP4 has exactly the W4A8 source / dst / compute envelope.
+TEST(CkResolveVariantS4, RejectsMxfp4OutsideItsTuple) {
+    // f16 dst, u8 compute, or a non-dynamic bf16 source.
+    EXPECT_EQ(ck::resolve_variant(data_type_t::bf16, data_type_t::f4_e2m1,
+                      data_type_t::f16, true, data_type_t::s8),
+            ck::KernelVariant::kUnsupported);
+    EXPECT_EQ(ck::resolve_variant(data_type_t::bf16, data_type_t::f4_e2m1,
+                      data_type_t::bf16, true, data_type_t::u8),
+            ck::KernelVariant::kUnsupported);
+    EXPECT_EQ(ck::resolve_variant(data_type_t::bf16, data_type_t::f4_e2m1,
+                      data_type_t::bf16, false, data_type_t::s8),
+            ck::KernelVariant::kUnsupported);
+    // f8_e8m0 is a scale type and never a weight.
+    EXPECT_EQ(ck::resolve_variant(data_type_t::bf16, data_type_t::f8_e8m0,
+                      data_type_t::bf16, true, data_type_t::s8),
+            ck::KernelVariant::kUnsupported);
+}
+
 TEST(CkResolveVariantS4, RejectsTuplesOutsideW4A8) {
     // u8 compute — W4A8 is symmetric; there is no asym s4 counterpart.
     EXPECT_EQ(ck::resolve_variant(data_type_t::bf16, data_type_t::s4,

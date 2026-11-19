@@ -45,7 +45,12 @@ dnnl::memory::data_type onednn_utils_t::to_dnnl_datatype(data_type_t dtype) {
         case data_type_t::u8: return dnnl::memory::data_type::u8;
         case data_type_t::s8: return dnnl::memory::data_type::s8;
         case data_type_t::s32: return dnnl::memory::data_type::s32;
-        default: return dnnl::memory::data_type::f32;
+        // `none` is the dtype of a bias, scale or zero-point slot the caller
+        // left unset, which the API reads as f32.
+        case data_type_t::none: return dnnl::memory::data_type::f32;
+        // Any other type (the MX types among them) is refused by oneDNN
+        // rather than read as f32 at the wrong width.
+        default: return dnnl::memory::data_type::undef;
     }
 }
 

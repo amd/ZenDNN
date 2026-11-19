@@ -101,7 +101,7 @@ single_expert_ck_t grp_matmul_single_expert_ck(
         const auto &ws = p.quant_params.wei_scale.dims;
         if (ws.size() == 2 && ws[0] > 0
                 && (K % ws[0] != 0
-                        || (K / ws[0]) % custom_kernel::kS4Octet != 0))
+                        || (K / ws[0]) % custom_kernel::kW4Octet != 0))
             return {};
     }
     return grp_matmul_single_expert_ck(p.dtypes.src, p.dtypes.wei, p.dtypes.dst,

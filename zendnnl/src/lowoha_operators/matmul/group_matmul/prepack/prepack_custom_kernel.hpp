@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "common/error_status.hpp"
+#include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -84,7 +85,7 @@ struct PackProbeStats {
 /// caller, because the active-set dispatcher will independently
 /// re-validate any expert it actually processes.
 ///
-/// Thread-safety: only S4 uses the OpenMP-parallel expert loop. BF16, FP16,
+/// Thread-safety: only W4 uses the OpenMP-parallel expert loop. BF16, FP16,
 /// and INT8 pack under a family mutex because WC=2 may publish an in-place
 /// image, so their warm loops are intentionally serial. Safe to call before
 /// an OMP parallel region. Callers must NOT invoke this
@@ -150,10 +151,10 @@ struct PackProbeStats {
 ///     plain, non-K-interleaved native-AVX-512-FP16 pack).  The caller
 ///     ensures `weight[i]` points to f16 bytes; the warmer casts
 ///     unconditionally.
-///   * `kS4`             — warm via `get_or_pack_weight_s4`.  The
-///     caller must point `weight[i]` at the nibble-packed s4 buffer
-///     and pass a valid `group_size`; the warmer casts unconditionally
-///     and skips every expert when `group_size <= 0`.
+///   * `kW4`             — warm via `get_or_pack_weight_w4`.  The
+///     caller must point `weight[i]` at the nibble-packed four-bit
+///     buffer and pass a valid `group_size`; the warmer casts
+///     unconditionally and skips every expert when `group_size <= 0`.
 /// The four families pack into DISJOINT LRU singletons (see
 /// pack.cpp), so a process that warms more than one for the same
 /// model pays one warm per family.
@@ -161,10 +162,10 @@ enum class WarmDtypeFamily : uint8_t {
     kBF16 = 0,
     kINT8 = 1,
     kF16 = 2,
-    kS4 = 3,
+    kW4 = 3,
 };
 
-/// `group_size` is consumed ONLY by `kS4` and is part of its pack
+/// `group_size` is consumed ONLY by `kW4` and is part of its pack
 /// cache key, so a wrong value warms a slab the runtime never looks
 /// up — and of the wrong SIZE, since the slab length depends on it.
 /// `in_place` writes a `kBF16` or `kF16` pack into the caller's weight buffer
@@ -179,7 +180,14 @@ status_t warm_pack_all_custom_kernel_experts(
         WarmDtypeFamily dtype_family = WarmDtypeFamily::kBF16,
         int group_size = 0, int32_t weight_cache_type = -1,
         bool in_place = false,
-        const std::vector<std::size_t> *wei_capacities = nullptr);
+        const std::vector<std::size_t> *wei_capacities = nullptr,
+        matmul::custom_kernel::W4Format w4_fmt
+        = matmul::custom_kernel::kW4FormatS4,
+        // Per-expert scales and row strides for a format that stores them
+        // in its pack (MXFP4's f8_e8m0); the warm skips an expert lacking
+        // them.
+        const std::vector<const void *> &pack_scales = {},
+        const std::vector<int> &pack_scale_ld = {});
 
 } // namespace custom_kernel
 } // namespace group_matmul_prepack

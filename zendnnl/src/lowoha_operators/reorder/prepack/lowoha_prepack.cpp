@@ -768,7 +768,22 @@ status_t aocl_unreorder(const void *packed, const prepack_params_t &params,
 // (bf16 -> VDPBF16PS pack; f16 -> plain native-FP16 slab; s8 ->
 // DQ-INT8 VPDPBUSD pack + comp row).
 // =====================================================================
+// Not diagnostic-gated: any other type, f4_e2m1 among them, would otherwise
+// be sized and packed as bf16.
+bool ck_prepack_dtype_supported(const char *caller, data_type_t dt) {
+    if (dt == data_type_t::bf16 || dt == data_type_t::f16
+            || dt == data_type_t::s8)
+        return true;
+    apilog_error(caller,
+            "(moe_custom_kernel): the custom kernel prepacks bf16, f16 or s8 "
+            "weights (got ",
+            dtype_info(dt), ")");
+    return false;
+}
+
 size_t ck_compute_size(const prepack_params_t &params) {
+    if (!ck_prepack_dtype_supported("weight_prepack_size", params.wei_dtype))
+        return 0;
     const int pack_nr = ck_resolve_pack_nr(params);
     if (pack_nr == 0) return 0; // validation already logged the cause
     const int K = static_cast<int>(params.K);
@@ -782,6 +797,8 @@ size_t ck_compute_size(const prepack_params_t &params) {
 
 status_t ck_prepack(
         const void *weights, const prepack_params_t &params, void *dst) {
+    if (!ck_prepack_dtype_supported("weight_prepack_into", params.wei_dtype))
+        return status_t::failure;
     const int pack_nr = ck_resolve_pack_nr(params);
     if (pack_nr == 0) {
         apilog_error(

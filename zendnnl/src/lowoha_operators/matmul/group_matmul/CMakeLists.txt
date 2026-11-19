@@ -20,10 +20,12 @@
 set(lowoha_group_matmul_sources
   group_matmul/selection/group_matmul_dispatch.cpp
   group_matmul/selection/algo_select.cpp
+  group_matmul/selection/mxfp4_route.cpp
   group_matmul/executors/sequential/sequential_experts.cpp
   group_matmul/executors/m_tile/group_matmul_m_tile.cpp
   group_matmul/executors/n_tile/group_matmul_n_tile.cpp
   group_matmul/executors/n_tile/n_tile_admission.cpp
+  group_matmul/executors/n_tile/src_group_sums.cpp
   group_matmul/multi_expert/expert_parallel/group_matmul_expert_parallel.cpp
   group_matmul/multi_expert/multilevel/parallel_multilevel.cpp
   group_matmul/multi_expert/multi_expert_policy.cpp
@@ -44,6 +46,8 @@ set(lowoha_group_matmul_sources
   group_matmul/custom_kernel/qwen_gemma_llama/bf16_decode_microkernel.cpp
   group_matmul/custom_kernel/ukernel/int8_microkernel.cpp
   group_matmul/custom_kernel/ukernel/s4_microkernel.cpp
+  group_matmul/custom_kernel/ukernel/mxfp4_microkernel.cpp
+  group_matmul/custom_kernel/ukernel/s8_group_sums.cpp
   group_matmul/custom_kernel/ukernel/f16_microkernel.cpp
   group_matmul/custom_kernel/dispatch.cpp
   group_matmul/custom_kernel/ck_enable.cpp

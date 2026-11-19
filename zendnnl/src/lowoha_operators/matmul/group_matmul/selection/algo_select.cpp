@@ -27,6 +27,7 @@
 #include "lowoha_operators/matmul/group_matmul/executors/n_tile/group_matmul_n_tile_planner.hpp"
 #include "lowoha_operators/matmul/group_matmul/executors/n_tile/n_tile_admission.hpp"
 #include "lowoha_operators/matmul/group_matmul/multi_expert/expert_parallel/group_matmul_expert_parallel_policy.hpp"
+#include "lowoha_operators/matmul/group_matmul/selection/mxfp4_route.hpp"
 #include "lowoha_operators/matmul/group_matmul/single_expert/single_expert_policy.hpp"
 
 namespace zendnnl {
@@ -475,6 +476,10 @@ int group_matmul_algo_select(const std::vector<char> &layout,
     // rather than `params.size()` (which still carries the framework's
     // prepack-extras tail).
     const int num_ops_eff = static_cast<int>(M.size());
+
+    // MXFP4 has one scheduler; `grp_matmul_mxfp4_admit` has already refused
+    // a call that pins another or that ALGO 3 cannot slice.
+    if (grp_matmul_is_mxfp4(M, params, M.size())) return kGrpMatmulMxfp4Algo;
     const bool m_tile_safe = m_tile_supported(layout, M, params, num_ops_eff);
     // ALGO 3 allows CK-VNNI and AOCL-prepacked B when CK can consume or
     // invert that family; a declined AOCL conversion falls back at full N.

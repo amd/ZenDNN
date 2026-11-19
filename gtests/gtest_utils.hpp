@@ -1003,7 +1003,7 @@ void clear_matmul_test_caches();
  *    1. Custom-kernel pack arenas — BF16 (`clear_custom_kernel_pack_cache_bf16()`),
  *       DQ-INT8 (`clear_custom_kernel_pack_cache_int8()`), FP16
  *       (`clear_custom_kernel_pack_cache_f16()`), and W4A8
- *       (`clear_custom_kernel_pack_cache_s4()`); each is a disjoint singleton.
+ *       (`clear_custom_kernel_pack_cache_w4()`); each is a disjoint singleton.
  *    2. Prepack-module fingerprint cache (`clear_fingerprint_cache_for_test()`)
  *    3. GGML unpack cache and the N-tile f32 weight-scale memo
  *    4. `matmul_direct` AOCL / oneDNN / native caches, custom-kernel packs

@@ -53,6 +53,20 @@ status_t reorder_direct(const void *src, void *dst, reorder_params_t &params) {
     if (params.is_prepack) { return weight_prepack_into(src, params, dst); }
     if (params.is_unreorder) { return weight_unreorder_into(src, params, dst); }
 
+    // No conversion or quantization kernel reads the MX types, and the paths
+    // below would read them as a wider type, so they are refused with
+    // diagnostics on or off.
+    for (const data_type_t dt :
+            {params.src_dtype, params.dst_dtype, params.quant_params.scale.dt,
+                    params.quant_params.zero_point.dt}) {
+        if (is_mx_type(dt)) {
+            log_error("reorder_direct: no reorder kernel reads ",
+                    dtype_info(dt), " (src=", dtype_info(params.src_dtype),
+                    ", dst=", dtype_info(params.dst_dtype), ")");
+            return status_t::failure;
+        }
+    }
+
     // Compute nelems from shape
     const size_t nelems = static_cast<size_t>(params.nelems());
 

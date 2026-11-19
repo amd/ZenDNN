@@ -110,7 +110,18 @@ inline std::atomic<int> s_grp_matmul_n_tile_heavy_threshold_override {
 // saves/restores it.
 inline std::atomic<int> s_grp_matmul_decode_proportional_override {-1};
 
+// Calls whose source group sums `n_tile_execute` hoisted (see
+// `kSrcGroupSumsHoistMinBytes`), for tests to confirm the hoist ran.
+inline std::atomic<int> s_src_group_sum_hoists {0};
+
 } // namespace test_api
+
+// A call whose format needs source group sums (`w4_needs_src_group_sums`)
+// and has at least this many source bytes (M x K summed over its active
+// experts) has `n_tile_execute` compute them once, in one parallel pass.  A
+// smaller call leaves them to each tile (`dispatch_tile_w4`), which costs
+// less than a serial pass before the parallel region.
+inline constexpr size_t kSrcGroupSumsHoistMinBytes = size_t(1) << 18;
 
 // =====================================================================
 // Section A.4 — N-tile env getters

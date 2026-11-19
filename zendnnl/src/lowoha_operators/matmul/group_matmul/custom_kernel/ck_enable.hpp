@@ -217,6 +217,18 @@ custom_kernel::KernelVariant grp_matmul_ck_weight_variant(data_type_t src,
         data_type_t compute, bool static_u8s8, bool aocl_prepacked, int K,
         int N);
 
+/// The weight scales the custom-kernel packs of operations `[0, count)`
+/// embed, for a four-bit format that stores them (`w4_scales_in_pack`):
+/// each one's buffer and row stride, or null and 0 where the format's scale
+/// descriptor rule refuses it (MXFP4: `mxfp4_scale_view`).  Leaves both
+/// empty for every other call, judged by operation `rep`.  The runtime pack
+/// and the prepack warm both take them from here, so the warm keys every
+/// pack the way the runtime looks it up.
+void grp_matmul_ck_pack_scales(const std::vector<matmul_params> &params,
+        size_t rep, const std::vector<int> &K, const std::vector<int> &N,
+        size_t count, std::vector<const void *> &scales,
+        std::vector<int> &scale_ld);
+
 /// The EFFECTIVE per-call custom-kernel verdict: the master knob folded
 /// with the family sub-toggle and the per-group disqualifier.
 ///
@@ -263,9 +275,9 @@ inline bool group_matmul_custom_kernel_candidate(const ParamsVec &params,
     if (is_f16_call && !get_grp_matmul_custom_kernel_f16()) { return false; }
 
     // A per-group `{G, N}` weight scale on ANY active INT8 expert disqualifies
-    // that custom kernel for the whole call. W4A8 normally has `{G, N}`
-    // weights and accepts either `{M,1}` per-token or matching `{M,G}`
-    // per-group source scales.
+    // that custom kernel for the whole call. Four-bit weights (W4A8, MXFP4)
+    // have `{G, N}` weight scales and accept either `{M,1}` per-token or
+    // matching `{M,G}` per-group source scales here.
     for (size_t i = 0; i < params.size(); ++i) {
         if (i >= M.size() || i >= N.size() || M[i] <= 0) { continue; }
         if (!params[i].postop_.empty()
@@ -289,7 +301,7 @@ inline bool group_matmul_custom_kernel_candidate(const ParamsVec &params,
                 != variant) {
             return false;
         }
-        if (is_w4a8_config(params[i])) {
+        if (is_w4_int8_config(params[i])) {
             const auto &ss = params[i].quant_params.src_scale;
             const auto &ws = params[i].quant_params.wei_scale;
             const bool src_per_token = ss.dims.size() == 2 && ss.dims[0] == M[i]

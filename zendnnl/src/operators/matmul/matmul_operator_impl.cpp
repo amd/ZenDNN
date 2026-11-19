@@ -19,6 +19,19 @@
 namespace zendnnl {
 namespace ops {
 
+namespace {
+
+// True when `t` stores, scales or offsets its data in an MX type.
+bool tensor_uses_mx_type(const tensor_t &t) {
+    if (is_mx_type(t.get_data_type())) return true;
+    if (!t.is_quantized()) return false;
+    return is_mx_type(t.get_quant_scale_data_type())
+            || (t.get_quant_subtype() == quant_subtype_t::asymmetric
+                    && is_mx_type(t.get_quant_zero_data_type()));
+}
+
+} // namespace
+
 status_t matmul_impl_t::validate_buffer_post_op(
         std::vector<uint64_t> &output_size, std::vector<post_op_t> &po,
         std::map<std::string, tensor_t> &inputs) {
@@ -286,6 +299,23 @@ status_t matmul_impl_t::validate() {
 
     if (!input || !output) {
         apilog_error("Invalid input or output tensor.");
+        return status_t::failure;
+    }
+
+    // No kernel of this operator reads the MX types, and the oneDNN and AOCL
+    // ones would read them as a wider type; LOWOHA `matmul_direct` serves
+    // MXFP4.  Checked before the forced kernel is consulted, over every
+    // input (post-op operands included), the output and the parameters.
+    bool uses_mx = tensor_uses_mx_type(*output)
+            || (weights && tensor_uses_mx_type(*weights))
+            || (bias && tensor_uses_mx_type(*bias));
+    for (const auto &named : inputs) {
+        uses_mx = uses_mx || tensor_uses_mx_type(named.second);
+    }
+    if (uses_mx) {
+        apilog_error("<", get_name(),
+                "> f4_e2m1 and f8_e8m0 tensors are not supported; use "
+                "LOWOHA matmul_direct for MXFP4");
         return status_t::failure;
     }
 

@@ -31,6 +31,7 @@ if(ZENDNNL_BUILD_GTEST)
     gtest_utils.cpp
     test_matmul.cpp
     test_lru_cache.cpp
+    test_data_types.cpp
     test_batchmatmul.cpp
     test_embag.cpp
     test_embedding.cpp

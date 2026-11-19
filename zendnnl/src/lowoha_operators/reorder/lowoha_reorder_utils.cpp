@@ -685,6 +685,18 @@ status_t compute_dynamic_quant_params(
         }
     }
 
+    // Checked here as well as in the gated validation: the reads below take
+    // two or four bytes per element.
+    if (params.src_dtype != data_type_t::f32
+            && params.src_dtype != data_type_t::bf16
+            && params.src_dtype != data_type_t::f16) {
+        log_error(
+                "Dynamic quantization requires an f32, bf16 or f16 source. "
+                "Got: ",
+                dtype_info(params.src_dtype));
+        return status_t::failure;
+    }
+
     // Precompute typed source pointer and dtype kind once so the inner loops
     // never re-check params.src_dtype or re-cast the pointer.
     enum class src_kind_t { f32, bf16, f16 };

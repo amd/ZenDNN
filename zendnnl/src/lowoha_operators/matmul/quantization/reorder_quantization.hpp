@@ -270,13 +270,14 @@ inline bool group_reorder_quantization_required(
         const std::vector<matmul_params> &params, size_t num_ops) {
     if (params.size() < num_ops) { return false; }
     for (size_t i = 0; i < num_ops; ++i) {
-        // W4A8 is tested separately: `is_dynamic_quant_config` demands an s8
-        // weight, so plain s4 answers false there and would skip the grouped
-        // pre-pass entirely.  Source quantization depends only on the src /
-        // compute dtypes and the src scale layout — all of which W4A8
-        // satisfies — so admit it here and let the per-expert gates in
-        // `group_reorder_quantization_wrapper` decide.
-        if (is_dynamic_quant_config(params[i]) || is_w4a8_config(params[i])) {
+        // Four-bit weights are tested separately: `is_dynamic_quant_config`
+        // demands an s8 weight, so s4 / f4_e2m1 answer false there and would
+        // skip the grouped pre-pass entirely.  Source quantization depends
+        // only on the src / compute dtypes and the src scale layout — all of
+        // which W4A8 and MXFP4 satisfy — so admit them here and let the
+        // per-expert gates in `group_reorder_quantization_wrapper` decide.
+        if (is_dynamic_quant_config(params[i])
+                || is_w4_int8_config(params[i])) {
             return true;
         }
     }

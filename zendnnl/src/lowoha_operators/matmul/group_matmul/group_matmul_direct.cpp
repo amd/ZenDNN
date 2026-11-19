@@ -36,6 +36,7 @@
 #include "lowoha_operators/matmul/ggml_weight_unpack.hpp"
 #include "lowoha_operators/matmul/quantization/reorder_quantization.hpp"
 #include "multi_expert/ntile_flat_parallel/ntile_flat_parallel.hpp"
+#include "selection/mxfp4_route.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -424,6 +425,23 @@ status_t validate_group_matmul_direct_inputs(const std::vector<char> &layout,
                 "group_matmul_direct: fused_moe is non-null but down_weight is "
                 "empty; pass nullptr to disable");
         return status_t::failure;
+    }
+
+    // MXFP4: every active expert must meet the single-matmul contract.  A
+    // call that mixes weight types, or a sequential chain, is refused by
+    // `grp_matmul_mxfp4_admit`, which runs with diagnostics off too.
+    if (grp_matmul_is_mxfp4(M, params, num_ops)) {
+        for (size_t i = 0; i < num_ops; ++i) {
+            if (M[i] <= 0 || params[i].dtypes.wei != data_type_t::f4_e2m1)
+                continue;
+            if (validate_mxfp4_inputs(params[i], M[i], N[i], K[i],
+                        /*Batch_A=*/1, /*Batch_B=*/1, is_weights_const[i])
+                    != status_t::success) {
+                log_error("group_matmul_direct: MXFP4 operation ", i,
+                        " does not meet the MXFP4 contract");
+                return status_t::failure;
+            }
+        }
     }
 
     // ── Phase B ─ sequential mode per-element rules ────────────────────
@@ -890,17 +908,6 @@ bool grp_operation_skips_post_op(const matmul_params &params) {
 // variance axis.
 // ───────────────────────────────────────────────────────────────────────
 
-inline const char *dt_name(data_type_t dt) {
-    switch (dt) {
-        case data_type_t::f32: return "f32";
-        case data_type_t::bf16: return "bf16";
-        case data_type_t::f16: return "f16";
-        case data_type_t::s8: return "s8";
-        case data_type_t::u8: return "u8";
-        default: return "?";
-    }
-}
-
 template <typename T>
 inline const char *uniformity_marker(const std::vector<T> &v) {
     for (size_t i = 1; i < v.size(); ++i)
@@ -1291,6 +1298,29 @@ status_t group_matmul_direct(const std::vector<char> &layout,
     });
     if (val != status_t::success) { return val; }
 
+    // MXFP4 runs only on the custom kernel (`mxfp4_route.hpp`): refuse here,
+    // with the reason, a call it cannot serve, and an MX type in any other
+    // role.  Outside the diagnostic gate, so ZENDNNL_DIAGNOSTICS_ENABLE=0
+    // opens no path to another backend.
+    bool mxfp4 = false;
+    const status_t mx_roles
+            = grp_matmul_scan_mx_types(M, params, num_ops, mxfp4);
+    if (mx_roles != status_t::success) { return mx_roles; }
+    if (mxfp4) {
+        const status_t admit = grp_matmul_mxfp4_admit(layout, transA, M, N, K,
+                alpha, beta, is_weights_const, params, num_ops,
+                (gated_act != nullptr) ? gated_act->act
+                                       : grp_matmul_gated_act_t::none,
+                /*sequential_chain=*/src.size() == 1
+                        && !single_expert_parallel);
+        if (admit != status_t::success) { return admit; }
+        if (fused_moe == nullptr && gated_act != nullptr) {
+            const status_t store = grp_matmul_mxfp4_admit_tight_gated_store(
+                    M, N, ldc, params, num_ops, gated_act->act);
+            if (store != status_t::success) { return store; }
+        }
+    }
+
     // Start common instrumentation before either the whole-call interceptor
     // or generic dispatch so every successful execution reaches the same
     // profiler, summary log, and test-observability epilogue.
@@ -1318,9 +1348,9 @@ status_t group_matmul_direct(const std::vector<char> &layout,
                << " exec_algo="
                << executed_algo_from_execution_path(execution_path)
                << " threads=" << num_threads
-               << " dtype=" << dt_name(params[0].dtypes.src) << ">"
-               << dt_name(params[0].dtypes.wei) << ">"
-               << dt_name(params[0].dtypes.dst) << " layout=" << layout[0]
+               << " dtype=" << dtype_info(params[0].dtypes.src) << ">"
+               << dtype_info(params[0].dtypes.wei) << ">"
+               << dtype_info(params[0].dtypes.dst) << " layout=" << layout[0]
                << uniformity_marker(layout)
                << " transA=" << (transA[0] ? 'T' : 'N')
                << uniformity_marker(transA)
@@ -1465,9 +1495,19 @@ status_t group_matmul_direct(const std::vector<char> &layout,
             params.begin()
                     + static_cast<std::vector<matmul_params>::difference_type>(
                             num_ops));
+    // An MXFP4 pack embeds its scales, so the prepack warm can pack an idle
+    // expert only from its prepack-extras tail entry; keep that tail here.
+    if (mxfp4 && params.size() > num_ops) {
+        exec_params.insert(exec_params.end(),
+                params.begin()
+                        + static_cast<
+                                std::vector<matmul_params>::difference_type>(
+                                num_ops),
+                params.end());
+    }
     // Normalize post-op defaults on the per-call copies. Group matmul
     // dispatches through matmul_execute() without entering matmul_direct().
-    for (size_t e = 0; e < exec_params.size(); ++e) {
+    for (size_t e = 0; e < num_ops; ++e) {
         auto &matmul_param = exec_params[e];
         for (auto &po : matmul_param.postop_) {
             po.apply_alpha_default();

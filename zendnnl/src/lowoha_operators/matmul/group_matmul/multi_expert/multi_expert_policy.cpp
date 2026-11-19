@@ -67,7 +67,7 @@ bool grp_matmul_auto_algo3_quant_expert(const matmul_params &p, int K, int N) {
     } else if (custom_kernel::is_w4a8_variant(v)) {
         if (ws.size() == 2 && ws[0] > 0
                 && (K % ws[0] != 0
-                        || (K / ws[0]) % custom_kernel::kS4Octet != 0)) {
+                        || (K / ws[0]) % custom_kernel::kW4Octet != 0)) {
             return false;
         }
         fam = prompt_tile::kernel_type_t::kW4a8;

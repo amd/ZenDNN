@@ -162,6 +162,19 @@ status_t validate_w4a8_inputs(
         const matmul_params &params, int M, int N, int K, bool native = false);
 
 /**
+ * @brief Validates an f4_e2m1 (MXFP4) matmul against its whole contract.
+ *
+ * Called for every `dtypes.wei == f4_e2m1` call, in place of the INT8 / W4A8 /
+ * WOQ rules.  Accepts: bf16 or f32 src with dynamic_quant, or s8 src with its
+ * scale; an f32/bf16 source scale per token `{M, 1}` or per block
+ * `{M, K/32}`; f8_e8m0 `{K/32, N}` weight scales; bf16 or f32 dst; s8
+ * compute; no zero points, destination quantization, post-ops,
+ * caller-prepacked or GGML-packed weights, or batching; constant weights.
+ */
+status_t validate_mxfp4_inputs(const matmul_params &params, int M, int N, int K,
+        int Batch_A, int Batch_B, bool is_weights_const);
+
+/**
 * @brief Validates input parameters for matrix multiplication direct operation.
 *
 * This function performs comprehensive validation of all input parameters to ensure
@@ -390,6 +403,119 @@ inline bool is_w4a8_config(const matmul_params &params) {
                 && params.quant_params.wei_scale.dt != data_type_t::none;
     }
     return false;
+}
+
+/// OCP MX block size: one f8_e8m0 scale per 32 consecutive K elements.
+inline constexpr int kMxfp4BlockSize = 32;
+
+/// The bias dtypes MXFP4's custom-kernel epilogue adds.
+inline bool mxfp4_bias_dtype_supported(data_type_t dt) noexcept {
+    return dt == data_type_t::none || dt == data_type_t::f32
+            || dt == data_type_t::bf16 || dt == data_type_t::f16;
+}
+
+/**
+ * @brief MXFP4: f4_e2m1 weights with f8_e8m0 `{K/32, N}` scales, bf16 or f32
+ *        output, s8 compute, symmetric, no destination quantization.  Same
+ *        two entries as W4A8: bf16 or f32 src with dynamic_quant, or
+ *        pre-quantized s8 src with its scale buffer; the source scale is f32
+ *        or bf16.
+ *
+ * Only the custom kernel serves MXFP4.  Route on `dtypes.wei == f4_e2m1`
+ * rather than on this predicate, so a malformed MXFP4 call fails instead of
+ * reaching a backend that would read the codes as something else.
+ */
+inline bool is_mxfp4_config(const matmul_params &params) {
+    const auto &qp = params.quant_params;
+    if (params.dtypes.wei != data_type_t::f4_e2m1
+            || (params.dtypes.dst != data_type_t::bf16
+                    && params.dtypes.dst != data_type_t::f32)
+            || params.dtypes.compute != data_type_t::s8
+            || !mxfp4_bias_dtype_supported(params.dtypes.bias)) {
+        return false;
+    }
+    if (qp.wei_zp.buff || qp.src_zp.buff || qp.dst_scale.buff
+            || qp.dst_zp.buff) {
+        return false;
+    }
+    if (!has_quant_scale_metadata(qp.wei_scale)
+            || qp.wei_scale.dt != data_type_t::f8_e8m0
+            || !quant_scale_dtype_supported(qp.src_scale.dt)) {
+        return false;
+    }
+    if (params.dtypes.src == data_type_t::s8) {
+        return !params.dynamic_quant && has_quant_scale_metadata(qp.src_scale);
+    }
+    return params.dynamic_quant
+            && (params.dtypes.src == data_type_t::bf16
+                    || params.dtypes.src == data_type_t::f32)
+            && !qp.src_scale.dims.empty();
+}
+
+/**
+ * @brief The f8_e8m0 scales of an f4_e2m1 weight, with their row stride, when
+ *        the descriptor is exactly `{K/32, N}`.
+ *
+ * The one definition of a valid MXFP4 scale descriptor.  The validator, the
+ * grouped admission, the runtime pack and the prepack warm all read scales
+ * through it, so none of them packs from a buffer the others would refuse.
+ */
+inline bool mxfp4_scale_view(const matmul_params &params, int K, int N,
+        const uint8_t *&buf, int &ld) noexcept {
+    const auto &ws = params.quant_params.wei_scale;
+    if (params.dtypes.wei != data_type_t::f4_e2m1 || ws.buff == nullptr
+            || ws.dt != data_type_t::f8_e8m0 || K <= 0 || N <= 0
+            || K % kMxfp4BlockSize != 0 || ws.dims.size() != 2
+            || ws.dims[0] != K / kMxfp4BlockSize
+            || ws.dims[1] != static_cast<int64_t>(N)) {
+        return false;
+    }
+    buf = static_cast<const uint8_t *>(ws.buff);
+    ld = N;
+    return true;
+}
+
+/**
+ * @brief False when `params` uses an MX type outside its role.
+ *
+ * f4_e2m1 is only ever `dtypes.wei`, and f8_e8m0 only the `wei_scale` of an
+ * f4_e2m1 weight.  The custom kernel is their one reader and no other backend
+ * has a kernel for them, so both LOWOHA entries check this outside the
+ * diagnostic gate.
+ */
+inline bool mx_types_in_role(const matmul_params &params) noexcept {
+    using zendnnl::common::is_mx_type;
+    const auto &d = params.dtypes;
+    const auto &q = params.quant_params;
+    if (is_mx_type(d.src) || is_mx_type(d.dst) || is_mx_type(d.bias)
+            || is_mx_type(d.compute) || d.wei == data_type_t::f8_e8m0) {
+        return false;
+    }
+    if (is_mx_type(q.src_scale.dt) || is_mx_type(q.src_zp.dt)
+            || is_mx_type(q.wei_zp.dt) || is_mx_type(q.dst_scale.dt)
+            || is_mx_type(q.dst_zp.dt)
+            || q.wei_scale.dt == data_type_t::f4_e2m1) {
+        return false;
+    }
+    if (q.wei_scale.dt == data_type_t::f8_e8m0
+            && d.wei != data_type_t::f4_e2m1) {
+        return false;
+    }
+    for (const auto &po : params.postop_) {
+        if (is_mx_type(po.dtype)) return false;
+    }
+    return true;
+}
+
+/**
+ * @brief W4A8 or MXFP4: four-bit weights, s8 compute, per-group weight scales.
+ *
+ * For what the two share and no backend owns: dynamic source quantization,
+ * nibble-packed weight slicing, the custom kernel's W4 family.  Backend
+ * choice must test `is_w4a8_config` or `is_mxfp4_config` itself.
+ */
+inline bool is_w4_int8_config(const matmul_params &params) {
+    return is_w4a8_config(params) || is_mxfp4_config(params);
 }
 
 inline int effective_postop_leading_dim(

@@ -221,11 +221,11 @@ static void ukernel_impl_s4(const uint8_t *__restrict A, int lda,
 
     // One K-octet is `pack_nr` columns × 4 bytes, i.e. NV zmm loads.
     // The dispatcher's gates guarantee no partial trailing octet.
-    const int K_oct = K / kS4Octet;
-    const int oct_per_group = group_size / kS4Octet;
+    const int K_oct = K / kW4Octet;
+    const int oct_per_group = group_size / kW4Octet;
     const int G = K / group_size;
-    constexpr int oct_stride_bytes = NV * 16 * kS4BytesPerOctetCol;
-    constexpr int v_stride_bytes = 16 * kS4BytesPerOctetCol;
+    constexpr int oct_stride_bytes = NV * 16 * kW4BytesPerOctetCol;
+    constexpr int v_stride_bytes = 16 * kW4BytesPerOctetCol;
     const size_t weight_bytes_in_oblock
             = static_cast<size_t>(K_oct) * oct_stride_bytes;
     // Compensation rows follow the weight slab, `pack_nr` int32 lanes
@@ -275,7 +275,7 @@ static void ukernel_impl_s4(const uint8_t *__restrict A, int lda,
             const int ko = oct0 + ol;
             const int8_t *__restrict bp
                     = Bpacked + static_cast<size_t>(ko) * oct_stride_bytes;
-            const size_t k_base = static_cast<size_t>(ko) * kS4Octet;
+            const size_t k_base = static_cast<size_t>(ko) * kW4Octet;
 
             // v-outer / m-inner keeps the two unpacked B planes live in
             // two registers across all MR rows; the reverse nesting
@@ -677,11 +677,11 @@ w4a8_ukernel_fn_t select_w4a8_ukernel(int MR, int NV, ActivationKind act,
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
 void unpack_s4_block_nr32(
         const int8_t *__restrict Bpacked, int K, int8_t *__restrict dst) {
-    constexpr int oct_bytes = 32 * kS4BytesPerOctetCol;
+    constexpr int oct_bytes = 32 * kW4BytesPerOctetCol;
     constexpr int quad_bytes = 32 * kVNNIInt8Quad;
     const __m512i mask_0f = _mm512_set1_epi8(0x0F);
     const __m512i bias_8 = _mm512_set1_epi8(8);
-    const int K_oct = K / kS4Octet;
+    const int K_oct = K / kW4Octet;
     for (int ko = 0; ko < K_oct; ++ko) {
         const int8_t *bp = Bpacked + static_cast<size_t>(ko) * oct_bytes;
         int8_t *lo = dst + static_cast<size_t>(2 * ko) * quad_bytes;

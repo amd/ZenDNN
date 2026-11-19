@@ -223,9 +223,7 @@ bool checked_product(
 }
 
 size_t packed_elements_bytes(size_t elements, data_type_t dt) {
-    if (dt == data_type_t::s4 || dt == data_type_t::u4) {
-        return (elements + 1) / 2;
-    }
+    if (is_4bit(dt)) { return (elements + 1) / 2; }
     const size_t element_size = static_cast<size_t>(size_of(dt));
     size_t bytes = 0;
     return element_size != 0 && checked_mul_size(elements, element_size, bytes)
@@ -916,6 +914,25 @@ status_t build_projection_params(
         params[0].active_matmul = static_cast<uint32_t>(params.size());
         params[0].total_matmul = static_cast<uint32_t>(num_experts);
     }
+    // A pack that holds its scales warms an idle expert only from a tail
+    // entry carrying them, in `expert_order` like the weight pointers.
+    const auto *w4 = custom_kernel::w4_format_entry(grouped_params.dtypes.wei);
+    if (w4 != nullptr && custom_kernel::w4_scales_in_pack(w4->fmt)
+            && grouped_params.quant_params.wei_scale.buff != nullptr) {
+        const size_t active = params.size();
+        params.resize(grouped.expert_order.size());
+        for (size_t slot = active; slot < params.size(); ++slot) {
+            matmul_params &p = params[slot];
+            p = matmul_params {};
+            p.dtypes.wei = grouped_params.dtypes.wei;
+            p.weight_cache_type = grouped_params.weight_cache_type;
+            p.quant_params.wei_scale = grouped_params.quant_params.wei_scale;
+            status = slice_expert_quant(p.quant_params.wei_scale,
+                    grouped.expert_order[slot], num_experts,
+                    projection.output_size);
+            if (status != status_t::success) { return status; }
+        }
+    }
     return status_t::success;
 }
 
@@ -1047,10 +1064,15 @@ status_t run_fused_grouped(const group_matmul_projection_params &primary,
     fused.down_wei_buffer_capacity_bytes = 0;
     fused.bias_down.assign(active, nullptr);
     fused.bias_dt_down = secondary.params.dtypes.bias;
+    const auto *down_w4
+            = custom_kernel::w4_format_entry(secondary.params.dtypes.wei);
+    const bool down_scales_in_pack = down_w4 != nullptr
+            && custom_kernel::w4_scales_in_pack(down_w4->fmt);
     // The optional vectors are read as "present when non-empty", so a reused
     // descriptor has to drop them explicitly when this call does not use them.
     if (secondary.params.quant_params.wei_scale.buff != nullptr) {
-        fused.down_scale.resize(active);
+        // Idle experts' scales too when the pack holds them, for the warm.
+        fused.down_scale.resize(down_scales_in_pack ? total : active);
     } else {
         fused.down_scale.clear();
     }
@@ -1102,6 +1124,13 @@ status_t run_fused_grouped(const group_matmul_projection_params &primary,
                     secondary.output_size, fused.down_zp[a]);
             if (status != status_t::success) { return status; }
         }
+    }
+    for (size_t slot = active; slot < fused.down_scale.size(); ++slot) {
+        const status_t status = slice_expert_quant_into(
+                secondary.params.quant_params.wei_scale,
+                grouped.expert_order[slot], num_experts, secondary.output_size,
+                fused.down_scale[slot]);
+        if (status != status_t::success) { return status; }
     }
     for (size_t slot = 0; slot < total; ++slot) {
         const int expert = grouped.expert_order[slot];
@@ -1219,7 +1248,7 @@ bool tight_expert_group_scale(
         return false;
     }
     group_size = input_size / q.dims[1];
-    return group_size > 0 && group_size % custom_kernel::kS4Octet == 0;
+    return group_size > 0 && group_size % custom_kernel::kW4Octet == 0;
 }
 
 bool fast_common_candidate(const char layout_src, const bool trans_src,

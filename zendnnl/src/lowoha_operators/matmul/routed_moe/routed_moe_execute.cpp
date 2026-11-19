@@ -689,7 +689,7 @@ status_t lookup_packed_weight_s4(const void *identity,
         int64_t group_size, bool interleave_split_halves, int num_threads,
         std::shared_ptr<const packed_weight_t> &result) {
     constexpr int pack_nr = 32;
-    const size_t bytes_per_expert = custom_kernel::packed_weight_size_s4(
+    const size_t bytes_per_expert = custom_kernel::packed_weight_size_w4(
             static_cast<int>(in_channels), static_cast<int>(out_channels),
             pack_nr, static_cast<int>(group_size));
     const int64_t groups = in_channels / group_size;
@@ -757,7 +757,7 @@ status_t lookup_packed_weight_s4(const void *identity,
     std::atomic<bool> failed {false};
 #pragma omp parallel for num_threads(num_threads) schedule(static)
     for (int64_t e = 0; e < num_experts; ++e) {
-        const status_t packed = custom_kernel::prepack_weight_into_s4(
+        const status_t packed = custom_kernel::prepack_weight_into_w4(
                 weight + static_cast<size_t>(e) * raw_bytes_per_expert,
                 static_cast<int>(in_channels), static_cast<int>(out_channels),
                 static_cast<int>(in_channels), pack_nr, /*transB=*/true,
@@ -1137,19 +1137,19 @@ status_t execute_w4(
             /*interleave_split_halves=*/false, nth, pw_down);
     if (cache_status != status_t::success) { return cache_status; }
 
-    const size_t gate_bytes_per_expert = custom_kernel::packed_weight_size_s4(
+    const size_t gate_bytes_per_expert = custom_kernel::packed_weight_size_w4(
             static_cast<int>(K), static_cast<int>(gate_up_oc), pack_nr,
             static_cast<int>(p.gate_up_group_size));
-    const size_t down_bytes_per_expert = custom_kernel::packed_weight_size_s4(
+    const size_t down_bytes_per_expert = custom_kernel::packed_weight_size_w4(
             static_cast<int>(N), static_cast<int>(K), pack_nr,
             static_cast<int>(p.down_group_size));
     const size_t gate_oblock_bytes
-            = static_cast<size_t>(K / custom_kernel::kS4Octet) * pack_nr
-                    * custom_kernel::kS4BytesPerOctetCol
+            = static_cast<size_t>(K / custom_kernel::kW4Octet) * pack_nr
+                    * custom_kernel::kW4BytesPerOctetCol
             + static_cast<size_t>(gate_groups) * pack_nr * sizeof(int32_t);
     const size_t down_oblock_bytes
-            = static_cast<size_t>(N / custom_kernel::kS4Octet) * pack_nr
-                    * custom_kernel::kS4BytesPerOctetCol
+            = static_cast<size_t>(N / custom_kernel::kW4Octet) * pack_nr
+                    * custom_kernel::kW4BytesPerOctetCol
             + static_cast<size_t>(down_groups) * pack_nr * sizeof(int32_t);
 
     const custom_kernel::ActivationKind gate_act

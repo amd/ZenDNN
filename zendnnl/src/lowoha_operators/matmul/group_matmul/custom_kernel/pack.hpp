@@ -57,8 +57,10 @@
 #include <vector>
 
 #include "common/bfloat16.hpp"
+#include "common/data_types.hpp"
 #include "common/error_status.hpp"
 #include "common/float16.hpp"
+#include "w4_format.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -80,14 +82,69 @@ inline constexpr int kVNNIPair = 2;
 /// `int8_microkernel.{hpp,cpp}`).
 inline constexpr int kVNNIInt8Quad = 4;
 
-/// S4 unit of K: eight consecutive K-rows share one 4-byte packed
+/// W4 unit of K: eight consecutive K-rows share one 4-byte packed
 /// column group, two K-elements per byte.  One 64-byte load of that
 /// group yields TWO VNNI quads via AND / shift+AND.
-inline constexpr int kS4Octet = 8;
+inline constexpr int kW4Octet = 8;
 
 /// Packed bytes per column per K-octet.  Same byte shape as an INT8
 /// K-quad, so both packs share their o-block stride arithmetic.
-inline constexpr int kS4BytesPerOctetCol = 4;
+inline constexpr int kW4BytesPerOctetCol = 4;
+
+/// E2M1 enters VPDPBUSD as the UNSIGNED operand, `value + 12`, against the
+/// signed source, so its correction depends only on the source and the pack
+/// needs no compensation rows: the kernel seeds each group with -12 * sum(src).
+inline constexpr int kE2M1UnsignedBias = 12;
+alignas(16) inline constexpr uint8_t kE2M1ToBiasedU8[16]
+        = {12, 13, 14, 15, 16, 18, 20, 24, 12, 11, 10, 9, 8, 6, 4, 0};
+
+namespace detail {
+constexpr bool e2m1_biased_lut_matches() {
+    for (int i = 0; i < 16; ++i) {
+        if (kE2M1ToBiasedU8[i]
+                != zendnnl::common::kE2M1ToInt8x2[i] + kE2M1UnsignedBias)
+            return false;
+    }
+    return true;
+}
+} // namespace detail
+static_assert(detail::e2m1_biased_lut_matches(),
+        "kE2M1ToBiasedU8 must be kE2M1ToInt8x2 + kE2M1UnsignedBias");
+
+/// The largest exponent byte an MXFP4 o-block keeps for K up to 2^16:
+/// 2^100 once halved, so with |Σ| < 2^16 per 32-element group the kernel's
+/// f32 sums stay below 2^127.  The pack lowers a larger o-block's bytes by
+/// the excess, flushing those it would take below one to zero, and stores
+/// the shift after the scale rows; the kernel restores it with the source
+/// scale.  An o-block with every scale at most 2^100 packs unchanged.
+inline constexpr uint8_t kE8M0InPackMaxExp = 127 + 100;
+
+/// `kE8M0InPackMaxExp` for an o-block of `G` groups: one lower for each
+/// doubling of G past 2^11, so the bound holds for any K.
+inline uint8_t e8m0_in_pack_max_exp(int G) {
+    int extra = 0;
+    while ((int64_t {2048} << extra) < G)
+        ++extra;
+    return static_cast<uint8_t>(kE8M0InPackMaxExp - extra);
+}
+
+/// Bytes after each o-block's nibble slab: `[G][pack_nr]` entries of
+/// `w4_tail_bytes_per_group_col` (s4's int32 compensation, MXFP4's scale
+/// byte).  In-pack scales end in the o-block's shift byte, padded to 64 so
+/// the next slab stays aligned.
+inline size_t w4_tail_bytes_per_oblock(
+        int K, int pack_nr, int group_size, W4Format fmt) {
+    const size_t bytes = static_cast<size_t>(K / group_size) * pack_nr
+            * w4_tail_bytes_per_group_col(fmt);
+    if (w4_scales_in_pack(fmt)) return (bytes + 1 + 63) & ~size_t(63);
+    return bytes;
+}
+
+inline size_t w4_oblock_bytes(
+        int K, int pack_nr, int group_size, W4Format fmt) {
+    return static_cast<size_t>(K / kW4Octet) * pack_nr * kW4BytesPerOctetCol
+            + w4_tail_bytes_per_oblock(K, pack_nr, group_size, fmt);
+}
 
 /// Supported pack widths.  Match the `bf16_brgemm_ukernel.cpp` set
 /// minus NR=16 (gated activation needs at least 32 cols for one
@@ -387,7 +444,7 @@ status_t get_or_pack_weight_int8(const int8_t *weight, int K, int N, int ldb,
 /// `free_owned_packed_weight` (the bf16 sibling).
 void free_owned_packed_weight_int8(const int8_t *packed);
 
-// ── W4A8 S4 pack ────────────────────────────────────────────────
+// ── W4 pack (s4 and MXFP4) ─────────────────────────────────────
 // Keeps the weight at FOUR bits end to end: the kernel expands
 // nibbles in registers, so no s8 copy is ever materialised.
 //
@@ -418,41 +475,51 @@ void free_owned_packed_weight_int8(const int8_t *packed);
 // accumulators directly.  Requires `group_size % 8 == 0` and
 // `K % group_size == 0`.
 //
+// MXFP4 (`kW4FormatMxfp4`) stores raw E2M1 codes and no compensation (see
+// `kE2M1UnsignedBias`); its tail is `[G][pack_nr]` scale bytes instead.
+//
 // The cache is a separate LRU singleton with its own key marker;
 // `group_size` is part of the key, so two group sizes over the same
 // weight pointer cannot alias.
 
-/// Look up the pre-packed S4 weight, packing on the first miss.
+/// Look up the pre-packed W4 weight, packing on the first miss.
 /// Mirrors `get_or_pack_weight_int8` except:
-///   * `weight` is the caller's NIBBLE-PACKED s4 buffer, indexed by
-///     the LINEAR logical index (`n*ldb + k` when `transB`, else
-///     `k*ldb + n`) with the even index in the low nibble — the same
-///     convention `cvt_s4_to_s8` uses, so the AOCL and CK paths
+///   * `weight` is the caller's NIBBLE-PACKED s4 or f4_e2m1 buffer,
+///     indexed by the LINEAR logical index (`n*ldb + k` when `transB`,
+///     else `k*ldb + n`) with the even index in the low nibble — the
+///     same convention `cvt_s4_to_s8` uses, so the AOCL and CK paths
 ///     consume byte-identical caller buffers.
 ///   * `group_size` is required: > 0, multiple of 8, and divides K.
-status_t get_or_pack_weight_s4(const int8_t *weight, int K, int N, int ldb,
+///   * `fmt` is part of the cache key, so the same pointer can hold s4
+///     or MXFP4 without aliasing.
+///   * `e8m0_scale` / `scale_ld` are the caller's f8_e8m0 `{G, N}` scales,
+///     required exactly when `fmt.scales == kE8M0InPack`; the scale buffer
+///     is then part of the key too.  A NaN scale (0xFF) fails the pack.
+status_t get_or_pack_weight_w4(const int8_t *weight, int K, int N, int ldb,
         int pack_nr, bool transB, bool interleave_split_halves, int group_size,
         const int8_t **out_packed, bool *was_hit_out = nullptr,
-        bool disable_cache = false);
+        bool disable_cache = false, W4Format fmt = kW4FormatS4,
+        const uint8_t *e8m0_scale = nullptr, int scale_ld = 0);
 
-/// Free a buffer from `get_or_pack_weight_s4(..., disable_cache=true)`.
+/// Free a buffer from `get_or_pack_weight_w4(..., disable_cache=true)`.
 /// Safe with `nullptr`.
-void free_owned_packed_weight_s4(const int8_t *packed);
+void free_owned_packed_weight_w4(const int8_t *packed);
 
-/// 64-byte-aligned byte size of the S4 pack — nibble slab plus
-/// `G = K/group_size` int32 compensation rows per o-block.  Returns 0
-/// for invalid args.
-size_t packed_weight_size_s4(int K, int N, int pack_nr, int group_size);
+/// 64-byte-aligned byte size of the W4 pack: `N/pack_nr` o-blocks of
+/// `w4_oblock_bytes`.  Returns 0 for invalid args.
+size_t packed_weight_size_w4(
+        int K, int N, int pack_nr, int group_size, W4Format fmt = kW4FormatS4);
 
-/// Pack into caller-provided `dst` (>= `packed_weight_size_s4`, ideally
+/// Pack into caller-provided `dst` (>= `packed_weight_size_w4`, ideally
 /// 64-byte aligned).  No allocation, no caching.
-status_t prepack_weight_into_s4(const int8_t *weight, int K, int N, int ldb,
+status_t prepack_weight_into_w4(const int8_t *weight, int K, int N, int ldb,
         int pack_nr, bool transB, bool interleave_split_halves, int group_size,
-        void *dst);
+        void *dst, W4Format fmt = kW4FormatS4,
+        const uint8_t *e8m0_scale = nullptr, int scale_ld = 0);
 
-/// S4 counterpart of `clear_custom_kernel_pack_cache_bf16()`, with the same
+/// W4 counterpart of `clear_custom_kernel_pack_cache_bf16()`, with the same
 /// quiescence contract: no in-flight W4A8 CK dispatch on any thread.
-void clear_custom_kernel_pack_cache_s4();
+void clear_custom_kernel_pack_cache_w4();
 
 // ── Caller-owned prepack (memory-format change, no caching) ──────
 // Used by the reorder weight-prepack pipeline

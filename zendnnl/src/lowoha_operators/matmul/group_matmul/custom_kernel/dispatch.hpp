@@ -153,7 +153,9 @@
 #include "ukernel/bf16_microkernel.hpp"
 #include "ukernel/f16_microkernel.hpp"
 #include "ukernel/int8_microkernel.hpp"
+#include "ukernel/mxfp4_microkernel.hpp"
 #include "ukernel/s4_microkernel.hpp"
+#include "ukernel/s8_group_sums.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -223,12 +225,31 @@ enum class KernelVariant : uint8_t {
     kU8_S8_U8_ASYM = 10, ///< Static per-tensor U8 × symmetric S8 → U8.
     kS8_S4_F32_SYM
     = 11, ///< W4A8: src(s8, per-token) × wei(s4, per-group) → f32.
+    /// MXFP4: src(s8, per-token or per-block) × wei(f4_e2m1, f8_e8m0 per
+    /// 32) → bf16.
+    kS8_MXFP4_BF16_SYM = 12,
+    /// MXFP4 as above → f32 (act = none only).
+    kS8_MXFP4_F32_SYM = 13,
 };
 
-/// Is this variant in the W4A8 (s4) family? BF16 and F32 destinations.
+/// Is this variant one of MXFP4's (bf16 or f32 dst)?
+inline bool is_mxfp4_variant(KernelVariant v) noexcept {
+    return v == KernelVariant::kS8_MXFP4_BF16_SYM
+            || v == KernelVariant::kS8_MXFP4_F32_SYM;
+}
+
+/// Is this variant in the W4A8 family?  Its members (s4 and MXFP4 weights,
+/// each with a bf16 or f32 dst, all with compute s8) share the nibble slab,
+/// the shape gates and the microkernel; each has its own `W4Format`.
 inline bool is_w4a8_variant(KernelVariant v) noexcept {
     return v == KernelVariant::kS8_S4_BF16_SYM
-            || v == KernelVariant::kS8_S4_F32_SYM;
+            || v == KernelVariant::kS8_S4_F32_SYM || is_mxfp4_variant(v);
+}
+
+/// The pack and microkernel format of a four-bit variant.  Meaningless
+/// for the other families, which never read it.
+inline W4Format w4_format_for_variant(KernelVariant v) noexcept {
+    return is_mxfp4_variant(v) ? kW4FormatMxfp4 : kW4FormatS4;
 }
 
 /// Predicate: is this variant in the INT8 family?
@@ -282,6 +303,8 @@ inline OutputType dst_dt_for_variant(KernelVariant v) noexcept {
         case KernelVariant::kF16_F16_F32: return OutputType::kF32;
         case KernelVariant::kS8_S4_BF16_SYM: return OutputType::kBf16;
         case KernelVariant::kS8_S4_F32_SYM: return OutputType::kF32;
+        case KernelVariant::kS8_MXFP4_BF16_SYM: return OutputType::kBf16;
+        case KernelVariant::kS8_MXFP4_F32_SYM: return OutputType::kF32;
         default: return OutputType::kBf16; // unreachable on the success path
     }
 }
@@ -335,6 +358,19 @@ inline size_t dst_elem_bytes(KernelVariant v) noexcept {
 ///     Both require `avx512f16_available()` at runtime (native
 ///     AVX-512-FP16); `resolve_variant` maps the tuple regardless, and
 ///     `prepare_for_call` refuses → DLP when the ISA is absent.
+///
+///   * Four-bit weights, `s8*` as above:
+///     `(s8*, s4     , bf16, _, s8)`        → `kS8_S4_BF16_SYM`
+///     `(s8*, s4     , f32 , _, s8)`        → `kS8_S4_F32_SYM`
+///     `(s8*, f4_e2m1, bf16, _, s8)`        → `kS8_MXFP4_BF16_SYM`
+///     `(s8*, f4_e2m1, f32 , _, s8)`        → `kS8_MXFP4_F32_SYM`
+///     with `s8*` here also an f32 source under dynamic quant; an f32 dst
+///     takes act = none only.
+///     The weight type alone picks the format.  The scale type is checked
+///     outside this switch: `mxfp4_scale_view` requires f8_e8m0 for
+///     f4_e2m1 on every entry, and `mx_types_in_role` keeps f8_e8m0 off
+///     every other weight.  For s4, only `matmul_direct` checks it
+///     (`validate_w4a8_inputs`, diagnostics on).
 ///
 ///   * any other tuple                        → `kUnsupported`
 ///
@@ -493,6 +529,10 @@ struct CallContext {
     /// range is `1..max_mr_for_nv_s4(NV)`, tighter than the int8
     /// table's.
     w4a8_ukernel_fn_t kernel_table_s4[kMaxMR + 1] = {};
+    /// The MXFP4 variant's per-MR table, filled instead of
+    /// `kernel_table_s4`; zero for every other variant.  Valid MR range is
+    /// `1..max_mr_for_nv_mxfp4(NV)`.
+    mxfp4_ukernel_fn_t kernel_table_mxfp4[kMaxMR + 1] = {};
 
     /// CK execution K-group size: W4A8's scale group or 32 for Q8. Zero for
     /// ordinary INT8 and floating-point variants.
@@ -534,7 +574,7 @@ struct CallContext {
     std::array<const float16_t *, kMaxExperts> packed_ptrs_f16 {};
     /// W4A8 packed-weight pointers (nibble slab, layout in pack.hpp);
     /// all-null for every other variant.
-    std::array<const int8_t *, kMaxExperts> packed_ptrs_s4 {};
+    std::array<const int8_t *, kMaxExperts> packed_ptrs_w4 {};
 
     /// Per-expert L2-friendly N-chunk width (cols).  Sized individually
     /// so small-M experts (low A footprint) get a wider subtile with
@@ -580,8 +620,8 @@ struct CallContext {
     /// the bf16 array; the destructor / `release_owned_buffers()` zero it.
     std::array<const float16_t *, kMaxExperts> owned_packed_ptrs_f16 {};
     /// W4A8 sibling of `owned_packed_ptrs`: cache-off branch only,
-    /// freed via `free_owned_packed_weight_s4()`.
-    std::array<const int8_t *, kMaxExperts> owned_packed_ptrs_s4 {};
+    /// freed via `free_owned_packed_weight_w4()`.
+    std::array<const int8_t *, kMaxExperts> owned_packed_ptrs_w4 {};
 
     /// Free every caller-owned packed buffer this context holds and
     /// zero the `owned_packed_ptrs` array.  Idempotent and safe to
@@ -782,7 +822,12 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
         const std::vector<bool> &weights_aocl_sym_prepacked = {},
         // Group metadata for that symmetric AOCL inverse. Separate from
         // group_size, which selects the CK Q8/S4 execution layout.
-        int aocl_unreorder_group_size = 0);
+        int aocl_unreorder_group_size = 0,
+        // Per-expert weight scales and their row strides, read only for a
+        // format that stores them in its pack (`W4ScaleStore::kE8M0InPack`:
+        // f8_e8m0 `{G, N}` bytes, each expert with its own N).
+        const std::vector<const void *> &pack_scales = {},
+        const std::vector<int> &pack_scale_ld = {});
 
 // (`PackProbeStats` and `warm_pack_all_custom_kernel_experts` moved
 // to `group_matmul/prepack/prepack_custom_kernel.{hpp,cpp}` so the
@@ -809,8 +854,11 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
 ///                    context was prepared with act=swiglu_oai_mul
 ///                    this is the halved [M, N/2] tight arena;
 ///                    otherwise it is the wide [M, N] destination.
-/// `src_scale` / `src_zp` / `wei_scale` are consumed only on the INT8 path.
-/// On the BF16/FP16 path the caller must pass `nullptr` explicitly.
+/// `src_scale` / `src_zp` / `wei_scale` are consumed only on the INT8 and
+/// W4 paths.  On the BF16/FP16 path the caller must pass `nullptr`
+/// explicitly.  `src_group_sums` is for a format that needs them
+/// (`w4_needs_src_group_sums`): `s8_group_sums` of the `M` rows of `src`, or
+/// nullptr to compute them per row chunk.
 /// Layout contract (INT8 only):
 ///   * `src_scale` — `M` row values or one scalar.
 ///                   The dispatcher slices only the vector form.
@@ -828,7 +876,8 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
         const void *bias, // per `ctx.bias_kind`; nullptr when BiasKind::none
         void *tight_dst, int tight_ldc, const void *src_scale,
         const int32_t *src_zp, const void *wei_scale,
-        const Int8EpilogueConfig &int8_epilogue);
+        const Int8EpilogueConfig &int8_epilogue,
+        const int32_t *src_group_sums = nullptr);
 
 /// Whether the u8-source DQ-INT8 kernels repay their source copy on this
 /// CPU.  The per-broadcast XOR they drop measured ~15% of the NR32 K-loop on
@@ -844,7 +893,10 @@ inline bool u8_src_eligible(const CallContext &ctx) noexcept {
     if (!ctx.enabled) return false;
     const bool int8 = is_int8_variant(ctx.variant) && ctx.NV == 2
             && ctx.compute_int == IntCompute::kS8_Sym && ctx.group_size != 32;
-    const bool w4a8 = is_w4a8_variant(ctx.variant) && ctx.pack_nr == 32;
+    // The u8-source and unpacked kernels read INT4 nibbles.
+    const bool w4a8 = is_w4a8_variant(ctx.variant)
+            && w4_format_for_variant(ctx.variant) == kW4FormatS4
+            && ctx.pack_nr == 32;
     return (int8 || w4a8) && u8_src_pays();
 }
 

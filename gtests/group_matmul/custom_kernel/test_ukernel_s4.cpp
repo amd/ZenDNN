@@ -135,8 +135,8 @@ double ref_dot(int m, int col, int K, int group_size, bool bf16_scales,
 }
 
 size_t oblock_bytes(int K, int pack_nr, int group_size) {
-    return static_cast<size_t>(K / ck::kS4Octet) * pack_nr
-            * ck::kS4BytesPerOctetCol
+    return static_cast<size_t>(K / ck::kW4Octet) * pack_nr
+            * ck::kW4BytesPerOctetCol
             + static_cast<size_t>(K / group_size) * pack_nr * sizeof(int32_t);
 }
 
@@ -157,9 +157,9 @@ TEST_P(CkUkernelS4None, MatchesScalarReference) {
     const int max_mr = ck::max_mr_for_nv_s4(NV);
 
     const std::vector<int8_t> wsrc = build_packed(K, N, ldb, /*transB=*/true);
-    Slab slab(ck::packed_weight_size_s4(K, N, pack_nr, group_size));
+    Slab slab(ck::packed_weight_size_w4(K, N, pack_nr, group_size));
     ASSERT_NE(slab.p, nullptr);
-    ASSERT_EQ(ck::prepack_weight_into_s4(wsrc.data(), K, N, ldb, pack_nr, true,
+    ASSERT_EQ(ck::prepack_weight_into_w4(wsrc.data(), K, N, ldb, pack_nr, true,
                       false, group_size, slab.p),
             status_t::success);
 
@@ -254,9 +254,9 @@ TEST(CkUkernelS4F32, StoresDequantizedF32) {
     const int G = K / group_size;
 
     const std::vector<int8_t> wsrc = build_packed(K, N, K, true);
-    Slab slab(ck::packed_weight_size_s4(K, N, pack_nr, group_size));
+    Slab slab(ck::packed_weight_size_w4(K, N, pack_nr, group_size));
     ASSERT_NE(slab.p, nullptr);
-    ASSERT_EQ(ck::prepack_weight_into_s4(wsrc.data(), K, N, K, pack_nr, true,
+    ASSERT_EQ(ck::prepack_weight_into_w4(wsrc.data(), K, N, K, pack_nr, true,
                       false, group_size, slab.p),
             status_t::success);
 
@@ -313,9 +313,9 @@ TEST(CkUkernelS4, PerGroupDequantizationAvoidsIntermediateOverflow) {
     std::vector<int8_t> wsrc(
             static_cast<size_t>(N) * K / 2, static_cast<int8_t>(0x11));
     std::fill_n(wsrc.begin(), K / 2, static_cast<int8_t>(0));
-    Slab slab(ck::packed_weight_size_s4(K, N, N, group_size));
+    Slab slab(ck::packed_weight_size_w4(K, N, N, group_size));
     ASSERT_NE(slab.p, nullptr);
-    ASSERT_EQ(ck::prepack_weight_into_s4(wsrc.data(), K, N, K, N, true,
+    ASSERT_EQ(ck::prepack_weight_into_w4(wsrc.data(), K, N, K, N, true,
                       /*interleave_split_halves=*/false, group_size, slab.p),
             status_t::success);
 
@@ -390,10 +390,10 @@ TEST_P(CkUkernelS4Gated, MatchesCanonicalReference) {
             : ck::ActivationKind::gelu_and_mul;
 
     const std::vector<int8_t> wsrc = build_packed(K, N, ldb, true);
-    Slab slab(ck::packed_weight_size_s4(K, N, pack_nr, group_size));
+    Slab slab(ck::packed_weight_size_w4(K, N, pack_nr, group_size));
     ASSERT_NE(slab.p, nullptr);
     // The pack permutes canonical [gate | up] into [g0, u0, g1, ...].
-    ASSERT_EQ(ck::prepack_weight_into_s4(wsrc.data(), K, N, ldb, pack_nr, true,
+    ASSERT_EQ(ck::prepack_weight_into_w4(wsrc.data(), K, N, ldb, pack_nr, true,
                       /*interleave_split_halves=*/true, group_size, slab.p),
             status_t::success);
 
@@ -470,9 +470,9 @@ TEST(CkUkernelS4, RoutedU8ModeMatchesS8AndStoresF32) {
     constexpr int G = K / group_size;
     constexpr int NV = 2;
     const auto wsrc = build_packed(K, N, K, /*transB=*/true);
-    Slab slab(ck::packed_weight_size_s4(K, N, N, group_size));
+    Slab slab(ck::packed_weight_size_w4(K, N, N, group_size));
     ASSERT_NE(slab.p, nullptr);
-    ASSERT_EQ(ck::prepack_weight_into_s4(wsrc.data(), K, N, K, N, true,
+    ASSERT_EQ(ck::prepack_weight_into_w4(wsrc.data(), K, N, K, N, true,
                       /*interleave_split_halves=*/false, group_size, slab.p),
             status_t::success);
 
@@ -557,21 +557,21 @@ TEST(CkUkernelS4, UnpackedBlockMatchesInRegisterKernels) {
 
     for (const int group_size : {32, 128}) {
         const int G = K / group_size;
-        Slab slab(ck::packed_weight_size_s4(K, N, N, group_size));
+        Slab slab(ck::packed_weight_size_w4(K, N, N, group_size));
         ASSERT_NE(slab.p, nullptr);
         ASSERT_EQ(
-                ck::prepack_weight_into_s4(wsrc.data(), K, N, K, N, true,
+                ck::prepack_weight_into_w4(wsrc.data(), K, N, K, N, true,
                         /*interleave_split_halves=*/false, group_size, slab.p),
                 status_t::success);
         const auto *blk = static_cast<const int8_t *>(slab.p);
         Slab unpacked(static_cast<size_t>(K) * N);
         ASSERT_NE(unpacked.p, nullptr);
         const size_t group_packed_bytes
-                = static_cast<size_t>(group_size / ck::kS4Octet) * N
-                * ck::kS4BytesPerOctetCol;
+                = static_cast<size_t>(group_size / ck::kW4Octet) * N
+                * ck::kW4BytesPerOctetCol;
         const auto *comp = reinterpret_cast<const int32_t *>(blk
-                + static_cast<size_t>(K / ck::kS4Octet) * N
-                        * ck::kS4BytesPerOctetCol);
+                + static_cast<size_t>(K / ck::kW4Octet) * N
+                        * ck::kW4BytesPerOctetCol);
         std::vector<float> wscales(static_cast<size_t>(G) * N);
         for (int g = 0; g < G; ++g)
             for (int n = 0; n < N; ++n)

@@ -197,6 +197,92 @@ status_t validate_w4a8_inputs(
     return status_t::success;
 }
 
+status_t validate_mxfp4_inputs(const matmul_params &params, int M, int N, int K,
+        int Batch_A, int Batch_B, bool is_weights_const) {
+    const auto &qp = params.quant_params;
+    const bool dynamic_entry = params.dynamic_quant
+            && (params.dtypes.src == data_type_t::bf16
+                    || params.dtypes.src == data_type_t::f32);
+    const bool static_entry
+            = !params.dynamic_quant && params.dtypes.src == data_type_t::s8;
+    if (!dynamic_entry && !static_entry) {
+        log_error(
+                "MXFP4 accepts bf16 or f32 src with dynamic_quant=true or "
+                "pre-quantized s8 src with dynamic_quant=false (got src=",
+                dtype_info(params.dtypes.src),
+                ", dynamic_quant=", params.dynamic_quant, ")");
+        return status_t::failure;
+    }
+    if (params.dtypes.compute != data_type_t::s8) {
+        log_error("MXFP4 requires s8 compute dtype");
+        return status_t::failure;
+    }
+    if (params.dtypes.dst != data_type_t::bf16
+            && params.dtypes.dst != data_type_t::f32) {
+        log_error("MXFP4 requires bf16 or f32 output");
+        return status_t::failure;
+    }
+    if (!mxfp4_bias_dtype_supported(params.dtypes.bias)) {
+        log_error("MXFP4 takes a none, f32, bf16 or f16 bias (got ",
+                dtype_info(params.dtypes.bias), ")");
+        return status_t::failure;
+    }
+    if (qp.wei_zp.buff || qp.src_zp.buff || qp.dst_scale.buff
+            || qp.dst_zp.buff) {
+        log_error(
+                "MXFP4 is symmetric with a bf16 or f32 output: no zero points "
+                "and no destination quantization");
+        return status_t::failure;
+    }
+
+    const uint8_t *scales = nullptr;
+    int scale_ld = 0;
+    if (!mxfp4_scale_view(params, K, N, scales, scale_ld)) {
+        log_error("MXFP4 requires f8_e8m0 weight scales {K/", kMxfp4BlockSize,
+                ", N} and K divisible by ", kMxfp4BlockSize, " (got ",
+                qp.wei_scale.buff ? dtype_info(qp.wei_scale.dt) : "none",
+                ", K=", K, ", N=", N, ")");
+        return status_t::failure;
+    }
+
+    const auto &src_scale = qp.src_scale;
+    if (static_entry && !src_scale.buff) {
+        log_error("MXFP4 with an s8 source requires quant_params.src_scale");
+        return status_t::failure;
+    }
+    const int64_t blocks = K / kMxfp4BlockSize;
+    if (!quant_scale_dtype_supported(src_scale.dt)
+            || !(quant_param_is_per_token(src_scale, M)
+                    || quant_param_is_per_group_src(src_scale, M, blocks))) {
+        log_error(
+                "MXFP4 requires an f32 or bf16 source scale per token {M,1} "
+                "or per block {M,K/32} (M=",
+                M, ", K/32=", blocks, ")");
+        return status_t::failure;
+    }
+
+    if (!params.postop_.empty()) {
+        log_error("MXFP4 does not support post-ops");
+        return status_t::failure;
+    }
+    if (params.packing.pack_format_b != 0 || params.mem_format_b != 'n') {
+        log_error(
+                "MXFP4 weights must be raw f4_e2m1 codes: no caller "
+                "reorder (mem_format_b='n') and no GGML packing");
+        return status_t::failure;
+    }
+    if (Batch_A != 1 || Batch_B != 1) {
+        log_error("MXFP4 does not support batched matmul (Batch_A=", Batch_A,
+                ", Batch_B=", Batch_B, ")");
+        return status_t::failure;
+    }
+    if (!is_weights_const) {
+        log_error("MXFP4 requires constant weights (is_weights_const=true)");
+        return status_t::failure;
+    }
+    return status_t::success;
+}
+
 status_t validate_matmul_direct_inputs(const void *src, const void *weight,
         const void *dst, const int M, const int N, const int K,
         const int Batch_A, const int Batch_B, const matmul_params &params,
@@ -230,6 +316,13 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
         log_error("Invalid batch sizes: Batch_A=", Batch_A,
                 ", Batch_B=", Batch_B);
         return status_t::failure;
+    }
+
+    // MXFP4 is a closed contract, checked whole; the rules below are written
+    // for other weight types and would half-apply to it.
+    if (params.dtypes.wei == data_type_t::f4_e2m1) {
+        return validate_mxfp4_inputs(
+                params, M, N, K, Batch_A, Batch_B, is_weights_const);
     }
 
     const bool is_w4a8 = is_w4a8_config(params);

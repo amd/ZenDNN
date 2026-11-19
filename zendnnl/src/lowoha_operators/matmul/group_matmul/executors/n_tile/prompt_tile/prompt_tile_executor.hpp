@@ -53,6 +53,8 @@ struct QuantizedInputView {
     const void *src_scale = nullptr; ///< Per row, read per `kctx.scale_kind`.
     const int32_t *src_zp = nullptr; ///< Per row when asymmetric, else null.
     const void *wei_scale = nullptr; ///< Whole; the CK slices it by column.
+    /// MXFP4: `[M][K / group_size]` source sums for the group seeds.
+    const int32_t *src_group_sums = nullptr;
 };
 
 /// Borrowed views of `n_tile_execute`'s per-expert arguments.

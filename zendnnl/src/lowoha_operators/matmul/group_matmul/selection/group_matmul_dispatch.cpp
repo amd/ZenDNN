@@ -53,6 +53,7 @@
 #include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
 #include "lowoha_operators/matmul/group_matmul/executors/sequential/sequential_experts.hpp"
 #include "lowoha_operators/matmul/group_matmul/multi_expert/multilevel/parallel_multilevel.hpp"
+#include "mxfp4_route.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -425,9 +426,11 @@ bool group_matmul_execute(const std::vector<char> &layout,
     // gate, the silu/gelu fused path engages exclusively when
     // (CK-on AND tight caller).  Wide non-CK silu/gelu falls through
     // to the dispatcher's separate-pass post-pass.
+    // That helper is the standard backend's, which cannot read MXFP4.
     const bool wide_fuse_supported
             = (fused_act == grp_matmul_gated_act_t::swiglu_oai_mul)
-            && get_grp_n_tile_fused_act();
+            && get_grp_n_tile_fused_act()
+            && !grp_matmul_is_mxfp4(M, params, M.size());
     const bool a3_fuses = (use_algo == 3)
             && n_tile_can_fuse_activation(fused_act, custom_kernel_en)
             && (caller_layout_tight || wide_fuse_supported);

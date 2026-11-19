@@ -89,6 +89,8 @@
 #include <type_traits>
 
 #include "common/data_types.hpp"
+#include "lowoha_operators/matmul/group_matmul/custom_kernel/ck_enable.hpp"
+#include "lowoha_operators/matmul/group_matmul/custom_kernel/w4_format.hpp"
 #include "lowoha_operators/matmul/group_matmul/group_matmul_direct.hpp"
 #include "lowoha_operators/matmul/group_matmul/multi_expert/multi_expert_policy.hpp"
 #include "lowoha_operators/matmul/group_matmul/selection/call_route.hpp"
@@ -293,6 +295,12 @@ struct PrepackRequest {
     // W4A8 sym-quant group_size (=K/G); 0 means not W4A8 or use full-K default.
     int w4a8_group_size = 0;
 
+    // Per-expert scales a four-bit format stores in its pack, and their row
+    // stride; set only for MXFP4 (f8_e8m0 `{G, N}`).  The warm needs them to
+    // build the same slab (and key) `prepare_for_call` looks up.
+    std::vector<const void *> pack_scales;
+    std::vector<int> pack_scale_ld;
+
     // Per-call OMP team size — taken straight from the dispatcher's entry-API
     // `num_threads` argument.  ALGO 3 uses it to compute
     // `aocl_stable_n_thr(num_threads)` so per-tile warm keys match runtime.
@@ -442,6 +450,11 @@ inline PrepackRequest build_prepack_params(
         }
     }
     if (!params.empty()) {
+        // Includes the prepack-extras tail: an idle expert can be packed only
+        // if its scales came with it, and only from a descriptor the runtime
+        // would accept; any other entry stays null and the warm skips it.
+        grp_matmul_ck_pack_scales(params, rep, K, N, params.size(),
+                p.pack_scales, p.pack_scale_ld);
         p.src_dtype = params[rep].dtypes.src;
         p.wei_dtype = params[rep].dtypes.wei;
         p.dst_dtype = params[rep].dtypes.dst;
@@ -547,7 +560,14 @@ inline PrepackRequest build_prepack_params(
     p.group_size = group_size;
     if (p.group_size <= 0 && !params.empty() && rep < K.size()) {
         const auto &ws = params[rep].quant_params.wei_scale;
-        if (ws.buff != nullptr && ws.dims.size() == 2 && ws.dims[0] > 1) {
+        // A format whose pack holds its scales is per-group even with one
+        // group (K = 32 for MXFP4).
+        const auto *w4 = matmul::custom_kernel::w4_format_entry(
+                params[rep].dtypes.wei);
+        const bool one_group_counts = w4 != nullptr
+                && matmul::custom_kernel::w4_scales_in_pack(w4->fmt);
+        if (ws.buff != nullptr && ws.dims.size() == 2
+                && (ws.dims[0] > 1 || (one_group_counts && ws.dims[0] == 1))) {
             const int G = static_cast<int>(ws.dims[0]);
             if (G > 0 && (K[rep] % G) == 0) p.group_size = K[rep] / G;
         }
@@ -587,7 +607,8 @@ inline PrepackRequest build_prepack_params(
                         && (params[rep].dtypes.compute == data_type_t::s8
                                 || params[rep].dtypes.compute == data_type_t::u8
                                 || params[rep].dtypes.src == data_type_t::u8));
-        const bool is_w4a8 = params[rep].dtypes.wei == data_type_t::s4
+        const bool is_w4
+                = matmul::custom_kernel::is_w4_weight(params[rep].dtypes.wei)
                 && params[rep].dtypes.compute == data_type_t::s8;
         // DQ-INT8 (either form): carry the runtime compute dtype so the
         // fingerprint marks it int8 (not bf16) and `ck_eligible_int8` /
@@ -598,8 +619,8 @@ inline PrepackRequest build_prepack_params(
         p.compute_dtype = (params[rep].dtypes.src == data_type_t::u8
                                   && params[rep].dtypes.wei == data_type_t::s8)
                 ? data_type_t::u8
-                : (is_dq_int8 || is_w4a8) ? params[rep].dtypes.compute
-                                          : data_type_t::none;
+                : (is_dq_int8 || is_w4) ? params[rep].dtypes.compute
+                                        : data_type_t::none;
     } else {
         p.dynamic_quant = dynamic_quant;
         p.compute_dtype = compute_dtype;

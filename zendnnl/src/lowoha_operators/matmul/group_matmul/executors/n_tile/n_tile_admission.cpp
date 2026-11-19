@@ -153,6 +153,18 @@ bool n_tile_supported(const std::vector<int> &M, const std::vector<int> &N,
             // inner aocl_dlp_blocked slices packed s4 directly.
             // u4 remains rejected (no symmetric W4A8 support).
             if (params[i].dtypes.wei == data_type_t::u4) { return false; }
+            // MXFP4 runs only on the custom kernel, whose pack holds its
+            // scales, so it needs neither AOCL nor a column-sliceable weight
+            // scale; the kernel reads one source scale per row, or per row
+            // and block.
+            if (params[i].dtypes.wei == data_type_t::f4_e2m1) {
+                if (!is_mxfp4_config(params[i]) || params[i].mem_format_b != 'n'
+                        || !(quant_param_is_per_token(qp.src_scale, M[i])
+                                || is_per_group_src(qp.src_scale, M[i]))) {
+                    return false;
+                }
+                continue;
+            }
             if (is_w4a8_config(params[i])) {
 #if !ZENDNNL_DEPENDS_AOCLDLP
                 // W4A8 N-tile needs AOCL-DLP (s4→s8 plain cache, per-tile

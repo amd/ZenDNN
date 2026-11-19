@@ -87,30 +87,32 @@ status_t warm_pack_all_custom_kernel_experts(
         const std::vector<bool> &is_weights_const, int total_count,
         PackProbeStats &stats, bool interleave_split_halves,
         WarmDtypeFamily dtype_family, int group_size, int32_t weight_cache_type,
-        bool in_place, const std::vector<std::size_t> *wei_capacities) {
+        bool in_place, const std::vector<std::size_t> *wei_capacities,
+        ck::W4Format w4_fmt, const std::vector<const void *> &pack_scales,
+        const std::vector<int> &pack_scale_ld) {
 
     // Every exit reports: a silent bail is indistinguishable from
     // "warmed nothing" in the PREPACK summary, which is how a missing
     // s4 warm once hid.
-    const bool is_s4 = (dtype_family == WarmDtypeFamily::kS4);
+    const bool is_w4 = (dtype_family == WarmDtypeFamily::kW4);
     static const bool s_w4a8_warm_log
             = zendnnl::error_handling::apilog_info_enabled();
     auto bail = [&](const char *why) -> status_t {
-        if (is_s4 && s_w4a8_warm_log) {
+        if (is_w4 && s_w4a8_warm_log) {
             zendnnl::error_handling::apilog_info(
-                    "[GRP_MATMUL.PREPACK.W4A8 WARM] Skipping INT4 CK "
-                    "prepack: reason=",
-                    why, " group_size=", group_size,
-                    " total_count=", total_count,
+                    "[GRP_MATMUL.PREPACK.W4A8 WARM] fmt=",
+                    ck::w4_format_name(w4_fmt), " Skipping ",
+                    ck::w4_format_label(w4_fmt), " CK prepack: reason=", why,
+                    " group_size=", group_size, " total_count=", total_count,
                     " — first call will pack lazily in prepare_for_call");
         }
         return status_t::success;
     };
 
     if (total_count <= 0) return bail("total_count<=0");
-    // Mirrors `prepare_for_call`'s `s4_group_size_unsupported`: without
+    // Mirrors `prepare_for_call`'s `w4_group_size_unsupported`: without
     // a group size there is no correctly-sized slab to warm.
-    if (is_s4 && (group_size <= 0 || (group_size % ck::kS4Octet) != 0)) {
+    if (is_w4 && (group_size <= 0 || (group_size % ck::kW4Octet) != 0)) {
         return bail("invalid_group_size");
     }
     // Per-family ISA gate — mirrors the split gate in
@@ -124,7 +126,7 @@ status_t warm_pack_all_custom_kernel_experts(
     // warming an arena the runtime cannot consume is pure waste, and the
     // runtime would refuse the matching call identically.
     if (dtype_family == WarmDtypeFamily::kINT8
-            || dtype_family == WarmDtypeFamily::kS4) {
+            || dtype_family == WarmDtypeFamily::kW4) {
         // W4A8 widens nibbles to s8 and runs the same VPDPBUSD loop.
         if (!ck::avx512vnni_available()) return bail("no_avx512vnni");
     } else if (dtype_family == WarmDtypeFamily::kF16) {
@@ -202,9 +204,9 @@ status_t warm_pack_all_custom_kernel_experts(
 
     int att = 0, ok = 0, hits = 0, misses = 0, skip = 0;
 #if defined(_OPENMP)
-    // BF16, FP16 and INT8 pack under their family mutex. Only S4 packs
+    // BF16, FP16 and INT8 pack under their family mutex. Only W4 packs
     // outside a family lock and benefits from an expert-level OMP team.
-    const bool lock_free_pack = dtype_family == WarmDtypeFamily::kS4;
+    const bool lock_free_pack = dtype_family == WarmDtypeFamily::kW4;
     const int pack_threads = lock_free_pack
             ? static_cast<int>(std::min(
                       bound, static_cast<size_t>(omp_get_max_threads())))
@@ -273,17 +275,29 @@ status_t warm_pack_all_custom_kernel_experts(
                     /*interleave_split_halves=*/interleave_split_halves,
                     &packed_ignored, &was_hit, /*disable_cache=*/false, ip, cap,
                     group_size == 32 ? 32 : 0);
-        } else if (dtype_family == WarmDtypeFamily::kS4) {
+        } else if (dtype_family == WarmDtypeFamily::kW4) {
             // `group_size` is in the cache key, so this warms exactly
             // the slab `prepare_for_call` later looks up.  An expert
             // whose K is not a multiple of it is refused by the pack
             // and counted in `skipped_invalid` below.
             const int8_t *packed_ignored = nullptr;
-            pst = ck::get_or_pack_weight_s4(
+            const uint8_t *scale_i = nullptr;
+            int scale_ld_i = 0;
+            if (ck::w4_scales_in_pack(w4_fmt)) {
+                if (i >= pack_scales.size() || i >= pack_scale_ld.size()
+                        || pack_scales[i] == nullptr) {
+                    ++skip;
+                    continue;
+                }
+                scale_i = static_cast<const uint8_t *>(pack_scales[i]);
+                scale_ld_i = pack_scale_ld[i];
+            }
+            pst = ck::get_or_pack_weight_w4(
                     static_cast<const int8_t *>(weight[i]), K[i], N[i], ldb[i],
                     pack_nr, transB_c[i] != 0,
                     /*interleave_split_halves=*/interleave_split_halves,
-                    /*group_size=*/group_size, &packed_ignored, &was_hit);
+                    /*group_size=*/group_size, &packed_ignored, &was_hit,
+                    /*disable_cache=*/false, w4_fmt, scale_i, scale_ld_i);
         } else if (dtype_family == WarmDtypeFamily::kF16) {
             const float16_t *packed_ignored = nullptr;
             pst = ck::get_or_pack_weight_f16(
@@ -320,12 +334,13 @@ status_t warm_pack_all_custom_kernel_experts(
     stats.cache_misses = misses;
     stats.skipped_invalid = skip;
 
-    if (dtype_family == WarmDtypeFamily::kS4) {
+    if (dtype_family == WarmDtypeFamily::kW4) {
         if (s_w4a8_warm_log) {
             zendnnl::error_handling::apilog_info(
-                    "[GRP_MATMUL.PREPACK.W4A8 WARM] Prepacking INT4 CK "
-                    "weights:",
-                    " group_size=", group_size,
+                    "[GRP_MATMUL.PREPACK.W4A8 WARM] fmt=",
+                    ck::w4_format_name(w4_fmt), " Prepacking ",
+                    ck::w4_format_label(w4_fmt),
+                    " CK weights:", " group_size=", group_size,
                     " attempted=", stats.total_attempted,
                     " packed=", stats.packed_ok, " hits=", stats.cache_hits,
                     " misses=", stats.cache_misses,

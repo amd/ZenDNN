@@ -96,7 +96,7 @@ inline bool matmul_custom_kernel_quant_supported(int M, int N, int K,
     }
 
     if (custom_kernel::is_w4a8_variant(variant)) {
-        if (!is_w4a8_config(params) || (K % custom_kernel::kS4Octet) != 0) {
+        if (!is_w4a8_config(params) || (K % custom_kernel::kW4Octet) != 0) {
             return false;
         }
         if (qp.dst_scale.buff != nullptr || qp.dst_zp.buff != nullptr)
@@ -123,7 +123,7 @@ inline bool matmul_custom_kernel_quant_supported(int M, int N, int K,
         }
         if (src_per_group && qp.src_scale.dims[1] != wei_dims[0]) return false;
         const int64_t group_size = static_cast<int64_t>(K) / wei_dims[0];
-        return group_size > 0 && (group_size % custom_kernel::kS4Octet) == 0;
+        return group_size > 0 && (group_size % custom_kernel::kW4Octet) == 0;
     }
 
     return true;

@@ -185,7 +185,12 @@ auto to_dlp_type = [](data_type_t dt) -> DLP_TYPE {
         // width or DLP reads the packed nibbles as a wider type.
         case data_type_t::s4: return DLP_S4;
         case data_type_t::u4: return DLP_U4;
-        default: return DLP_F32;
+        // `none` is the dtype of a bias, scale or zero-point slot the caller
+        // left unset, which the API reads as f32.
+        case data_type_t::none: return DLP_F32;
+        // Any other type (the MX types among them) has no DLP storage type;
+        // reading it as f32 would read the wrong width.
+        default: return DLP_INVALID;
     }
 };
 

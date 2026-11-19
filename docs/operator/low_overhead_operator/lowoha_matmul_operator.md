@@ -157,6 +157,7 @@ struct matmul_data_types {
 | F16 | F16 | F32/F16 | F16/F32 | Half-precision (requires AVX512-FP16, except on the native BRGEMM). No scales or zero-points. |
 | BF16 | S4/U4 | F32/BF16 | F32/BF16 | Weight-only (`dynamic_quant=false`). Source stays BF16. S4 is symmetric (no zero-point). U4 is asymmetric (weight zero-point required, S8 or BF16). |
 | BF16/F32/S8 | S4 | F32/BF16 | F32/BF16 | W4A8 (`compute=s8`, no zero-points). A BF16 or F32 source requires `dynamic_quant=true`. S8 source requires `dynamic_quant=false` and a source scale. An F32 source writes an F32 destination. See [W4A8](#w4a8-symmetric-w4--a8). |
+| BF16/F32/S8 | F4_E2M1 | F32/BF16/F16 | F32/BF16 | MXFP4 (`compute=s8`, no zero-points), group-matmul custom kernel only. Weight scale is `f8_e8m0` with dims `{K/32, N}`. A BF16 or F32 source requires `dynamic_quant=true`. S8 source requires `dynamic_quant=false` and its source scale. The source scale is per token `{M, 1}` or per block `{M, K/32}`. Destination is BF16 or F32. See [MXFP4](#mxfp4-f4_e2m1-weights-f8_e8m0-scales). |
 | S8 | S4 | F32/BF16 | F32 | GGML Q4_0. Packed symmetric S4 with an S8 source. Source scale is per-token or per-group. No zero-point. |
 | U8/S8 | S8 | F32/BF16/S8/U8/S32 | F32/BF16/S8/U8/S32/F16 | INT8. U8 source scale is per-tensor only. An S8 per-token or per-group source scale writes F32 or BF16 only. S32, S8, U8, and F16 outputs need a per-tensor source scale. |
 | BF16/F32 | S8 | F32/BF16/S8/U8 | F32/BF16/S8/U8 | INT8. No S32 or F16 output. A per-token source scale writes F32 or BF16 only. |
@@ -323,6 +324,37 @@ Two entry contracts:
 > - **Shape constraints:** `src_scale` dims `{M, 1}` or `{M, G}` (`G` matching `wei_scale.dims[0]`); `wei_scale` dims `{G, N}` with `N` matching the matmul `N`; `K` divisible by `G`; `K / G` (group size) a multiple of 4. Compact `{M, 1}` scales are broadcast to `{M, G}` in the AOCL path before GEMM.
 > - **vs WOQ:** WOQ is bf16×s4 with `dynamic_quant = false`. W4A8 uses the symmetric grouped blocked weight layout, not the weight-only s4 layout.
 
+### MXFP4 (`f4_e2m1` weights, `f8_e8m0` scales)
+
+OCP MX FP4 weights: 4-bit E2M1 codes with one power-of-two E8M0 scale per 32 elements along K, declared by data type alone:
+
+| Field | Value |
+|-------|-------|
+| `dtypes.wei` | `f4_e2m1` — two codes per byte in the weight's element order, the even linear index in the low nibble (the s4 convention): with `transB = true` (`[N, K]`) a byte holds two neighbouring k, with `transB = false` two neighbouring n |
+| `quant_params.wei_scale` | `dt = f8_e8m0`, `dims = {K/32, N}`, the raw E8M0 bytes (2^(e-127); 0xFF is NaN) |
+| `dtypes.src` / `dynamic_quant` | `bf16` or `f32` with `dynamic_quant = true`, or pre-quantized `s8` with `dynamic_quant = false` |
+| `quant_params.src_scale` | f32 or bf16, per token `{M, 1}` or per block `{M, K/32}` (one per row and E8M0 block; dynamic quantization then quantizes each block on its own). `buff` is required for an s8 source |
+| `dtypes.dst` / `dtypes.compute` | `bf16` or `f32` / `s8`. The kernel fuses a gated activation into a bf16 store, except SiLU or GELU with a bias. Into a destination N wide, any other gated call runs the activation in place after the kernel; into a narrower one it is refused before any work |
+
+Not part of the contract: zero points, destination quantization, post-ops, batching, caller-reordered (`mem_format_b='r'`) or GGML-packed weights, non-constant weights. `validate_mxfp4_inputs` checks the whole contract for every `f4_e2m1` call, and `group_matmul_direct` applies it to every active expert, refusing a call that mixes MXFP4 with other weight types.
+
+The two types have one role each: `f4_e2m1` is a weight type and `f8_e8m0` the weight scale of an `f4_e2m1` weight. Both entries refuse any other use, such as `f8_e8m0` scales on `s8` or `s4` weights, an `f8_e8m0` weight, or either type as a source, destination, bias, zero point or post-op buffer. Neither type has a kernel in the legacy `matmul_operator_t` or reorder operator, which refuse it too.
+
+**Backend: the group-matmul custom kernel only.** Grouped calls run ALGO 3; `matmul_direct` sends every MXFP4 call through its one-op grouped route, so dense layers reach the same kernel (a prompt reaches its prompt-tile executor). No other backend reads `f4_e2m1`, and a call the custom kernel cannot serve fails instead of falling back:
+
+- a grouped scheduler pinned to ALGO 1, 2, 5 or 6 (`ZENDNNL_GRP_MATMUL_ALGO`, or `ZENDNNL_GRP_MATMUL_AUTO_{PROMPT,DECODE}_ALGO` for the call's phase). ALGO 4, the W8A8 interceptor, declines MXFP4, which then runs ALGO 3;
+- `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=0`, or a CPU without AVX-512 VNNI (`status_t::isa_unsupported`);
+- more than 256 active experts, `transA`, `alpha != 1`, `beta != 0`, or an `N` that the kernel's pack width (32 or 64) does not divide;
+- a NaN scale, or any refusal the kernel can only make while preparing the call (`execution_path = error_mxfp4_no_ck`);
+- for `matmul_direct`, a per-call `lowoha_algo` other than `none` / `moe_custom_kernel`. The scalar `ZENDNNL_MATMUL_ALGO` chooses among backends that do not read `f4_e2m1` and does not apply.
+
+These refusals, the role rule above and the whole MXFP4 contract run outside the diagnostic gate: `ZENDNNL_DIAGNOSTICS_ENABLE=0` skips validation but opens no path to another backend and drops no part of the call. The custom kernel's prepack API (`weight_prepack_size` and `reorder_direct` with `prepack.algo = moe_custom_kernel`) packs `bf16`, `f16` and `s8` weights only; it refuses `f4_e2m1` rather than pack it as another type.
+
+> **Notes:**
+> - **Decode:** the kernel maps each code through a lookup table to twice its value plus 12, an exact u8 in [0, 24] for VPDPBUSD's unsigned side, and removes the 12 with each source row's per-group sum. A call with at least 256 KiB of source (M x K summed over its experts) computes the sums once, before the tiles run; a smaller call computes them in each tile. It folds each E8M0 scale's halving into the pack (`byte - 1`), so the hot loop reads one scale byte per group. Scales of 2^-126 and below flush to zero.
+> - **Range:** when an o-block's largest halved scale exceeds 2^100, the pack lowers that o-block's scales by the excess and the kernel restores it after the source scale, so the f32 sums stay finite for any E8M0 scale. Scales that fall below 2^-126 in that o-block flush to zero. Real checkpoints sit far below 2^100 and pack unchanged.
+> - **Packing:** the custom kernel packs the weight and its scales together, out of place, and caches the pack by weight address and scale-buffer address and stride: the weight and its scales must stay constant while the weights are in use.
+
 **Supported Data Types for Scales and Zero Points by Backend:**
 
 | Quant Mode | Tensor  | Parameter  | DLP Backend                        | OneDNN Backend                      |
@@ -339,10 +371,13 @@ Two entry contracts:
 | WOQ (U4)   | Weights | Zero-Point | S8, BF16                           | ✗ *(WOQ always dispatches to DLP)*  |
 | W4A8      | Source  | Scale      | F32, BF16 (F16 on the native BRGEMM) | ✗ *(W4A8 never runs on oneDNN)*    |
 | W4A8      | Weights | Scale      | F32, BF16 (F16 on the native BRGEMM) | ✗ *(W4A8 never runs on oneDNN)*    |
+| MXFP4     | Source  | Scale      | ✗ *(custom kernel: F32, BF16)*     | ✗ *(custom kernel only)*            |
+| MXFP4     | Weights | Scale      | ✗ *(custom kernel: F8_E8M0)*       | ✗ *(custom kernel only)*            |
 
 > **Notes:**
 > - **WOQ Routing:** WOQ is supported by the AOCL-DLP backend only.
 > - **W4A8 Routing:** W4A8 runs on the custom-kernel route or AOCL-DLP with the algorithm unset, and on the native BRGEMM for a call that asks for it.
+> - **MXFP4 Routing:** MXFP4 is supported by the group-matmul custom kernel only; see [MXFP4](#mxfp4-f4_e2m1-weights-f8_e8m0-scales).
 > - **S4 vs U4:** S4 weights use symmetric quantization (no zero-point). U4 weights use asymmetric quantization with zero-point.
 > - **U4 Zero-Point Domain:** The dequantization formula for U4 depends on the zero-point data type. See the dequantization formulas in the WOQ key points section below for details.
 

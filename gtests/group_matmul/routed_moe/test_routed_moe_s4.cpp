@@ -59,7 +59,7 @@ namespace matmul {
 void clear_ggml_weight_unpack_cache();
 void clear_weight_scale_f32_cache();
 namespace custom_kernel {
-void clear_custom_kernel_pack_cache_s4();
+void clear_custom_kernel_pack_cache_w4();
 }
 namespace group_matmul_prepack {
 void clear_fingerprint_cache_for_test();
@@ -90,7 +90,7 @@ using status_t = zendnnl::error_handling::status_t;
 constexpr uint16_t kOutputPoison = 0x7fc1u;
 
 void reset_grouped_s4_caches() {
-    zendnnl::lowoha::matmul::custom_kernel::clear_custom_kernel_pack_cache_s4();
+    zendnnl::lowoha::matmul::custom_kernel::clear_custom_kernel_pack_cache_w4();
     zendnnl::lowoha::matmul::group_matmul_prepack::
             clear_fingerprint_cache_for_test();
     zendnnl::lowoha::matmul::clear_ggml_weight_unpack_cache();

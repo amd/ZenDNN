@@ -1371,13 +1371,13 @@ TEST_F(NativeBrgemmLayoutS4, PackMatchesTheCustomKernelOctets) {
                 const std::vector<uint8_t> w
                         = random_s4(K, N, ldb, transB, K + N + transB);
                 const int8_t *ck_packed = nullptr;
-                ASSERT_EQ(ck::get_or_pack_weight_s4(
+                ASSERT_EQ(ck::get_or_pack_weight_w4(
                                   reinterpret_cast<const int8_t *>(w.data()), K,
                                   N, ldb, 32, transB, false, gs, &ck_packed,
                                   nullptr, true),
                         status_t::success);
                 std::unique_ptr<const int8_t, void (*)(const int8_t *)> owner(
-                        ck_packed, ck::free_owned_packed_weight_s4);
+                        ck_packed, ck::free_owned_packed_weight_w4);
                 buffer_t got = alloc_buffer(
                         nv::native_packed_bytes(data_type_t::s4, K, N, 32));
                 ASSERT_EQ(nv::native_pack_weight(data_type_t::s4, w.data(), K,

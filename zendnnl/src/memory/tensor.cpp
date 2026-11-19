@@ -37,6 +37,19 @@ std::string vec_to_string(const std::vector<T> &v) {
     oss << "]";
     return oss.str();
 }
+
+// Two 4-bit elements share a byte, so only the even one of a pair has an
+// address of its own.
+uint64_t element_byte_offset(uint64_t element, data_type_t data_type) {
+    if (!is_4bit(data_type)) { return element * size_of(data_type); }
+    if (element % 2 != 0) {
+        std::string message
+                = "attempt to get raw handle of the odd element "
+                  "of a 4-bit pair.";
+        EXCEPTION_WITH_LOC(message);
+    }
+    return element / 2;
+}
 } // namespace
 
 //constructors and destructor
@@ -568,7 +581,8 @@ void *tensor_t::get_raw_handle_unsafe(const index_vec_type &index_) const {
         EXCEPTION_WITH_LOC(message);
     }
 
-    auto index_offset = compute_offset(index_) * size_of(option.data_type);
+    auto index_offset
+            = element_byte_offset(compute_offset(index_), option.data_type);
 
     return (void *)((uint8_t *)storage->get_raw_handle() + option.base_offset
             + index_offset);
@@ -602,7 +616,8 @@ const void *tensor_t::get_raw_handle_const(const index_vec_type &index_) const {
         EXCEPTION_WITH_LOC(message);
     }
 
-    auto index_offset = compute_offset(index_) * size_of(option.data_type);
+    auto index_offset
+            = element_byte_offset(compute_offset(index_), option.data_type);
 
     return (const void *)((uint8_t *)storage->get_raw_handle()
             + option.base_offset + index_offset);
@@ -654,10 +669,7 @@ tensor_t &tensor_t::create() {
         return (*this);
     }
 
-    float multiplier = option.data_type == data_type_t::s4
-                    || option.data_type == data_type_t::u4
-            ? 2.0f
-            : 1.0f;
+    float multiplier = is_4bit(option.data_type) ? 2.0f : 1.0f;
     uint64_t buffer_size = std::ceil(1.0 * option.aligned_nelem
             * size_of(option.data_type) / multiplier);
 

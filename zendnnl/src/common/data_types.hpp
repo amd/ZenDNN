@@ -55,7 +55,9 @@ enum class data_type_t : uint8_t {
     u32, /*!< unsigned integer 32 bit */
     u16, /*!< unsigned integer 16 bit */
     u8, /*!< unsigned integer 8 bit */
-    u4 /*!< unsigned integer 4 bit */
+    u4, /*!< unsigned integer 4 bit */
+    f4_e2m1, /*!< float 4bit, OCP MX E2M1, packed two per byte like s4 */
+    f8_e8m0 /*!< power-of-two scale 8bit, OCP MX E8M0 (scale use only) */
 };
 
 /** @brief conversion from data_type_t to corresponding C++ type */
@@ -137,6 +139,18 @@ struct prec_traits<data_type_t::u8> {
 /** @brief u4 to uint8_t */
 template <>
 struct prec_traits<data_type_t::u4> {
+    typedef uint8_t type;
+};
+
+/** @brief f4_e2m1 to uint8_t (two codes per byte, low nibble first) */
+template <>
+struct prec_traits<data_type_t::f4_e2m1> {
+    typedef uint8_t type;
+};
+
+/** @brief f8_e8m0 to uint8_t */
+template <>
+struct prec_traits<data_type_t::f8_e8m0> {
     typedef uint8_t type;
 };
 
@@ -224,6 +238,32 @@ ZENDNNL_API uint32_t size_of(data_type_t data_type);
  *  @return Name of the data type
  */
 ZENDNNL_API std::string dtype_info(data_type_t data_type);
+
+/** @brief True for the 4-bit types, which pack two elements per byte. */
+inline constexpr bool is_4bit(data_type_t data_type) {
+    return data_type == data_type_t::s4 || data_type == data_type_t::u4
+            || data_type == data_type_t::f4_e2m1;
+}
+
+/** @brief True for the OCP MX types, f4_e2m1 codes and their f8_e8m0 block
+ *  scales.  Only the custom kernel's MXFP4 matmul reads them. */
+inline constexpr bool is_mx_type(data_type_t data_type) {
+    return data_type == data_type_t::f4_e2m1
+            || data_type == data_type_t::f8_e8m0;
+}
+
+/** @brief f4_e2m1 code to twice its value.
+ *
+ *  An E2M1 code is sign-magnitude (bit 3 sign, bits 2-1 exponent, bit 0
+ *  mantissa) over {0, 0.5, 1, 1.5, 2, 3, 4, 6}.  Doubled, every value is an
+ *  integer in [-12, 12], so int8 holds it exactly and a consumer halves the
+ *  scale instead.
+ */
+alignas(16) inline constexpr int8_t kE2M1ToInt8x2[16]
+        = {0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12};
+
+/** @brief The f8_e8m0 byte that encodes NaN; every other byte e is 2^(e-127). */
+inline constexpr uint8_t kE8M0NaN = 0xFF;
 
 } // namespace common
 

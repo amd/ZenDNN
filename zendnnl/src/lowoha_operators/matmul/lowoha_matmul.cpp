@@ -386,16 +386,28 @@ ZENDNNL_ALWAYS_INLINE inline status_t prepare_direct_call(const int M,
         void *dst, const bool is_weights_const,
         const matmul_batch_params_t &batch_params, const matmul_params &params,
         const matmul_gated_act_params *gated_act, direct_call_t &call) {
+    // The MX types have one reader, the custom kernel, and only in their
+    // roles; every other backend would read them as a wider type.  Outside
+    // the diagnostic gate.
+    if (!mx_types_in_role(params)) {
+        log_error(
+                "matmul_direct: f4_e2m1 is accepted only as the weight type "
+                "and f8_e8m0 only as the weight scale of an f4_e2m1 weight");
+        return status_t::failure;
+    }
+
     // F16 ISA check must always run — not gated behind diagnostics.
     // Prevents undefined behavior on platforms without AVX512-FP16 support.
     // Covers every F16-bearing operand: src / wei / dst, bias, and any binary
     // post-op buffer. Anything else slips through to a kernel that touches
     // F16 storage and produces wrong results on non-FP16 hardware.  A call
-    // that asks for the native BRGEMM takes its requirement instead.
+    // that asks for the native BRGEMM takes its requirement instead, and
+    // MXFP4's custom kernel widens an f16 bias with AVX-512F alone.
     const bool is_f16 = (params.dtypes.src == data_type_t::f16
             || params.dtypes.wei == data_type_t::f16
             || params.dtypes.dst == data_type_t::f16
-            || params.dtypes.bias == data_type_t::f16);
+            || (params.dtypes.bias == data_type_t::f16
+                    && params.dtypes.wei != data_type_t::f4_e2m1));
     if (is_f16 && !zendnnl_platform_info().get_avx512_f16_status()
             && !native_takes_f16(params, batch_params, call)) {
         log_error(
@@ -504,6 +516,7 @@ status_t native_brgemm_refusal(const char layout, const bool transA,
     if (prepare_direct_call(M, N, K, src, weight, dst, is_weights_const,
                 batch_params, params, gated_act, call)
                     != status_t::success
+            || params.dtypes.wei == data_type_t::f4_e2m1
             || !native::native_brgemm_selected(call.params))
         return status_t::success;
     // A dynamic quantization writes the scales and zero points it makes
@@ -548,6 +561,29 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
     const status_t checked = prepare_direct_call(M, N, K, src, weight, dst,
             is_weights_const, batch_params, params, gated_act, call);
     if (checked != status_t::success) { return checked; }
+
+    // MXFP4 has one backend, the custom kernel, reached through the one-op
+    // grouped route below (`group_matmul/selection/mxfp4_route.hpp`).
+    // Decided on the data type, outside the diagnostic gate, so no f4_e2m1
+    // call reaches the native BRGEMM or kernel_select.  The scalar
+    // ZENDNNL_MATMUL_ALGO chooses among backends none of which reads
+    // f4_e2m1, so it does not apply; an explicit per-call algorithm does.
+    const bool mxfp4 = params.dtypes.wei == data_type_t::f4_e2m1;
+    if (mxfp4
+            && (validate_mxfp4_inputs(params, M, N, K, batch_params.Batch_A,
+                        batch_params.Batch_B, is_weights_const)
+                            != status_t::success
+                    || (layout != 'r' && layout != 'R')
+                    || (params.lowoha_algo != matmul_algo_t::none
+                            && params.lowoha_algo
+                                    != matmul_algo_t::moe_custom_kernel))) {
+        log_error(
+                "matmul_direct: MXFP4 runs only on the custom kernel, which "
+                "needs the MXFP4 contract (see validate_mxfp4_inputs), a "
+                "single row-major batch and no per-call algorithm other than "
+                "moe_custom_kernel");
+        return status_t::failure;
+    }
     matmul_params &exec_params = call.params;
     matmul_batch_params_t exec_batch_params = batch_params;
 
@@ -566,9 +602,10 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
     // The native BRGEMM takes the calls that ask for it: it serves them or
     // returns their error, except the calls of ZENDNNL_MATMUL_ALGO=10 it
     // hands back (native_layout_matmul); those and the others continue below
-    // as without it.
+    // as without it. MXFP4 is never among them: its one backend is the custom
+    // kernel.
     native::native_weight_raw_hold_t handed_back_weight;
-    if (native::native_brgemm_selected(exec_params)) {
+    if (!mxfp4 && native::native_brgemm_selected(exec_params)) {
         status_t native_status = status_t::success;
         if (native::native_layout_matmul(layout, transA, transB, M, N, K, alpha,
                     src, lda, weight, ldb, bias, beta, dst, ldc,
@@ -663,10 +700,10 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
     // calls use this route to reach the single-expert custom kernel.  Gated
     // activation has no equivalent in the normal matmul_direct continuation,
     // so an active request always enters the grouped path and propagates its
-    // status. Routed INT8 and W4A8 calls are quantized by
-    // group_matmul_direct's own pre-pass. GGML weights have already been
-    // unpacked above.
-    if (run_gated_act
+    // status, as does every MXFP4 call, which has no other backend. Routed
+    // INT8, W4A8 and MXFP4 calls are quantized by group_matmul_direct's own
+    // pre-pass. GGML weights have already been unpacked above.
+    if (run_gated_act || mxfp4
             || single_matmul_group_routable(layout, M, N, K, num_threads,
                     batch_count, transA, transB, alpha, beta, bias, ldb,
                     is_weights_const, exec_params)) {
@@ -740,11 +777,11 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
                     "cache conflict; refusing standard scalar fallback");
             return status_t::failure;
         }
-        if (run_gated_act) {
+        if (run_gated_act || mxfp4) {
             if (is_profile) { profiler.tbp_stop(); }
-            log_error(
-                    "matmul_direct: group_matmul_direct could not execute the "
-                    "requested gated activation");
+            log_error("matmul_direct: group_matmul_direct could not execute ",
+                    mxfp4 ? "the MXFP4 call on the custom kernel"
+                          : "the requested gated activation");
             return grp_status;
         }
         log_info(
@@ -979,7 +1016,7 @@ ZENDNNL_API void clear_grp_matmul_weight_caches() {
     custom_kernel::clear_custom_kernel_pack_cache_bf16();
     custom_kernel::clear_custom_kernel_pack_cache_int8();
     custom_kernel::clear_custom_kernel_pack_cache_f16();
-    custom_kernel::clear_custom_kernel_pack_cache_s4();
+    custom_kernel::clear_custom_kernel_pack_cache_w4();
     group_matmul_prepack::clear_fingerprint_cache_for_test();
     clear_weight_scale_f32_cache();
 }

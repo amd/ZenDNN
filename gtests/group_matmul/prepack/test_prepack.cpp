@@ -5394,4 +5394,59 @@ TEST_F(TestSymQuantScaleShapePredicates, SymQuantGroupSizeIsKOverGForPerGroup) {
             static_cast<int64_t>(K) / G);
 }
 
+// An MXFP4 pack embeds its scales, so the warm can build an expert's slab only
+// from that expert's scales.  A skipped idle expert is packed serially by the
+// first call that fires it, which is the stall this contract exists to avoid.
+TEST(TestPrepackMxfp4Warm, WarmsEveryExpertOnlyWithItsScales) {
+    namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+    namespace ck = zendnnl::lowoha::matmul::custom_kernel;
+    if (!ck::avx512vnni_available()) GTEST_SKIP() << "no AVX-512 VNNI";
+    constexpr int E = 4, K = 256, N = 64,
+                  gs = zendnnl::lowoha::matmul::kMxfp4BlockSize;
+    constexpr int G = K / gs;
+
+    std::vector<std::vector<uint8_t>> w(E);
+    std::vector<std::vector<uint8_t>> s(E);
+    std::vector<const void *> wp(E);
+    std::vector<const void *> sp(E);
+    for (int e = 0; e < E; ++e) {
+        w[e].resize(static_cast<size_t>(N) * K / 2);
+        for (size_t i = 0; i < w[e].size(); ++i)
+            w[e][i] = static_cast<uint8_t>((e * 131 + i * 7) & 0xFF);
+        s[e].resize(static_cast<size_t>(G) * N);
+        for (int g = 0; g < G; ++g)
+            for (int n = 0; n < N; ++n)
+                s[e][static_cast<size_t>(g) * N + n]
+                        = static_cast<uint8_t>(127 + (g + n + e) % 7 - 3);
+        wp[e] = w[e].data();
+        sp[e] = s[e].data();
+    }
+    const std::vector<int> Ks(E, K), Ns(E, N), ldbs(E, K), lds(E, N);
+    const std::vector<bool> transBs(E, true);
+    const auto warm = [&](const std::vector<const void *> &scales,
+                              prepack::custom_kernel::PackProbeStats &st) {
+        return prepack::custom_kernel::warm_pack_all_custom_kernel_experts(wp,
+                Ks, Ns, ldbs, transBs, /*is_weights_const=*/ {}, E, st,
+                /*interleave_split_halves=*/false,
+                prepack::custom_kernel::WarmDtypeFamily::kW4, gs,
+                /*weight_cache_type=*/1, /*in_place=*/false,
+                /*wei_capacities=*/nullptr, ck::kW4FormatMxfp4, scales, lds);
+    };
+    ck::clear_custom_kernel_pack_cache_w4();
+
+    prepack::custom_kernel::PackProbeStats bare;
+    ASSERT_EQ(warm({}, bare), zendnnl::error_handling::status_t::success);
+    EXPECT_EQ(bare.packed_ok, 0);
+    EXPECT_EQ(bare.skipped_invalid, E);
+
+    prepack::custom_kernel::PackProbeStats first, again;
+    ASSERT_EQ(warm(sp, first), zendnnl::error_handling::status_t::success);
+    EXPECT_EQ(first.packed_ok, E);
+    EXPECT_EQ(first.cache_misses, E);
+    ASSERT_EQ(warm(sp, again), zendnnl::error_handling::status_t::success);
+    EXPECT_EQ(again.cache_hits, E)
+            << "the warm must key each pack the way the runtime looks it up";
+    ck::clear_custom_kernel_pack_cache_w4();
+}
+
 } // namespace

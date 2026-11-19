@@ -177,7 +177,7 @@ static status_t get_or_cache_aocl_ck_weight_impl(const void *aocl_packed, int K,
     const size_t raw_bytes = reorder::weight_unreorder_size(params);
     size_t ck_bytes = custom_kernel::packed_weight_size_bf16(K, N, pack_nr);
     if (is_s4) {
-        ck_bytes = custom_kernel::packed_weight_size_s4(
+        ck_bytes = custom_kernel::packed_weight_size_w4(
                 K, N, pack_nr, group_size);
     } else if (is_int8) {
         ck_bytes = custom_kernel::packed_weight_size_int8(K, N, pack_nr);
@@ -196,7 +196,7 @@ static status_t get_or_cache_aocl_ck_weight_impl(const void *aocl_packed, int K,
 
     status_t pack_status = status_t::failure;
     if (is_s4) {
-        pack_status = custom_kernel::prepack_weight_into_s4(
+        pack_status = custom_kernel::prepack_weight_into_w4(
                 static_cast<const int8_t *>(raw_temporary.get()), K, N, ldb,
                 pack_nr, transB, interleave_split_halves, group_size,
                 ck_arena.get());

@@ -315,13 +315,13 @@ void run_derived_ck_cache_quant_case(bool s4) {
             status_t::success);
 
     const size_t ck_bytes = s4
-            ? ck::packed_weight_size_s4(K, N, pack_nr, group_size)
+            ? ck::packed_weight_size_w4(K, N, pack_nr, group_size)
             : ck::packed_weight_size_int8(K, N, pack_nr);
     ASSERT_GT(ck_bytes, 0u);
     aligned_ptr_t expected_ck(zendnnl_aligned_alloc(64, ck_bytes));
     ASSERT_NE(expected_ck, nullptr);
     const status_t expected_status = s4
-            ? ck::prepack_weight_into_s4(original.data(), K, N, ldb, pack_nr,
+            ? ck::prepack_weight_into_w4(original.data(), K, N, ldb, pack_nr,
                       /*transB=*/true, /*interleave_split_halves=*/false,
                       group_size, expected_ck.get())
             : ck::prepack_weight_into_int8(original.data(), K, N, ldb, pack_nr,

@@ -80,10 +80,11 @@ status_t reorder_quantization_wrapper(const void *&src, const int lda,
     const data_type_t quant_dtype = params.dtypes.compute;
     const data_type_t orig_src_dtype = params.dtypes.src;
 
-    const bool is_w4a8 = is_w4a8_config(params) && is_dynamic;
+    // Four-bit weights (W4A8, MXFP4) quantize the source the same way.
+    const bool is_w4 = is_w4_int8_config(params) && is_dynamic;
     // is_dynamic_quant_config likewise admits only a bf16/f32 source, so no
     // already-quantized source can reach the reorder below.
-    const bool eligible = is_w4a8 || is_dynamic_quant_config(params);
+    const bool eligible = is_w4 || is_dynamic_quant_config(params);
 
     //TODO: Masking static quantization for now, Remove later.
     if (!eligible) { return status_t::success; }
@@ -194,7 +195,7 @@ status_t reorder_quantization_wrapper(const void *&src, const int lda,
 #if ZENDNNL_LOWOHA_DQ_BF16S8
     const std::vector<int64_t> logical_shape_for_gran
             = {static_cast<int64_t>(M), static_cast<int64_t>(K)};
-    const bool try_native_bf16_f32_s8 = !is_w4a8 && is_dynamic && !needs_zp
+    const bool try_native_bf16_f32_s8 = !is_w4 && is_dynamic && !needs_zp
             && quant_dtype == data_type_t::s8 && !is_batched
             && (orig_src_dtype == data_type_t::bf16
                     || orig_src_dtype == data_type_t::f32)
@@ -498,13 +499,14 @@ status_t group_reorder_quantization_wrapper(
         // granularity that is neither per_token nor M<=1 per_tensor) would
         // needlessly force the WHOLE group onto the slow per-expert fallback.
         if (M[i] == 0) { continue; }
-        // s8 (Q8_0 / W8A8) or s4 (Q4_0 packed nibbles, or W4A8).  The grouped
-        // kernel only ever touches the SOURCE, so the weight dtype only
-        // identifies a supported quant scheme. `is_w4a8_config` covers the
-        // normalized bf16/f32 W4A8 contract, including unpacked Q4_0.
+        // s8 (Q8_0 / W8A8), s4 (Q4_0 packed nibbles, or W4A8) or f4_e2m1
+        // (MXFP4).  The grouped kernel only ever touches the SOURCE, so the
+        // weight dtype only identifies a supported quant scheme.
+        // `is_w4_int8_config` covers the normalized bf16/f32 W4A8 contract,
+        // including unpacked Q4_0, and the MXFP4 contract.
         const bool wei_dtype_ok = params[i].dtypes.wei == data_type_t::s8
                 || params[i].dtypes.wei == data_type_t::s4
-                || is_w4a8_config(params[i]);
+                || is_w4_int8_config(params[i]);
         if (!params[i].dynamic_quant || !wei_dtype_ok
                 || params[i].dtypes.src != src_dtype
                 || params[i].dtypes.compute != compute_dtype

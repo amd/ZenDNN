@@ -109,6 +109,7 @@
 #include "../multi_expert/expert_parallel/group_matmul_expert_parallel_policy.hpp" // ALGO 5 fusion knob
 #include "../multi_expert/ntile_flat_parallel/ntile_flat_parallel.hpp"
 #include "../prepack/prepack.hpp"
+#include "../selection/mxfp4_route.hpp"
 #include "../single_expert/single_expert_policy.hpp" // single_expert_ck_epilogue_supported
 #include "lowoha_operators/common/operator_instrumentation.hpp"
 #include "lowoha_operators/matmul/group_matmul/fused_moe/vertical_fusion_pipeline.hpp" // try_fused_m_tile
@@ -831,14 +832,16 @@ inline status_t validate_fused_moe_inputs(
                     && (params[i].dtypes.dst == data_type_t::bf16
                             || params[i].dtypes.dst == data_type_t::f32)
                     && params[i].quant_params.src_scale.buff != nullptr;
-            if (!prequant_s8_op1) {
+            // MXFP4's one backend, the custom kernel, computes every tuple
+            // its contract admits.
+            if (!prequant_s8_op1 && !is_mxfp4_config(params[i])) {
                 log_error(
                         "group_matmul_fused_moe: op1_internal requires "
                         "dtypes.src == dtypes.dst on params[",
                         i,
                         "] unless the call is the pre-quantized s8 form "
                         "(src=s8, wei=s8/s4, dst=bf16/f32, non-null "
-                        "quant_params.src_scale.buff).  Got src=",
+                        "quant_params.src_scale.buff) or MXFP4.  Got src=",
                         static_cast<int>(params[i].dtypes.src),
                         ", wei=", static_cast<int>(params[i].dtypes.wei),
                         ", dst=", static_cast<int>(params[i].dtypes.dst),
@@ -1095,7 +1098,7 @@ inline status_t prepare_op1_output(FusedMoEIntermediateArena &arena,
 // zero-points remain unsupported and return `status_t::failure`.
 inline status_t prepare_op2_dispatch(FusedMoEDispatchScratch &scratch,
         const grp_matmul_fused_moe_params &fused, grp_matmul_gated_act_t act,
-        size_t num_ops, const std::vector<int> &N,
+        const std::vector<int> &M, size_t num_ops, const std::vector<int> &N,
         const std::vector<const void *> &src, const std::vector<int> &lda,
         const std::vector<matmul_params> &params,
         const std::vector<void *> &op1_dst, bool op2_internal) {
@@ -1265,6 +1268,32 @@ inline status_t prepare_op2_dispatch(FusedMoEDispatchScratch &scratch,
             // op2_internal by clearing fused.dst_down, which implies
             // accepting src reuse as the Op2 output.
             scratch.op2_dst_internal[i] = const_cast<void *>(src[i]);
+        }
+    }
+    // A pack that embeds its scales (MXFP4's) lets the Pass-2 warm pack the
+    // idle tail only if the caller sent its down scales; carry them as
+    // weight-side tail entries, the same shape Op1's prepack-extras tail has.
+    // From the first active expert: an inactive slot's dtypes may be unset.
+    size_t rep = 0;
+    while (rep + 1 < num_ops && M[rep] <= 0)
+        ++rep;
+    const custom_kernel::W4FormatEntry *down_w4 = num_ops > 0
+            ? custom_kernel::w4_format_entry(
+                      scratch.params_down[rep].dtypes.wei)
+            : nullptr;
+    if (down_w4 != nullptr && custom_kernel::w4_scales_in_pack(down_w4->fmt)
+            && fused.down_scale.size() > num_ops) {
+        const size_t total = std::min(fused.down_scale.size(), N.size());
+        scratch.params_down.resize(std::max(total, num_ops));
+        for (size_t i = num_ops; i < total; ++i) {
+            matmul_params &p = scratch.params_down[i];
+            p = matmul_params {};
+            p.dtypes.wei = down_w4->wei;
+            p.weight_cache_type = scratch.params_down[rep].weight_cache_type;
+            p.wei_buffer_capacity_bytes = fused.down_wei_buffer_capacity_bytes;
+            p.quant_params.wei_scale.buff = fused.down_scale[i].buff;
+            p.quant_params.wei_scale.dt = fused.down_scale[i].dt;
+            p.quant_params.wei_scale.dims = fused.down_scale[i].dims;
         }
     }
     return status_t::success;
@@ -1635,8 +1664,14 @@ status_t group_matmul_fused_moe_execute(
                     /*tight=*/true, act, act_dtype);
     const int resolved_algo = group_matmul_algo_select(layout, M, N, K, params,
             num_threads, &algo_trace, act, single_expert_epilogue_ok);
-    const bool want_tight = should_use_tight_intermediate(
-            op1_internal, act, custom_kernel_en, env_algo_fused, resolved_algo);
+    // MXFP4 has no backend to fall back to: it takes the tight arena only
+    // where the kernel fuses its gated store, else the wide arena and the
+    // separate activation pass.
+    const bool tight_store_fuses = !grp_matmul_is_mxfp4(M, params, num_ops)
+            || grp_matmul_mxfp4_fuses_gated_store(M, params, act, act_dtype);
+    const bool want_tight = should_use_tight_intermediate(op1_internal, act,
+            custom_kernel_en && tight_store_fuses, env_algo_fused,
+            resolved_algo);
 
     // Publish the arena the DECODE call will get, for the prompt-side
     // cross-warm.  Under AUTO a prompt-shaped call outside an ALGO-3 MoE
@@ -1703,8 +1738,8 @@ status_t group_matmul_fused_moe_execute(
         // framework's prepack-extras-tail `params.size()`.  See the
         // doc-block on prepare_op2_dispatch() for the active/total
         // contract.
-        const status_t s = prepare_op2_dispatch(scratch, fused, act, num_ops, N,
-                src, lda, params, op1_dst, op2_internal);
+        const status_t s = prepare_op2_dispatch(scratch, fused, act, M, num_ops,
+                N, src, lda, params, op1_dst, op2_internal);
         if (s != status_t::success) return s;
     }
     const std::vector<void *> &op2_dst
@@ -1738,6 +1773,45 @@ status_t group_matmul_fused_moe_execute(
     // out-of-place caching.
     const bool op2_custom_kernel_en = group_matmul_custom_kernel_candidate(
             scratch.params_down, M, fused.N_down, grp_matmul_gated_act_t::none);
+    // `params_down` takes its dtypes from Op1, which group_matmul_direct has
+    // role-checked, except the bias, weight scale and weight zero point,
+    // which come from `fused`.  Those, and the down scales an MXFP4 call
+    // packs, are checked here, before either projection is packed.
+    for (size_t i = 0; i < M.size(); ++i) {
+        if (M[i] <= 0) continue;
+        const matmul_params &p = scratch.params_down[i];
+        const data_type_t scale_dt = p.quant_params.wei_scale.dt;
+        if (is_mx_type(p.dtypes.bias) || is_mx_type(p.quant_params.wei_zp.dt)
+                || scale_dt == data_type_t::f4_e2m1
+                || (scale_dt == data_type_t::f8_e8m0
+                        && p.dtypes.wei != data_type_t::f4_e2m1)) {
+            log_error(
+                    "group_matmul_fused_moe: the down projection of "
+                    "operation ",
+                    i,
+                    " has an f4_e2m1 or f8_e8m0 bias, zero point or scale; "
+                    "f8_e8m0 is the weight scale of an f4_e2m1 weight only");
+            return status_t::failure;
+        }
+        if (p.dtypes.wei == data_type_t::f4_e2m1
+                && (p.quant_params.wei_zp.buff != nullptr
+                        || !mxfp4_bias_dtype_supported(p.dtypes.bias))) {
+            log_error(
+                    "group_matmul_fused_moe: the MXFP4 down projection of "
+                    "operation ",
+                    i,
+                    " takes no zero point and a none, f32, bf16 or f16 bias "
+                    "(got bias ",
+                    dtype_info(p.dtypes.bias), ")");
+            return status_t::failure;
+        }
+    }
+    if (grp_matmul_is_mxfp4(M, scratch.params_down, M.size())
+            && grp_matmul_mxfp4_admit_operands(M, fused.N_down, scratch.K_down,
+                       scratch.params_down, M.size())
+                    != status_t::success) {
+        return status_t::failure;
+    }
     const size_t op1_wei_elem
             = params.empty() ? 1 : size_of(params.front().dtypes.wei);
     const size_t op2_wei_elem = scratch.params_down.empty()

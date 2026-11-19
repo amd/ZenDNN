@@ -257,6 +257,10 @@ inline constexpr const char *kGrpMatmulErrMutatedWeightMiss
 /// so the call is refused before GEMM.
 inline constexpr const char *kGrpMatmulErrW4a8NonConst
         = "error_w4a8_nonconst_weight";
+/// The custom kernel, MXFP4's only backend, did not serve every expert of an
+/// f4_e2m1 call, so the call fails rather than reach a backend that would
+/// read the codes as another type.
+inline constexpr const char *kGrpMatmulErrMxfp4NoCk = "error_mxfp4_no_ck";
 
 inline bool execution_path_is_error(const char *mode) {
     return mode != nullptr

@@ -236,10 +236,25 @@ inline size_t fingerprint(const PrepackRequest &p, int group_schedule) {
         size_t ldb_xor = 0;
         size_t ldb_sum = 0;
         size_t transb_xor = 0;
+        // A pack that holds its scales is keyed on them: an expert's new
+        // scales, or an idle expert's that arrive, warm again.
+        size_t scales_xor = 0;
+        size_t scales_sum = 0;
         for (size_t i = 0; i < bound; ++i) {
             const uintptr_t pi = reinterpret_cast<uintptr_t>((*p.weight)[i]);
             ptr_xor ^= pi;
             ptr_sum += pi;
+            if (!p.pack_scales.empty()) {
+                const uintptr_t sc = i < p.pack_scales.size()
+                        ? reinterpret_cast<uintptr_t>(p.pack_scales[i])
+                        : 0;
+                const size_t ld = i < p.pack_scale_ld.size()
+                        ? static_cast<size_t>(p.pack_scale_ld[i])
+                        : 0;
+                const size_t t = mix_hash(mix_hash(pi, sc), ld);
+                scales_xor ^= t;
+                scales_sum += t;
+            }
             if (p.K && i < p.K->size()) {
                 const size_t v = static_cast<size_t>((*p.K)[i]);
                 k_xor ^= v;
@@ -287,6 +302,10 @@ inline size_t fingerprint(const PrepackRequest &p, int group_schedule) {
         s = mix_hash(s, ldb_xor);
         s = mix_hash(s, ldb_sum);
         s = mix_hash(s, transb_xor);
+        if (!p.pack_scales.empty()) {
+            s = mix_hash(s, scales_xor);
+            s = mix_hash(s, scales_sum);
+        }
         // Fold the iteration count in too so an empty-vs-non-empty or
         // size-mismatch case cannot collide with all-zero XORs (e.g.
         // all-null pool, or a pool whose XORs happen to be zero by
@@ -1002,23 +1021,26 @@ inline custom_kernel::PackProbeStats warm_custom(const PrepackRequest &p) {
     // discriminator (rather than `ck_eligible_*`) keeps this branch
     // forward-reference-free and robust — `warm_custom` is only reached
     // for CK-eligible calls, so the dtype alone determines the arena.
-    // s4 first, so it can never land in the int8 arena (whose slab
+    // Four-bit first, so it can never land in the int8 arena (whose slab
     // layout and length differ).
-    const custom_kernel::WarmDtypeFamily family
-            = (p.wei_dtype == data_type_t::s4)
-            ? custom_kernel::WarmDtypeFamily::kS4
+    const matmul::custom_kernel::W4FormatEntry *w4
+            = matmul::custom_kernel::w4_format_entry(p.wei_dtype);
+    const custom_kernel::WarmDtypeFamily family = w4 != nullptr
+            ? custom_kernel::WarmDtypeFamily::kW4
             : int8_aocl_warm_candidate(p)
             ? custom_kernel::WarmDtypeFamily::kINT8
             : (p.src_dtype == data_type_t::f16
                       && p.wei_dtype == data_type_t::f16)
             ? custom_kernel::WarmDtypeFamily::kF16
             : custom_kernel::WarmDtypeFamily::kBF16;
-    // `group_size` is in the s4 pack cache key, so it must match what
-    // `n_tile_execute` derives at runtime (K / wei_scale.dims[0]).
+    // `group_size` and the format are in the W4 pack cache key, so they
+    // must match what `n_tile_execute` derives at runtime (K / wei_scale.dims[0]).
     custom_kernel::warm_pack_all_custom_kernel_experts(*p.weight, *p.K, *p.N,
             *p.ldb, *p.transB, iwc, p.num_ops_total, st,
             interleave_split_halves, family, p.group_size, p.weight_cache_type,
-            p.ck_in_place, &p.wei_capacities);
+            p.ck_in_place, &p.wei_capacities,
+            w4 != nullptr ? w4->fmt : matmul::custom_kernel::kW4FormatS4,
+            p.pack_scales, p.pack_scale_ld);
     return st;
 }
 
@@ -1716,23 +1738,26 @@ inline bool ck_eligible_f16(const PrepackRequest &p) {
 // skips the AOCL warm it does need) or skips one the runtime wants.
 //
 // Unlike `ck_eligible_int8`, per-group is the NORMAL case here.
-inline bool ck_eligible_s4(const PrepackRequest &p) {
+inline bool ck_eligible_w4(const PrepackRequest &p) {
     if (!p.custom_kernel_on) return false;
-    // W4A8 pins compute to s8 and supports BF16 or F32 destinations.
-    if (p.wei_dtype != data_type_t::s4) return false;
+    // Every four-bit format pins compute to s8 and writes a bf16 or f32 dst.
+    if (!matmul::custom_kernel::is_w4_weight(p.wei_dtype)) return false;
     if (p.dst_dtype != data_type_t::bf16 && p.dst_dtype != data_type_t::f32) {
         return false;
     }
     if (p.compute_dtype != data_type_t::s8) return false;
-    // Src arrives as a bf16 hoist or already-s8, as in `resolve_variant`.
+    // Src arrives as a bf16 or f32 hoist or already-s8, as in
+    // `resolve_variant`.
     const bool s4_src_form
-            = (p.dynamic_quant && p.src_dtype == data_type_t::bf16)
+            = (p.dynamic_quant
+                      && (p.src_dtype == data_type_t::bf16
+                              || p.src_dtype == data_type_t::f32))
             || (p.src_dtype == data_type_t::s8);
     if (!s4_src_form) return false;
-    // Mirrors the `s4_group_size_unsupported` and
-    // `s4_K_not_multiple_of_group_size` refusals.
+    // Mirrors the `w4_group_size_unsupported` and
+    // `w4_K_not_multiple_of_group_size` refusals.
     namespace ck = ::zendnnl::lowoha::matmul::custom_kernel;
-    if (p.group_size <= 0 || (p.group_size % ck::kS4Octet) != 0) return false;
+    if (p.group_size <= 0 || (p.group_size % ck::kW4Octet) != 0) return false;
     // `none` and `swiglu_oai_mul` may carry bias; split-halves
     // silu/gelu may not, because the pack permutes weight columns and
     // there is no matching bias permutation yet.  Runtime refuses that
@@ -1748,7 +1773,7 @@ inline bool ck_eligible_s4(const PrepackRequest &p) {
             && !split_halves_no_bias) {
         return false;
     }
-    // F32 S4 kernels serve plain matmul only; fused activation uses BF16.
+    // An f32 dst serves plain matmul only; fused activation uses BF16.
     if (p.act != grp_matmul_gated_act_t::none
             && (p.act_dtype != data_type_t::bf16
                     || p.dst_dtype != data_type_t::bf16)) {
@@ -1812,7 +1837,7 @@ inline bool ck_eligible_s4(const PrepackRequest &p) {
 inline bool ck_eligible(const PrepackRequest &p) {
     if (!get_grp_matmul_custom_kernel()) { return false; }
     return ck_eligible_bf16(p) || ck_eligible_int8(p) || ck_eligible_f16(p)
-            || ck_eligible_s4(p);
+            || ck_eligible_w4(p);
 }
 
 // ──────────────────────────────────────────────────────────────────────
