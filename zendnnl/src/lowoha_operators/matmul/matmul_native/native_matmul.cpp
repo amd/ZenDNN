@@ -331,11 +331,10 @@ enum class native_source_t : uint8_t {
     in_place, ///< a buffer an earlier native call rewrote in place
 };
 
-/// The bytes at weight a call of layout vouches for as its weight buffer:
-/// what it reads from a bf16 / s8 / s4 / f32 / f16 weight (an AOCL prepack
-/// this route unreorders, or the span of a plain weight as the caller lays
-/// it out), or the capacity it states when larger; 0 when neither is known.
-ZENDNNL_ALWAYS_INLINE inline size_t weight_buffer_bytes(char layout,
+/// The bytes at weight a call of layout reads from a bf16 / s8 / s4 / f32 /
+/// f16 weight: an AOCL prepack this route unreorders, or the span of a
+/// plain weight as the caller lays it out; 0 when not known.
+ZENDNNL_ALWAYS_INLINE inline size_t weight_read_bytes(char layout,
         const matmul_params &params, int K, int N, int ldb, bool transB) {
     size_t reads = 0;
     const data_type_t wdt = params.dtypes.wei;
@@ -355,7 +354,15 @@ ZENDNNL_ALWAYS_INLINE inline size_t weight_buffer_bytes(char layout,
             reads = native_raw_weight_bytes(wdt, K, N, ldb, row_trans);
         }
     }
-    return std::max(reads, params.wei_buffer_capacity_bytes);
+    return reads;
+}
+
+/// The bytes at weight a call of layout vouches for as its weight buffer:
+/// weight_read_bytes, or the capacity it states when larger.
+ZENDNNL_ALWAYS_INLINE inline size_t weight_buffer_bytes(char layout,
+        const matmul_params &params, int K, int N, int ldb, bool transB) {
+    return std::max(weight_read_bytes(layout, params, K, N, ldb, transB),
+            params.wei_buffer_capacity_bytes);
 }
 
 /// The bytes at weight the default route reads of a call of layout handed
@@ -391,25 +398,85 @@ ZENDNNL_NOINLINE size_t handed_back_weight_bytes(char layout,
     return std::max(reads, owned);
 }
 
+/// The layout request of a call on weight, which lies in an in-place image,
+/// as acquire_native_weight makes it.
+native_raw_weight_t request_in_image(const matmul_params &params,
+        const void *weight, int K, int N, int ldb, bool transB) {
+    native_raw_weight_t w;
+    w.wei_dt = params.dtypes.wei;
+    w.weight = weight;
+    w.K = K;
+    w.N = N;
+    w.aocl_blocked = aocl_prepacked_weight(params);
+    w.ldb = w.aocl_blocked ? (transB ? K : N) : ldb;
+    w.transB = transB;
+    w.pack_nr = kNativeLayoutPackNr;
+    return w;
+}
+
+/// Whether a call on weight, which lies inside an in-place image, is served
+/// the layout the cache kept of it across the rewrite that wrote the image
+/// (native_weight_retained_layout), asked for as acquire_native_weight asks
+/// at the call's weight cache mode wc.
+ZENDNNL_NOINLINE bool retained_inside_image(const matmul_params &params,
+        const void *weight, int K, int N, int ldb, bool transB, int32_t wc) {
+    return native_weight_retained_layout(
+            request_in_image(params, weight, K, N, ldb, transB), wc,
+            params.wei_buffer_capacity_bytes);
+}
+
+/// Whether a call on weight, which the calling thread's memo found inside an
+/// image with a cached layout (image.memo_layout), lies in an image for the
+/// call: that layout serves it when it is the layout of the call's request
+/// and the call caches (wc, its weight cache mode); otherwise the buffer is
+/// checked again as for any call (owned and reads as for
+/// native_weight_find_image), which leaves no memo_layout.
+ZENDNNL_NOINLINE bool memo_layout_serves(const matmul_params &params,
+        const void *weight, int K, int N, int ldb, bool transB, int32_t wc,
+        size_t owned, size_t reads, native_image_check_t &image) {
+    const native_raw_weight_t w
+            = request_in_image(params, weight, K, N, ldb, transB);
+    const native_raw_weight_t &m = image.layout;
+    if (wc != 0 && m.wei_dt == w.wei_dt && m.K == w.K && m.N == w.N
+            && m.ldb == w.ldb && m.transB == w.transB && m.pack_nr == w.pack_nr
+            && m.aocl_blocked == w.aocl_blocked)
+        return true;
+    return native_weight_find_image(weight, owned, image, false, reads);
+}
+
 /// The source of the weight of a call the native BRGEMM looks at.  A call
 /// that asks for it (native_brgemm_requested) is the native BRGEMM's
 /// whatever it carries: refused, with reason and status (what matmul_direct
 /// returns for it), when the native BRGEMM does not serve its weight.  So is
 /// a call on a buffer an earlier native call rewrote in place, which no
-/// other route reads: its reason is set when it cannot read the image.
-/// requested is native_brgemm_requested of the call, owned its
-/// weight_buffer_bytes; image is what its check for an in-place image found.
+/// other route reads: its reason (native_image_refusal) is set when it
+/// cannot read the image, reads into it from below, or starts inside it and
+/// no layout the cache carried across the image's rewrite serves it.
+/// requested is native_brgemm_requested of the call, wc its weight cache
+/// mode, owned its weight_buffer_bytes, reads its weight_read_bytes; image
+/// is what its check for an in-place image found.
 ZENDNNL_ALWAYS_INLINE inline native_source_t classify_source(
         const matmul_params &params, const void *weight, int K, int N, int ldb,
         bool transB, int batch_count, bool requested, bool process_native,
-        size_t owned, int &pack_nr, const char *&reason, status_t &status,
-        native_image_check_t &image) {
+        int32_t wc, size_t owned, size_t reads, int &pack_nr,
+        const char *&reason, status_t &status, native_image_check_t &image) {
     // A native in-place image has this route as its only reader, whatever
     // algorithm the call selects.
-    if (native_weight_find_image(weight, owned, image)) {
+    if (native_weight_find_image(weight, owned, image, true, reads)
+            && (image.memo_layout == nullptr
+                    || memo_layout_serves(params, weight, K, N, ldb, transB, wc,
+                            owned, reads, image))) {
+        pack_nr = kNativeLayoutPackNr;
+        if (image.tomb || image.after
+                || (image.interior && image.memo_layout == nullptr
+                        && !retained_inside_image(
+                                params, weight, K, N, ldb, transB, wc))) {
+            reason = native_image_refusal(image);
+            status = status_t::failure;
+            return native_source_t::in_place;
+        }
         const native_layout_decision_t rule = decide_native_layout(
                 native_layout_query_for(params, K, N, ldb, transB));
-        pack_nr = kNativeLayoutPackNr;
         if (!rule.native)
             reason = rule.reason;
         else if (batch_count != 1)
@@ -511,11 +578,23 @@ ZENDNNL_ALWAYS_INLINE inline bool take_call(char layout, bool transA,
     int pack_nr = 0;
     reason = nullptr;
     status = status_t::success;
-    const size_t owned = weight_buffer_bytes(layout, params, K, N, ldb, transB);
+    const size_t reads = weight_read_bytes(layout, params, K, N, ldb, transB);
+    const size_t owned = std::max(reads, params.wei_buffer_capacity_bytes);
     native_weight_ref_t ref;
-    const native_source_t source = classify_source(params, weight, K, N, ldb,
-            transB, batch_count, requested, process_native, owned, pack_nr,
-            reason, status, ref.image);
+    // A buffer rewritten in place must have no other reader, which only the
+    // process-wide ALGO 10 guarantees (every call then reaches the image
+    // check of classify_source); a call that selects the native BRGEMM by
+    // itself caches the layout out of place instead.
+    ref.weight_cache_mode = 0;
+    if (is_weights_const) {
+        const int32_t mode
+                = effective_weight_cache_type(params.weight_cache_type);
+        ref.weight_cache_mode = mode == 2 && !process_native ? 1 : mode;
+    }
+    const native_source_t source
+            = classify_source(params, weight, K, N, ldb, transB, batch_count,
+                    requested, process_native, ref.weight_cache_mode, owned,
+                    reads, pack_nr, reason, status, ref.image);
     if (source == native_source_t::none) {
         // ZENDNNL_MATMUL_ALGO=10 does not select the kernel of a batched call.
         if (!CheckOnly && process_native
@@ -553,16 +632,6 @@ ZENDNNL_ALWAYS_INLINE inline bool take_call(char layout, bool transA,
     ref.pack_nr = pack_nr;
     ref.aocl_blocked = source == native_source_t::aocl_prepacked
             || (in_place && aocl_prepacked_weight(params));
-    // A buffer rewritten in place must have no other reader, which only the
-    // process-wide ALGO 10 guarantees (every call then reaches the image
-    // check of classify_source); a call that selects the native BRGEMM by
-    // itself caches the layout out of place instead.
-    ref.weight_cache_mode = 0;
-    if (is_weights_const) {
-        const int32_t mode
-                = effective_weight_cache_type(params.weight_cache_type);
-        ref.weight_cache_mode = mode == 2 && !process_native ? 1 : mode;
-    }
     ref.capacity_bytes = params.wei_buffer_capacity_bytes;
 
     // A concurrent first call may have rewritten the buffer since it was
@@ -647,7 +716,8 @@ ZENDNNL_ALWAYS_INLINE inline bool take_call(char layout, bool transA,
            << ", dynamic_quant=" << (params.dynamic_quant ? "true" : "false")
            << ", kernel=native_brgemm, layout=native_nr" << pack_nr
            << ", weight_cache=";
-        if (in_place)
+        // A weight inside an image reads the layout cached for it.
+        if (in_place && !ref.image.interior)
             ss << "inplace";
         else
             ss << ref.weight_cache_mode;
@@ -663,8 +733,16 @@ ZENDNNL_ALWAYS_INLINE inline bool take_call(char layout, bool transA,
     }
     if (status != status_t::success) {
         if (in_place) kept = nullptr;
+        std::string record;
+        if (in_place
+                && (ref.image.tomb || ref.image.interior || ref.image.after)) {
+            std::ostringstream os;
+            os << "; the image recorded at " << ref.image.record << ", "
+               << ref.image.record_bytes << " bytes";
+            record = os.str();
+        }
         apilog_error("matmul_direct: native BRGEMM did not serve the call (",
-                reason, ")",
+                reason, record, ")",
                 in_place ? "; no other route reads a buffer it rewrote"
                         : params.lowoha_algo == matmul_algo_t::native_brgemm
                         ? "; lowoha_algo native_brgemm takes no other route"
@@ -716,13 +794,17 @@ status_t native_hold_handed_back_weight(native_weight_raw_hold_t &hold,
         reads += static_cast<size_t>(batch->Batch_B - 1) * stride
                 * zendnnl::common::size_of(params.dtypes.wei);
     }
-    switch (hold.hold(weight, std::max<size_t>(reads, 1), reads)) {
+    native_image_check_t found;
+    switch (hold.hold(weight, std::max<size_t>(reads, 1), reads, &found)) {
         case native_raw_read_t::done: return status_t::success;
         case native_raw_read_t::image:
             apilog_error(
                     "matmul_direct: the weight of a call handed to the default "
-                    "route holds an image the native BRGEMM rewrote in place; "
-                    "no other route reads a buffer the native BRGEMM rewrote");
+                    "route is not read: ",
+                    native_image_refusal(found), "; the image recorded at ",
+                    found.record, ", ", found.record_bytes,
+                    " bytes; no other route reads a buffer the native BRGEMM "
+                    "rewrote");
             return status_t::failure;
         default:
             apilog_error(

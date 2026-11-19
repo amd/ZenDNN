@@ -167,6 +167,7 @@ buffer_t fresh_result(data_type_t wei_dt, int M, int N, int K, gated_t gated,
 }
 
 TEST(NativeGatedPack, PlainLayoutServesLaterGatedCalls) {
+    const WeightCacheGuard mode(2);
     const int M = 5, K = 128;
     uint32_t seed = 4100;
     for (data_type_t wei_dt : {kBf16, kS8, kS4}) {

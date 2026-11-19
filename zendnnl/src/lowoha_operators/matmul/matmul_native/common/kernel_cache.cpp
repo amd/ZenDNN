@@ -17,6 +17,7 @@
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 #include "common/op_config.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_brgemm_looper.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_epilogue.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_weight_cache.hpp"
 
 namespace zendnnl {
@@ -31,6 +32,7 @@ uint32_t get_weight_cache_capacity() {
 void clear_all_weight_caches() {
     clear_native_weight_caches();
     release_native_f16_sources();
+    release_native_staged_rows();
 }
 
 } // namespace native

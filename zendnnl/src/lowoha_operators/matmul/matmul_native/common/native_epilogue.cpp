@@ -19,7 +19,9 @@
 #include <immintrin.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstdint>
 #include <new>
 
 #include "common/zendnnl_compat.hpp"
@@ -491,40 +493,69 @@ void finish_gated_row(const native_epilogue_t &ep, int m, int j0, int j1) {
     }
 }
 
+/// The calling thread's staged rows, and the release generation they were
+/// taken in.  Trivially destructible: a clear from an exit hook may reach it
+/// after the thread's other thread-local objects are destroyed.
 struct thread_staged_t {
-    std::unique_ptr<float[]> buf;
+    float *buf = nullptr;
     size_t cap = 0;
+    uint64_t generation = 0;
 };
 
-thread_staged_t &thread_staged() {
-    static thread_local thread_staged_t staged;
-    return staged;
+thread_local thread_staged_t t_staged;
+
+/// Bumped by release_native_staged_rows.
+std::atomic<uint64_t> g_staged_generation {0};
+
+void free_thread_staged() {
+    delete[] t_staged.buf;
+    t_staged.buf = nullptr;
+    t_staged.cap = 0;
 }
+
+/// Frees the thread's staged rows at its exit.
+struct staged_owner_t {
+    ~staged_owner_t() { free_thread_staged(); }
+};
 
 /// The calling thread's staging rows of at least floats floats, kept for
 /// the thread's lifetime: grown to at least twice their size up to
 /// kNativeThreadStagedFloats, or to floats above it; rows above that bound
-/// are freed by the thread's next request that fits it.  nullptr when they
-/// cannot be allocated.
+/// are freed by the thread's next request that fits it, and rows taken
+/// before a release_native_staged_rows by the thread's next request.
+/// nullptr when they cannot be allocated.
 float *thread_staged_rows(size_t floats) {
-    thread_staged_t &t = thread_staged();
+    static thread_local staged_owner_t owner;
+    (void)owner;
+    thread_staged_t &t = t_staged;
+    const uint64_t generation
+            = g_staged_generation.load(std::memory_order_relaxed);
+    if (t.generation != generation) {
+        free_thread_staged();
+        t.generation = generation;
+    }
     const size_t bound = kNativeThreadStagedFloats;
     const bool shrink = t.cap > bound && floats <= bound;
     if (t.cap < floats || shrink) {
         const size_t cap = floats > bound
                 ? floats
                 : std::min(bound, std::max(floats, shrink ? 0 : 2 * t.cap));
-        t.buf.reset();
-        t.buf.reset(new (std::nothrow) float[cap]);
-        t.cap = t.buf ? cap : 0;
+        free_thread_staged();
+        t.buf = new (std::nothrow) float[cap];
+        t.cap = t.buf != nullptr ? cap : 0;
     }
-    return t.buf.get();
+    return t.buf;
 }
 
 } // namespace
 
 size_t native_thread_staged_floats() {
-    return thread_staged().cap;
+    return t_staged.cap;
+}
+
+void release_native_staged_rows() {
+    g_staged_generation.fetch_add(1, std::memory_order_relaxed);
+    free_thread_staged();
 }
 
 status_t prepare_epilogue(const GemmDescriptor &desc,

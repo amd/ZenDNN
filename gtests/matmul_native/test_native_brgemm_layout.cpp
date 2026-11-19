@@ -1176,7 +1176,10 @@ TEST_F(NativeBrgemmLayoutTest, InPlaceImageServesOrRebuildsEveryRequest) {
     EXPECT_NE(nv::get_native_layout(as_s8, 0, 0, 1, l), status_t::success);
 
     zendnnl::lowoha::matmul::clear_matmul_native_weight_caches();
-    EXPECT_FALSE(packed_in_place(w));
+    EXPECT_TRUE(packed_in_place(w))
+            << "the tombstone of the image, which the buffer still holds";
+    w = pb.w;
+    EXPECT_FALSE(packed_in_place(w)) << "the raw weight written back";
 }
 
 TEST_F(NativeBrgemmLayoutTest, ConcurrentAcquisitionsShareOneLayout) {

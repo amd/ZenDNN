@@ -1441,6 +1441,73 @@ status_t batched_call(const void *w, const void *src, float *dst, int batch_b,
             nullptr, 0.0f, dst, 32, false, batch, p, nullptr);
 }
 
+// A batched call that ZENDNNL_MATMUL_ALGO=10 hands to the default route,
+// whose second weight holds an in-place image, fails with one error line
+// that names the image's start and bytes and what helps: for a live image,
+// writing the raw weight back into the image's buffer, a clear and a reload
+// of every weight a mode 2 call rewrote; for its tombstone after a clear,
+// the raw weight of the image's whole buffer, with no further clear.
+TEST(NativeBrgemmRefusal, AHandedBackCallOverAnImageNamesWhatHelps) {
+    if (!native_isa())
+        GTEST_SKIP() << "needs AVX512-BF16, AVX512-VNNI and AVX-512 F";
+    nt::expect_in_child({{"ZENDNNL_API_LOG_LEVEL", nullptr},
+                                {"ZENDNNL_COMMON_LOG_LEVEL", nullptr}},
+            [] {
+        WeightCacheGuard global_cache(2);
+        const nt::algo_pin_t pin(matmul_algo_t::native_brgemm);
+        const nt::buffer_t w = nt::random_buffer(bf16, 4096, 8920, -1.0f, 1.0f);
+        const nt::buffer_t src
+                = nt::random_buffer(bf16, 2 * 4 * 32, 8921, -1.0f, 1.0f);
+        std::vector<float> dst(2 * 4 * 32);
+        mm::matmul_batch_params_t one;
+        mm::matmul_params p;
+        p.dtypes.src = bf16;
+        p.dtypes.wei = bf16;
+        p.dtypes.dst = f32;
+        p.weight_cache_type = 2;
+        const uint8_t *second = w.as<uint8_t>() + 2048;
+        if (mm::matmul_direct('r', false, false, 4, 32, 32, 1.0f, src.get(), 32,
+                    second, 32, nullptr, 0.0f, dst.data(), 32, true, one, p,
+                    nullptr)
+                        != status_t::success
+                || !nat::native_weight_packed_in_place(second, 2048))
+            return 1;
+        int bad = 0;
+        const auto line = [&](const char *what) {
+            std::fill(dst.begin(), dst.end(), 123.0f);
+            ::testing::internal::CaptureStdout();
+            const status_t st = batched_call(w.get(), src.get(), dst.data(), 2);
+            const std::string log = ::testing::internal::GetCapturedStdout();
+            size_t lines = 0;
+            for (size_t at = log.find("][error"); at != std::string::npos;
+                    at = log.find("][error", at + 1))
+                ++lines;
+            if (st != status_t::failure || lines != 1
+                    || !std::all_of(dst.begin(), dst.end(),
+                            [](float v) { return v == 123.0f; })
+                    || log.find("the image recorded at ") == std::string::npos
+                    || log.find(", 2048 bytes") == std::string::npos) {
+                std::fprintf(stderr, "%s:\n%s\n", what, log.c_str());
+                ++bad;
+            }
+            return log;
+        };
+        const std::string live = line("a live image");
+        mm::clear_matmul_native_weight_caches();
+        const std::string tomb = line("a tombstone");
+        if (live.find("write the raw weight back into the image's buffer, "
+                      "clear the weight caches and reload every weight a mode "
+                      "2 call rewrote")
+                == std::string::npos)
+            ++bad;
+        if (tomb.find("reload the raw weight of the image's whole buffer")
+                        == std::string::npos
+                || tomb.find("clear the weight caches") != std::string::npos)
+            ++bad;
+        return bad;
+    }, "the error line of a handed-back call over an image");
+}
+
 // A batched call that ZENDNNL_MATMUL_ALGO=10 hands to the default route
 // reads every one of its Batch_B weights: once a first native call at
 // weight cache mode 2 has rewritten the second weight in place, at the
@@ -1721,6 +1788,7 @@ TEST(NativeBrgemmRefusal,
 TEST(NativeBrgemmRefusal, CallsOfAnyNAreServed) {
     if (!native_isa())
         GTEST_SKIP() << "needs AVX512-BF16, AVX512-VNNI and AVX-512 F";
+    const WeightCacheGuard mode(2);
     for (const bool per_call : {true, false})
         for (const auto &rp : any_n_cases()) {
             refused_t &r = *rp;

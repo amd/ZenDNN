@@ -32,16 +32,29 @@ inline constexpr size_t kWeightEndBytes = 64;
 /// A digest of one end of [p, p + bytes) and of bytes: the first
 /// kWeightEndBytes, or the last ones when tail (all bytes below that).  It
 /// reads only those bytes, so an end can be checked while the rest of the
-/// range may no longer be readable.  A buffer rewritten in place keeps the
-/// digests of its two ends until those bytes change: they tell a buffer that
-/// was overwritten, or freed and reused, from the image it held, unless the
-/// new bytes equal the image at both ends.  No allocation.
+/// range may no longer be readable.  The record of a buffer rewritten in
+/// place keeps the digests of the lines where its image first and last
+/// differs from the weight it replaced: they tell a buffer that was
+/// overwritten, freed and reused, or given that weight again, from the image
+/// it held, unless the new bytes equal the image at both lines.  No
+/// allocation.
 inline uint64_t weight_end_digest(
         const void *p, size_t bytes, bool tail) noexcept {
     uint64_t h = (0x9e3779b97f4a7c15ull ^ static_cast<uint64_t>(bytes))
             + (tail ? 0x632be59bd9b4e019ull : 0);
-    if (p == nullptr || bytes < sizeof(uint64_t)) return h;
+    if (p == nullptr || bytes == 0) return h;
+    const auto mix = [&h](uint64_t w) {
+        h = (h ^ w) * 0xff51afd7ed558ccdull;
+        h ^= h >> 29;
+    };
     const unsigned char *b = static_cast<const unsigned char *>(p);
+    if (bytes < sizeof(uint64_t)) {
+        // Every byte, in one word that is zero past them.
+        uint64_t w = 0;
+        std::memcpy(&w, b, bytes);
+        mix(w);
+        return h;
+    }
     const size_t span = bytes < kWeightEndBytes ? bytes : kWeightEndBytes;
     const size_t from = tail ? bytes - span : 0;
     for (size_t at = 0; at < span; at += sizeof(uint64_t)) {
@@ -49,8 +62,7 @@ inline uint64_t weight_end_digest(
                 = at + sizeof(uint64_t) <= span ? at : span - sizeof(uint64_t);
         uint64_t w = 0;
         std::memcpy(&w, b + from + word, sizeof(w));
-        h = (h ^ w) * 0xff51afd7ed558ccdull;
-        h ^= h >> 29;
+        mix(w);
     }
     return h;
 }

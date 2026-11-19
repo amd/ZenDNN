@@ -259,6 +259,7 @@ TEST(NativeMatmulDispatch, RequestedOneRowCallsReadTheNativeLayout) {
 // gives the reference's output within the INT8 band.
 TEST(NativeMatmulDispatch, RequestedInt8CallsWithF16OrBf16ScalesAreServed) {
     if (!gemv_isa()) GTEST_SKIP() << "needs AVX512-BF16 and AVX512-VNNI";
+    const WeightCacheGuard mode(2);
     const data_type_t s8 = data_type_t::s8, f32 = data_type_t::f32;
     const int N = 96, K = 256;
     uint32_t seed = 6900;
@@ -308,6 +309,7 @@ TEST(NativeMatmulDispatch, RequestedInt8CallsWithF16OrBf16ScalesAreServed) {
 // source a zero point.
 TEST(NativeMatmulDispatch, RequestedInt8CallsWithAlphaOrBetaAreServed) {
     if (!gemv_isa()) GTEST_SKIP() << "needs AVX512-BF16 and AVX512-VNNI";
+    const WeightCacheGuard mode(2);
     const data_type_t s8 = data_type_t::s8, u8 = data_type_t::u8,
                       f32 = data_type_t::f32, bf16 = data_type_t::bf16;
     const int N = 96, K = 256;
@@ -379,6 +381,7 @@ TEST(NativeMatmulDispatch, RequestedInt8CallsWithAlphaOrBetaAreServed) {
 // on a team of eight caches a layout of its weight.
 TEST(NativeMatmulDispatch, RequestedCallsCacheTheNativeLayout) {
     if (!gemv_isa()) GTEST_SKIP() << "needs AVX512-BF16 and AVX512-VNNI";
+    const WeightCacheGuard mode(2);
     route_call_t asked(data_type_t::bf16, data_type_t::bf16, data_type_t::f32,
             1, 96, 128, 8, 5800);
     asked.c.params.lowoha_algo = matmul_algo_t::native_brgemm;
@@ -482,6 +485,7 @@ matmul_algo_t group_unset_kernel() {
 // 13 and keeps 11.
 TEST(NativeMatmulDispatch,
         Algo10IsTheNativeBrgemm11TheMoeCustomKernelAnd12IsUnknown) {
+    const WeightCacheGuard mode(2);
     EXPECT_EQ(static_cast<int32_t>(matmul_algo_t::native_brgemm), 10);
     EXPECT_EQ(static_cast<int32_t>(matmul_algo_t::moe_custom_kernel), 11);
     EXPECT_TRUE(zendnnl::common::is_valid_matmul_algo(10));

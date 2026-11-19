@@ -40,6 +40,7 @@
 
 #include "common/zendnnl_compat.hpp"
 #include "group_matmul/moe_test_utils.hpp"
+#include "gtest_utils.hpp"
 #include "lowoha_operators/matmul/backends/reference/reference_kernel.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/ukernel/int8_microkernel.hpp"
@@ -1969,6 +1970,7 @@ std::vector<E2ECase> e2e_ref_cases() {
 // within their band (one step for an integer dst).
 TEST(NativeBrgemmInt8Gated, PerChannelMatchesTheReference) {
     NATIVE_BRGEMM_INT8_SKIP_IF_NO_VNNI();
+    const WeightCacheGuard mode(2);
     mm::clear_matmul_weight_caches();
     const auto bf16 = data_type_t::bf16, f32 = data_type_t::f32,
                u8 = data_type_t::u8, s8 = data_type_t::s8,

@@ -161,6 +161,12 @@ inline constexpr size_t kNativeThreadStagedFloats
 /// call reads it.
 size_t native_thread_staged_floats();
 
+/// Releases the staged rows of every thread: the calling thread's now,
+/// another thread's at its next staged call (or its exit), which takes
+/// rows of its own size again.  A call in flight on another thread keeps
+/// its rows until that thread's next staged call.
+void release_native_staged_rows();
+
 /// Finishes C[mr][nr] (f32 accumulators of rows m0 .. m0 + mr and pack
 /// columns n0 .. n0 + nr, or with paired tiles the columns the tile at n0
 /// holds) and stores them to dst.  A gated activation needs n0 and nr even.

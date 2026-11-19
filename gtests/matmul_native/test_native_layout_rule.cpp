@@ -25,6 +25,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -388,13 +389,20 @@ rdr::reorder_params_t prepack_request(matmul_algo_t algo, data_type_t wei,
     return rp;
 }
 
+/// A weight of values of its own, k / 64 (bf16) or k for k in [-63, 63]:
+/// the buffer of one test's weight may land where a freed in-place image
+/// of another test's weight lies, which refuses it when it holds that
+/// image's bytes among other bytes.
 template <typename T>
 std::vector<T> raw_weight(int K, int N, int ldb, bool transB) {
+    static std::atomic<uint32_t> made {0};
+    std::mt19937 gen(2654435761u * (made.fetch_add(1) + 1));
+    std::uniform_int_distribution<int> value(-63, 63);
     std::vector<T> w(static_cast<size_t>(transB ? N : K) * ldb);
     for (size_t i = 0; i < w.size(); ++i) {
-        const int v = static_cast<int>((i * 7 + 3) % 15) - 7;
+        const int v = value(gen);
         if constexpr (std::is_same_v<T, bfloat16_t>) {
-            w[i] = bfloat16_t(static_cast<float>(v) * 0.125f);
+            w[i] = bfloat16_t(static_cast<float>(v) / 64.0f);
         } else {
             w[i] = static_cast<T>(v);
         }
@@ -2372,7 +2380,103 @@ TEST_F(NativeLayoutRuleRoute, ClearingNativeCachesDropsAoclPrepackLayouts) {
             status_t::success);
     ASSERT_TRUE(packed_in_place(in_place));
     native::clear_all_weight_caches();
-    EXPECT_FALSE(packed_in_place(in_place));
+    EXPECT_TRUE(packed_in_place(in_place))
+            << "the tombstone of the image, which the buffer still holds";
+    EXPECT_EQ(native::native_weight_tombstones(in_place.data()), 1u);
+    const std::vector<uint8_t> prepack = aocl_prepack(c.wei.data(),
+            data_type_t::bf16, data_type_t::bf16, c.K, c.N, c.ldb, false);
+    ASSERT_EQ(prepack.size(), in_place.size());
+    std::copy(prepack.begin(), prepack.end(), in_place.begin());
+    EXPECT_FALSE(packed_in_place(in_place)) << "the prepack written back";
+}
+
+// The branches of an AOCL prepack's in-place rewrite that write nothing:
+// with no memory for its record's checks the native BRGEMM does not serve
+// the call and AOCL-DLP does (handed back with lowoha_algo none, on its own
+// route with lowoha_algo aocl_dlp_blocked), and the prepack of an all-zero
+// weight, whose image equals it, is cached out of place.  Each call gives
+// the reference's result, and the buffer keeps the prepack's bytes and
+// holds no image.
+TEST_F(NativeLayoutRuleRoute, AoclPrepackRewritesThatWriteNothing) {
+    if (!has_bf16()) GTEST_SKIP() << "needs AVX512-BF16";
+    if (!aocl_inverse_available(Bf16Case(1, 32, 32).params()))
+        GTEST_SKIP() << "no AOCL inverse in this build";
+    config_.cfg.set_algo(kAlgoNative);
+    for (const bool zero : {false, true})
+        for (const matmul_algo_t tag :
+                {matmul_algo_t::aocl_dlp_blocked, matmul_algo_t::none}) {
+            SCOPED_TRACE(std::string(zero ? "an all-zero weight"
+                                          : "no memory for the checks")
+                    + ", tag " + mm::kernel_to_string(tag));
+            reset_grp_matmul_caches();
+            Bf16Case c(4, 64, 96);
+            if (zero) std::fill(c.wei.begin(), c.wei.end(), bfloat16_t(0.0f));
+            std::vector<uint8_t> packed
+                    = aocl_prepack(c.wei.data(), data_type_t::bf16,
+                            data_type_t::bf16, c.K, c.N, c.ldb, false);
+            const std::vector<uint8_t> prepack = packed;
+            std::vector<float> dst(static_cast<size_t>(c.M) * c.N, kCanary);
+            if (!zero) native::native_fail_next_image_checks(1);
+            const status_t st = routed_call(c.M, c.N, c.K, c.src.data(), c.K,
+                    packed.data(), c.ldb, false, dst.data(), c.N,
+                    on_aocl_prepack(c.params(), tag, 2));
+            native::native_fail_next_image_checks(0);
+            ASSERT_EQ(st, status_t::success);
+            expect_matches_reference(c, dst, c.N);
+            EXPECT_EQ(packed, prepack) << "the prepack was written";
+            EXPECT_FALSE(packed_in_place(packed));
+            EXPECT_EQ(native::native_weight_layouts(packed.data()),
+                    zero ? 1u : 0u)
+                    << (zero ? "cached out of place" : "handed back");
+        }
+    native::clear_all_weight_caches();
+}
+
+// An AOCL prepack rewritten in place and then written back over the buffer
+// with no clear, as a model unloaded and loaded again at the same address,
+// is read as the prepack by the next call: bf16 prepacks, transposed or not,
+// and s8 ones made for a u8 source, whose images hold the prepack's bytes at
+// both of their ends.
+TEST_F(NativeLayoutRuleRoute, AoclPrepackWrittenBackOverItsImageIsReadAgain) {
+    config_.cfg.set_algo(kAlgoNative);
+    const auto check = [&](const auto &c, data_type_t wei, data_type_t src,
+                               bool transB, double rel) {
+        reset_grp_matmul_caches();
+        std::vector<uint8_t> packed
+                = aocl_prepack(c.wei.data(), wei, src, c.K, c.N, c.ldb, transB);
+        const std::vector<uint8_t> prepack = packed;
+        const matmul_params p = on_aocl_prepack(
+                c.params(), matmul_algo_t::aocl_dlp_blocked, 2);
+        for (int call = 0; call < 2; ++call) {
+            SCOPED_TRACE(
+                    call == 0 ? "the rewrite" : "the prepack written back");
+            std::vector<float> dst(static_cast<size_t>(c.M) * c.N, kCanary);
+            ASSERT_EQ(routed_call(c.M, c.N, c.K, c.src.data(), c.K,
+                              packed.data(), c.ldb, transB, dst.data(), c.N, p),
+                    status_t::success);
+            expect_matches_reference(c, dst, c.N, rel);
+            ASSERT_TRUE(packed_in_place(packed));
+            std::copy(prepack.begin(), prepack.end(), packed.begin());
+        }
+        native::clear_all_weight_caches();
+    };
+    if (has_bf16() && aocl_inverse_available(Bf16Case(1, 32, 32).params()))
+        for (const bool transB : {false, true})
+            for (const int K : {96, 1024})
+                for (const int N : {64, 256}) {
+                    SCOPED_TRACE("bf16 K=" + std::to_string(K) + " N="
+                            + std::to_string(N) + (transB ? " transB" : ""));
+                    check(Bf16Case(4, N, K, transB), data_type_t::bf16,
+                            data_type_t::bf16, transB, 1e-4);
+                }
+    if (has_vnni() && aocl_inverse_available(Int8Case(1, 32, 32).params()))
+        for (const int K : {64, 1024})
+            for (const int N : {64, 256}) {
+                SCOPED_TRACE("s8 K=" + std::to_string(K)
+                        + " N=" + std::to_string(N));
+                check(Int8Case(4, N, K), data_type_t::s8, data_type_t::u8,
+                        false, 1e-3);
+            }
 }
 
 TEST_F(NativeLayoutRuleRoute, AoclPrepackMadeWithAnMHintStaysOnAocl) {

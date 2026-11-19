@@ -1150,6 +1150,54 @@ TEST_F(NativeBrgemmHardeningEpilogue,
     }).join();
 }
 
+// The weight cache clears release the staged rows: the clearing thread's at
+// once, another thread's at its next staged call, which takes rows of its
+// own size where it would have kept larger ones.
+TEST_F(NativeBrgemmHardeningEpilogue, TheClearsReleaseStagedRows) {
+    const nt::algo_pin_t pin(matmul_algo_t::native_brgemm);
+    const int N = 4100, K = 64;
+    const nt::buffer_t wei = nt::random_buffer(
+            kBf16, static_cast<size_t>(N) * K, 9200, -0.5f, 0.5f);
+    const auto staged = [&](int M) {
+        const nt::buffer_t src = nt::random_buffer(
+                kBf16, static_cast<size_t>(M) * K, 9201 + M, -1.0f, 1.0f);
+        nt::buffer_t dst = nt::make_buffer(static_cast<size_t>(M) * N);
+        return nt::run_matmul(staged_call(M, N, K, src, wei, dst.get(), true));
+    };
+    for (bool all : {false, true}) {
+        SCOPED_TRACE(all ? "clear_matmul_weight_caches"
+                         : "clear_matmul_native_weight_caches");
+        const auto clear = [&] {
+            if (all)
+                zendnnl::lowoha::matmul::clear_matmul_weight_caches();
+            else
+                zendnnl::lowoha::matmul::clear_matmul_native_weight_caches();
+        };
+        std::thread([&] {
+            EXPECT_EQ(staged(1024), status_t::success);
+            EXPECT_EQ(nat::native_thread_staged_floats(), size_t {1024} * N);
+            clear();
+            EXPECT_EQ(nat::native_thread_staged_floats(), 0u)
+                    << "the clearing thread's rows";
+        }).join();
+        std::atomic<int> step {0};
+        std::thread other([&] {
+            EXPECT_EQ(staged(1024), status_t::success);
+            step.store(1);
+            while (step.load() != 2)
+                std::this_thread::yield();
+            EXPECT_EQ(staged(512), status_t::success);
+            EXPECT_EQ(nat::native_thread_staged_floats(), size_t {512} * N)
+                    << "rows taken before the clear were kept";
+        });
+        while (step.load() != 1)
+            std::this_thread::yield();
+        clear();
+        step.store(2);
+        other.join();
+    }
+}
+
 // ── BF16 kernel addresses ────────────────────────────────────────────────
 
 #if defined(__linux__)

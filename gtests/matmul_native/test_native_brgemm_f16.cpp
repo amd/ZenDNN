@@ -1743,6 +1743,33 @@ TEST(NativeBrgemmF16Route, WeightCacheModesKeepTheBits) {
     mm::clear_matmul_weight_caches();
 }
 
+// A non-transposed f16 weight of N and ldb 32 is its own layout: under ALGO
+// 10 weight cache mode 2 does not rewrite it in place, caches its layout out
+// of place and keeps the buffer as it was, and after a clear and a reload of
+// the raw weight the next call gives the model's bits.
+TEST(NativeBrgemmF16Route, AWeightThatIsItsOwnLayoutIsNotRewritten) {
+    SKIP_WITHOUT_NATIVE_ISA();
+    mm::clear_matmul_weight_caches();
+    const nt::algo_pin_t pin(matmul_algo_t::native_brgemm);
+    WeightCacheGuard cache(2);
+    direct_t d = make_contiguous(4, kNr, 256, false, kF32, 1450, 2);
+    const std::vector<float> want = model_of(d);
+    const std::vector<uint8_t> raw(
+            d.wei.as<uint8_t>(), d.wei.as<uint8_t>() + d.wei.bytes);
+    std::memcpy(d.dst.get(), d.o.dst0.get(), d.o.dst0.bytes);
+    ASSERT_EQ(nt::run_matmul(d.call), status_t::success);
+    EXPECT_TRUE(same_bits(d.shape, d.dst, want));
+    EXPECT_FALSE(nat::native_weight_packed_in_place(d.wei.get(), d.wei.bytes));
+    EXPECT_EQ(std::memcmp(raw.data(), d.wei.get(), d.wei.bytes), 0);
+    EXPECT_EQ(nt::native_layouts(d.wei.get()), 1u);
+    mm::clear_matmul_weight_caches();
+    std::memcpy(d.wei.get(), raw.data(), raw.size());
+    std::memcpy(d.dst.get(), d.o.dst0.get(), d.o.dst0.bytes);
+    ASSERT_EQ(nt::run_matmul(d.call), status_t::success);
+    EXPECT_TRUE(same_bits(d.shape, d.dst, want));
+    mm::clear_matmul_weight_caches();
+}
+
 // A weight rewritten in place for plain calls serves a later silu_and_mul
 // call on the same buffer from the f16 image (the layout depends on the
 // weight alone): the bits of the same call over a pack made for it.
@@ -1820,6 +1847,128 @@ TEST(NativeBrgemmF16Route, AViewOfAnImageIsPackedFromTheWeightItHolds) {
     mm::clear_matmul_weight_caches();
 }
 
+// A call on the last rows of a weight, whose layout a call cached at weight
+// cache mode 1 before a mode 2 call rewrote the whole weight in place, is
+// served that layout at modes 1 and 2: the scalar model's bits of the view
+// over its raw weight.  A mode 0 call on it is refused, dst untouched: the
+// image holds no raw weight for it.
+TEST(NativeBrgemmF16Route, AViewInsideAnImageIsServedItsCachedLayout) {
+    SKIP_WITHOUT_NATIVE_ISA();
+    mm::clear_matmul_weight_caches();
+    const nt::algo_pin_t pin(matmul_algo_t::native_brgemm);
+    WeightCacheGuard cache(2);
+    const int M = 4, K = 128, N = 64;
+    direct_t whole = make_contiguous(M, N, K, false, kF32, 1560, 2);
+    const uint16_t *raw = whole.wei.as<uint16_t>();
+    f16_call_t s;
+    s.M = M;
+    s.N = N;
+    s.K = K / 2;
+    s.dst_dt = kF32;
+    s.threads = 4;
+    direct_t view = make_direct(s, 1561, 1);
+    for (int k = 0; k < s.K; ++k)
+        for (int n = 0; n < N; ++n)
+            view.o.wei[static_cast<size_t>(k) * s.ldb() + n]
+                    = raw[static_cast<size_t>(K / 2 + k) * N + n];
+    const std::vector<float> want = model_output(s, view.o);
+    view.call.wei = raw + static_cast<size_t>(K / 2) * N;
+    view.call.ldb = N;
+    ASSERT_EQ(nt::run_matmul(view.call), status_t::success);
+    EXPECT_TRUE(same_bits(s, view.dst, want));
+    ASSERT_EQ(nt::run_matmul(whole.call), status_t::success);
+    ASSERT_TRUE(nat::native_weight_packed_in_place(
+            whole.wei.get(), whole.wei.bytes));
+    for (const int32_t wc : {1, 2}) {
+        std::memcpy(view.dst.get(), view.o.dst0.get(), view.o.dst0.bytes);
+        view.call.params.weight_cache_type = wc;
+        ASSERT_EQ(nt::run_matmul(view.call), status_t::success)
+                << "weight cache mode " << wc;
+        EXPECT_TRUE(same_bits(s, view.dst, want)) << "weight cache mode " << wc;
+    }
+    std::memcpy(view.dst.get(), view.o.dst0.get(), view.o.dst0.bytes);
+    view.call.params.weight_cache_type = 0;
+    EXPECT_EQ(nt::run_matmul(view.call), status_t::failure);
+    EXPECT_EQ(std::memcmp(view.dst.get(), view.o.dst0.get(), view.o.dst0.bytes),
+            0)
+            << "dst written";
+    mm::clear_matmul_weight_caches();
+}
+
+// The raw weight written back over its in-place image with no clear, as a
+// model unloaded and loaded again at the same address, is read as that raw
+// weight by the next call: a non-transposed weight, whose image holds the
+// raw weight's bytes at both of its ends, and a transposed one, of images of
+// 8 KiB and 128 KiB.
+TEST(NativeBrgemmF16Route, ARawWeightWrittenBackOverItsImageIsReadAsRaw) {
+    SKIP_WITHOUT_NATIVE_ISA();
+    mm::clear_matmul_weight_caches();
+    const nt::algo_pin_t pin(matmul_algo_t::native_brgemm);
+    WeightCacheGuard cache(2);
+    uint32_t seed = 1570;
+    for (const int K : {64, 1024})
+        for (const bool transB : {false, true}) {
+            SCOPED_TRACE("K=" + std::to_string(K)
+                    + (transB ? " transB" : " not transposed"));
+            direct_t d = make_contiguous(4, 64, K, transB, kF32, ++seed, 2);
+            const std::vector<float> want = model_of(d);
+            const std::vector<uint8_t> raw(
+                    d.wei.as<uint8_t>(), d.wei.as<uint8_t>() + d.wei.bytes);
+            ASSERT_EQ(nt::run_matmul(d.call), status_t::success);
+            EXPECT_TRUE(same_bits(d.shape, d.dst, want));
+            ASSERT_TRUE(nat::native_weight_packed_in_place(
+                    d.wei.get(), d.wei.bytes));
+            std::memcpy(d.wei.get(), raw.data(), raw.size());
+            std::memcpy(d.dst.get(), d.o.dst0.get(), d.o.dst0.bytes);
+            ASSERT_EQ(nt::run_matmul(d.call), status_t::success);
+            EXPECT_TRUE(same_bits(d.shape, d.dst, want));
+            mm::clear_matmul_weight_caches();
+        }
+}
+
+// The raw bytes of a non-transposed f16 image of N 64 from byte 64 on (its
+// first line is the raw weight's own) written back and called as a weight
+// of their own leave no part of the record that a reload could not change:
+// once the whole raw weight is back, the call on the whole weight gives the
+// model's bits, with a clear before the reload or none.  Images of 8 KiB
+// and of 128 KiB, whose record keeps its ends and sample lines.
+TEST(NativeBrgemmF16Route, AWrittenBackSuffixLeavesNoPartAReloadCannotChange) {
+    SKIP_WITHOUT_NATIVE_ISA();
+    mm::clear_matmul_weight_caches();
+    const nt::algo_pin_t pin(matmul_algo_t::native_brgemm);
+    WeightCacheGuard cache(2);
+    for (const int K : {64, 1024})
+        for (const bool cleared : {false, true}) {
+            SCOPED_TRACE("K=" + std::to_string(K)
+                    + (cleared ? ", a clear before the reload" : ", no clear"));
+            direct_t whole = make_contiguous(4, 64, K, false, kF32, 1590, 2);
+            const std::vector<float> want = model_of(whole);
+            const std::vector<uint8_t> raw(whole.wei.as<uint8_t>(),
+                    whole.wei.as<uint8_t>() + whole.wei.bytes);
+            ASSERT_EQ(nt::run_matmul(whole.call), status_t::success);
+            ASSERT_TRUE(nat::native_weight_packed_in_place(
+                    whole.wei.get(), whole.wei.bytes));
+            // A transposed weight of K 32 over the bytes past the first 64.
+            const int n = static_cast<int>((raw.size() - 64) / 64);
+            direct_t suffix = make_contiguous(4, n, 32, true, kF32, 1591, 2);
+            ASSERT_EQ(suffix.wei.bytes, raw.size() - 64);
+            std::memcpy(suffix.wei.get(), raw.data() + 64, suffix.wei.bytes);
+            std::memcpy(whole.wei.as<uint8_t>() + 64, raw.data() + 64,
+                    suffix.wei.bytes);
+            const std::vector<float> suffix_want = model_of(suffix);
+            suffix.call.wei = whole.wei.as<uint8_t>() + 64;
+            ASSERT_EQ(nt::run_matmul(suffix.call), status_t::success);
+            EXPECT_TRUE(same_bits(suffix.shape, suffix.dst, suffix_want));
+            if (cleared) mm::clear_matmul_weight_caches();
+            std::memcpy(whole.wei.get(), raw.data(), raw.size());
+            std::memcpy(
+                    whole.dst.get(), whole.o.dst0.get(), whole.o.dst0.bytes);
+            ASSERT_EQ(nt::run_matmul(whole.call), status_t::success);
+            EXPECT_TRUE(same_bits(whole.shape, whole.dst, want));
+            mm::clear_matmul_weight_caches();
+        }
+}
+
 // What matmul_direct requires of the CPU for f16 operands: a call that asks
 // for the native BRGEMM, which widens and rounds them with AVX-512 F, runs
 // without AVX512-FP16, f16 bias and binary operand included; a call that
@@ -1894,6 +2043,51 @@ status_t column_major_refusal(const direct_t &d) {
 
 bool dst_untouched(const direct_t &d) {
     return std::memcmp(d.dst.get(), d.o.dst0.get(), d.o.dst0.bytes) == 0;
+}
+
+// A new weight of 64 bytes written with no clear where a non-transposed
+// 64 x 64 f16 image starts, which holds neither line a call the image serves
+// checks (the image's first and last lines are the raw weight's own), is
+// checked at the image's bytes it holds, from the thread whose memo holds
+// the image and from another: the column-major call of K 16, N 2 and ldb 16
+// on it is not refused as one on the image (the native BRGEMM hands it
+// back), and the transposed row-major call on the same bytes gives the
+// model's bits.
+TEST(NativeBrgemmF16Route, AShortWeightAtAnImagesStartIsCheckedAtItsBytes) {
+    SKIP_WITHOUT_NATIVE_ISA();
+    mm::clear_matmul_weight_caches();
+    const nt::algo_pin_t pin(matmul_algo_t::native_brgemm);
+    WeightCacheGuard cache(2);
+    for (const bool same_thread : {true, false}) {
+        SCOPED_TRACE(same_thread ? "the thread that wrote the image"
+                                 : "another thread");
+        direct_t whole = make_contiguous(4, 64, 64, false, kF32, 1580, 2);
+        ASSERT_EQ(nt::run_matmul(whole.call), status_t::success);
+        ASSERT_TRUE(nat::native_weight_packed_in_place(
+                whole.wei.get(), whole.wei.bytes));
+        direct_t fresh = make_contiguous(4, 2, 16, true, kF32, 1581, 2);
+        const std::vector<float> want = model_of(fresh);
+        std::memcpy(whole.wei.get(), fresh.wei.get(), fresh.wei.bytes);
+        f16_call_t s;
+        s.M = 4;
+        s.N = 2;
+        s.K = 16;
+        s.dst_dt = kF32;
+        direct_t column = make_direct(s, 1582, 2);
+        column.wei = whole.wei;
+        status_t st = status_t::success;
+        if (same_thread) {
+            st = run_column_major(column);
+        } else {
+            std::thread other([&] { st = run_column_major(column); });
+            other.join();
+        }
+        EXPECT_NE(st, status_t::failure) << "refused as a call on the image";
+        fresh.call.wei = whole.wei.get();
+        ASSERT_EQ(nt::run_matmul(fresh.call), status_t::success);
+        EXPECT_TRUE(same_bits(fresh.shape, fresh.dst, want));
+        mm::clear_matmul_weight_caches();
+    }
 }
 
 // A call that asks for the native BRGEMM takes an f16 bias, binary operand
@@ -2262,10 +2456,8 @@ TEST(NativeBrgemmF16Route, HandedBackCallsMeetTheDefaultRoutesIsa) {
 // weight cache mode 2 on a 16 x 64 f16 weight 4,096 bytes into the buffer
 // waits to rewrite it in place, and every byte of the span reads as it
 // was.  Once that weight is an image, the hold finds it and fails, and the
-// call under ZENDNNL_MATMUL_ALGO=10 returns with dst untouched: failure
-// once the default route takes it, isa_unsupported before that on a CPU
-// without AVX512-FP16, and in a build without AOCL-DLP the native error of
-// a column-major call.
+// call under ZENDNNL_MATMUL_ALGO=10, which reads into the image, fails with
+// dst untouched: no route reads it, in every build and on every CPU.
 TEST(NativeBrgemmF16Route, AHandedBackColumnMajorCallHoldsAllItsBytes) {
     SKIP_WITHOUT_NATIVE_ISA();
     mm::clear_matmul_weight_caches();
@@ -2341,12 +2533,7 @@ TEST(NativeBrgemmF16Route, AHandedBackColumnMajorCallHoldsAllItsBytes) {
     const status_t st = mm::matmul_direct('c', false, false, M, N, K, 1.0f,
             src.data(), M, shared.get(), ldb, nullptr, 0.0f, dst.data(), M,
             false, batch, cm);
-    status_t want = status_t::failure;
-    if (!ZENDNNL_DEPENDS_AOCLDLP)
-        want = status_t::unimplemented;
-    else if (!has_avx512_fp16())
-        want = status_t::isa_unsupported;
-    EXPECT_EQ(st, want);
+    EXPECT_EQ(st, status_t::failure);
     EXPECT_EQ(std::memcmp(dst.data(), prior.data(), dst.size() * sizeof(float)),
             0)
             << "dst written";

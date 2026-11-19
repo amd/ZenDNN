@@ -261,11 +261,27 @@ What a matmul call keeps across calls (extend this list when a PR adds state):
   the buffer is an AOCL-DLP prepack. At weight cache mode 2 under
   `ZENDNNL_MATMUL_ALGO=10`, the layout replaces a bf16, f16 or s4 weight (or
   an AOCL-DLP prepack) in the caller's buffer, and an image record remembers
-  it. Change detection reads the two 64-byte ends only, and a dropped layout
-  stays until a clear.
+  it; a clear keeps the record as a tombstone, with the bytes it keeps (up
+  to 64 KiB a record, outside the layout capacity), which no clear frees.
+  Change detection reads the two 64-byte ends of the bytes a layout was
+  packed from. A call an image may serve (at its start, of its layout)
+  checks two 64-byte lines only: the first and the last where the image
+  differs from the weight it replaced (its own ends may hold the weight's
+  bytes). Any other call on an image record or tombstone compares the bytes
+  it keeps (all of an image up to 64 KiB, the two ends of a larger one)
+  wherever the call's buffer overlaps them, and those two lines and up to
+  1024 sample lines of a larger one. A cached layout of bytes
+  an image holds serves only while that image is there: it names the record
+  of the image it was packed from or carried across.
+  A dropped layout is freed once no call can read it, by the next call that
+  drops a layout or caches one it packed (or finds the cache full), or by a
+  clear; calls served a cached layout or an image free none.
 - The widened f16 sources (`matmul_native/brgemm/looper/`), at most 32
   buffers and 512 MiB, and the per-thread staged rows of gated calls
-  (`matmul_native/common/native_epilogue.cpp`), kept up to 4 MiB a thread.
+  (`matmul_native/common/native_epilogue.cpp`), kept up to 4 MiB a thread;
+  the clears release the widened sources, and the staged rows of the
+  clearing thread at once and of another thread at its next staged call or
+  its exit (rows above 4 MiB stay on an idle thread until then).
 - Native plans (`matmul_native/brgemm/planner/`) and the values read once at
   the first native call: CPU features, `ZENDNNL_MATMUL_WEIGHT_CACHE`,
   `ZENDNNL_MATMUL_NATIVE_CONFIG`, `ZENDNNL_MATMUL_NATIVE_TUNING_FILE` and
@@ -292,9 +308,10 @@ Checks:
   API header, the operator doc and `docs/runtime_env.md` what a framework may
   no longer do with that buffer: read it, save it, update it, or share it with
   another tensor.
-- A clear at mode 2 is process-wide: it forgets the image records of every
-  model in the process. Flag a doc or test that treats a clear as safe while
-  in-place weights stay loaded.
+- A clear at mode 2 is process-wide: it turns the image records of every
+  model in the process into tombstones, and a weight that stays loaded fails
+  its calls until its raw weight is reloaded. Flag a doc or test that treats
+  a clear as safe while in-place weights stay loaded.
 - `clear_matmul_native_weight_caches()` reaches only the native state.
   Handed-back calls keep the default route's caches, which only
   `clear_matmul_weight_caches()` clears. A doc that names a clear for reloaded
@@ -310,6 +327,14 @@ documented, loud failure, never success with wrong values:
   included;
 - a weight allocated inside a freed image, as in a model swap without a
   clear;
+- a view of a weight (rows or columns, at the buffer's start or inside it)
+  cached before its buffer is rewritten in place, then the buffer rewritten
+  again for another weight;
+- a view's own raw elements written back over an image, after a clear or
+  with none, then the whole weight called;
+- a raw weight (or AOCL-DLP prepack) written back over its image with no
+  clear, as a model loaded again at the same address, for every weight type
+  rewritten in place;
 - a framework that reads or updates a weight after its first mode-2 call: a
   tied embedding, a checkpoint save, a LoRA merge;
 - a handed-back constant weight refilled in place, then each clear;

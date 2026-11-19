@@ -530,6 +530,7 @@ direct_t make_direct(
 // layout padded past N.
 TEST(NativeBrgemmFp32Route, Algo10ServesFp32Calls) {
     SKIP_WITHOUT_FP32_ISA();
+    const WeightCacheGuard mode(2);
     mm::clear_matmul_weight_caches();
     const nt::algo_pin_t pin(matmul_algo_t::native_brgemm);
     struct route_t {
