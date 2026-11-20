@@ -460,6 +460,11 @@ ZenDNN build can be integrated to the framework build using these files as follo
   | ZENDNNL_LIBXSMM_INJECT_DIR | Install path of libxsmm if framework is building it and wants to inject it to ZenDNN build. |
   | ZENDNNL_PARLOOPER_INJECT_DIR | Install path of parlooper if framework is building it and wants to inject it to ZenDNN build. |
   | ZENDNNL_FBGEMM_INJECT_DIR | Install path of fbgemm if framework is building it and wants to inject it to ZenDNN build. |
+  | ZENDNNL_AOCLDLP_SOURCE_DIR | Source path of aocl-dlp if framework provides it, so ZenDNN builds it from there instead of downloading it. |
+  | ZENDNNL_AOCLUTILS_SOURCE_DIR | Source path of aocl-utils if framework provides it, so ZenDNN builds it from there instead of downloading it. |
+  | ZENDNNL_JSON_SOURCE_DIR | Source path of json (nlohmann-json) if framework provides it, so ZenDNN builds it from there instead of downloading it. |
+
+  For a build without network access, set the three SOURCE_DIR options and keep the other dependencies off or injected. Keep aocl-dlp at `${ZENDNNL_SOURCE_DIR}/dependencies/aocldlp`; from any other path, ZenDNN links it there, which needs `${ZENDNNL_SOURCE_DIR}/dependencies/` to exist.
 
 - Make *fwk_zendnnl* target dependent on injected dependencies by editing its "add_dependencies(fwk_zendnnl...)" command.
 - Include the edited ZenDnnlFwkIntegrate.cmake in the framework build flow, where ZenDNN is to be built.
