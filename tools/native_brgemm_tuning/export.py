@@ -511,26 +511,68 @@ def build_entries(winners: List[Winner], spaces: Dict[str, Space], schema: Schem
     return entries, skipped
 
 
+def layered_plan(p: Problem, layers: Sequence[Tuple[str, Dict[str, Any]]], schema: Schema,
+                 uarch: Any) -> Tuple[str, Dict[str, Any], Any]:
+    """resolve_layers: (the source names joined by "+", the applied config, the plan) of the
+    configs of layers, lowest precedence first (rules, then table).  Each layer is taken
+    without the keys the problem's INT8 scheme does not apply, and a layer left with no key
+    is not applied; the merged config stands when its plan is legal, else, from the highest
+    layer down, each layer stays only if the plan with it under the layers kept above it is."""
+    from .plan import builtin_plan, resolve, scheme_config
+
+    cfgs = [(n, scheme_config(c, p, schema)) for n, c in layers]
+    cfgs = [(n, c) for n, c in cfgs if c]
+    merged: Dict[str, Any] = {}
+    for _, c in cfgs:
+        merged = merge_config(merged, c)
+    if cfgs:
+        r = resolve(p, merged, uarch, schema)
+        if r.applied:
+            return "+".join(n for n, _ in cfgs), merged, r.plan
+    kept: Dict[str, Any] = {}
+    names: List[str] = []
+    plan = builtin_plan(p, uarch, schema)
+    for n, c in reversed(cfgs):
+        trial = merge_config(c, kept)
+        r = resolve(p, trial, uarch, schema)
+        if r.applied:
+            kept, plan = trial, r.plan
+            names.insert(0, n)
+    return "+".join(names) or "heuristic", kept, plan
+
+
 def entry_plans(entries: List[Dict[str, Any]], problems: Sequence[Problem], schema: Schema,
-                uarch: Any) -> List[Dict[str, Any]]:
-    """The plan each entry names for the problems it matches: the [MATMUL.NATIVE_BRGEMM]
-    fields the library logs for them under the file (source=table, cfg= the entry's config
-    as the call applies it, the plan's fields), and whether that is the built-in plan."""
+                uarch: Any, rules: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """The plan the file names for each problem an entry matches, and with rules for each other
+    problem a rule gives a config: the [MATMUL.NATIVE_BRGEMM] fields the library logs for it
+    under the file (source= the layers applied, cfg= their config as the call applies it, the
+    plan's fields), and whether that is the built-in plan."""
     from .candidates import format_settings
-    from .plan import builtin_plan, plan_log_fields, resolve, scheme_config
+    from .plan import builtin_plan, plan_log_fields
+
+    def rule_config(p: Problem) -> Dict[str, Any]:
+        r = eval_rules(rules, rule_features(p, uarch, schema.hw)) if rules else None
+        return config_from_json(r, schema) if r else {}
 
     out = []
+
+    def record(rid: str, p: Problem, layers: List[Tuple[str, Dict[str, Any]]]) -> None:
+        source, cfg, plan = layered_plan(p, layers, schema, uarch)
+        fields = plan_log_fields(plan, p)
+        out.append({"id": rid, "problem": p.key(), "source": source,
+                    "cfg": (format_settings(cfg, schema) or "-") if source != "heuristic" else "-",
+                    "plan": fields, "builtin": fields == plan_log_fields(builtin_plan(p, uarch, schema), p)})
+
+    named = set()
     for e in entries:
         cfg = config_from_json(e.get("config", {}), schema)
         for p in problems:
-            if not match_entry(e.get("match", {}), p):
-                continue
-            r = resolve(p, cfg, uarch, schema)
-            fields = plan_log_fields(r.plan, p)
-            out.append({"id": e.get("id", ""), "problem": p.key(), "source": "table" if r.applied else "heuristic",
-                        "cfg": (format_settings(scheme_config(cfg, p, schema), schema) or "-") if r.applied else "-",
-                        "plan": fields,
-                        "builtin": fields == plan_log_fields(builtin_plan(p, uarch, schema), p)})
+            if match_entry(e.get("match", {}), p):
+                named.add(p.key())
+                record(e.get("id", ""), p, [("rules", rule_config(p)), ("table", cfg)])
+    for p in problems:
+        if rules and p.key() not in named and rule_config(p):
+            record("rules", p, [("rules", rule_config(p))])
     return out
 
 

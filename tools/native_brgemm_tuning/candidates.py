@@ -91,8 +91,9 @@ def builtin_value(spec: Any) -> Any:
     return None
 
 
-def canonical(config: Dict[str, Any], schema: Schema, dtype: str) -> Dict[str, Any]:
-    """config without keys that do not apply to dtype or equal their built-in value."""
+def canonical(config: Dict[str, Any], schema: Schema, dtype: str, keep: Sequence[str] = ()) -> Dict[str, Any]:
+    """config without keys that do not apply to dtype or equal their built-in value (but those
+    of keep)."""
     out = {}
     for spec in schema.keys:
         if spec.name not in config or not spec.applies_to(dtype):
@@ -101,7 +102,7 @@ def canonical(config: Dict[str, Any], schema: Schema, dtype: str) -> Dict[str, A
         if spec.type == "list":
             v = sorted(set(v), reverse=True)
         b = builtin_value(spec)
-        if b is not None and v == b:
+        if b is not None and v == b and spec.name not in keep:
             continue
         out[spec.name] = v
     return out
@@ -275,11 +276,15 @@ class Space:
 
     def __init__(self, problem: Problem, schema: Schema, uarch: Any,
                  keys: Optional[Sequence[str]] = None, values: Optional[Dict[str, List[Any]]] = None,
-                 allow_bit_changing: bool = False, keep_threads: bool = False):
+                 allow_bit_changing: bool = False, keep_threads: bool = False,
+                 base: Optional[Dict[str, Any]] = None):
         self.p = problem
         self.schema = schema
         self.uarch = uarch
         self.allow_bit_changing = allow_bit_changing
+        # Settings under every candidate's own (tune.py calibrate): the built-in plan stays the
+        # reference, and the base alone is a candidate the search proposes first.
+        self.base = canonical(base or {}, schema, problem.dtype)
         # Leave out plans with a smaller team than the built-in plan's: a call on
         # fewer threads changes the thread team the calls before and after it see.
         self.keep_threads = keep_threads
@@ -300,10 +305,15 @@ class Space:
         self.keys = list(self.choices)
         plan = builtin_plan(problem, uarch, schema)
         self.default = Candidate({}, "", plan, effective_signature(plan, problem))
+        made = self.make({}) if self.base else None
+        self.base_candidate = made if made is not None and made.sig != self.default.sig else None
 
     def make(self, config: Dict[str, Any]) -> Optional[Candidate]:
-        """The candidate of config, or None when it is illegal or bit-changing."""
-        cfg = canonical(config, self.schema, self.p.dtype)
+        """The candidate of config over the base, or None when it is illegal or bit-changing."""
+        # A base key config sets back to its built-in value stays in the text: from_text()
+        # reads a text over the base.
+        cfg = canonical(dict(self.base, **config), self.schema, self.p.dtype,
+                        keep=[k for k in self.base if k in config])
         if check_config(cfg, self.schema):
             return None
         if not self.allow_bit_changing and any(not self.schema.key_map[k].same_bits(self.p.dtype) for k in cfg):
@@ -326,7 +336,10 @@ class Space:
         return n
 
     def iter_grid(self, max_keys: Optional[int] = None) -> Iterator[Candidate]:
-        """Legal candidates with 1, then 2, ... changed keys (lazily, in key order)."""
+        """Legal candidates with 1, then 2, ... changed keys (lazily, in key order), after the
+        base candidate."""
+        if self.base_candidate is not None:
+            yield self.base_candidate
         top = len(self.keys) if max_keys is None else min(max_keys, len(self.keys))
         for level in range(1, top + 1):
             for combo in itertools.combinations(self.keys, level):

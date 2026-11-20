@@ -245,6 +245,19 @@ it. `native_brgemm_selected` is `lowoha_algo == native_brgemm` or
   (`python3 -m unittest discover -s tools/native_brgemm_tuning/tests -t tools`)
   pass. Flag a planner change that leaves the tuner behind, and a fixture
   refreshed without the mirror following it.
+- The op performance utility (`tools/op_perf_utility`) follows the native
+  kernels, the cost model and BenchDNN: its probe times the kernels'
+  dot-product instructions, its bounds take each weight type's compute path,
+  its calibration writes the cost model's `cm_*` inputs, and its reader
+  parses BenchDNN's matmul output. A change to a kernel's dot-product
+  instruction or kind, a matmul data type, scale granularity or post-op, a
+  `cm_*` input, its units or the calls the cost model prices, the fields of
+  `native_hw()` or `native_plan_uarch()`, or BenchDNN's matmul CSV or result
+  line updates the utility in the same PR, and
+  `python3 -m unittest discover -s tools/op_perf_utility/tests -t tools`
+  and the tuner's tests pass. Flag a change that leaves the utility behind.
+  Also flag committed machine data: a ceilings file, numbers measured on a
+  lab machine, or the identity or figures of an unreleased part.
 
 ## Caches and kept state
 

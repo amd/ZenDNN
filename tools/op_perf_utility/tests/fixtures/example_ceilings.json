@@ -1,0 +1,61 @@
+{
+ "format": "op-perf-ceilings",
+ "version": 1,
+ "probe_version": "1.0",
+ "created": "2026-01-01T00:00:00Z",
+ "duration_s": 30.0,
+ "note": "A synthetic machine for the unit tests, not a measurement of any CPU.",
+ "cpu": {
+  "vendor": "ExampleVendor",
+  "family": 1,
+  "model": 1,
+  "stepping": 0,
+  "isa": ["avx512f", "avx512bf16", "avx512vnni"],
+  "l1d_kib": 48,
+  "l2_kib": 1024,
+  "l3_kib": 32768,
+  "logical_cpus": 16,
+  "smt": 1,
+  "physical_cores": 16,
+  "l3_domain_threads": 8
+ },
+ "uarch": {
+  "l1d_bytes": 49152,
+  "l2_bytes": 1048576,
+  "l3_domain_bytes": 33554432,
+  "l3_domain_cores": 8,
+  "family_l3_cores": 8,
+  "fma_ports": 2,
+  "vec_width_bits": 512
+ },
+ "run": {
+  "threads": 16,
+  "domain_threads": 8,
+  "cpuset": "0-15",
+  "omp_proc_bind": "close",
+  "omp_places": "cores",
+  "repeats": 5,
+  "quick": false
+ },
+ "clock": {"ghz_1core": 3.0, "ghz_team": 2.5, "spread_1core": 0.0, "spread_team": 0.0},
+ "compute": {
+  "fp32": {"flops_per_instr": 32, "instr_per_cycle": 2.0, "latency_cycles": 4.0,
+           "gflops_core": 192.0, "gflops_team": 2560.0, "spread": 0.0},
+  "bf16": {"flops_per_instr": 64, "instr_per_cycle": 2.0, "latency_cycles": 6.0,
+           "gflops_core": 384.0, "gflops_team": 5120.0, "spread": 0.0},
+  "int8": {"flops_per_instr": 128, "instr_per_cycle": 2.0, "latency_cycles": 5.0,
+           "gflops_core": 768.0, "gflops_team": 10240.0, "spread": 0.0}
+ },
+ "bandwidth": [
+  {"level": "l1", "threads": 1, "bytes_per_thread": 24576, "gbps": 192.0, "spread": 0.0},
+  {"level": "l1", "threads": 16, "bytes_per_thread": 24576, "gbps": 2560.0, "spread": 0.0},
+  {"level": "l2", "threads": 1, "bytes_per_thread": 524288, "gbps": 96.0, "spread": 0.0},
+  {"level": "l2", "threads": 16, "bytes_per_thread": 524288, "gbps": 1280.0, "spread": 0.0},
+  {"level": "l3", "threads": 1, "bytes_per_thread": 2097152, "gbps": 60.0, "spread": 0.0},
+  {"level": "l3", "threads": 8, "bytes_per_thread": 2097152, "gbps": 320.0, "spread": 0.0},
+  {"level": "l3", "threads": 16, "bytes_per_thread": 2097152, "gbps": 640.0, "spread": 0.0},
+  {"level": "dram", "threads": 1, "bytes_per_thread": 268435456, "gbps": 24.0, "spread": 0.0},
+  {"level": "dram", "threads": 8, "bytes_per_thread": 33554432, "gbps": 80.0, "spread": 0.0},
+  {"level": "dram", "threads": 16, "bytes_per_thread": 16777216, "gbps": 120.0, "spread": 0.0}
+ ]
+}

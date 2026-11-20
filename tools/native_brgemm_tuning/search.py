@@ -33,6 +33,10 @@ space is exhausted; a new Searcher on the same store resumes.
 - local: per problem, the neighbours (Space.neighbors, in key order) of its
   `seeds` best candidates that beat the built-in plan beyond the noise; a
   problem without such a candidate gets none.
+
+With the problems' attainable times on the measured machine (tune.py probe),
+plan_round() can skip a problem whose built-in plan is near its bound, stop
+one whose best candidate is, and split the budget by headroom (see there).
 """
 
 from __future__ import annotations
@@ -40,7 +44,7 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from .candidates import Candidate, Deduper, Space
 from .plan import plan_features
@@ -66,6 +70,19 @@ class SearchSettings:
     z: float = 2.0
     seeds: int = 2  # local: best significant candidates whose neighbours are proposed
     min_gain: float = 0.02
+    # Headroom on the measured machine (tune.py probe); off unless one of the three is set.
+    attainable: Optional[Dict[str, float]] = None  # pkey -> the problem's attainable time (ms)
+    weights: Optional[Dict[str, float]] = None  # pkey -> calls of the problem's weight (default 1)
+    prioritize: bool = False  # budget x problems split by headroom
+    # calls: calls x best time x (1 - efficiency); relative: (1 - efficiency) alone, for flat calls
+    prioritize_by: str = "calls"
+    skip_at: float = 0.0  # no candidates for a problem whose built-in plan reaches this efficiency
+    stop_at: float = 0.0  # no more candidates once a problem's best candidate reaches it
+    scout: int = 1  # candidates of a problem without a built-in time yet, with headroom on
+
+    @property
+    def headroom(self) -> bool:
+        return bool(self.attainable) and (self.prioritize or self.skip_at > 0 or self.stop_at > 0)
 
 
 def featurize(p: Problem, c: Candidate) -> List[float]:
@@ -93,6 +110,10 @@ class Searcher:
         self.exhausted: set = set()
         self.grid: Dict[str, Iterator[Candidate]] = {}
         self.round = 1
+        # With headroom on, per round: (budget, batch) of the problems it changes, and why a
+        # problem gets no candidates.
+        self.limits: Dict[str, Tuple[int, int]] = {}
+        self.held: Dict[str, str] = {}
         self._load()
 
     def _cand(self, k: str, text: str) -> Optional[Candidate]:
@@ -116,9 +137,52 @@ class Searcher:
                     self.count[k] += 1
 
     def want(self, k: str) -> int:
-        if k in self.exhausted:
+        if k in self.exhausted or k in self.held:
             return 0
-        return max(0, min(self.s.batch, self.s.budget - self.count[k]))
+        budget, batch = self.limits.get(k, (self.s.budget, self.s.batch))
+        return max(0, min(batch, budget - self.count[k]))
+
+    def plan_round(self) -> None:
+        """With headroom on, each problem's place in the next round from its built-in and best
+        times against its attainable time: a problem not timed yet gets `scout` candidates; one
+        whose built-in plan reaches skip_at, or whose best plan (the built-in one when no
+        candidate beats it) reaches stop_at, gets none;
+        with prioritize, budget x problems is split by headroom (calls x best time x
+        (1 - efficiency)), each problem between a quarter and four times the budget.  A
+        round still gives a problem at most batch candidates: a session's slots, each a
+        process of its group, follow the largest batch of the group, whatever the others."""
+        self.limits, self.held = {}, {}
+        if not self.s.headroom:
+            return
+        att = self.s.attainable or {}
+        weights = self.s.weights or {}
+        summ = summarize(self.db.load(), phases=["search"], z=self.s.z)
+        head: Dict[str, float] = {}
+        for k in self.problems:
+            a = att.get(k)
+            if not a:
+                continue
+            ps = summ.get(k)
+            if ps is None or not ps.default_ms > 0:
+                self.limits[k] = (self.s.budget, max(1, self.s.scout))
+                continue
+            best = ps.best(self.s.min_gain, significant_only=True)
+            t_best = ps.default_ms * best.ratio if best is not None else ps.default_ms
+            eff, eff_best = a / ps.default_ms, a / t_best
+            if self.s.skip_at > 0 and eff >= self.s.skip_at:
+                self.held[k] = "built-in plan at %.0f%% of its bound" % (100 * eff)
+            elif self.s.stop_at > 0 and eff_best >= self.s.stop_at:
+                self.held[k] = "best plan at %.0f%% of its bound" % (100 * eff_best)
+            elif self.s.prioritize_by == "relative":
+                head[k] = max(0.0, 1.0 - eff_best)
+            else:
+                head[k] = float(weights.get(k, 1.0)) * t_best * max(0.0, 1.0 - eff_best)
+        total = sum(head.values())
+        if self.s.prioritize and total > 0:
+            pool = self.s.budget * len(head)
+            lo, hi = max(1, self.s.budget // 4), 4 * self.s.budget
+            for k, h in head.items():
+                self.limits[k] = (min(hi, max(lo, int(round(pool * h / total)))), self.s.batch)
 
     def _take(self, k: str, it: Iterator[Candidate], n: int, exhaust: bool = True) -> List[Candidate]:
         out: List[Candidate] = []
@@ -134,6 +198,8 @@ class Searcher:
     def _random_iter(self, k: str, tries: int) -> Iterator[Candidate]:
         rng = random.Random("%d/%d/%s" % (self.s.seed, self.round, k))
         sp = self.spaces[k]
+        if getattr(sp, "base_candidate", None) is not None:
+            yield sp.base_candidate
         for _ in range(tries):
             c = sp.sample(rng, self.s.p_change)
             if c is not None:
@@ -243,7 +309,13 @@ class Searcher:
     def run(self, max_rounds: Optional[int] = None) -> int:
         """Rounds until the budget is spent; returns the rounds done."""
         done = 0
+        logged: set = set()
         while max_rounds is None or done < max_rounds:
+            self.plan_round()
+            for k, why in sorted(self.held.items()):
+                if k not in logged:
+                    logged.add(k)
+                    self.log("no more candidates for %s: %s" % (self.problems[k].label(), why))
             batch = {k: v for k, v in self.propose().items() if v}
             if not batch:
                 break

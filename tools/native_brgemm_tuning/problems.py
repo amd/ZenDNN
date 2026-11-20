@@ -19,7 +19,7 @@ classes and the rule features of DESIGN section 6.2."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 # Weight types (native_problem_t::wei_dt), sources and destinations, as the match keys name them.
 DTYPES = ("bf16", "s8", "f32", "s4", "f16")
@@ -57,9 +57,11 @@ class Problem:
     (bf16, s8, f32, s4 or f16); n is the call's N (plan_n the width the planner and the
     tuning file see); an s8 problem's int8_scheme is that of its weight scales, an s4
     problem's is per_group.  group is an s4 weight's group size along K (K for one group
-    over K: {1, N} scales) and scale_bytes the bytes of one of its weight scales; both are
-    0 for any other weight.  src and dst default to the weight's type for f16 and f32
-    weights, to bf16 otherwise."""
+    over K: {1, N} scales), or that of a per-group s8 weight when the problem gives it, and
+    scale_bytes the bytes of one of its weight scales; both are 0 for any other weight.  The
+    planner reads an s4 weight's group only, so an s8 group changes no plan, feature or
+    tuning-file match; it prices the weight's scales in the bound.  src and dst default to
+    the weight's type for f16 and f32 weights, to bf16 otherwise."""
 
     dtype: str
     m: int
@@ -108,8 +110,15 @@ class Problem:
                 raise ValueError("an s4 weight's group size %d does not divide K=%d" % (self.group, self.k))
             if self.scale_bytes not in SCALE_BYTES:
                 raise ValueError("an s4 weight's scales take %s bytes, not %d" % (SCALE_BYTES, self.scale_bytes))
+        elif self.dtype == "s8" and self.int8_scheme == "per_group" and (self.group or self.scale_bytes):
+            if self.scale_bytes == 0:
+                object.__setattr__(self, "scale_bytes", 4)
+            if self.group < 1 or self.group > self.k or self.k % self.group:
+                raise ValueError("an s8 weight's group size %d does not divide K=%d" % (self.group, self.k))
+            if self.scale_bytes not in SCALE_BYTES:
+                raise ValueError("an s8 weight's scales take %s bytes, not %d" % (SCALE_BYTES, self.scale_bytes))
         elif self.group or self.scale_bytes:
-            raise ValueError("group and scale_bytes are for s4 weights only: %r" % (self,))
+            raise ValueError("group and scale_bytes are for s4 and per-group s8 weights only: %r" % (self,))
         if self.dynamic is None:
             object.__setattr__(self, "dynamic", self.int8 and self.src in ("bf16", "f32"))
 
@@ -179,12 +188,12 @@ class Problem:
         # A per-channel problem's identity names no scheme, as its stored records do.
         if self.int8_scheme != "per_channel":
             rest += ",int8_scheme=" + self.int8_scheme
-        if self.int4:
+        if self.group:
             rest += ",group=%d,scale_bytes=%d" % (self.group, self.scale_bytes)
         return rest
 
     def label(self) -> str:
-        wei = "%s g%d" % (self.dtype, self.group) if self.int4 else self.dtype
+        wei = "%s g%d" % (self.dtype, self.group) if self.group else self.dtype
         return "%s%s M=%d N=%d K=%d" % (self.name + " " if self.name else "", wei, self.m, self.n, self.k)
 
     def with_m(self, m: int) -> "Problem":
@@ -194,7 +203,7 @@ class Problem:
         d = {f: getattr(self, f) for f in self.FIELDS}
         if self.int8_scheme == "per_channel" or self.int4:
             del d["int8_scheme"]
-        if not self.int4:
+        if not self.group:
             del d["group"], d["scale_bytes"]
         if self.name:
             d["name"] = self.name
@@ -255,9 +264,43 @@ def read_shapes_tsv(path: str, dtypes: Optional[Iterable[str]] = None,
 
     Rows of one (dtype, N, K, group) merge: calls add up and the M range widens.
     """
+    merged: Dict[Tuple[str, int, int, int], Shape] = {}
+    for key, name, calls, lo, hi, model in _shape_rows(path, dtypes, skip_names, min_calls, group):
+        dtype, n, k, gs = key
+        s = merged.get(key)
+        if s is None:
+            merged[key] = Shape(dtype, n, k, name, calls, lo, hi, (model,) if model else (), gs)
+            continue
+        s.calls += calls
+        s.m_lo = min(s.m_lo, lo)
+        s.m_hi = 0 if (s.m_hi == 0 or hi == 0) else max(s.m_hi, hi)
+        if model and model not in s.models:
+            s.models = s.models + (model,)
+        if name not in s.name.split("/"):
+            s.name = s.name + "/" + name
+    return sorted(merged.values(), key=lambda s: (s.dtype, s.n, s.k, s.group))
+
+
+def calls_by_m(path: str, dtypes: Optional[Iterable[str]] = None, skip_names: Iterable[str] = ("lm_head",),
+               min_calls: int = 0, group: int = 128) -> Dict[Tuple[str, int, int, int], List[Tuple[int, int, int]]]:
+    """(m_lo, m_hi, calls) of every row of a shapes TSV, by (dtype, N, K, group): rows of one
+    shape over different M ranges (a model trace's) give the calls at each M."""
+    out: Dict[Tuple[str, int, int, int], List[Tuple[int, int, int]]] = {}
+    for key, _, calls, lo, hi, _ in _shape_rows(path, dtypes, skip_names, min_calls, group):
+        out.setdefault(key, []).append((lo, hi, calls))
+    return out
+
+
+def calls_at(rows: Sequence[Tuple[int, int, int]], m: int) -> int:
+    """The calls of the rows whose M range (m_hi 0: no bound) holds m."""
+    return sum(c for lo, hi, c in rows if lo <= m and (hi == 0 or m <= hi))
+
+
+def _shape_rows(path: str, dtypes: Optional[Iterable[str]], skip_names: Iterable[str], min_calls: int,
+                group: int) -> Iterator[Tuple[Tuple[str, int, int, int], str, int, int, int, str]]:
+    """((dtype, N, K, group), name, calls, m_lo, m_hi, model) of each kept row."""
     want = set(dtypes) if dtypes else None
     skip = set(skip_names)
-    merged: Dict[Tuple[str, int, int, int], Shape] = {}
     with open(path, encoding="utf-8") as f:
         header: Optional[List[str]] = None
         for line in f:
@@ -285,23 +328,9 @@ def read_shapes_tsv(path: str, dtypes: Optional[Iterable[str]] = None,
             if dtype == "s4":
                 gs = int((row.get("group") or "").strip() or group)
                 gs = k if gs == -1 else gs
-            key = (dtype, n, k, gs)
             lo = int(row.get("m_lo", "1") or 1)
             hi = int(row.get("m_hi", "0") or 0)
-            model = row.get("model", "").strip()
-            s = merged.get(key)
-            if s is None:
-                merged[key] = Shape(dtype, n, k, row["name"].strip(), calls, lo, hi,
-                                    (model,) if model else (), gs)
-                continue
-            s.calls += calls
-            s.m_lo = min(s.m_lo, lo)
-            s.m_hi = 0 if (s.m_hi == 0 or hi == 0) else max(s.m_hi, hi)
-            if model and model not in s.models:
-                s.models = s.models + (model,)
-            if row["name"].strip() not in s.name.split("/"):
-                s.name = s.name + "/" + row["name"].strip()
-    return sorted(merged.values(), key=lambda s: (s.dtype, s.n, s.k, s.group))
+            yield (dtype, n, k, gs), row["name"].strip(), calls, lo, hi, row.get("model", "").strip()
 
 
 @dataclass(frozen=True)
@@ -408,5 +437,6 @@ def rule_features(p: Problem, uarch: Any, hw: Any = None) -> Dict[str, float]:
         "cores": float(hw.physical_cores) if hw else 0.0,
         "a_l3": a_bytes / l3 if l3 else 0.0, "b_l3": b_bytes / l3 if l3 else 0.0,
         "slab_l2": float(p.pack_nr) * p.k * esz / l2 if l2 else 0.0,
-        "group": float(p.group),
+        # The library's feature is native_problem_t::wei_group_size, an s4 weight's only.
+        "group": float(p.group) if p.int4 else 0.0,
     }

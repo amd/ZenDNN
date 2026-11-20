@@ -7,11 +7,12 @@ description: >-
   zendnnl, building vLLM for CPU against upstream oneDNN and ZenDNN without
   zentorch, developing and optimizing an operator, reviewing an operator
   change or a ZenDNN pull request, running gtests, benchmarking with
-  BenchDNN, and keeping C++ and CMake changes working on the native Windows
-  (MSVC) build. Use for any task that involves changing ZenDNN's C++ or CMake,
-  or building, testing, benchmarking, configuring, integrating or reviewing
-  ZenDNN. When no sub-skill covers the task, it says so and works only from
-  the repository's own documentation.
+  BenchDNN, measuring a machine's ceilings and rating matmul calls against
+  them (a roofline), and keeping C++ and CMake changes working on the native
+  Windows (MSVC) build. Use for any task that involves changing ZenDNN's C++
+  or CMake, or building, testing, benchmarking, configuring, integrating or
+  reviewing ZenDNN. When no sub-skill covers the task, it says so and works
+  only from the repository's own documentation.
 ---
 
 # ZenDNN skills
@@ -102,6 +103,21 @@ sub-skill is only ever opened through this file.
 - **Side effects:** may configure a BenchDNN build. Confirm before replacing
   an existing build directory.
 - **Produces:** the BenchDNN result.
+
+### [op-perf-utility](op-perf-utility/SUBSKILL.md)
+- **For:** measuring a machine's compute and memory ceilings, bounding matmul
+  calls and BenchDNN results against them, and using them in the native
+  BRGEMM tuner. Also what a change to the native kernels, the cost model, the
+  hardware detection or BenchDNN's matmul output updates in the utility, and
+  the rules for machine data.
+- **Inputs:** the shared inputs, plus a ZenDNN build for the probe, the
+  thread count and pinning of the work to rate, and the shapes or BenchDNN
+  output.
+- **Side effects:** builds the probe where the user says; the probe loads
+  every CPU of its team for about 40 s; writes a ceilings file to the run
+  directory, which stays out of the repository.
+- **Produces:** the ceilings file, and the bounds and efficiencies of the
+  calls or of the tuner campaign.
 
 ### [Windows MSVC checklist](op-development-optimization/windows/SUBSKILL.md)
 - **For:** changing ZenDNN's C++ or CMake without breaking the native Windows

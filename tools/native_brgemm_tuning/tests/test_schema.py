@@ -191,14 +191,30 @@ class TestFixture(unittest.TestCase):
         self.assertFalse(SCHEMA.int8_serves(1, 64))
 
     def test_hardware_and_uarch(self):
-        # The fixture's machine: L3 domains of 32 cores and 128 MiB.
-        self.assertEqual((SCHEMA.hw.l1d_kib, SCHEMA.hw.l2_kib, SCHEMA.hw.l3_kib), (48, 1024, 131072))
+        # The fixture's example machine: L3 domains of 8 cores and 32 MiB, AVX512-FP16.
+        self.assertEqual((SCHEMA.hw.l1d_kib, SCHEMA.hw.l2_kib, SCHEMA.hw.l3_kib), (48, 1024, 32768))
         self.assertEqual(SCHEMA.hw.isa, ["avx512f", "avx512bf16", "avx512vnni"])
         self.assertTrue(SCHEMA.uarch.complete)
         self.assertEqual((SCHEMA.uarch.l3_bytes, SCHEMA.uarch.family_l3_cores, SCHEMA.uarch.l3_domain_cores),
-                         (128 << 20, 8, 32))
+                         (32 << 20, 8, 8))
         self.assertEqual((SCHEMA.hw.vendor, SCHEMA.hw.family, SCHEMA.hw.model, SCHEMA.hw.stepping),
-                         ("AuthenticAMD", 26, 81, 0))
+                         ("ExampleVendor", 1, 1, 0))
+        self.assertTrue(SCHEMA.doc["uarch"]["avx512fp16"])
+
+    def test_with_machine(self):
+        with open(S.FIXTURE) as f:
+            fixture = json.load(f)
+        dump = json.loads(json.dumps(fixture))
+        dump["hw"].update(vendor="OtherVendor", model=9, l3_kib=65536)
+        dump["hw_match"].update(vendor="OtherVendor", model=9, l3_kib=65536)
+        dump["uarch"]["l3_bytes"] = 64 << 20
+        kept = S.with_machine(dump, fixture)
+        self.assertEqual(kept, fixture)
+        self.assertEqual(S.schema_text(kept), S.schema_text(fixture))
+        # The dump's fields and order; a field the example machine lacks needs a value first.
+        dump["uarch"]["new_field"] = 1
+        with self.assertRaises(S.SchemaError):
+            S.with_machine(dump, fixture)
 
     def test_hardware_fields(self):
         with open(S.FIXTURE) as f:
@@ -212,7 +228,7 @@ class TestFixture(unittest.TestCase):
         with open(DESIGN_FIXTURE) as f:
             doc = json.load(f)
         # A dump's hw_match is taken as it is.
-        dumped = {"vendor": "AuthenticAMD", "family": 26, "model": 81, "isa": ["avx512f"], "l3_cores": 32}
+        dumped = {"vendor": "ExampleVendor", "family": 1, "model": 2, "isa": ["avx512f"], "l3_cores": 16}
         self.assertEqual(S.Schema(dict(doc, hw_match=dumped)).hw_match, dumped)
         # A dump without the identity: a zero count left out, the plan's domain from the topology.
         hw = {k: v for k, v in doc["hw"].items() if k not in ("vendor", "family", "model", "stepping")}

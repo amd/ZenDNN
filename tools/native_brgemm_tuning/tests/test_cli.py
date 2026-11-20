@@ -25,7 +25,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from helpers import HAVE_NUMPY, HW, SCHEMA, strict_json  # noqa: E402
+from helpers import HAVE_NUMPY, HW, MACHINE, SCHEMA, strict_json  # noqa: E402
 
 from native_brgemm_tuning import export as E  # noqa: E402
 from native_brgemm_tuning import tune  # noqa: E402
@@ -81,10 +81,10 @@ class TestCli(unittest.TestCase):
         lo = HW["model"] - HW["model"] % 16
         self.assertEqual(run("export", "--workdir", wd, "-o", wide_file, "--rules", "none", "--hw-keys",
                              "family,model,l3_cores,smt", "--hw-set", "model=%d-%d" % (lo, lo + 15),
-                             "--hw-set", "l3_cores=8|32")[0], 0)
+                             "--hw-set", "l3_cores=8|16")[0], 0)
         with open(wide_file) as f:
             self.assertEqual(json.load(f)["hardware"],
-                             {"family": HW["family"], "model": {"min": lo, "max": lo + 15}, "l3_cores": [8, 32],
+                             {"family": HW["family"], "model": {"min": lo, "max": lo + 15}, "l3_cores": [8, 16],
                               "smt": HW["smt"]})
         self.assertEqual(run("export", "--workdir", wd, "-o", other_file, "--rules", "none", "--hw-set",
                              "model=%d" % (HW["model"] + 1))[0], 0)
@@ -173,7 +173,7 @@ class TestCli(unittest.TestCase):
         with open(os.path.join(wd, "campaign.json")) as f:
             self.assertIsNone(json.load(f)["keys"])
         self.assertEqual(run("confirm", "--workdir", wd, "--only-new")[0], 0)
-        rc, out = run("confirm", "--workdir", wd, "--only-new")
+        rc, out = run("confirm", "--workdir", wd, "--only-new", "--alone")
         self.assertIn("nothing to confirm", out)
         out_file = os.path.join(wd, "t.json")
         self.assertEqual(run("export", "--workdir", wd, "-o", out_file, "--rules", "none",
@@ -181,8 +181,12 @@ class TestCli(unittest.TestCase):
 
     def test_replay_dry_run(self):
         wd = os.path.join(self.tmp, "rp")
+        with self.assertRaises(SystemExit) as cm:
+            run("init", "--workdir", wd, "--shapes", self.shapes, "--backend", "replay", "--replay-bin", "/opt/replay")
+        self.assertIn("a replay campaign needs its machine's schema", str(cm.exception))
         rc, out = run("init", "--workdir", wd, "--shapes", self.shapes, "--dtypes", "s8", "--m-classes", "1,2-16:16",
-                      "--backend", "replay", "--replay-bin", "/opt/replay", "--preload", "/opt/a.so:/opt/b.so")
+                      "--backend", "replay", "--replay-bin", "/opt/replay", "--preload", "/opt/a.so:/opt/b.so",
+                      *MACHINE)
         self.assertEqual(rc, 0)
         with open(os.path.join(wd, "campaign.json")) as f:
             cold = json.load(f)["backend"]["cold_mb"]
@@ -199,12 +203,27 @@ class TestCli(unittest.TestCase):
         self.assertIn("round 2", out)  # failed candidates are proposed again
         with self.assertRaises(SystemExit):
             run("init", "--workdir", wd, "--shapes", self.shapes, "--backend", "synthetic")
+        # A campaign made without its machine's schema has no hardware block to export.
+        with open(os.path.join(wd, "campaign.json")) as f:
+            c = json.load(f)
+        c["schema"] = None
+        with open(os.path.join(wd, "campaign.json"), "w") as f:
+            json.dump(c, f)
+        out_file = os.path.join(self.tmp, "rp.json")
+        with self.assertRaises(SystemExit) as cm:
+            run("export", "--workdir", wd, "-o", out_file, "--rules", "none", "--no-confirm")
+        self.assertIn("no schema of its machine", str(cm.exception))
+        rc, out = run("export", "--workdir", wd, "-o", out_file, "--rules", "none", "--no-confirm",
+                      "--hw-match", "none")
+        self.assertEqual(rc, 0, out)
+        with open(out_file) as f:
+            self.assertNotIn("hardware", json.load(f))
 
     def test_replay_memory_cap_at_the_timed_layers(self):
         # bf16 4096 x 4096 (33.6 MB) takes 8 layers (268 MB) of a 256 MB floor, 6144 x 4096 6 (302 MB).
         args = ["init", "--workdir", os.path.join(self.tmp, "cap"), "--shapes", self.shapes, "--dtypes", "bf16",
                 "--m-classes", "1", "--backend", "replay", "--replay-bin", "/opt/replay", "--layers", 1,
-                "--cold-mb", 256]
+                "--cold-mb", 256, *MACHINE]
         with self.assertRaises(SystemExit) as cm:
             run(*args, "--group-gb", 0.1)
         self.assertIn("cold_mb=256 MB", str(cm.exception))
@@ -221,7 +240,7 @@ class TestCli(unittest.TestCase):
                         ["--backend", "benchdnn", "--benchdnn", "/opt/benchdnn"]):
             with self.assertRaises(SystemExit) as cm:
                 run("init", "--workdir", os.path.join(self.tmp, "p64"), "--shapes", self.shapes, "--dtypes", "bf16",
-                    "--m-classes", "2-16:16", "--pack-nr", 64, *backend)
+                    "--m-classes", "2-16:16", "--pack-nr", 64, *backend, *MACHINE)
             self.assertIn("pack_nr 64: the library's calls pack every weight in blocks of 32 columns",
                           str(cm.exception))
         rc, out = run("init", "--workdir", os.path.join(self.tmp, "p64"), "--shapes", self.shapes, "--dtypes", "bf16",
@@ -235,7 +254,7 @@ class TestCli(unittest.TestCase):
                 "m\t%s\t4096\t4096\t%s\t100\t1\t16\n" % (w, w) for w in ("bf16", "s8", "s4", "f16")))
         wd = os.path.join(self.tmp, "bd")
         rc, out = run("init", "--workdir", wd, "--shapes", shapes, "--m-classes", "1,2-16:16",
-                      "--backend", "benchdnn", "--benchdnn", "/opt/benchdnn")
+                      "--backend", "benchdnn", "--benchdnn", "/opt/benchdnn", *MACHINE)
         self.assertEqual(rc, 0, out)
         with open(os.path.join(wd, "campaign.json")) as f:
             self.assertEqual(sorted({p["dtype"] for p in json.load(f)["problems"]}), ["bf16", "s8"])
@@ -246,7 +265,7 @@ class TestCli(unittest.TestCase):
         wd = os.path.join(self.tmp, "pods")
         rc, out = run("init", "--workdir", wd, "--shapes", self.shapes, "--m-classes", "1,2-16:16",
                       "--backend", "replay", "--replay-bin", "/opt/replay", "--parallel", 3, "--pods", "pod-a,pod-b",
-                      "--launcher", "/tools/run_one.sh --pod {pod} --cmd {dir} -- bash {script}")
+                      "--launcher", "/tools/run_one.sh --pod {pod} --cmd {dir} -- bash {script}", *MACHINE)
         self.assertEqual(rc, 0, out)
         with open(os.path.join(wd, "campaign.json")) as f:
             self.assertEqual(json.load(f)["pods"], ["pod-a", "pod-b"])

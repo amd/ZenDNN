@@ -17,7 +17,9 @@
 """Native BRGEMM tuner CLI: shapes and M classes -> problems -> search ->
 results store -> confirmation -> tuning file.  See README.md.
 
-  tune.py init     --workdir D --shapes S.tsv --backend replay --replay-bin B ...
+  tune.py init     --workdir D --schema G --shapes S.tsv --backend replay --replay-bin B ...
+  tune.py probe    --workdir D --probe-bin P [--local]   (the machine's ceilings: bounds, efficiency)
+  tune.py calibrate --workdir D   (A/B the cost model's inputs from the ceilings; before the search)
   tune.py search   --workdir D [--strategy guided --budget 32 --batch 8] [--dry-run]
   tune.py collect  --workdir D            (sessions run by hand after --dry-run)
   tune.py confirm  --workdir D
@@ -35,6 +37,7 @@ import argparse
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from typing import Any, Dict, List, Optional
@@ -42,8 +45,10 @@ from typing import Any, Dict, List, Optional
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from native_brgemm_tuning import calibration as calib_mod  # noqa: E402
 from native_brgemm_tuning import candidates as cand_mod  # noqa: E402
 from native_brgemm_tuning import export as exp  # noqa: E402
+from native_brgemm_tuning import op_perf  # noqa: E402
 from native_brgemm_tuning import problems as prob_mod  # noqa: E402
 from native_brgemm_tuning import results as res_mod  # noqa: E402
 from native_brgemm_tuning import schema as schema_mod  # noqa: E402
@@ -76,31 +81,68 @@ class Campaign:
         self.classes = prob_mod.parse_m_classes(self.c["m_classes"])
         self.db = res_mod.ResultsDB(os.path.join(self.workdir, RESULTS))
         self._spaces: Optional[Dict[str, cand_mod.Space]] = None
+        self._ceilings: Any = False
+        self._bounds: Optional[Dict[str, Any]] = None
+
+    def save(self) -> None:
+        _write_json(os.path.join(self.workdir, CAMPAIGN), self.c)
+
+    @property
+    def ceilings(self) -> Any:
+        """The machine's ceilings (tune.py probe), or None."""
+        if self._ceilings is False:
+            self._ceilings = None
+            path = os.path.join(self.workdir, op_perf.CEILINGS)
+            if os.path.exists(path):
+                try:
+                    self._ceilings = op_perf.load(path)
+                except op_perf.CeilingsError as e:
+                    log("ignored %s" % e)
+        return self._ceilings
+
+    @property
+    def cold(self) -> bool:
+        return op_perf.cold_weights(self.c["backend"])
+
+    @property
+    def bounds(self) -> Dict[str, Any]:
+        """pkey -> the problem's bound on the measured machine; empty without ceilings."""
+        if self._bounds is None:
+            ceil = self.ceilings
+            self._bounds = op_perf.bounds(self.problems, ceil, self.cold) if ceil is not None else {}
+        return self._bounds
+
+    @property
+    def calibration(self) -> Dict[str, Dict[str, Any]]:
+        """Weight type -> the calibrated cm_* values tune.py calibrate kept ({} when none)."""
+        cal = self.c.get("calibration") or {}
+        return cal.get("configs", {}) if cal.get("accepted") else {}
 
     @property
     def spaces(self) -> Dict[str, cand_mod.Space]:
         if self._spaces is None:
             values = cand_mod.parse_values(self.c.get("values") or [], self.schema)
+            base = self.calibration
             self._spaces = {}
             for p in self.problems:
                 keys = cand_mod.search_keys(self.schema, p.dtype, self.c["allow_bit_changing"],
                                             self.c.get("keys") or None)
                 self._spaces[p.key()] = cand_mod.Space(p, self.schema, self.uarch, keys, values,
                                                        self.c["allow_bit_changing"],
-                                                       self.c.get("keep_threads", False))
+                                                       self.c.get("keep_threads", False), base.get(p.dtype))
         return self._spaces
 
     def backend(self) -> Any:
         return jobs.make_backend(self.c["backend"])
 
-    def evaluator(self, repeats: int, dry_run: bool) -> Any:
+    def evaluator(self, repeats: int, dry_run: bool, alone: bool = False) -> Any:
         be = self.backend()
         defaults = {k: s.default for k, s in self.spaces.items()}
         if not be.runs_on_pod:
             return be.evaluator(self.by_key, defaults, repeats)
         return jobs.PodEvaluator(be, self.workdir, self.by_key, defaults, self.c.get("launcher"), repeats,
                                  self.c.get("parallel", 1), self.c.get("timeout_s", 7200), self.schema,
-                                 dry_run, log=log, pods=self.c.get("pods") or ())
+                                 dry_run, log=log, pods=self.c.get("pods") or (), alone=alone)
 
 
 def log(msg: str) -> None:
@@ -143,6 +185,9 @@ def cmd_schema(a: argparse.Namespace) -> int:
     if a.extract:
         with open(a.extract, encoding="utf-8") as f:
             doc = json.loads(schema_mod.extract_schema_json(f.read()))
+        if a.machine_of:
+            with open(a.machine_of, encoding="utf-8") as f:
+                doc = schema_mod.with_machine(doc, json.loads(schema_mod.extract_schema_json(f.read())))
         out = a.output or "schema.json"
         os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
         with open(out, "w", encoding="utf-8") as f:
@@ -214,6 +259,10 @@ def cmd_init(a: argparse.Namespace) -> int:
     wd = os.path.abspath(a.workdir)
     if os.path.exists(os.path.join(wd, CAMPAIGN)) and not a.force:
         sys.exit("%s exists (use --force to replace it)" % os.path.join(wd, CAMPAIGN))
+    if not a.schema and a.backend != "synthetic":
+        sys.exit("a %s campaign needs its machine's schema: --schema <the SchemaDump gtest log of the build, on "
+                 "that machine> (the fixture describes an example machine that no tuning file should match)"
+                 % a.backend)
     s = schema_mod.load_schema(a.schema, a.uarch)
     if s.uarch is None or not s.uarch.complete:
         sys.exit("the schema lacks uarch fields: pass --uarch family_l3_cores=<n>[,l2_bytes=..]")
@@ -247,6 +296,17 @@ def cmd_init(a: argparse.Namespace) -> int:
         for k in a.keys.split(","):
             s.key(k)
     cand_mod.parse_values(a.values or [], s)
+    # The calls of each problem's weight at its M (the rows of the shapes whose M range holds
+    # it, else all of the weight's calls) weigh its headroom.
+    weights: Dict[str, int] = {}
+    if a.shapes:
+        rows = prob_mod.calls_by_m(a.shapes, a.dtypes.split(",") if a.dtypes else None, min_calls=a.min_calls,
+                                   group=a.s4_group)
+        for p in probs:
+            mine = rows.get((p.dtype, p.n, p.k, p.group if p.int4 else 0), [])
+            c = prob_mod.calls_at(mine, p.m) or sum(r[2] for r in mine)
+            if c:
+                weights.setdefault(p.key(), c)
     camp = {
         "schema": os.path.abspath(a.schema) if a.schema else None, "uarch": a.uarch or "",
         "backend": be, "problems": [p.to_dict() for p in probs], "m_classes": a.m_classes,
@@ -254,7 +314,7 @@ def cmd_init(a: argparse.Namespace) -> int:
         "allow_bit_changing": a.allow_bit_changing, "keep_threads": a.keep_threads,
         "launcher": a.launcher, "pods": _pods(a.pods), "repeats": a.repeats,
         "confirm_repeats": a.confirm_repeats, "parallel": a.parallel, "timeout_s": a.timeout,
-        "min_gain": a.min_gain, "z": a.z,
+        "min_gain": a.min_gain, "z": a.z, "weights": weights,
     }
     _write_json(os.path.join(wd, CAMPAIGN), camp)
     for p, why in skipped:
@@ -287,10 +347,18 @@ def cmd_search(a: argparse.Namespace) -> int:
         probs = [p for p in probs if p.m in want]
         if not probs:
             sys.exit("no problem of the campaign has M in %s" % a.ms)
+    attainable = None
+    if a.prioritize or a.skip_at_pct or a.stop_at_pct:
+        if camp.ceilings is None:
+            sys.exit("--prioritize, --skip-at-pct and --stop-at-pct need the machine's ceilings: run tune.py probe")
+        attainable = {k: b.attainable_ms for k, b in camp.bounds.items()}
     st = SearchSettings(strategy=a.strategy, budget=a.budget, batch=a.batch, max_keys=a.max_keys,
                         p_change=a.p_change, init=a.init, pool=a.pool, explore=a.explore, kappa=a.kappa,
                         surrogate=a.surrogate, seed=a.seed, z=camp.c["z"], seeds=a.seeds,
-                        min_gain=camp.c["min_gain"])
+                        min_gain=camp.c["min_gain"], attainable=attainable, weights=camp.c.get("weights") or None,
+                        prioritize=bool(a.prioritize), prioritize_by=a.prioritize or "calls",
+                        skip_at=(a.skip_at_pct or 0.0) / 100.0,
+                        stop_at=(a.stop_at_pct or 0.0) / 100.0, scout=a.scout)
     ev = camp.evaluator(camp.c["repeats"], a.dry_run)
     searcher = Searcher(probs, camp.spaces, ev, camp.db, st, log=log)
     try:
@@ -305,9 +373,16 @@ def cmd_search(a: argparse.Namespace) -> int:
 def cmd_collect(a: argparse.Namespace) -> int:
     camp = Campaign(a.workdir)
     dirs = a.sessions or jobs.pending_sessions(camp.workdir)
-    if not dirs:
+    probes = [] if a.sessions else jobs.pending_probes(camp.workdir)
+    if not dirs and not probes:
         log("no pending session")
         return 0
+    ran = [d for d in probes if a.force or os.path.exists(os.path.join(d, jobs.PROBE_DONE))]
+    for d in probes:
+        if d not in ran:
+            log("skipped %s: the probe has not finished (--force collects it as failed)" % d)
+    if ran:
+        _collect_probes(camp, ran)
     be = camp.backend()
     for d in dirs:
         out_dir = os.path.join(d, "out")
@@ -369,7 +444,7 @@ def cmd_confirm(a: argparse.Namespace) -> int:
         return 0
     rnd = _next_round(camp, "confirm")
     try:
-        recs = camp.evaluator(camp.c["confirm_repeats"], a.dry_run)(rnd, "confirm", batch)
+        recs = camp.evaluator(camp.c["confirm_repeats"], a.dry_run, alone=a.alone)(rnd, "confirm", batch)
     except jobs.DryRun as e:
         _report_dry_run(e, camp)
         return 0
@@ -382,6 +457,9 @@ def cmd_confirm(a: argparse.Namespace) -> int:
 
 def cmd_export(a: argparse.Namespace) -> int:
     camp = Campaign(a.workdir)
+    if a.hw_match != "none" and not camp.c.get("schema") and camp.c["backend"]["backend"] != "synthetic":
+        sys.exit("the campaign has no schema of its machine, so its hardware block would be the fixture's "
+                 "example machine: re-init it with --schema, or export --hw-match none")
     recs = camp.db.load()
     winners = _winners(camp)
     exp.attach_confirmation(winners, recs, camp.spaces, camp.c["min_gain"], camp.c["z"])
@@ -412,16 +490,28 @@ def cmd_export(a: argparse.Namespace) -> int:
                                            if camp.schema.key(k).applies_to(d))]
             if bad:
                 rules, rules_report["skipped"] = None, "classes with bit-changing keys: %s" % bad
+    cal_cfgs = {d: exp.config_json(c, camp.schema) for d, c in camp.calibration.items() if c}
+    if cal_cfgs and not a.no_calibration_rule:
+        rules = calib_mod.with_rules(rules, cal_cfgs, int(camp.c["backend"]["threads"]))
+        rules_report["calibration"] = "the calibrated values of each weight type in the rules, from M = 2"
     hw_keys = [k.strip() for k in a.hw_keys.split(",") if k.strip()] if a.hw_keys is not None else None
+    meta = {"backend": camp.c["backend"]["backend"], "m_classes": camp.c["m_classes"],
+            "min_gain": camp.c["min_gain"], "z": camp.c["z"], "rules_report": rules_report}
+    ceil, op_rows = camp.ceilings, []
+    if ceil is not None:
+        op_rows = op_perf.efficiency_rows(res_mod.summarize(recs, phases=["search"], z=camp.c["z"]),
+                                          camp.problems, camp.bounds, camp.c["min_gain"],
+                                          res_mod.summarize(recs, phases=["confirm"], z=camp.c["z"]))
+        cal = camp.c.get("calibration")
+        # A rejected calibration's values are no settings of the file: its verdict alone.
+        meta["op_perf"] = op_perf.meta(op_rows, ceil, camp.cold, None if cal is None else {
+            k: cal[k] for k in ("accepted", "geomean_ratio", "geomean_changed", "problems", "changed",
+                                "calib_min_gain", "configs") if k in cal and (k != "configs" or cal.get("accepted"))})
     try:
         hw_values = exp.parse_hw_set(a.hw_set or [])
-        # The plans the entries name, which tune.py verify checks against the library's lines.
-        plans = exp.entry_plans(entries, camp.problems, camp.schema, camp.uarch)
-        doc = exp.build_doc(entries, rules, camp.schema, a.hw_match,
-                            {"backend": camp.c["backend"]["backend"], "m_classes": camp.c["m_classes"],
-                             "min_gain": camp.c["min_gain"], "z": camp.c["z"], "rules_report": rules_report,
-                             "plans": plans},
-                            hw_keys, hw_values)
+        # The plans the file names, which tune.py verify checks against the library's lines.
+        meta["plans"] = exp.entry_plans(entries, camp.problems, camp.schema, camp.uarch, rules)
+        doc = exp.build_doc(entries, rules, camp.schema, a.hw_match, meta, hw_keys, hw_values)
     except ValueError as e:
         sys.exit("export: %s" % e)
     errs, warns = exp.validate_doc(doc, camp.schema)
@@ -430,10 +520,13 @@ def cmd_export(a: argparse.Namespace) -> int:
     _write_tuning_file(a.output, doc)
     report = {"entries": len(entries), "skipped": skipped, "winners": [w.to_dict() for w in winners],
               "rules": rules_report, "warnings": warns}
+    if ceil is not None:
+        report["op_perf"] = {"ceilings": camp.c.get("ceilings", ceil.brief()), "cold_weights": camp.cold,
+                             "rows": op_rows}
     _write_json(os.path.join(camp.workdir, "export_report.json"), report)
     log("wrote %s: %d entries, rules %s; %d classes skipped (export_report.json)" % (
         a.output, len(entries), rules["kind"] if rules else "none (%s)" % rules_report.get("skipped"), len(skipped)))
-    if rules is not None:
+    if "heldout" in rules_report:
         ho = rules_report["heldout"]
         if ho["measured"]:
             log("rules held out: geomean ratio %.3f (oracle %.3f) over %d measured problems, %d slower than "
@@ -502,10 +595,190 @@ def cmd_verify(a: argparse.Namespace) -> int:
     for r in report["rows"]:
         if not r["ok"]:
             log("  %s: %s" % (r["problem"], "; ".join(r["why"])))
-    log("%d problems, %d named by entries (%d of them the built-in plan), %d failed: %s" % (
-        report["problems"], report["named"], report["named_builtin"], report["failed"],
+    log("%d problems, %d named by entries (%d of them the built-in plan), %d by rules alone, %d failed: %s" % (
+        report["problems"], report["named"], report["named_builtin"], report["ruled"], report["failed"],
         os.path.join(sdir, "verify_report.json")))
     return 1 if report["failed"] else 0
+
+
+def cmd_calibrate(a: argparse.Namespace) -> int:
+    """Times every problem with the cost model's inputs from the ceilings against the built-in
+    plan, and keeps them as the base of the search when the A/B says so."""
+    from op_perf_utility.matmul.calibrate import calibrate
+
+    camp = Campaign(a.workdir)
+    _no_pending(camp, a.ignore_pending)
+    ceil = camp.ceilings
+    if ceil is None:
+        sys.exit("calibrate needs the machine's ceilings: run tune.py probe first")
+    if any(r.get("phase") in ("search", "confirm") for r in camp.db.load()):
+        sys.exit("the campaign has search results: the calibrated values become the base of every candidate, "
+                 "so calibrate a campaign before its search (tune.py init a new one)")
+    # --parallel and --pods are this run's, as for search and confirm: camp.save() below keeps the stored ones.
+    stored = {k: camp.c[k] for k in ("parallel", "pods") if k in camp.c}
+    if a.parallel:
+        camp.c["parallel"] = a.parallel
+    if a.pods is not None:
+        camp.c["pods"] = _pods(a.pods)
+    keys = [k.strip() for k in a.keys.split(",")] if a.keys else list(calib_mod.DEFAULT_KEYS)
+    bad = [k for k in keys if k not in calib_mod.KEYS]
+    if bad:
+        sys.exit("--keys: %s (calibrated keys: %s)" % (", ".join(bad), ", ".join(calib_mod.KEYS)))
+    cal = calibrate(ceil, threads=int(camp.c["backend"]["threads"]), domain_threads=camp.uarch.plan_domain)
+    cfgs = calib_mod.configs(cal, [p.dtype for p in camp.problems], keys)
+    plain = {p.key(): cand_mod.Space(p, camp.schema, camp.uarch, [], None, camp.c["allow_bit_changing"],
+                                     camp.c.get("keep_threads", False)) for p in camp.problems}
+    batch = calib_mod.ab_batch(camp.problems, plain, cfgs)
+    for d, cfg in sorted(cfgs.items()):
+        log("%s: %s" % (d, cand_mod.format_settings(cfg, camp.schema) or "-"))
+    summ = res_mod.summarize(camp.db.load(), phases=["calibrate"], z=camp.c["z"])
+    todo = {k: v for k, v in batch.items() if k not in summ or v[0].text not in summ[k].cands}
+    if todo:
+        rnd = _next_round(camp, "calibrate")
+        log("calibration round %d: %d of %d problems change plan" % (rnd, len(batch), len(camp.problems)))
+        try:
+            recs = camp.evaluator(a.repeats or camp.c["confirm_repeats"], a.dry_run)(rnd, "calibrate", todo)
+        except jobs.DryRun as e:
+            _report_dry_run(e, camp)
+            return 0
+        for r in recs:
+            r["round"] = rnd
+        camp.db.append(recs)
+        summ = res_mod.summarize(camp.db.load(), phases=["calibrate"], z=camp.c["z"])
+    verdict = calib_mod.decide(camp.problems, batch, summ, camp.c["min_gain"], a.calib_min_gain)
+    for row in verdict["rows"]:
+        if row["changed"]:
+            p = camp.by_key[row["problem"]]
+            log("  %-40s %s" % (p.label(), "no result" if row["ratio"] is None else "ratio %.4f (noise %.3f)%s" % (
+                row["ratio"], row["noise"], "  slower" if row["problem"] in verdict["slower"] else "")))
+    camp.c["calibration"] = dict({k: v for k, v in verdict.items() if k != "rows"}, configs=cfgs,
+                                 sources=cal.sources, probe=ceil.brief(), created=res_mod.utc_now())
+    if verdict["accepted"]:
+        camp.c["values"] = calib_mod.seed_values(camp.c.get("values") or [], cfgs, camp.schema)
+    for k in ("parallel", "pods"):
+        camp.c.pop(k, None)
+    camp.c.update(stored)
+    camp.save()
+    log("calibration %s: geomean ratio %.4f over the %d problems it changes (%.4f over all %d)%s" % (
+        "kept as the search's base" if verdict["accepted"] else "not kept", verdict["geomean_changed"],
+        verdict["changed"], verdict["geomean_ratio"], verdict["problems"],
+        "" if verdict["accepted"] else ": " + "; ".join(verdict["why"])))
+    return 0
+
+
+def _probe_dir(camp: Campaign, name: str) -> str:
+    base = sdir = os.path.join(camp.workdir, "probe", name)
+    n = 1
+    while os.path.exists(sdir):
+        n += 1
+        sdir = "%s_%d" % (base, n)
+    return sdir
+
+
+def _ceilings_spread(a: Any, b: Any, tol: float = 0.10) -> List[str]:
+    """The ceilings of b more than tol away from a's: compute per type, bandwidth per level and team."""
+    out = []
+    for path in sorted(set(a.compute) & set(b.compute)):
+        r = b.compute[path]["gflops_team"] / a.compute[path]["gflops_team"] - 1.0
+        if abs(r) > tol:
+            out.append("%s compute %+.0f%%" % (path, 100 * r))
+    theirs = {(x["level"], x["threads"]): x["gbps"] for x in b.doc["bandwidth"]}
+    for x in a.doc["bandwidth"]:
+        y = theirs.get((x["level"], x["threads"]))
+        if y is not None and abs(y / x["gbps"] - 1.0) > tol:
+            out.append("%s bandwidth at %d threads %+.0f%%" % (x["level"], x["threads"], 100 * (y / x["gbps"] - 1.0)))
+    return out
+
+
+def _install_ceilings(camp: Campaign, paths: List[str], force: bool) -> bool:
+    """Installs the first of paths whose ceilings describe the campaign's machine and team as
+    workdir/ceilings.json, and notes how the others differ from it."""
+    threads = int(camp.c["backend"]["threads"])
+    good = []
+    for path in paths:
+        try:
+            ceil = op_perf.load(path)
+        except op_perf.CeilingsError as e:
+            log("refused %s" % e)
+            continue
+        bad = op_perf.machine_mismatch(ceil, camp.schema, threads)
+        if bad and not force:
+            log("refused %s: not the campaign's machine and team (--force installs it):\n  %s" % (
+                path, "\n  ".join(bad)))
+            continue
+        good.append((os.path.abspath(path), ceil, bad))
+    if not good:
+        return False
+    path, ceil, bad = good[0]
+    for other, oc, _ in good[1:]:
+        spread = _ceilings_spread(ceil, oc)
+        if spread:
+            log("note: %s differs from %s: %s" % (other, path, "; ".join(spread)))
+    dest = os.path.join(camp.workdir, op_perf.CEILINGS)
+    if path != dest:
+        shutil.copyfile(path, dest)
+    camp.c["ceilings"] = dict(ceil.brief(), source=path, mismatch=bad)
+    camp.save()
+    camp._ceilings, camp._bounds = False, None
+    log(camp.ceilings.summary())
+    log("installed the ceilings of %s%s" % (path, " despite: " + "; ".join(bad) if bad else ""))
+    return True
+
+
+def _collect_probes(camp: Campaign, dirs: List[str], force: bool = False) -> bool:
+    paths = []
+    for d in dirs:
+        path, tail = jobs.collect_probe(d)
+        jobs.mark_collected(d, 1 if path else 0)
+        if path is None:
+            log("probe %s wrote no ceilings%s" % (d, ": " + tail if tail else ""))
+        else:
+            paths.append(path)
+    return bool(paths) and _install_ceilings(camp, paths, force)
+
+
+def cmd_probe(a: argparse.Namespace) -> int:
+    """Measures the machine's ceilings with the campaign's team where its sessions run, one
+    job per pod (or on this host), or installs a ceilings file measured there."""
+    camp = Campaign(a.workdir)
+    if a.ceilings:
+        return 0 if _install_ceilings(camp, [a.ceilings], a.force) else 1
+    pend = jobs.pending_probes(camp.workdir)
+    if pend and not a.ignore_pending:
+        sys.exit("probes not collected yet (run them, then tune.py collect):\n  " + "\n  ".join(pend))
+    probe_bin = a.probe_bin or camp.c.get("probe_bin")
+    if not probe_bin:
+        sys.exit("no probe binary: pass --probe-bin (built with tools/op_perf_utility/probe/build.sh)")
+    camp.c["probe_bin"] = os.path.abspath(probe_bin)
+    camp.save()
+    be = camp.backend()
+    local = a.local or not be.runs_on_pod
+    pods = _pods(a.pods) if a.pods is not None else list(camp.c.get("pods") or [])
+    targets = [""] if local or not pods else pods
+    dirs, scripts = [], []
+    for pod in targets:
+        dirs.append(_probe_dir(camp, "local" if local else pod or "pod"))
+        scripts.append(jobs.write_probe(dirs[-1], be, camp.c["probe_bin"], pod, a.quick, a.seconds, a.repeats))
+    launcher = camp.c.get("launcher")
+    if local:
+        if a.dry_run:
+            log("probe written, not run: bash %s" % scripts[0])
+            return 0
+        with open(os.path.join(dirs[0], "launch.out"), "w", encoding="utf-8") as out:
+            rc = subprocess.call(["bash", scripts[0]], stdout=out, stderr=subprocess.STDOUT)
+        log("probe on this host: exit %d" % rc)
+    elif a.dry_run or not launcher:
+        log("probe jobs written, not launched:")
+        for d, s, pod in zip(dirs, scripts, targets):
+            log("  " + (jobs.launch_command(d, s, launcher, pod) if launcher else "<launcher> " + s))
+        log("after they ran: tune.py collect --workdir %s" % camp.workdir)
+        return 0
+    else:
+        running = [(d, jobs.launch_job(d, s, launcher, be.threads, camp.c.get("timeout_s", 7200), pod))
+                   for d, s, pod in zip(dirs, scripts, targets)]
+        for d, proc in running:
+            log("probe %s: launcher exit %d" % (os.path.basename(d), proc.wait()))
+    return 0 if _collect_probes(camp, dirs, a.force) else 1
 
 
 def cmd_merge(a: argparse.Namespace) -> int:
@@ -541,19 +814,40 @@ def cmd_status(a: argparse.Namespace) -> int:
             bad[st] = bad.get(st, 0) + 1
     log("%d problems, %d with results; probes not applied: %s; pending sessions: %d" % (
         len(camp.problems), len(summ), bad or "none", len(jobs.pending_sessions(camp.workdir))))
+    cal = camp.c.get("calibration")
+    if cal:
+        log("calibration %s: geomean ratio %.4f over the %d problems it changes; %s" % (
+            "kept" if cal.get("accepted") else "not kept", cal.get("geomean_changed", float("nan")),
+            cal.get("changed", 0), "; ".join("%s %s" % (d, cand_mod.format_settings(c, camp.schema))
+                                             for d, c in sorted(cal.get("configs", {}).items()))))
+    ceil, rows = camp.ceilings, {}
+    if ceil is not None:
+        op_perf.attach(summ, camp.bounds)
+        conf = res_mod.summarize(recs, phases=["confirm"], z=camp.c["z"])
+        rows = {r["problem"]: r for r in op_perf.efficiency_rows(summ, camp.problems, camp.bounds,
+                                                                 camp.c["min_gain"], conf)}
+        log("ceilings of %s (%d threads, %s weights): the built-in plans reach %s%% of their bounds, the best "
+            "plans %s%% (geomeans; a search's best counts until a confirmation rejects it)" % (
+                ceil.doc.get("created", "?"), ceil.threads, "cold" if camp.cold else "warm",
+                op_perf.geomean_pct(rows.values(), "builtin_pct"), op_perf.geomean_pct(rows.values(), "best_pct")))
     for k, ps in sorted(summ.items(), key=lambda kv: kv[0]):
         b = ps.best(camp.c["min_gain"], significant_only=True)
         p = camp.by_key.get(k)
-        log("  %-40s built-in %.4f ms (noise %.3f), %3d candidates, best %s" % (
+        r = rows.get(k)
+        log("  %-40s built-in %.4f ms (noise %.3f), %3d candidates, best %s%s" % (
             p.label() if p else k[:40], ps.default_ms, ps.default_noise, len(ps.cands),
-            "%s (%.3f)" % (b.text, b.ratio) if b else "-"))
+            "%s (%.3f)" % (b.text, b.ratio) if b else "-",
+            "; %s-bound, built-in %.0f%%, best %.0f%% of it%s" % (
+                ps.bound, r["builtin_pct"], r["best_pct"], " (%s)" % r["best_status"] if r["best_status"] else "")
+            if r and r["builtin_pct"] is not None else ""))
     return 0
 
 
 # ---------------------------------------------------------------- arguments
 
 def _common_schema(sp: argparse.ArgumentParser) -> None:
-    sp.add_argument("--schema", help="SchemaDump JSON or gtest log (default: fixtures/schema_dump.json)")
+    sp.add_argument("--schema", help="SchemaDump JSON or gtest log (default: fixtures/schema_dump.json, an example "
+                                     "machine; a replay or benchdnn campaign's init needs its own)")
     sp.add_argument("--uarch", help="UarchParams overrides, e.g. family_l3_cores=8,l2_bytes=1048576")
 
 
@@ -578,6 +872,8 @@ def build_parser() -> argparse.ArgumentParser:
     _common_schema(sp)
     sp.add_argument("--compare", help="another schema to diff against")
     sp.add_argument("--extract", help="gtest log holding the SchemaDump output")
+    sp.add_argument("--machine-of", help="with --extract: the machine fields (hw, uarch, hw_match) of this "
+                                         "schema instead of the dump's (refresh_fixtures.sh: the fixture's)")
     sp.add_argument("-o", "--output")
     sp.set_defaults(fn=cmd_schema)
 
@@ -663,6 +959,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--values", action="append", help="key=a|b for this search (repeatable)")
     sp.add_argument("--parallel", type=int, help="sessions of this search (default: the campaign's)")
     sp.add_argument("--pods", help="pods of this search's sessions (default: the campaign's)")
+    sp.add_argument("--prioritize", nargs="?", const="calls", choices=("calls", "relative"),
+                    help="split budget x problems by headroom on the measured machine (needs tune.py probe): "
+                         "calls (the default) by calls at the problem's M x time x (1 - efficiency), relative "
+                         "by (1 - efficiency) alone, for shapes whose calls are flat")
+    sp.add_argument("--skip-at-pct", type=float,
+                    help="no candidates for a problem whose built-in plan reaches this %% of its bound")
+    sp.add_argument("--stop-at-pct", type=float,
+                    help="no more candidates for a problem once its best candidate reaches this %% of its bound")
+    sp.add_argument("--scout", type=int, default=1,
+                    help="with the three above: candidates of a problem not timed yet, in its first round")
     sp.add_argument("--dry-run", action="store_true", help="write the sessions and stop")
     sp.add_argument("--ignore-pending", action="store_true")
     sp.set_defaults(fn=cmd_search)
@@ -681,6 +987,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="confirm only winners without confirmation results yet")
     sp.add_argument("--fallback", action="store_true",
                     help="for winners no confirmed candidate covers: confirm their best alternative not run yet")
+    sp.add_argument("--alone", action="store_true",
+                    help="time each winner in a slot of its own, the other problems of its process at their "
+                         "built-in plans (in a slot of every problem's winner, one plan can change another's time)")
     sp.add_argument("--parallel", type=int, help="sessions of each round (default: the campaign's)")
     sp.add_argument("--pods", help="pods of the sessions (default: the campaign's)")
     sp.add_argument("--dry-run", action="store_true")
@@ -700,12 +1009,31 @@ def build_parser() -> argparse.ArgumentParser:
         exp.HW_DEFAULT_KEYS))
     sp.add_argument("--hw-set", action="append",
                     help="key=value written instead of the machine's value, e.g. model=0-15, "
-                         "l3_kib=32768|131072, cores=64-, vendor=A|B, isa=avx512bf16+avx512vnni (repeatable)")
+                         "l3_kib=16384|32768, cores=64-, vendor=A|B, isa=avx512bf16+avx512vnni (repeatable)")
     sp.add_argument("--no-confirm", action="store_true", help="export winners without a confirmation run")
     sp.add_argument("--allow-bit-changing", action="store_true")
     sp.add_argument("--exclude", action="append",
                     help="entry ids to leave out (comma separated, or @file with one id per line; repeatable)")
+    sp.add_argument("--no-calibration-rule", action="store_true",
+                    help="the calibrated values in the entries only, no rule for the other calls (a file "
+                         "tune.py merge takes)")
     sp.set_defaults(fn=cmd_export)
+
+    sp = sub.add_parser("calibrate",
+                        help="A/B the cost model's inputs from the machine's ceilings; kept, they are the "
+                             "search's base")
+    sp.add_argument("--workdir", required=True)
+    sp.add_argument("--keys", help="the keys to calibrate, of %s (default: %s)" % (
+        ",".join(calib_mod.KEYS), ",".join(calib_mod.DEFAULT_KEYS)))
+    sp.add_argument("--repeats", type=int, help="repeats of the A/B (default: the campaign's confirm repeats)")
+    sp.add_argument("--calib-min-gain", type=float, default=0.01,
+                    help="least gain of the geomean ratio of the problems whose plans change that keeps "
+                         "the values")
+    sp.add_argument("--parallel", type=int, help="sessions of the A/B (default: the campaign's)")
+    sp.add_argument("--pods", help="pods of the A/B's sessions (default: the campaign's)")
+    sp.add_argument("--dry-run", action="store_true")
+    sp.add_argument("--ignore-pending", action="store_true")
+    sp.set_defaults(fn=cmd_calibrate)
 
     sp = sub.add_parser("check", help="validate a tuning file and show what it gives problems")
     sp.add_argument("file")
@@ -721,6 +1049,21 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--ms", help="verify only the problems at these Ms")
     sp.add_argument("--dry-run", action="store_true", help="write the job and stop")
     sp.set_defaults(fn=cmd_verify)
+
+    sp = sub.add_parser("probe", help="measure the machine's ceilings where the campaign's sessions run")
+    sp.add_argument("--workdir", required=True)
+    sp.add_argument("--probe-bin", help="the probe (tools/op_perf_utility/probe/build.sh; kept in campaign.json)")
+    sp.add_argument("--local", action="store_true", help="run the probe on this host, not through the launcher")
+    sp.add_argument("--pods", help="pods to probe, comma separated (default: the campaign's)")
+    sp.add_argument("--ceilings", help="install this ceilings file instead of probing")
+    sp.add_argument("--quick", action="store_true", help="short measurements, for a smoke test")
+    sp.add_argument("--seconds", type=float, default=0.0, help="seconds per measurement (default: the probe's)")
+    sp.add_argument("--repeats", type=int, default=0, help="repeats per measurement (default: the probe's)")
+    sp.add_argument("--force", action="store_true",
+                    help="install ceilings of another machine or team than the campaign's")
+    sp.add_argument("--dry-run", action="store_true", help="write the probe jobs and stop")
+    sp.add_argument("--ignore-pending", action="store_true")
+    sp.set_defaults(fn=cmd_probe)
 
     sp = sub.add_parser("merge", help="one tuning file of the entries of several files")
     sp.add_argument("files", nargs="+")

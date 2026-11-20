@@ -16,7 +16,9 @@
 # *******************************************************************************/
 #
 # Rewrites the tuner's fixtures from a ZenDNN build: fixtures/schema_dump.json
-# from the log of its NativeConfigSchema.SchemaDump gtest, and
+# from the log of its NativeConfigSchema.SchemaDump gtest, keeping the
+# fixture's example machine (its hw, uarch and hw_match values, whose field
+# names alone the planner's test compares) rather than the dump machine's, and
 # fixtures/plan_check.json from its planner's plans for the cases of
 # tests/plan_cases.py. The plan fixture is written only when plan.py gives the
 # library's plan in every case; otherwise the differences are listed and
@@ -42,7 +44,7 @@ LOG=$(readlink -f "$2")
 B=${3:-$WT/build}
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
-"$PY" "$HERE/tune.py" schema --extract "$LOG" -o "$T/schema.json"
+"$PY" "$HERE/tune.py" schema --extract "$LOG" --machine-of "$HERE/fixtures/schema_dump.json" -o "$T/schema.json"
 "$PY" "$HERE/tune.py" schema --schema "$T/schema.json" --compare "$HERE/fixtures/schema_dump.json" || true
 if [ -n "${DUMP:-}" ]; then
     cp "$DUMP" "$T/dump.txt"

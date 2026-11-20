@@ -456,6 +456,25 @@ jobs:
         ZENDNNL_NATIVE_SCHEMA=$WORKSPACE/native_tuner_gtest.log python -m unittest discover -s $WORKSPACE/tools/native_brgemm_tuning/tests -t $WORKSPACE/tools
       shell: bash
 
+    - name: Run op performance utility tests
+      run: |
+        # Source miniforge profile and activate conda environment
+        source ~/.miniforge_profile
+        conda activate $CONDA_ENV_NAME
+
+        # The utility's own tests (machine ceilings, matmul bounds, the cost model's inputs), on the host
+        python -m unittest discover -s $WORKSPACE/tools/op_perf_utility/tests -t $WORKSPACE/tools
+
+        # Its probe, built against this build and run briefly on 4 threads; the ceilings it writes read back
+        # without printing them, so the log carries no runner's measurements
+        bash $WORKSPACE/tools/op_perf_utility/probe/build.sh $WORKSPACE/build $WORKSPACE/op_perf_probe
+        if grep -q -w avx512f /proc/cpuinfo; then
+          OMP_NUM_THREADS=4 OMP_PROC_BIND=close OMP_PLACES=cores $WORKSPACE/op_perf_probe --out $WORKSPACE/op_perf_ceilings.json --threads 4 --quick
+          (cd $WORKSPACE/tools && python -m op_perf_utility show $WORKSPACE/op_perf_ceilings.json > /dev/null)
+          echo "op perf ceilings file read back"
+        fi
+      shell: bash
+
     - name: Upload build logs
       uses: actions/upload-artifact@v6
       if: always()

@@ -107,10 +107,28 @@ class ProblemSummary:
         self.default_noise = 0.0
         self.cands: Dict[str, CandStat] = {}
         self.excluded: Dict[str, str] = {}  # text -> status / reason
+        # The machine's bound on the problem (op_perf.attach): its resource and time.
+        self.bound = ""
+        self.attainable_ms = float("nan")
 
     def best(self, min_gain: float = 0.0, significant_only: bool = False) -> Optional[CandStat]:
         pool = [c for c in self.cands.values() if c.ratios and (not significant_only or c.significant(min_gain))]
         return min(pool, key=lambda c: c.ratio) if pool else None
+
+    def efficiency(self, ms: float) -> float:
+        """The attainable time over ms (nan without a bound or a time)."""
+        if self.attainable_ms > 0 and ms > 0:
+            return self.attainable_ms / ms
+        return float("nan")
+
+    @property
+    def builtin_efficiency(self) -> float:
+        return self.efficiency(self.default_ms)
+
+    def best_efficiency(self, min_gain: float = 0.0) -> float:
+        """The best significant candidate's efficiency, else the built-in plan's."""
+        b = self.best(min_gain, significant_only=True)
+        return self.efficiency(self.default_ms * b.ratio) if b is not None else self.builtin_efficiency
 
 
 class ResultsDB:

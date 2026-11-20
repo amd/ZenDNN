@@ -191,6 +191,17 @@ class ReplayBackend(Backend):
             'rp() { if [ -n "$PRE" ]; then env LD_PRELOAD="$PRE" "$REPLAY" "$@"; else "$REPLAY" "$@"; fi; }',
         ]
 
+    def probe_env(self) -> List[str]:
+        # preamble()'s proclist as one place per CPU: GCC's runtime does not read KMP_AFFINITY.
+        return [
+            "for v in $(compgen -e | grep -E '^(ZENDNNL_|KMP_|GOMP_)'); do unset \"$v\"; done",
+            "unset OMP_WAIT_POLICY",
+            CPU_LIST,
+            "LIST=$(echo \"$LIST\" | tr ',' '\\n' | head -n %d | paste -sd, -)" % self.threads,
+            "export OMP_NUM_THREADS=%d OMP_PROC_BIND=close "
+            "OMP_PLACES=\"$(echo \"$LIST\" | sed -E 's/[0-9]+/{&}/g')\"" % self.threads,
+        ]
+
     def command(self, gid: int, problems: Sequence[Problem], probe: bool) -> str:
         kinds = {(p.dtype, replay_group(p)) for p in problems}
         if len(kinds) != 1:

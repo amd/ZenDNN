@@ -20,7 +20,8 @@ END NATIVE TUNING SCHEMA: the config keys (type, range, default or auto
 value, dtype, bits), the match keys, the rule features, the kernel registry
 and the hardware, with the machine's value of every version 2 hardware key
 (hw_match).  load_schema() reads that JSON, a gtest log that holds it, or
-fixtures/schema_dump.json (the gtest's output) when no path is given;
+fixtures/schema_dump.json (the gtest's output, with an example machine's
+hardware, uarch and hw_match: with_machine()) when no path is given;
 fixtures/schema_design.json, written from the design, is the schema of an
 older build, without the rule keys, the blocks schedule and hw_match.  Field
 names are normalized, so small spelling differences of the dump (a key dict
@@ -562,6 +563,28 @@ def extract_schema_json(text: str) -> str:
     if i < 0 or j < i:
         raise SchemaError("no JSON object between the schema markers")
     return body[i:j + 1]
+
+
+# The blocks that describe the machine a dump was made on.
+MACHINE_BLOCKS = ("hw", "uarch", "hw_match")
+
+
+def with_machine(doc: Dict[str, Any], machine: Dict[str, Any]) -> Dict[str, Any]:
+    """doc with the values of machine's hw, uarch and hw_match, in doc's fields and order.
+
+    fixtures/schema_dump.json describes an example machine whatever machine its dump
+    came from: the planner's test compares only these blocks' field names."""
+    out = dict(doc)
+    missing: List[str] = []
+    for block in MACHINE_BLOCKS:
+        if block not in doc:
+            continue
+        values = machine.get(block) or {}
+        missing += ["%s.%s" % (block, k) for k in doc[block] if k not in values]
+        out[block] = {k: values.get(k) for k in doc[block]}
+    if missing:
+        raise SchemaError("the example machine has no %s: give it a value" % ", ".join(missing))
+    return out
 
 
 def schema_text(doc: Dict[str, Any], width: int = 112) -> str:

@@ -477,15 +477,15 @@ class TestHardware(unittest.TestCase):
 
     def test_one_file_for_machines_of_a_family(self):
         a = machine(model=2, smt=1, l3_threads=8, cores=256, logical_cpus=256)
-        b = machine(model=81, l3_kib=131072, l3_cores=32, smt=1, l3_threads=32, cores=512, logical_cpus=512)
+        b = machine(model=3, l3_kib=65536, l3_cores=16, smt=1, l3_threads=16, cores=256, logical_cpus=256)
         for_a, for_b = E.hardware_block(a), E.hardware_block(b)
         self.assertIsNone(E.hardware_mismatch(for_a, a))
         self.assertEqual(E.hardware_mismatch(for_a, b), "model")
         self.assertIsNone(E.hardware_mismatch(for_b, b))
         self.assertEqual(E.hardware_mismatch(for_b, a), "model")
-        both = E.hardware_block(a, values=E.parse_hw_set(["model=2|81", "l3_kib=32768-131072", "l3_cores=8|32"]))
+        both = E.hardware_block(a, values=E.parse_hw_set(["model=2|3", "l3_kib=32768-65536", "l3_cores=8|16"]))
         self.assertEqual((both["model"], both["l3_kib"], both["l3_cores"]),
-                         ([2, 81], {"min": 32768, "max": 131072}, [8, 32]))
+                         ([2, 3], {"min": 32768, "max": 65536}, [8, 16]))
         for m in (a, b):
             self.assertIsNone(E.hardware_mismatch(both, m))
         # The same part with SMT on, or with fewer cores, keeps the default block.
@@ -494,7 +494,7 @@ class TestHardware(unittest.TestCase):
             self.assertIsNone(E.hardware_mismatch(for_a, other))
         self.assertEqual(E.hardware_mismatch(E.hardware_block(a, keys=list(E.HW_DEFAULT_KEYS) + ["cores"]),
                                              machine(model=2, cores=128)), "cores")
-        doc = E.build_doc([], None, a, hw_values=E.parse_hw_set(["model=2|81"]))
+        doc = E.build_doc([], None, a, hw_values=E.parse_hw_set(["model=2|3"]))
         self.assertEqual(E.validate_doc(doc, SCHEMA), ([], []))
 
     def test_keys_and_fields_the_machine_does_not_report(self):
@@ -519,7 +519,7 @@ class TestHardware(unittest.TestCase):
         no_vnni = machine(isa=["avx512f", "avx512bf16"])
         self.assertIsNone(E.hardware_mismatch({"isa": ["avx512bf16"]}, no_vnni))
         self.assertEqual(E.hardware_mismatch({"isa": ["avx512bf16", "avx512vnni"]}, no_vnni), "isa")
-        self.assertIsNone(E.hardware_mismatch({"vendor": ["OtherVendor0", "AuthenticAMD"]}, SCHEMA))
+        self.assertIsNone(E.hardware_mismatch({"vendor": ["OtherVendor0", HW["vendor"]]}, SCHEMA))
         self.assertEqual(E.hardware_mismatch({"vendor": "OtherVendor0"}, SCHEMA), "vendor")
         model = HW["model"]
         self.assertIsNone(E.hardware_mismatch({"model": {"min": model - 1, "max": model + 14}, "l3_cores": [8, 32]},
@@ -539,10 +539,10 @@ class TestHardware(unittest.TestCase):
             self.assertTrue(E.validate_doc(dict(good, hardware=hw), SCHEMA)[0], hw)
 
     def test_parse_hw_set(self):
-        self.assertEqual(E.parse_hw_set(["model=0-15", "l3_kib=32768-", "cores=-128", "l3_cores=8|32", "family=26",
+        self.assertEqual(E.parse_hw_set(["model=0-15", "l3_kib=32768-", "cores=-128", "l3_cores=8|16", "family=26",
                                          "vendor=A|B", "isa=avx512bf16+avx512vnni"]),
                          {"model": {"min": 0, "max": 15}, "l3_kib": {"min": 32768}, "cores": {"max": 128},
-                          "l3_cores": [8, 32], "family": 26, "vendor": ["A", "B"],
+                          "l3_cores": [8, 16], "family": 26, "vendor": ["A", "B"],
                           "isa": ["avx512bf16", "avx512vnni"]})
         for bad in ("model", "model=", "frequency=3", "model=15-0", "model=-", "model=a", "model=1|x", "isa=amx",
                     "vendor=A|"):

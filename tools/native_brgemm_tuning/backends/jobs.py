@@ -31,6 +31,11 @@ Runs: one probe per (group, slot) with ZENDNNL_API_LOG_LEVEL=4 (the source,
 cfg and plan each call used, and the replay output hash), then the timed runs
 with the log off, per repeat A S1 .. Sk A (slots reversed on odd repeats).
 collect() turns the outputs into result records.
+
+write_probe() writes a job that measures the machine's ceilings with the team of
+the backend's timed runs (tools/op_perf_utility/probe), and write_verify() one
+that runs a tuning file against the built-in plan; both go through the same
+launcher.
 """
 
 from __future__ import annotations
@@ -39,7 +44,7 @@ import json
 import os
 import shlex
 import subprocess
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..candidates import Candidate, format_override, problem_filters
 from ..plan import compare_fields, plan_log_fields
@@ -67,7 +72,7 @@ class Session:
     def __init__(self, sdir: str, backend: Backend, problems: Sequence[Problem],
                  assignments: Dict[str, List[Candidate]], session_id: str, phase: str = "search",
                  repeats: int = 2, probe: bool = True, defaults: Optional[Dict[str, Candidate]] = None,
-                 schema: Any = None):
+                 schema: Any = None, alone: bool = False):
         self.dir = os.path.abspath(sdir)
         self.backend = backend
         self.session_id = session_id
@@ -75,6 +80,8 @@ class Session:
         self.repeats = max(1, repeats)
         self.probe = probe
         self.schema = schema
+        # One candidate a slot: the other problems of its process run their built-in plans.
+        self.alone = alone
         bad = {p.key(): backend.supports(p) for p in problems}
         bad = {k: v for k, v in bad.items() if v}
         if bad:
@@ -96,7 +103,9 @@ class Session:
         return all(self.schema.key(k).same_bits(p.dtype) for k in cand.config)
 
     def build(self) -> Dict[str, Any]:
-        """The manifest: slots, cfg values, expected log fields and the run order."""
+        """The manifest: slots, cfg values, expected log fields and the run order.  Alone, slot j
+        of a group holds its j-th (problem, candidate) pair only, and every run of the group
+        times all its problems (the process of slot 0) but records those of its slot."""
         slots: Dict[str, List[Dict[str, Any]]] = {}
         cfgs: Dict[str, str] = {}
         for gid, probs in enumerate(self.groups):
@@ -106,6 +115,15 @@ class Session:
                           "expect": plan_log_fields(self.defaults[p.key()].plan, p)
                           if p.key() in self.defaults else {}}
                 for p in probs}]
+            if self.alone:
+                for p in probs:
+                    for c in self.assign.get(p.key(), []):
+                        if c.text:
+                            cfgs["cfg/g%d_s%d.cfg" % (gid, len(gslots))] = format_override(
+                                [(problem_filters(p), c.text)])
+                            gslots.append({p.key(): {"text": c.text, "bits_same": self._bits_same(p, c),
+                                                     "expect": plan_log_fields(c.plan, p)}})
+                n = 0
             for j in range(n):
                 slot: Dict[str, Any] = {}
                 clauses = []
@@ -124,10 +142,12 @@ class Session:
         runs: List[Dict[str, Any]] = []
 
         def add(kind: str, gid: int, j: int, rep: int) -> None:
-            pk = list(slots[str(gid)][j])
-            runs.append({"id": "r%04d" % (len(runs) + 1), "kind": kind, "group": gid, "slot": j,
-                         "repeat": rep, "pos": len(runs), "pkeys": pk,
-                         "cfg": "cfg/g%d_s%d.cfg" % (gid, j) if j else None})
+            run = {"id": "r%04d" % (len(runs) + 1), "kind": kind, "group": gid, "slot": j,
+                   "repeat": rep, "pos": len(runs), "pkeys": list(slots[str(gid)][j]),
+                   "cfg": "cfg/g%d_s%d.cfg" % (gid, j) if j else None}
+            if self.alone:
+                run["record"], run["pkeys"] = run["pkeys"], [p.key() for p in self.groups[gid]]
+            runs.append(run)
 
         if self.probe:
             for gid in range(len(self.groups)):
@@ -141,7 +161,7 @@ class Session:
                 for j in [0] + order + [0]:
                     add("timed", gid, j, rep)
         self.manifest = {
-            "session": self.session_id, "phase": self.phase, "created": utc_now(),
+            "session": self.session_id, "phase": self.phase, "created": utc_now(), "alone": self.alone,
             "backend": self.backend.describe(), "repeats": self.repeats,
             "problems": {k: p.to_dict() for k, p in self.problems.items()},
             "groups": [[p.key() for p in g] for g in self.groups],
@@ -201,18 +221,28 @@ class Session:
 
     def launch_command(self, launcher: str, pod: str = "") -> str:
         """launcher with {dir}, {script} and {pod} filled in."""
-        return launcher.format(dir=shlex.quote(self.dir), script=shlex.quote(self.script), pod=shlex.quote(pod))
+        return launch_command(self.dir, self.script, launcher, pod)
 
     def launch(self, launcher: str, timeout_s: int = 7200, pod: str = "") -> subprocess.Popen:
         """Starts the launcher (one pod claim for the whole session); does not wait.
         A pod, when given, is also the launcher's POD."""
-        env = dict(os.environ, TIMEOUT=str(timeout_s), THREADS=str(self.backend.threads),
-                   LOG=os.path.join(self.dir, "launcher.log"))
-        if pod:
-            env["POD"] = pod
-        with open(os.path.join(self.dir, "launch.out"), "w", encoding="utf-8") as out:
-            return subprocess.Popen(shlex.split(self.launch_command(launcher, pod)), env=env, stdout=out,
-                                    stderr=subprocess.STDOUT)
+        return launch_job(self.dir, self.script, launcher, self.backend.threads, timeout_s, pod)
+
+
+def launch_command(sdir: str, script: str, launcher: str, pod: str = "") -> str:
+    """launcher with {dir}, {script} and {pod} filled in."""
+    return launcher.format(dir=shlex.quote(sdir), script=shlex.quote(script), pod=shlex.quote(pod))
+
+
+def launch_job(sdir: str, script: str, launcher: str, threads: int, timeout_s: int = 7200,
+               pod: str = "") -> subprocess.Popen:
+    """Starts launcher on the job script of sdir (output in sdir/launch.out); does not wait."""
+    env = dict(os.environ, TIMEOUT=str(timeout_s), THREADS=str(threads), LOG=os.path.join(sdir, "launcher.log"))
+    if pod:
+        env["POD"] = pod
+    with open(os.path.join(sdir, "launch.out"), "w", encoding="utf-8") as out:
+        return subprocess.Popen(shlex.split(launch_command(sdir, script, launcher, pod)), env=env, stdout=out,
+                                stderr=subprocess.STDOUT)
 
 
 def collect(sdir: str, backend: Optional[Backend] = None) -> List[Dict[str, Any]]:
@@ -228,6 +258,8 @@ def collect(sdir: str, backend: Optional[Backend] = None) -> List[Dict[str, Any]
         gslots = slots[str(r["group"])]
         slot = gslots[r["slot"]]
         probs = [problems[k] for k in r["pkeys"]]
+        # The problems a run times but does not record (alone: those at their built-in plans).
+        skip = set(r["pkeys"]) - set(r.get("record", r["pkeys"]))
         base = {"session": man["session"], "phase": man["phase"], "backend": man["backend"]["backend"],
                 "run": r["id"], "group": r["group"], "slot": r["slot"]}
         path = os.path.join(sdir, "out", r["id"] + ".txt")
@@ -240,6 +272,8 @@ def collect(sdir: str, backend: Optional[Backend] = None) -> List[Dict[str, Any]
             reasons, warns = parse_warnings(text) if text is not None else ({}, [])
             for p in probs:
                 k = p.key()
+                if k in skip:
+                    continue
                 s = slot[k]
                 i = info.get(k, {})
                 logged = i.get("logged")
@@ -262,6 +296,8 @@ def collect(sdir: str, backend: Optional[Backend] = None) -> List[Dict[str, Any]
             res = backend.parse_timed(text, probs) if text is not None else {}
             for p in probs:
                 k = p.key()
+                if k in skip:
+                    continue
                 got = res.get(k)
                 records.append(dict(base, kind="measure", pkey=k, problem=p.to_dict(), text=slot[k]["text"],
                                     time_ms=got["time_ms"] if got else None, stats=got.get("stats", {}) if got else {},
@@ -310,8 +346,9 @@ class PodEvaluator:
     def __init__(self, backend: Backend, workdir: str, problems: Dict[str, Problem],
                  defaults: Dict[str, Candidate], launcher: Optional[str] = None, repeats: int = 2,
                  parallel: int = 1, timeout_s: int = 7200, schema: Any = None, dry_run: bool = False,
-                 log: Any = print, pods: Sequence[str] = ()):
+                 log: Any = print, pods: Sequence[str] = (), alone: bool = False):
         self.backend = backend
+        self.alone = alone
         self.workdir = workdir
         self.problems = problems
         self.defaults = defaults
@@ -351,7 +388,7 @@ class PodEvaluator:
                 sid = "%s_%d" % (base, n)
             s = Session(os.path.join(self.workdir, "sessions", sid), self.backend, [probs[k] for k in part],
                         {k: batch[k] for k in part}, sid, phase=phase, repeats=self.repeats,
-                        defaults=self.defaults, schema=self.schema)
+                        defaults=self.defaults, schema=self.schema, alone=self.alone)
             s.write()
             sessions.append(s)
         pods = [self.pods[i % len(self.pods)] if self.pods else "" for i in range(len(sessions))]
@@ -368,6 +405,73 @@ class PodEvaluator:
             self.log("session %s: launcher exit %d, %d records" % (s.session_id, rc, len(recs)))
             records += recs
         return records
+
+
+PROBE_MANIFEST = "probe.json"
+PROBE_OUT = "ceilings.json"
+PROBE_DONE = "probe.rc"  # the probe's exit status, written when it ends
+
+
+def write_probe(sdir: str, backend: Backend, probe_bin: str, pod: str = "", quick: bool = False,
+                seconds: float = 0.0, repeats: int = 0) -> str:
+    """A job that runs the op performance utility's probe (tools/op_perf_utility/probe) with
+    the team and pinning of the backend's timed runs, writing sdir/ceilings.json.  Returns the
+    job script; collect_probe() reads its output."""
+    sdir = os.path.abspath(sdir)
+    if os.path.exists(os.path.join(sdir, PROBE_MANIFEST)):
+        raise FileExistsError("probe %s exists" % sdir)
+    os.makedirs(sdir, exist_ok=True)
+    args = ["--out", '"$S/%s"' % PROBE_OUT, "--threads", str(backend.threads)]
+    if quick:
+        args.append("--quick")
+    if seconds > 0:
+        args += ["--seconds", "%g" % seconds]
+    if repeats > 0:
+        args += ["--repeats", str(repeats)]
+    lines = ["#!/bin/bash",
+             "# native_brgemm_tuning: the machine's ceilings with the team of the %s backend's timed runs"
+             % backend.name,
+             "set -uo pipefail", 'S=$(cd "$(dirname "$0")" && pwd)'] + backend.probe_env() + [
+        "echo \"host=$(hostname) cpus=$(awk '/Cpus_allowed_list/{print $2}' /proc/self/status)"
+        + " start=$(date -u '+%F %T UTC')\"",
+        '%s %s > "$S/probe.txt" 2>&1' % (shlex.quote(os.path.abspath(probe_bin)), " ".join(args)),
+        'rc=$?',
+        # probe.txt exists from the probe's start: collect waits for this.
+        'echo "$rc" > "$S/%s"' % PROBE_DONE,
+        'echo "probe rc=$rc"',
+        "echo \"done $(date -u '+%F %T UTC')\"",
+    ]
+    script = os.path.join(sdir, SCRIPT)
+    with open(script, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    os.chmod(script, 0o755)
+    with open(os.path.join(sdir, PROBE_MANIFEST), "w", encoding="utf-8") as f:
+        json.dump({"probe": os.path.abspath(probe_bin), "pod": pod, "backend": backend.describe(),
+                   "threads": backend.threads, "quick": quick, "created": utc_now()}, f, indent=1)
+    return script
+
+
+def collect_probe(sdir: str) -> Tuple[Optional[str], str]:
+    """The ceilings file a probe job wrote (None when it wrote none) and the last line the
+    probe printed."""
+    tail = ""
+    out = os.path.join(sdir, "probe.txt")
+    if os.path.exists(out):
+        with open(out, encoding="utf-8", errors="replace") as f:
+            lines = [line.strip() for line in f if line.strip()]
+        tail = lines[-1] if lines else ""
+    path = os.path.join(sdir, PROBE_OUT)
+    return (path if os.path.exists(path) else None), tail
+
+
+def pending_probes(workdir: str) -> List[str]:
+    """Probe directories written but not collected yet."""
+    root = os.path.join(workdir, "probe")
+    if not os.path.isdir(root):
+        return []
+    return sorted(os.path.join(root, d) for d in os.listdir(root)
+                  if os.path.exists(os.path.join(root, d, PROBE_MANIFEST))
+                  and not os.path.exists(os.path.join(root, d, COLLECTED)))
 
 
 VERIFY_MANIFEST = "verify.json"
@@ -418,9 +522,10 @@ def write_verify(sdir: str, backend: Backend, problems: Sequence[Problem], tunin
 
 def collect_verify(sdir: str, plans: Sequence[Dict[str, Any]], backend: Optional[Backend] = None) -> Dict[str, Any]:
     """Per problem: the logged plan and output hash with the built-in plan and with the file, and the
-    checks: the file's line names the source, config and plan its entry names (plans: the export's
-    meta.plans), a problem no entry names keeps the built-in plan, and the output bits are the
-    built-in plan's."""
+    checks: the file's line names the layers, config and plan the file names for it (plans: the
+    export's meta.plans, for the problems of its entries and those its rules alone give a config),
+    a problem it names nothing for keeps the built-in plan, and the output bits are the built-in
+    plan's."""
     with open(os.path.join(sdir, VERIFY_MANIFEST), encoding="utf-8") as f:
         man = json.load(f)
     backend = backend or make_backend(man["backend"])
@@ -445,9 +550,11 @@ def collect_verify(sdir: str, plans: Sequence[Dict[str, Any]], backend: Optional
         if not lb or not lf:
             why.append("no plan line")
         elif want is not None:
-            layers = lf.get("source", "").split("+")
-            if want["source"] == "table" and ("table" not in layers or lf.get("cfg") != want["cfg"]):
-                why.append("source=%s cfg=%s, the entry names cfg=%s" % (lf.get("source"), lf.get("cfg"), want["cfg"]))
+            layers = set(lf.get("source", "").split("+"))
+            if want["source"] != "heuristic" and (not set(want["source"].split("+")) <= layers
+                                                  or lf.get("cfg") != want["cfg"]):
+                why.append("source=%s cfg=%s, the file names source=%s cfg=%s" % (
+                    lf.get("source"), lf.get("cfg"), want["source"], want["cfg"]))
             why += compare_fields(want["plan"], lf)
         else:
             if lf.get("source") != lb.get("source") or lf.get("cfg") != lb.get("cfg"):
@@ -457,9 +564,11 @@ def collect_verify(sdir: str, plans: Sequence[Dict[str, Any]], backend: Optional
         if not same_bits:
             why.append("output hash %s, built-in %s" % (f.get("hash"), b.get("hash")))
         bad += bool(why)
-        rows.append({"problem": k, "entry": want["id"] if want else None,
+        ruled = want is not None and want["source"] == "rules"
+        rows.append({"problem": k, "entry": want["id"] if want and not ruled else None, "rules": ruled,
                      "builtin_plan": bool(want["builtin"]) if want else True, "hash": f.get("hash"),
                      "same_bits": same_bits, "ok": not why, "why": why})
     return {"file": man["file"], "problems": len(rows), "failed": bad,
             "named": sum(r["entry"] is not None for r in rows),
-            "named_builtin": sum(r["entry"] is not None and r["builtin_plan"] for r in rows), "rows": rows}
+            "named_builtin": sum(r["entry"] is not None and r["builtin_plan"] for r in rows),
+            "ruled": sum(r["rules"] for r in rows), "rows": rows}

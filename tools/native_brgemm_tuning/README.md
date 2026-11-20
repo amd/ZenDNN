@@ -31,6 +31,7 @@ run time, gradient-boosted trees when present, numpy models otherwise).
 | `plan_dump/`, `refresh_fixtures.sh` | The library's plans for the cases of `tests/plan_cases.py` (`plan_dump.cpp` and its build script), and the refresh of both fixtures from a build (see Tests). |
 | `search.py`, `surrogate.py` | Grid, random and model-guided search; surrogate models. |
 | `export.py`, `rules.py` | Class winners, confirmation, the tuning file and its validation; the learned rules. |
+| `op_perf.py`, `calibration.py` | The machine's ceilings in a campaign (`tools/op_perf_utility`): the machine check, each problem's bound and efficiency, `meta.op_perf`; the cost model's inputs from the ceilings, their A/B and their rules (see Machine ceilings, headroom and calibration). |
 | `tune.py` | Command line. |
 | `tunings/` | The tuning files of the CI shapes, one per machine type (see Tuning files). |
 | `tests/` | Host unit tests, the sync with the planner's schema among them (`test_sync.py`). |
@@ -39,7 +40,10 @@ run time, gradient-boosted trees when present, numpy models otherwise).
 
 1. **Schema.** Run the `SchemaDump` gtest (`NativeConfigSchema.SchemaDump`) of
    the build being tuned and extract its output: `tune.py schema --extract
-   gtest.log -o schema.json`. Without `--schema`, the fixture is used.
+   gtest.log -o schema.json`. Without `--schema`, the fixture is used, which
+   describes an example machine: only a synthetic campaign may do that. `init`
+   refuses a replay or benchdnn campaign without it, and `export` refuses such a
+   campaign made before unless `--hw-match none`.
    `tune.py schema --schema schema.json --compare fixtures/schema_dump.json`
    lists the differences. The heuristic reads `l1d_bytes` (the L1 passes),
    `l2_bytes`, `l3_bytes` (the L3 of one domain; 0 on a machine that reports
@@ -159,8 +163,11 @@ run time, gradient-boosted trees when present, numpy models otherwise).
    candidates that gain beyond the noise at every M where they change the
    plan (an M where a candidate is the built-in plan is neutral) and that are
    legal at every M of the class. The winners run against the built-in plan
-   again, with more repeats (`--confirm-repeats`). With a dry run, collect
-   and rerun `confirm` after each written round.
+   again, with more repeats (`--confirm-repeats`); with `--alone`, each
+   winner in a slot of its own, the other problems of its process at their
+   built-in plans (see the end of Machine ceilings, headroom and
+   calibration). With a dry run, collect and rerun `confirm` after each
+   written round.
 8. **Export.** `tune.py export -o tuning.json` writes an entry per class
    whose confirmation agrees: `match` holds every problem field and the M
    range (from M 2: an M = 1 call runs on the GEMV kernels, so a class of
@@ -178,7 +185,7 @@ run time, gradient-boosted trees when present, numpy models otherwise).
    but not its core count or SMT setting, so the file also applies to the same
    part with other core counts or SMT on. `--hw-keys` picks the keys (for
    example add `smt` or `cores`), and `--hw-set key=value` writes a value
-   instead of the machine's: `model=0-15`, `l3_kib=32768|131072`, `cores=64-`,
+   instead of the machine's: `model=0-15`, `l3_kib=16384|32768`, `cores=64-`,
    `vendor=A|B`, `isa=avx512bf16+avx512vnni`, so one file can serve several
    models. A schema without `hw_match` (an older build's dump) gives no
    vendor, family or model: dump it again, or leave those out with
@@ -195,11 +202,133 @@ run time, gradient-boosted trees when present, numpy models otherwise).
    (format, types, ranges, limits) before it is written, as strict JSON
    within the loader's bounds (64 MiB, 128 levels of nesting, 2^21 values):
    the loader ignores a file it cannot parse or that exceeds one, entries
-   included. Its `meta.plans` (which the loader ignores) records, per entry
-   and problem of the campaign it matches, the plan the library should log
-   under the file: `source=table`, the entry's config as the call applies it
-   (`cfg=`), the plan's fields, and whether that is the built-in plan;
+   included. Its `meta.plans` (which the loader ignores) records, per problem
+   of the campaign an entry matches or the rules alone give a config, the
+   plan the library should log under the file: the layers (`source=table`,
+   `rules+table` or `rules`), their config as the call applies it (`cfg=`),
+   the plan's fields, and whether that is the built-in plan;
    `tune.py verify` checks them (see Validating a table).
+
+## Machine ceilings, headroom and calibration
+
+The op performance utility (`tools/op_perf_utility`) measures the machine where
+the sessions run and gives each problem its bound (see its README). All of it
+is optional: a campaign without ceilings tunes as before.
+
+- `tune.py probe --workdir D --probe-bin <probe>` (built with
+  `tools/op_perf_utility/probe/build.sh`, kept in `campaign.json`) writes one
+  probe job per pod of the campaign (`--pods` names others) and runs it through
+  the launcher, with the team and pinning of the backend's timed runs (replay:
+  one OpenMP place per CPU of its `KMP_AFFINITY` proclist; benchdnn:
+  `OMP_PROC_BIND=close OMP_PLACES=cores`). `--local` runs it on this host (as
+  for the synthetic backend), `--dry-run` writes the jobs for `tune.py
+  collect`, and `--ceilings F` installs a file measured by hand. A file is
+  installed as `<workdir>/ceilings.json` only when its CPU (vendor, family,
+  model, caches, threads per L3 domain), the plan's L3 domain and its thread
+  count are the campaign's (`--force` installs it anyway and records the
+  differences); of several pods the first one's is installed, and the others'
+  differences above 10% are noted. A probe job writes the probe's exit status
+  (`probe.rc`) when it ends: `collect` takes a probe once it has (`--force`
+  before, as failed).
+- With ceilings, `status` gives each problem its bounding resource and the
+  built-in plan's and the best plan's efficiency (attainable / measured
+  time, the weights cold for the replay backend with `--cold-mb`, warm for
+  benchdnn), and their geometric means; `export_report.json` lists them per
+  problem with the times, and the tuning file's `meta.op_perf` the
+  percentages and bound kinds only. The best plan is the best candidate a
+  confirmation held (`confirmed`), else the search's best (`unconfirmed`),
+  or the built-in plan when a confirmation timed the search's best and it
+  did not hold (`rejected`).
+- `search --skip-at-pct P` gives no candidates to a problem whose built-in
+  plan reaches P% of its bound, `--stop-at-pct P` no more once its best plan
+  (the built-in one while no candidate beats it) does, and `--prioritize`
+  splits budget x problems by headroom: the calls at the problem's M (the
+  shapes' rows whose M range holds it, as a model trace gives them; all of the
+  weight's calls when none does) x its best time x (1 - efficiency), or with
+  `--prioritize relative` (1 - efficiency) alone, for shapes whose calls are
+  flat. Each problem gets between a quarter and four times `--budget`, at
+  most `--batch` a round (a
+  session's slots follow the largest batch of a group). A problem not timed
+  yet first gets `--scout` candidates (1), which time its built-in plan. All
+  three are off by default.
+- `tune.py calibrate --workdir D` derives the cost model's hardware inputs
+  from the ceilings (`cm_fma_pipes` and `cm_fma_lat` per weight type,
+  `cm_l3_cycles`, `cm_mem_cycles`, `cm_stream_cycles`, and `cm_l2_bytes` when
+  `--keys` names it: at the probe's L2 streaming rate it made BF16 plans
+  slower on every machine it was tried on) and times every problem whose plan
+  they change against the built-in plan (phase `calibrate`, `--repeats`, by
+  default the confirmation's). It keeps them when the geometric-mean ratio of
+  those problems gains at least `--calib-min-gain` (0.01), none is slower
+  beyond max(min_gain, noise) and each has a result. The cost model prices
+  BF16, F16, per-channel INT8 and s4 calls: an f32 or per-group s8 plan takes
+  none of the inputs, so f32 gets no values and a per-group s8 problem keeps
+  its plan. Kept, they are the base of every candidate (the built-in plan
+  stays the reference, and the base alone is each problem's first
+  candidate), the search tries their halves, doubles and built-in values, and
+  the export writes them in every entry and, from M 2, in the rules, for calls
+  on the campaign's team (its threads) only, as they were measured on it: a
+  tree of them by weight type (on `esz` and `bf16`), or under every leaf of the
+  learned tree (ordered rules: ahead of every rule a variant of it for each
+  calibrated type, so the other types and teams keep the rule, then one rule
+  per weight type);
+  `--no-calibration-rule` keeps them in the entries only (a file `merge`
+  takes). `meta.op_perf.calibration` records the A/B, and the values when it
+  kept them.
+  Calibrate before the search: a campaign with search results is refused.
+  The cost model refines the rules' plan only where an alternative is modeled
+  `cm_gain_pct` faster, so the inputs change few plans.
+
+What each weight type gets:
+
+| Weights | Bound (compute path) | Ceiling the probe measures | Timed by replay / benchdnn | `calibrate` |
+|---|---|---|---|---|
+| bf16 | BF16 dot product | VDPBF16PS | yes / yes | yes |
+| s8, per channel, source quantized in the call | INT8 VNNI | VPDPBUSD | yes / yes | yes |
+| s8, per group | INT8 VNNI (scales per group when the problem gives its `group`) | VPDPBUSD | no / no | no |
+| s8 over a u8 or s8 source | INT8 VNNI | VPDPBUSD | no / no | yes |
+| s4 | the INT4 tile's loop (unpacking included) | the INT4 tile's loop | yes / no | yes |
+| f16 | FP16 FMA with AVX512-FP16 (F16_PH), else the F16 kernels' loop (widening included) | VFMADD231PH where present, else the F16 kernels' loop | yes / no | yes |
+| f32 | FP32 FMA | VFMADD231PS | no / no | no |
+
+The bound counts bias, gated outputs, binary post-op tensors and a quantized
+source's copy, prices stores at the write bandwidth, and uses the threads a
+call can use (one per 16 columns of a row) on the cores they take; the
+problems of the epilogue classes other than `store` (and benchdnn's `bias`)
+are not timed. A type no backend times is bounded and rated (`report` on
+benchdnn's output) but not tuned. A per-group s8 problem may give its group
+(`group=`, with `scale_bytes=`, 4 by default) for the bound's scale bytes;
+the planner reads no s8 group, so the plan, the rule features and the match
+stay those of the problem without it.
+
+On the 8-core-domain machine type of `tunings/` (32 threads, replay backend,
+the CI shapes in bf16 and s8 at M 4, 16, 128 and 2048):
+
+- the built-in plans reach about 95% of their DRAM bound at M 4 and 90% at
+  M 16 (a replay of one shape alone streams at the probe's bandwidth), 85-90%
+  of their compute bound at M 2048, and 55-60% at M 128, where the search's
+  real gains were;
+- `calibrate` kept nothing: the inputs changed six BF16 M = 16 plans and made
+  them 2-7% slower, all of it from `cm_l2_bytes` (the probe's L2 streaming
+  rate is not the rate of the kernels' slab re-reads);
+- `--skip-at-pct 95` skipped 29 of 100 problems and lost no real gain, but
+  saved little pod time: the skipped problems shared their processes with
+  others; `--prioritize` (every shape's `calls` 1) gave the long M 2048 calls
+  the budget and missed M 128 gains, in more rounds (calls per M from a trace,
+  or `--prioritize relative`, are for that). On a second machine
+  type, `--skip-at-pct 95 --stop-at-pct 97` reached the gain of a search
+  without them with 30% fewer candidates. The three stay off by default; 95
+  and 97 are the values to start from.
+
+A session times the j-th candidates of a group's problems in one process, so
+one problem's candidate can change another's time: on small MoE shapes at
+M 4 and 16, gains of up to 2x vanished (and some were 15% slower) when the
+candidate was timed with the other problems at their built-in plans, while
+the gains at M 128 and 2048 held. `tune.py confirm --alone` times each
+winner so: every run of a group times all its problems, as the built-in
+runs do, with only the winner's clause set, which takes one process per
+winner and repeat. On the second machine type it kept 19 of 32 search
+winners (9 of the others were slower than the built-in plan), and 20 of 22
+after a search with skip and stop.
 
 ## Backends
 
@@ -250,6 +379,11 @@ python3 $T init --workdir <data>/camp1 --schema schema.json --shapes shapes.tsv 
 python3 $T init --workdir <data>/camp2 ... --launcher '<tools>/run_one_named.sh --cmd {dir} -- bash {script}' \
     --pods <pod a>,<pod b> --parallel 2
 python3 $T search  --workdir <data>/camp1 --strategy guided --budget 32 --batch 8
+# the machine's ceilings first: bounds and efficiency, then the cost model's inputs and a search by headroom
+bash tools/op_perf_utility/probe/build.sh <zendnn worktree> <data>/probe
+python3 $T probe     --workdir <data>/camp3 --probe-bin <data>/probe
+python3 $T calibrate --workdir <data>/camp3
+python3 $T search    --workdir <data>/camp3 --strategy guided --budget 32 --batch 8 --prioritize --skip-at-pct 95
 # the rule switches and constants alone, up to two keys at a time
 python3 $T search  --workdir <data>/camp1 --strategy grid --max-keys 2 --budget 32 --batch 8 \
     --keys makespan,l1_pass,traffic_groups,blocks,min_gain_pct,idle_pct,decode_m,l1_pct,l1_pass_max_mb
@@ -261,7 +395,7 @@ python3 $T status  --workdir <data>/camp1
 python3 $T merge   -o <data>/tuning.json <data>/camp1/tuning.json <data>/camp2/tuning.json --schema schema.json
 # a file for two models of one family, with their L3 sizes and domains
 python3 $T export  --workdir <data>/camp1 -o <data>/camp1/family.json \
-    --hw-set 'model=2|81' --hw-set l3_kib=32768-131072 --hw-set 'l3_cores=8|32'
+    --hw-set 'model=2|3' --hw-set l3_kib=16384-32768 --hw-set 'l3_cores=8|16'
 ```
 
 `tune.py space --problem dtype=s8,m=8,n=4096,k=4096` shows one problem's
@@ -282,10 +416,11 @@ file names, and the result is validated against the schema.
   problems in one pod session (the campaign's launcher) twice, with the
   built-in plan and with `ZENDNNL_MATMUL_NATIVE_TUNING_FILE=tuning.json`,
   with the plan lines and the output hashes logged, and checks that the
-  library reads the file and gives the plans it names: every problem an entry
-  names logs `source=table`, the entry's `cfg=` and the plan of `meta.plans`,
-  every other problem keeps the built-in plan, and every output keeps the
-  built-in plan's bits. `verify_report.json` lists each problem.
+  library reads the file and gives the plans it names: every problem the file
+  names (an entry, or the rules alone) logs the layers, `cfg=` and plan of
+  `meta.plans`, every other problem keeps the built-in plan, and every output
+  keeps the built-in plan's bits (the replay backend's `--check 1` hashes; the
+  benchdnn backend prints none). `verify_report.json` lists each problem.
 - `tune.py check tuning.json --workdir <campaign>` validates the file against
   the schema and shows, per problem, which layers the loader would apply, the
   merged config, and whether the resolved plan is legal; when the hardware
@@ -304,7 +439,9 @@ file names, and the result is validated against the schema.
 
 `python3 -m unittest discover -s tools/native_brgemm_tuning/tests -t tools`
 (host only: no pod, no library). Tests that need numpy are skipped without it.
-`test_sync.py` checks the tuner against the planner's schema: every key is
+`test_op_perf.py` covers the probe jobs, the machine check, the efficiencies,
+the search by headroom and the calibration, on the op performance utility's
+synthetic machine. `test_sync.py` checks the tuner against the planner's schema: every key is
 mirrored at its built-in value and has search values, the match keys and
 their names, the rule features and comparisons, the tuning-file names, the
 kernel kinds, the plan-line fields and `gemv` values and the uarch fields are
@@ -342,7 +479,13 @@ from the new build, with the plans of a machine of the ISA of its
 `SchemaDump` (the kernel registry follows the ISA: an f16 call takes the
 F16_PH kernels only with AVX512-FP16). Take both from a machine with every
 kernel kind, so that `NativeConfigSchema.TheTunerFollowsThePlanner` passes on
-every machine (it accepts a kind the running CPU lacks):
+every machine (it accepts a kind the running CPU lacks). The schema fixture
+describes an example machine, not the one the dump was made on: vendor
+`ExampleVendor`, L3 domains of 8 cores and 32 MiB, L2 1 MiB, L1d 48 KiB,
+AVX512-FP16. The planner's test compares only the field names of its `hw`,
+`uarch` and `hw_match` blocks, and the refresh keeps their values
+(`tune.py schema --extract <log> --machine-of fixtures/schema_dump.json`). A
+field the planner adds needs an example value in the fixture first:
 
     tools/native_brgemm_tuning/refresh_fixtures.sh <worktree> <SchemaDump gtest log> [build dir]
     # or with the plan dump made on that machine
@@ -437,10 +580,7 @@ iterations).
 | File | Machine type | Teams | Entries |
 |---|---|---|---|
 | `l3_domain_8_cores_32mib.json` | L3 domains of 8 cores and 32 MiB, L2 1 MiB, L1d 48 KiB; AVX512-BF16 and VNNI, no AVX512-FP16 | 32 threads (four L3 domains) | 245: bf16 72, s8 44, s4 29, f16 100 |
-| `l3_domain_32_cores_128mib.json` | L3 domains of 32 cores and 128 MiB, L2 1 MiB, L1d 48 KiB; AVX512-FP16 (F16_PH kernels) | 32 threads (one L3 domain), M 2-4096; 64 threads (two), M 2-128 | 677: 32 threads bf16 59, s8 176, s4 59, f16 111; 64 threads bf16 57, s8 149, s4 8, f16 58 |
 
-Most entries take a K pass of 1024 or 2048 at M 65-128, 8-row INT8 calls (`int8_mr=8`) at M 16-128 on the
-32-core domains, the 64-column F16_PH tiles at M 5-16, or column groups at M 128 and prompt sizes; decode
-sizes up to M 4 keep the built-in plan almost everywhere. The hardware block cannot name AVX512-FP16: on a
-machine of the same caches without it, an f16 entry of 64-column tiles is illegal for the F16 kernels and
-dropped for that call, with a warning.
+Its entries start at M 5: decode sizes up to M 4 keep the built-in plan. A hardware block cannot name
+AVX512-FP16: a file made on a machine with it also loads on one of the same caches without it, where an
+f16 entry of 64-column tiles is illegal for the F16 kernels and dropped for that call, with a warning.

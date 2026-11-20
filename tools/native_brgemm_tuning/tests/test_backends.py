@@ -604,6 +604,51 @@ class TestSession(unittest.TestCase):
         for recs in (lost + dropped + ran, lost + ran + dropped, ran + dropped + lost):
             self.assertEqual(R.summarize(recs)[p1.key()].excluded, {"nr=16": "dropped: no kernel"})
 
+    def test_alone_slots_time_the_whole_group(self):
+        # One candidate a slot, every run of the group timing all its problems (the others at their
+        # built-in plans), and only the slot's problems recorded.
+        s = jobs.Session(os.path.join(self.tmp, "alone"), ReplayBackend(binary="/opt/replay"), self.probs, self.assign,
+                         "c001_0", phase="confirm", repeats=2, defaults=self.defaults, schema=SCHEMA, alone=True)
+        s.write()
+        man = s.manifest
+        self.assertTrue(man["alone"])
+        slots = man["slots"]["0"]
+        self.assertEqual(sorted((k, v["text"]) for slot in slots[1:] for k, v in slot.items()),
+                         sorted((p.key(), c.text) for p in self.probs for c in self.assign[p.key()]))
+        for j in range(1, len(slots)):
+            with open(os.path.join(s.dir, "cfg", "g0_s%d.cfg" % j)) as f:
+                self.assertEqual(len(f.read().strip().split(";")), 1)
+        keys = sorted(p.key() for p in self.probs)
+        for r in man["runs"]:
+            self.assertEqual((sorted(r["pkeys"]), r["record"]), (keys, list(slots[r["slot"]])))
+        self.assertEqual(subprocess.call(["bash", "-n", s.script]), 0)
+        for r in man["runs"]:
+            slot, lines = slots[r["slot"]], []
+            for k in r["pkeys"]:
+                p, text = Problem.parse(k), slot.get(k, {}).get("text", "")
+                if r["kind"] == "timed":
+                    lines.append("RESULT shape=x N=%d K=4096 M=%d calls=90 median_ms=%.3f mean_ms=1 min_ms=1 p90_ms=1"
+                                 % (p.n, p.m, 0.5 if text else 1.0))
+                    continue
+                lines.append(log_line(p, (slot.get(k) or slots[0][k])["expect"], "override" if text else "heuristic",
+                                      text or "-"))
+                lines.append("CHECK shape=x N=%d K=4096 M=%d hash=aaaa" % (p.n, p.m))
+            with open(os.path.join(s.dir, "out", r["id"] + ".txt"), "w") as f:
+                f.write("\n".join(lines) + "\n")
+        recs = jobs.collect(s.dir)
+        self.assertEqual(sum(1 for r in recs if r["kind"] == "probe"), 3 + 6)
+        self.assertEqual(sum(1 for r in recs if r["kind"] == "measure"), 2 * (2 * 3 + 6))
+        summ = R.summarize(recs, phases=["confirm"])
+        for p in self.probs:
+            self.assertEqual({t: round(c.ratio, 3) for t, c in summ[p.key()].cands.items()},
+                             {c.text: 0.5 for c in self.assign[p.key()]})
+        ev = jobs.PodEvaluator(ReplayBackend(binary="/opt/replay"), os.path.join(self.tmp, "ev"),
+                               {p.key(): p for p in self.probs}, self.defaults, schema=SCHEMA, alone=True)
+        with self.assertRaises(jobs.DryRun) as cm:
+            ev(1, "confirm", self.assign)
+        with open(os.path.join(cm.exception.dirs[0], "manifest.json")) as f:
+            self.assertTrue(json.load(f)["alone"])
+
     def test_dry_run_and_pending(self):
         ev = jobs.PodEvaluator(ReplayBackend(binary="/opt/replay"), self.tmp, {p.key(): p for p in self.probs},
                                self.defaults, launcher=None, parallel=2, schema=SCHEMA)

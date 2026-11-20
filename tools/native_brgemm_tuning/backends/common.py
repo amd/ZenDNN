@@ -178,6 +178,15 @@ class Backend:
     def preamble(self) -> List[str]:
         return []
 
+    def probe_env(self) -> List[str]:
+        """Shell lines that give an OpenMP program of GCC's runtime (the op performance
+        utility's probe) the team and pinning of this backend's timed runs."""
+        return [
+            "for v in $(compgen -e | grep -E '^(ZENDNNL_|KMP_|GOMP_)'); do unset \"$v\"; done",
+            "unset OMP_WAIT_POLICY",
+            "export OMP_NUM_THREADS=%d OMP_PROC_BIND=close OMP_PLACES=cores" % self.threads,
+        ]
+
     def write_inputs(self, sdir: str, gid: int, problems: Sequence[Problem]) -> None:
         pass
 

@@ -40,6 +40,8 @@ UARCH = schema_mod.Uarch(l1d_bytes=48 << 10, l2_bytes=1 << 20, l3_bytes=32 << 20
                          num_cores=32, l3_domain_cores=8)
 # The fixture's machine, as the hardware blocks of a tuning file read it.
 HW = SCHEMA.hw_match
+# init's schema for the pod backends, which need one: the fixture stands in for a pod's dump.
+MACHINE = ["--schema", schema_mod.FIXTURE]
 # Written from the design: the schema of an older build, without the rule keys, the
 # blocks schedule and hw_match.
 DESIGN = schema_mod.load_schema(os.path.join(os.path.dirname(schema_mod.FIXTURE), "schema_design.json"))
