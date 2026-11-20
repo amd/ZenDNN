@@ -38,7 +38,7 @@ Let:
 - *Bias* ∈ ℝ<sup>1xn</sup>: Optional Bias vector
 - *Alpha* (*α*): Scaling factor for the matrix product
 - *Beta* (*β*): Scaling factor for the output (for accumulation)
-- *Post_ops(x)*: Optional activation or binary post operations (e.g., ReLU, GELU, `binary_add`, etc.)
+- *Post_ops(x)*: Optional activation, binary or sum post operations (e.g., ReLU, GELU, `binary_add`, `sum`, etc.)
 - *Transpose(A, B)*: Optional transpose operation on matrices A or B
 
 The computation can be expressed as:
@@ -46,6 +46,8 @@ The computation can be expressed as:
 $$
 C = \text{PostOps}(\alpha \cdot (A \cdot B) + \beta \cdot C + \text{Bias})
 $$
+
+A `sum` post-op adds the destination as the call found it, *C₀*, at its place in the chain: the chain's value *x* becomes *x* + *s* · (*C₀* − *z*), with *s* the sum's scale and *z* its zero point. β · *C* reads the same *C₀*. See [Sum Post-Op](#sum-post-op).
 
 ### LowOHA MatMul Flow Diagram
 
@@ -64,7 +66,7 @@ $$
                    +------v------+
                    | Scale / ZP  |  ← INT8 dequant or WOQ dequant
                    +------v------+
-                   |   Post-Op   |  ← Activation / Binary Op (fused)
+                   |   Post-Op   |  ← Activation / Binary Op / Sum (fused)
                    +------v------+
                        Output C
 ```
@@ -171,11 +173,11 @@ Defines a single post-operation:
 ```cpp
 struct matmul_post_op {
   post_op_type_t po_type;      // Type of post-operation
-  void *buff;                  // Buffer for binary ops (nullptr for activations)
+  void *buff;                  // Buffer for binary ops (nullptr for activations and sum)
   data_type_t dtype;           // Data type of the buffer
   std::vector<int64_t> dims;   // Dimensions of the buffer
-  float alpha;                 // Alpha parameter
-  float beta;                  // Beta parameter
+  float alpha;                 // Alpha parameter (sum: scale, 1 when left NaN)
+  float beta;                  // Beta parameter (sum: zero point)
 };
 ```
 
@@ -193,6 +195,7 @@ struct matmul_post_op {
 | `post_op_type_t::mish` | Mish | No |
 | `post_op_type_t::binary_add` | Element-wise Add | Yes |
 | `post_op_type_t::binary_mul` | Element-wise Multiply | Yes |
+| `post_op_type_t::sum` | Adds `alpha * (dst - beta)`, dst as the call found it; see [Sum Post-Op](#sum-post-op) | No |
 
 > **Note:** On AOCL-DLP INT8 `sym_quant` / `dynamic_quant` kernel paths, the `mish` post-op is rejected by `validate_matmul_direct_inputs` (input validation runs by default unless `ZENDNNL_DIAGNOSTICS_ENABLE=0`). A call that asks for the native BRGEMM (see [Native BRGEMM](#native-brgemm)) takes it on those calls, except on GGML packed weights.
 
@@ -207,6 +210,35 @@ For binary post-ops (`binary_add` and `binary_mul`), the `dims` field specifies 
 | MM (Matrix Multiply) | 2D | `{M, N}` | Element-wise operation on output |
 | BMM (Batched Matrix Multiply) | 2D | `{M, N}` | Same values broadcast to all batches |
 | BMM (Batched Matrix Multiply) | 3D | `{Batch, M, N}` | Different values per batch |
+
+#### Sum Post-Op
+
+A `sum` post-op adds the destination as the call found it, *C₀*, at its place in the post-op chain, as oneDNN's sum post-op does: the chain's value *x* becomes *x* + `alpha` · (*C₀* − `beta`). `alpha` is the scale (1 when left NaN, the default) and `beta` the zero point. *C₀* is read in the destination's data type before the call writes dst, so β · *C* and the sum both read the values the call found, in every batch of a batched call.
+
+On an INT8 call the sum, like every post-op, applies after the source and weight scales and before the destination scale and zero point: it adds `alpha * (C0 - beta)`, with *C₀* the quantized values dst held, to the dequantized result, and the destination scale and zero point then quantize the sum.
+
+```cpp
+matmul_post_op sum_op;
+sum_op.po_type = post_op_type_t::sum;
+sum_op.alpha = 0.5f;  // scale; leave it NaN for 1
+sum_op.beta = 0.0f;   // zero point; nonzero only with an S8 / U8 destination
+params.postop_.push_back(sum_op);
+```
+
+Rules (checked by `validate_matmul_direct_inputs`, which runs by default unless `ZENDNNL_DIAGNOSTICS_ENABLE=0`):
+- `buff` stays `nullptr`, and `dtype` is `data_type_t::none` or the destination type. `dims` and `leading_dim` are not read.
+- `alpha` is finite; `beta` is an integer that int32 holds, nonzero only with an S8 or U8 destination.
+- A call takes at most one sum post-op; a second returns `status_t::failure`, with the checks on or off.
+
+Where it runs:
+- **AOCL-DLP** (`aocl_dlp`, `aocl_dlp_blocked`): before anything writes dst, the call copies `alpha * (C0 - beta)` of every matrix of dst into one F32 buffer, M x N values for a single call and batch x M x N for a batched one, and the chain adds the buffer as a `binary_add` at the sum's place. The copy costs that buffer and one pass over dst per call; a call whose copy does not fit in `size_t`, or cannot be allocated, returns `status_t::failure` with dst untouched.
+- **oneDNN** (`onednn`, `onednn_blocked`): `append_sum(alpha, beta)` at the sum's place. oneDNN adds β · *C* as a sum at the head of the chain; with a nonzero beta, a sum post-op that leads the chain without a zero point joins it, as one sum of scale `beta + alpha`. It does not join when `beta + alpha` is not finite, or on an S8 / U8 source into an S32, S8 or U8 destination, where β · *C* belongs in the integer sum before the source and weight scales and the sum post-op after them (see [AOCL-DLP route](#aocl-dlp-route)). oneDNN takes a sum zero point only over an S8 or U8 source. A call oneDNN does not take this way returns `status_t::unimplemented` when it asks for oneDNN and kernel selection keeps it there, and runs on AOCL-DLP when dynamic dispatch picked oneDNN. A call kernel selection moves off oneDNN for another reason (an M = 1 call of an F32 source, for one) runs on AOCL-DLP.
+- **Reference kernel**: at the sum's place in the chain.
+- **Every other kernel** (libxsmm, the batched SGEMM, the auto tuner, the MoE custom kernel) does not apply it: a call that asks for one of them runs on AOCL-DLP instead, or on the reference kernel in a build without AOCL-DLP. The calls without a sum on the same weight stay on the kernel asked for, which may read the weight raw, so the moved call keeps its weight cache at mode 1 at most. An auto-tuner call on non-constant weights or in a batch runs under dynamic dispatch instead, as any such call does, and may stay on oneDNN as above.
+- **Native BRGEMM**: it does not apply the sum post-op. With `lowoha_algo = native_brgemm` the call returns `status_t::unimplemented`; under `ZENDNNL_MATMUL_ALGO=10` a call without `lowoha_algo` goes back to the default route, as [Native BRGEMM](#native-brgemm) describes for the calls it does not serve.
+- **Refused** with `status_t::unimplemented`, dst untouched: a column-major call, `group_matmul_direct`, and a gated activation.
+
+The Tensor Operator API ([MatMul Operator](../tensor_operator/matmul_operator.md)) does not take the sum post-op: creating a `matmul_context_t` with it fails.
 
 ### `matmul_quantization_params_t`
 
@@ -1226,7 +1258,7 @@ The same algorithms can be selected by either the `matmul_algo_t` enum value (in
 | `4`                   | `aocl_dlp`           | AOCL-DLP backend |
 | `5`                   | `onednn`             | OneDNN backend |
 | `6`                   | `libxsmm`            | LibXSMM backend (initial batched default when LIBXSMM is built) |
-| `7`                   | `batched_sgemm`      | AOCL-DLP's batch GEMM for batched calls (`ZENDNNL_BMM_ALGO`); a single call runs on AOCL-DLP |
+| `7`                   | `batched_sgemm`      | AOCL-DLP's batch GEMM for batched calls (`ZENDNNL_BMM_ALGO`); a single call runs on AOCL-DLP, and so does an F16 batch with a bias or a post-op, at weight cache mode 1 at most, since the batches without them keep reading the weight raw |
 | `8`                   | `auto_tuner`         | Auto Tuner, as `auto` |
 | `9`                   | `reference`          | Reference kernel |
 | `10`                  | `native_brgemm`      | Native BRGEMM over the native VNNI weight layout: serves the calls listed under [Native BRGEMM](#native-brgemm); another call takes the default route, or returns an error when `lowoha_algo` names the native BRGEMM |
@@ -1243,14 +1275,14 @@ It serves a single (not batched), row-major call with a plain source (`mem_forma
 - a raw weight (`mem_format_b = 'n'`), an AOCL-DLP blocked prepack of a bf16 × bf16 or static u8 × s8 call, which it unreorders (in a build with AOCL-DLP, with no `ZENDNNL_DLP_M_HINT`, under `ZENDNNL_MATMUL_ALGO=10` only), or a buffer the native BRGEMM rewrote in place;
 - N from 1 to 2147483616, the largest multiple of 32 an int holds, K ≥ 1 and ldb at least the weight row (a weight whose N is not a multiple of 32 is packed with zero columns up to whole 32-column blocks, about 32 / N times the weight's bytes for N below 32, never in place, and only its N columns are read and written); for bf16 weights, K at most 67108864 (2^26), whose K pairs the bf16 kernels offset in an int, and at M above 1 a source whose rows those kernels offset in an int too, (min(M, 12) - 1) * lda + K at most 2147483647 (a transposed source is copied into rows K apart); for f16 weights, K at most 2147483632, whose steps of 16 an int holds; for s8 and s4 weights, K within the int32 accumulation bound (for s4 weights, each group within it and K at most 2147483640, whose whole K octets an int holds) and per-group weight scales over groups of whole K quads (s4 weights always take `{G, N}` weight scales, `{1, N}` for one group over K). Every call reads the weight's one layout: an M = 1 call on the GEMV kernels of the native BRGEMM (below), every other M on the native tiles (the `[MATMUL.NATIVE_BRGEMM]` line names the GEMV kernels of an M = 1 call in its `gemv` field and shows `gemv=none` on the tiles). An M = 1 call whose layout is at most a quarter of the L2 runs on the calling thread (`team=1` on that line), as one core reads such a layout in less time than the call's team takes to start;
 - for INT8 and W4A8, no weight zero point (and for s4 weights no u8 source and no source zero point, also with a source the call quantizes), and no source zero point with a source the call quantizes to s8; f32, bf16 or f16 scales per tensor or per row for the source, per tensor, per column or per group for the weight (for s4 weights `{G, N}` only, `{1, N}` for one group over K); s32, s8 or u8 source zero points per tensor or per row (with per-group weight scales, one per tensor and only with a u8 source); an `{M, G}` source scale with an s8 source and no zero point;
-- the post-ops and gated activations of `matmul_direct`, except a softmax with a gated activation, and beta with a gated activation only over a dst of at least N columns.
+- the post-ops and gated activations of `matmul_direct`, except a sum post-op and a softmax with a gated activation, and beta with a gated activation only over a dst of at least N columns.
 
 In short, under `ZENDNNL_MATMUL_ALGO=10` (the lists below give every form):
 
 | Calls | Where they run |
 |---|---|
-| bf16, DA8W8 (u8 / s8 sources, given or quantized from bf16 / f32), DA8W4 (s8 sources over symmetric s4 weights with `{G, N}` scales), f32 and f16 single row-major calls on raw weights, AOCL-DLP blocked prepacks of bf16 × bf16 or static u8 × s8 calls (in a build with AOCL-DLP, with no DLP M hint) or images of the native BRGEMM, any M, N and K within the bounds above, with the post-ops, gated activations, biases, alpha and beta of `matmul_direct` | the native BRGEMM |
-| batched calls (on their `ZENDNNL_BMM_ALGO` kernel) and group matmul; GGML packed weights; an s8 weight's zero point of one value over a static u8 / s8 source; W4A16 (s4 or u4 weights) with per-column f32 or bf16 weight scales and no s4 weight zero point (a u4 zero point included); AOCL-DLP blocked prepacks of other calls (other types, or under a DLP M hint) and other prepack formats; N or K past the bounds above; a CPU without the instruction set of the call's types; a column-major call of float operands on a weight that changes; a softmax with a gated activation | the default route, as with the algorithm unset |
+| bf16, DA8W8 (u8 / s8 sources, given or quantized from bf16 / f32), DA8W4 (s8 sources over symmetric s4 weights with `{G, N}` scales), f32 and f16 single row-major calls on raw weights, AOCL-DLP blocked prepacks of bf16 × bf16 or static u8 × s8 calls (in a build with AOCL-DLP, with no DLP M hint) or images of the native BRGEMM, any M, N and K within the bounds above, with the post-ops (but sum), gated activations, biases, alpha and beta of `matmul_direct` | the native BRGEMM |
+| batched calls (on their `ZENDNNL_BMM_ALGO` kernel) and group matmul; GGML packed weights; an s8 weight's zero point of one value over a static u8 / s8 source; W4A16 (s4 or u4 weights) with per-column f32 or bf16 weight scales and no s4 weight zero point (a u4 zero point included); AOCL-DLP blocked prepacks of other calls (other types, or under a DLP M hint) and other prepack formats; N or K past the bounds above; a CPU without the instruction set of the call's types; a column-major call of float operands on a weight that changes; a softmax with a gated activation; a sum post-op | the default route, as with the algorithm unset |
 | the forms the default route computes wrongly or has no kernel for (W8A16, W4A16 with s4 or u4 weights and per-group or f16 weight scales, W4A16 with an s4 weight's zero point, a column-major call on a constant weight or with integer operands, a reordered source, mixed float types, `gelu_tanh_and_mul`, the other forms listed below) | keep the native BRGEMM's error, dst untouched |
 
 **One layout per weight.** The native layout of a weight is made from the weight alone: its type, its bytes, K, N, ldb, transB and the format of its buffer (raw, or an AOCL-DLP blocked prepack the native BRGEMM unreorders), in blocks of 32 columns. Nothing of a call (M, the post-ops or gated activation, the thread count, the weight cache mode, the route) changes it, and calls in any order share it. The weight cache mode decides only where it lives:
@@ -1284,7 +1316,7 @@ Either way alpha, beta, the bias, the post-ops and an f16 dst's rounding to near
 The checks also take, for a call that asks for the native BRGEMM, the `mish` post-op on the INT8 sym-quant, dynamically quantized and W4A8 calls that the other routes refuse it on (not on GGML packed weights), and an f16 dst of a bf16 × bf16 call (not one the call quantizes), which the native BRGEMM rounds from its f32 results, on a CPU without AVX512-FP16 too.
 
 Any other call with `lowoha_algo = native_brgemm` returns, with dst untouched and one error line naming the reason and that no other route takes the call:
-- `status_t::unimplemented` for what the native BRGEMM does not implement, for example weight zero points, u4 weights, s4 weights with a u8 source, a source zero point or weight scales other than `{G, N}`, a source the call quantizes to s8 with a source zero point, an f16 source for s8 weights, an f16 call into a dst other than f16 or f32, batched calls, column-major calls, reordered sources, GGML packed weights, a softmax with a gated activation, an f16 dst with per-group weight scales, or an s8 source with a zero point on per-group weight scales;
+- `status_t::unimplemented` for what the native BRGEMM does not implement, for example a sum post-op, weight zero points, u4 weights, s4 weights with a u8 source, a source zero point or weight scales other than `{G, N}`, a source the call quantizes to s8 with a source zero point, an f16 source for s8 weights, an f16 call into a dst other than f16 or f32, batched calls, column-major calls, reordered sources, GGML packed weights, a softmax with a gated activation, an f16 dst with per-group weight scales, or an s8 source with a zero point on per-group weight scales;
 - `status_t::isa_unsupported` on a CPU without the instruction set its data types need (AVX-512 F, BW, VL and DQ and FMA, with AVX512-BF16 for bf16 and AVX512-VNNI for INT8);
 - `status_t::failure` for a weight buffer only another route reads (a custom-kernel image), for a call the native BRGEMM does not serve on a buffer it rewrote in place, which no other route reads, and for wrong arguments (a bad shape, leading dimension or buffer).
 
@@ -1319,13 +1351,13 @@ Each call's plan (tile widths, rows per call, M blocks, K passes, schedule and t
 ### AOCL-DLP route
 
 With `lowoha_algo` left `none` and the algorithm unset, a single call runs on `aocl_dlp_blocked`. `aocl_dlp`, `aocl_dlp_blocked`, and every other kernel except the reference kernel and oneDNN pass the calls they do not serve to AOCL-DLP. On that route:
-- **Post-ops the chain does not map.** The AOCL-DLP chain applies relu, leaky relu, gelu tanh, gelu erf, sigmoid, swish, tanh, clip, mish, binary add and binary mul. A call whose chain holds elu, square, abs, sqrt, exp, log or softmax runs on the reference kernel instead, with one info line, and gets the results of the same call with `lowoha_algo = matmul_algo_t::reference`. It returns `status_t::unimplemented` where the reference kernel does not serve it: a column-major call, AOCL-prepacked or GGML packed weights, per-group weight scales of an S8 or S4 weight without a source scale of the same groups, a BF16 / F32 source with S8 weights and no source scale, or a binary operand that is neither `{1, N}` nor rows of N values. The reference kernel reads the weight buffer as given: every call on one weight buffer must take the same route, since at weight cache mode 2 AOCL-DLP may rewrite a constant weight in place.
+- **Post-ops the chain does not map.** The AOCL-DLP chain applies relu, leaky relu, gelu tanh, gelu erf, sigmoid, swish, tanh, clip, mish, binary add, binary mul and sum (from a copy of dst, see [Sum Post-Op](#sum-post-op)). A call whose chain holds elu, square, abs, sqrt, exp, log or softmax runs on the reference kernel instead, with one info line, and gets the results of the same call with `lowoha_algo = matmul_algo_t::reference`. It returns `status_t::unimplemented` where the reference kernel does not serve it: a column-major call, AOCL-prepacked or GGML packed weights, per-group weight scales of an S8 or S4 weight without a source scale of the same groups, a BF16 / F32 source with S8 weights and no source scale, or a binary operand that is neither `{1, N}` nor rows of N values. The reference kernel reads the weight buffer as given: every call on one weight buffer must take the same route, since at weight cache mode 2 AOCL-DLP may rewrite a constant weight in place.
 - **Refused post-ops.** A `pooling` post-op returns `status_t::unimplemented`, and so does a gated activation with any of the post-ops above.
 - **Weight scales.** With s8 weights, one weight scale value or one per column runs on any wiring. Per-group weight scales `{G, N}` run only on the S8 rows of the INT8 pair table with F32 or BF16 output, with no zero point, a group size `K / G` that is a multiple of 4 and `G × N` values. Those rows run on the sym-quant kernel, which reads F32 weight scales, or weight scales of the source scale's type. Any other weight scale returns `status_t::unimplemented`.
 - **INT8 alpha and beta.** AOCL-DLP's GEMMs with s8 weights, or with s4 weights and a u8 / s8 source, take alpha and beta as int32. An alpha or beta that is not an integer int32 holds returns `status_t::unimplemented`. A nonzero beta with s8 weights is applied in two places. For a u8 / s8 source with one source scale value into an S32, S8 or U8 destination, beta * C is added to the int32 sum before the scales. On the sym-quant kernel (S8 source, no zero point, F32 or BF16 destination), it is added after the scales, with per-token source scales (`{1, 1}` at M = 1 included), per-group source scales or per-group weight scales. Any other nonzero beta with s8 weights returns `status_t::unimplemented`: for example into an F32, BF16 or F16 destination with one source scale value and per-tensor or per-channel weight scales, or with a BF16 / F32 source the call does not quantize. The reference kernel and the native BRGEMM place beta * C as these kernels do: after the scales into an F32, BF16 or F16 destination, `alpha * (A x B) + beta * C`. Into an S32, S8 or U8 destination they add it to the integer sum before the scales, `(alpha * S + beta * C) * src_scale * wei_scale`, when the source scale and the weight scale have one group over K each (per tensor or per token, over per-tensor or per-channel weight scales); with `{G, N}` weight scales it follows the sum of the scaled groups, `alpha * sum + beta * C`, and with `{M, G}` source scales over per-tensor or per-channel weight scales it precedes the weight scale only, `(alpha * sum + beta * C) * wei_scale`, where sum adds each group's integer sum times its source scale.
-- **Auto tuner.** Under `ZENDNNL_MATMUL_ALGO=auto` (8) these rules apply to the calls that run on AOCL-DLP. When every candidate of `ZENDNNL_MATMUL_AUTO_ALGO_CANDIDATES` is oneDNN or the reference kernel, no rule applies. Otherwise a call with a post-op the chain does not map runs on the reference kernel as above, and a call AOCL-DLP refuses for its weight scales, alpha or beta runs on the first candidate off AOCL-DLP, or is refused when there is none.
+- **Auto tuner.** Under `ZENDNNL_MATMUL_ALGO=auto` (8) these rules apply to the calls that run on AOCL-DLP. When every candidate of `ZENDNNL_MATMUL_AUTO_ALGO_CANDIDATES` is oneDNN or the reference kernel, no rule applies. Otherwise a call with a post-op the chain does not map runs on the reference kernel as above, and a call AOCL-DLP refuses for its weight scales, alpha or beta runs on the first candidate off AOCL-DLP, or is refused when there is none. A call with a sum post-op the auto tuner would run is not the auto tuner's: it runs on AOCL-DLP whatever the candidates (see [Sum Post-Op](#sum-post-op)), and is refused when AOCL-DLP refuses it.
 
-A refused call leaves dst untouched and writes one error line. The one-op group route, which runs gated activations and the calls `single_matmul_group_routable` admits, applies the weight-scale count rule, the int32 alpha and beta rule, and the post-op rule of gated activations. `group_matmul_direct` refuses an operation with a post-op the chain does not map, or pooling, unless the operation runs on oneDNN. oneDNN and the reference kernel keep their own handling of these calls.
+A refused call leaves dst untouched and writes one error line. The one-op group route, which runs gated activations and the calls `single_matmul_group_routable` admits, applies the weight-scale count rule, the int32 alpha and beta rule, and the post-op rule of gated activations. `group_matmul_direct` refuses an operation with a post-op the chain does not map, or pooling, unless the operation runs on oneDNN, and an operation with a sum post-op on any backend. oneDNN and the reference kernel keep their own handling of these calls.
 
 ### Via `matmul_params`
 

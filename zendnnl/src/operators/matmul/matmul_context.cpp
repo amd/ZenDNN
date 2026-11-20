@@ -143,6 +143,13 @@ status_t matmul_context_t::validate() {
             return status_t::failure;
         }
     }
+
+    for (const auto &po : post_ops) {
+        if (po.type == post_op_type_t::sum) {
+            apilog_error("No matmul kernel applies a sum post-op");
+            return status_t::failure;
+        }
+    }
     return status_t::success;
 }
 

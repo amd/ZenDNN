@@ -1203,6 +1203,11 @@ status_t group_matmul_direct(const std::vector<char> &layout,
         // An operation on AOCL-DLP takes only post-ops its chain applies
         // (aocl_dlp_maps_post_op).
         for (size_t e = 0; e < no; ++e) {
+            if (has_sum_post_op(params[e])) {
+                log_error("group_matmul_direct: operation ", e,
+                        " has a sum post-op, which no group kernel applies");
+                return status_t::unimplemented;
+            }
             if (ZENDNNL_DEPENDS_AOCLDLP
                     && grp_operation_skips_post_op(params[e])) {
                 log_error("group_matmul_direct: operation ", e,

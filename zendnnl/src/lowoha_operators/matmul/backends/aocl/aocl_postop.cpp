@@ -310,11 +310,12 @@ get_postop_metadata_cache() {
 //   - zp_comp_ndim
 //   - bias presence
 //   - for binary_add/binary_mul: po.dtype (drives m.stor_type),
-//     po.leading_dim (drives m.ldm), and po.dims (drives whether the cold
-//     path maps the operand to BIAS/SCALE broadcast vs MATRIX_ADD/MUL) —
-//     collisions on these between weight-tied layers would silently produce
-//     wrong results or segfaults because the patch path only refreshes
-//     mutable pointers into the slot type chosen at build time.
+//     po.leading_dim (drives m.ldm), and whether po.dims is one row of N
+//     values (drives whether the cold path maps the operand to BIAS/SCALE
+//     broadcast vs MATRIX_ADD/MUL) — collisions on these between weight-tied
+//     layers would silently produce wrong results or segfaults because the
+//     patch path only refreshes mutable pointers into the slot type chosen
+//     at build time.
 //   - source and weight scale granularity. Per-tensor, per-token/channel,
 //     and per-group scales produce different quant-op topology that
 //     patch_mutable_fields does not rebuild. WOQ B scale/zp outer_dim and
@@ -327,7 +328,9 @@ get_postop_metadata_cache() {
 //   - po.alpha/po.beta (parameterized eltwise values): patched per-call via holder-owned
 //     eltwise_alpha/eltwise_beta floats.
 //   - po.buff (binary operand pointer): patched per-call.
-//   - M: dynamic batch sizes must not invalidate per-layer cache hits.
+//   - M, also as the rows of an [M, N] binary operand (a sum post-op's copy
+//     of dst among them): dynamic batch sizes must not invalidate per-layer
+//     cache hits.
 //   - scale element counts within the same granularity (the per-call lengths
 //     and group_size are refreshed by patch_mutable_fields).
 std::size_t compute_postop_signature(const matmul_params &lowoha_param,
@@ -342,10 +345,9 @@ std::size_t compute_postop_signature(const matmul_params &lowoha_param,
             sig = sig * 31u
                     + static_cast<std::size_t>(
                             static_cast<uint32_t>(po.leading_dim));
-            sig = sig * 31u + po.dims.size();
-            for (int64_t d : po.dims) {
-                sig = sig * 31u + static_cast<std::size_t>(d);
-            }
+            const bool row
+                    = po.dims.size() == 2 && po.dims[0] == 1 && po.dims[1] == N;
+            sig = sig * 31u + (row ? 1u : 0u);
             // A {1, N} binary_mul is routed to SCALE (broadcast) only when
             // M > 1, otherwise to MATRIX_MUL (see binary_mul_uses_scale_path).
             // Fold the routing class in so M == 1 and M > 1 metadata stay

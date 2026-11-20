@@ -305,8 +305,31 @@ status_t apply_eltwise_post_op(
     return status_t::success;
 }
 
-status_t apply_post_ops(int batch_size, int M, int N,
-        const std::vector<matmul_post_op> &postops, float *accum_buff_f32) {
+// output is still the destination as the call found it: only store_output
+// writes it.
+void apply_sum_post_op(const matmul_post_op &po, int batch_size, int M, int N,
+        int ldc, unsigned int offset_out, const void *output,
+        data_type_t output_dtype, float *accum_buff_f32) {
+    const float scale = po.alpha_or_default();
+    const float zero_point = po.beta;
+    const size_t accum_batch_stride = static_cast<size_t>(M) * N;
+    const size_t output_batch_stride = static_cast<size_t>(offset_out);
+    const bool parallelize
+            = static_cast<size_t>(batch_size) * accum_batch_stride > 10000;
+    ref_parallel_3d(batch_size, M, N, parallelize, [&](int bs, int i, int j) {
+        const size_t ac_idx = static_cast<size_t>(bs) * accum_batch_stride
+                + static_cast<size_t>(i) * N + static_cast<size_t>(j);
+        const size_t out_idx = static_cast<size_t>(bs) * output_batch_stride
+                + static_cast<size_t>(i) * ldc + static_cast<size_t>(j);
+        accum_buff_f32[ac_idx] += scale
+                * (read_and_cast<float>(output, output_dtype, out_idx)
+                        - zero_point);
+    });
+}
+
+status_t apply_post_ops(int batch_size, int M, int N, int ldc,
+        unsigned int offset_out, const std::vector<matmul_post_op> &postops,
+        const void *output, data_type_t output_dtype, float *accum_buff_f32) {
     LOG_DEBUG_INFO("Apply post ops in matmul_ref kernel");
     const size_t size = static_cast<size_t>(batch_size) * M * N;
 
@@ -317,6 +340,9 @@ status_t apply_post_ops(int batch_size, int M, int N,
         if (po.po_type == post_op_type_t::binary_add
                 || po.po_type == post_op_type_t::binary_mul) {
             status = apply_binary_post_op(po, size, accum_buff_f32);
+        } else if (po.po_type == post_op_type_t::sum) {
+            apply_sum_post_op(po, batch_size, M, N, ldc, offset_out, output,
+                    output_dtype, accum_buff_f32);
         } else {
             status = apply_eltwise_post_op(
                     po, batch_size, M, N, accum_buff_f32);
@@ -1239,7 +1265,8 @@ status_t reference_matmul_execute(const char layout, const bool transA,
                 bias, output, accum_buff_f32, input_dtype, weight_dtype,
                 bias_dtype, output_dtype);
     }
-    if (apply_post_ops(batch_size, M, N, params.postop_, accum_buff_f32)
+    if (apply_post_ops(batch_size, M, N, ldc, offset_out, params.postop_,
+                output, output_dtype, accum_buff_f32)
             != status_t::success) {
         free(accum_buff_f32);
         return status_t::failure;

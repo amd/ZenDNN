@@ -35,7 +35,7 @@
 
 using namespace std;
 
-const uint32_t po_size = 10; //Supported postops
+const uint32_t po_size = 11; //Supported postops
 
 const uint32_t dtype_size = 5; //Supported dtypes
 vector<data_type_t> dtype_arr(dtype_size);
@@ -55,9 +55,13 @@ const float rtol_woq = 1e-4;
 
 // Matmul fused post-op parameters (LOWOHA `matmul_post_op` and reference `post_op_t`;
 // not GEMM alpha/beta). clip uses (CLIP_LOWER, CLIP_UPPER) as (lower, upper) bounds.
+// sum uses SUM_SCALE as its scale, and SUM_ZERO_POINT over an s8 / u8 source
+// and dst.
 const float MATMUL_POSTOP_CLIP_LOWER = -0.5f;
 const float MATMUL_POSTOP_CLIP_UPPER = 0.5f;
 const float MATMUL_POSTOP_ELTWISE_ALPHA = 1.0f;
+const float MATMUL_POSTOP_SUM_SCALE = 0.5f;
+const int32_t MATMUL_POSTOP_SUM_ZERO_POINT = 3;
 
 // Test tolerance constants
 const float EMBAG_F32_TOL = 0.001;

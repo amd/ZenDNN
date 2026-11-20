@@ -369,6 +369,8 @@ extern const float rtol_woq;
 extern const float MATMUL_POSTOP_CLIP_LOWER;
 extern const float MATMUL_POSTOP_CLIP_UPPER;
 extern const float MATMUL_POSTOP_ELTWISE_ALPHA;
+extern const float MATMUL_POSTOP_SUM_SCALE;
+extern const int32_t MATMUL_POSTOP_SUM_ZERO_POINT;
 extern std::vector<MatmulType> matmul_test;
 // `quant_matmul_test` was lifted into `group_matmul/group_matmul_test_helpers.hpp`.
 extern std::vector<BatchMatmulType> batchmatmul_test;
@@ -493,7 +495,8 @@ const post_op_type_t post_op_arr[] = {post_op_type_t::relu,
         post_op_type_t::gelu_tanh, post_op_type_t::gelu_erf,
         post_op_type_t::sigmoid, post_op_type_t::swish, post_op_type_t::tanh,
         post_op_type_t::clip, post_op_type_t::binary_add,
-        post_op_type_t::binary_mul, post_op_type_t::mish, post_op_type_t::none};
+        post_op_type_t::binary_mul, post_op_type_t::mish, post_op_type_t::sum,
+        post_op_type_t::none};
 
 //Supported Dtype declaration
 extern std::vector<data_type_t> dtype_arr;
@@ -758,6 +761,13 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
  */
 void fill_buffer_with_nan(void *buf, size_t nbytes, data_type_t dt);
 void fill_tensor_with_nan(tensor_t &tensor);
+
+/** @brief Fill every stored element (padding included) with the values a
+ *  sum post-op reads: a function of the element index alone, so two tensors
+ *  of one shape get the same values; multiples of 0.5 in [-1.5, 1.5] for a
+ *  float type, [-3, 3] for s8 / s32 and [0, 6] for u8.
+ */
+void fill_tensor_for_sum(tensor_t &tensor);
 
 // `group_matmul_kernel_test` was lifted into
 // `group_matmul/group_matmul_test_helpers.hpp` during the gtests folder

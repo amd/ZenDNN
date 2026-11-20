@@ -211,6 +211,15 @@ std::vector<std::unique_ptr<refused_t>> refused_cases() {
             bf16, bf16, bf16, 4, 64, 64, seed += 4));
     v.back()->c.params.mem_format_a = 'r';
     v.back()->kept = "a call with a reordered source";
+    v.push_back(make_case("u8 x s8 with a sum post-op",
+            "a post-op the epilogue does not apply", u8, s8, f32, 4, 64, 64,
+            seed += 4));
+    {
+        mm::matmul_post_op sum;
+        sum.po_type = zendnnl::common::post_op_type_t::sum;
+        sum.alpha = 0.5f;
+        v.back()->c.params.postop_.push_back(sum);
+    }
     return v;
 }
 
@@ -301,9 +310,9 @@ TEST(NativeBrgemmRefusal, EveryClassReturnsItsStatus) {
 /// The values of r's dst that differ from the f64 model of its call (an
 /// s8 weight with a u8 source and an optional weight zero point, an s8
 /// weight with a bf16 source it does not quantize, an s4 weight, or a u4
-/// weight with a zero point, each with r's scales and r's binary_add
-/// operand) by more than the rounding of the dst, described; "no model" for
-/// any other class.
+/// weight with a zero point, each with r's scales, r's binary_add operand
+/// and its sum post-op over r's prior dst) by more than the rounding of the
+/// dst, described; "no model" for any other class.
 std::string model_mismatches(const refused_t &r) {
     const nt::call_t &c = r.c;
     const auto &q = c.params.quant_params;
@@ -351,6 +360,16 @@ std::string model_mismatches(const refused_t &r) {
                 mag += std::fabs(v);
             }
             const size_t i = static_cast<size_t>(m) * c.N + n;
+            for (const mm::matmul_post_op &po : c.params.postop_) {
+                if (po.po_type != zendnnl::common::post_op_type_t::sum)
+                    continue;
+                const double v = static_cast<double>(po.alpha_or_default())
+                        * (static_cast<double>(
+                                   nt::load_f32(r.prior.get(), dst_dt, i))
+                                - po.beta);
+                want += v;
+                mag += std::fabs(v);
+            }
             const double got = nt::load_f32(c.dst, dst_dt, i);
             const double tol = (dst_dt == bf16 ? std::fabs(want) / 128 : 0.0)
                     + 1e-5 * mag + 1e-6;
@@ -474,7 +493,8 @@ TEST(NativeBrgemmRefusal, TheDefaultRouteIsLoggedOncePerReason) {
         std::vector<const char *> reasons {"weight zero points",
                 "s4 weight with a source other than s8",
                 "weight type other than bf16 / s8 / s4 / f32 / f16",
-                "K exceeds the int32 accumulation bound", "a batched call"};
+                "K exceeds the int32 accumulation bound", "a batched call",
+                "a post-op the epilogue does not apply"};
         if (ZENDNNL_DEPENDS_AOCLDLP) {
             reasons.push_back("a GGML pack format");
             reasons.push_back("a column-major call");

@@ -173,6 +173,8 @@ struct conv_postop {
 | `post_op_type_t::binary_add` | Element-wise Add | Yes |
 | `post_op_type_t::binary_mul` | Element-wise Multiply | Yes |
 
+> **Note:** `post_op_type_t::sum` is a matmul post-op. `conv_direct` returns `status_t::unimplemented` for a chain that holds one, before any kernel writes the output.
+
 **Binary Post-Op Dimensions:**
 
 For binary post-ops (`binary_add` and `binary_mul`), the `dims` field specifies the tensor shape:

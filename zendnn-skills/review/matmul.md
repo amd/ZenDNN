@@ -51,7 +51,12 @@ Current pairing:
   dimension at least N. Alpha is 1 and beta is 0.
 - **AOCL-DLP**, including the default `aocl_dlp_blocked` path. Its chain
   takes relu, leaky relu, gelu tanh, gelu erf, sigmoid, swish, tanh, clip,
-  mish, binary add, binary mul. A call with elu, square, abs, sqrt, exp,
+  mish, binary add, binary mul, and sum, which `matmul_direct` lowers to a
+  binary add of an F32 copy of dst it takes before dispatch (failing the
+  call, dst untouched, when the copy does not fit in `size_t` or cannot be
+  allocated). A kernel that does not apply sum (libxsmm, the batched SGEMM,
+  the auto tuner) hands a sum call to AOCL-DLP in `kernel_select`, at weight
+  cache mode 1 at most. A call with elu, square, abs, sqrt, exp,
   log, or softmax that would run on AOCL-DLP runs on the reference kernel;
   what that kernel does not serve (`reference_declines`: column-major,
   AOCL-prepacked or GGML packed weights, per-group weight scales without a
@@ -62,12 +67,17 @@ Current pairing:
   `aocl_dlp_applies_wei_scale_type`, `aocl_dlp_applies_alpha_beta`), for every
   kernel that passes calls to AOCL-DLP. Under the auto tuner they apply only
   when a candidate runs the call on AOCL-DLP. `group_matmul_direct` refuses
-  an operation with those post-ops unless it runs on oneDNN. Dtypes include f32, bf16 to bf16 or f32, u8 or s8 times
+  an operation with those post-ops unless it runs on oneDNN, and an operation
+  with a sum on any backend. Dtypes include f32, bf16 to bf16 or f32, u8 or s8 times
   s8, WOQ bf16 times s4 or u4, W4A8, and f16. WOQ, W4A8, symmetric quant, and
   a non-f32 int8 source scale are forced here by `kernel_select`.
 - **oneDNN.** Post-ops: elu, relu, leaky relu, gelu tanh, gelu erf, tanh,
   square, abs, sqrt, exp, log, sigmoid, swish, mish, clip, binary add,
-  binary mul. Not softmax or pooling. F16 and bf16 map to oneDNN types.
+  binary mul, and sum as `onednn_takes_sum` allows (a zero point only over
+  an s8 / u8 source; beside a nonzero beta only a leading sum without a
+  zero point, which joins beta's sum when beta plus its scale is finite and
+  the call is not an s8 / u8 source into an s32 / s8 / u8 dst). Not softmax
+  or pooling. F16 and bf16 map to oneDNN types.
   M=1 with an f32 source leaves oneDNN. Unequal batch counts leave oneDNN.
 - **libxsmm.** Post-ops: binary add, binary mul, gelu erf, relu, tanh,
   sigmoid, and swish only when alpha is 1. Dtypes: f32 to f32, bf16 to f32,
@@ -77,8 +87,8 @@ Current pairing:
   only with no bias and no post-op. Other batches use the selected BMM
   algorithm and must apply that algorithm's post-op and dtype limits.
 - **Reference.** Elu, relu, leaky relu, gelu tanh, gelu erf, swish, sigmoid,
-  tanh, softmax, square, abs, sqrt, exp, log, clip, mish, binary add, and
-  binary mul. It is the fallback when a requested backend is not built, and
+  tanh, softmax, square, abs, sqrt, exp, log, clip, mish, binary add,
+  binary mul, and sum. It is the fallback when a requested backend is not built, and
   it still rejects an AOCL-reordered weight.
 - **Native BRGEMM.** The calls it serves, with their data types, scales,
   zero points, weight layouts, and post-ops, are the list in the Native
@@ -88,9 +98,9 @@ Current pairing:
   included), s8 times symmetric s4, f32 times f32, and f16 times f16;
   per-tensor, per-row, or `{M, G}` source scales and per-tensor,
   per-column, or per-group weight scales; and every
-  post-op and gated activation of `matmul_direct` except a softmax with a
-  gated activation. Its epilogue (`native_epilogue.cpp`) applies them, mish
-  included. A call outside that list returns an error status, or under
+  post-op and gated activation of `matmul_direct` except a sum and a softmax
+  with a gated activation. Its epilogue (`native_epilogue.cpp`) applies them,
+  mish included. A call outside that list returns an error status, or under
   `ZENDNNL_MATMUL_ALGO=10` without `lowoha_algo` goes back to the default
   route (see Native matmul below). Every call reads the weight's one
   layout: M = 1 on the GEMV kernels of `brgemm/kernel/gemv/`, whose

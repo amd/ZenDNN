@@ -364,7 +364,6 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N, int K,
     std::unordered_map<int, dnnl::memory> matmul_args;
     dnnl::primitive_attr matmul_attr;
     dnnl::post_ops matmul_pops;
-    int post_op_index = 0;
 
     if (alpha != 1.0f) {
         matmul_attr.set_scales_mask(DNNL_ARG_SRC, 0);
@@ -373,10 +372,13 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N, int K,
         matmul_args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC, alpha_mem});
     }
 
-    if (beta != 0.0f) {
-        matmul_pops.append_sum(beta);
-        post_op_index++;
+    float lead_sum = beta;
+    size_t first_po = 0;
+    if (beta != 0.0f && onednn_merges_sum_into_beta(lowoha_params)) {
+        lead_sum += lowoha_params.postop_[0].alpha_or_default();
+        first_po = 1;
     }
+    if (lead_sum != 0.0f) { matmul_pops.append_sum(lead_sum); }
 
     if (lowoha_params.quant_params.src_scale.buff) {
         dnnl_params.src_quant.scales
@@ -446,7 +448,7 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N, int K,
     }
 
     if (lowoha_params.postop_.size() > 0) {
-        for (size_t po = 0; po < lowoha_params.postop_.size(); po++) {
+        for (size_t po = first_po; po < lowoha_params.postop_.size(); po++) {
             switch (lowoha_params.postop_[po].po_type) {
                 case post_op_type_t::elu: {
                     log_info("Adding ELU post-op");
@@ -590,8 +592,8 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N, int K,
                     matmul_pops.append_binary(
                             dnnl::algorithm::binary_add, dnnl_buff_desc);
                     matmul_args.insert(
-                            {DNNL_ARG_ATTR_MULTIPLE_POST_OP(post_op_index)
-                                            | DNNL_ARG_SRC_1,
+                            {DNNL_ARG_ATTR_MULTIPLE_POST_OP(matmul_pops.len()
+                                     - 1) | DNNL_ARG_SRC_1,
                                     dnnl_buff_mem});
                     break;
                 }
@@ -619,14 +621,21 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N, int K,
                     matmul_pops.append_binary(
                             dnnl::algorithm::binary_mul, dnnl_buff_desc);
                     matmul_args.insert(
-                            {DNNL_ARG_ATTR_MULTIPLE_POST_OP(post_op_index)
-                                            | DNNL_ARG_SRC_1,
+                            {DNNL_ARG_ATTR_MULTIPLE_POST_OP(matmul_pops.len()
+                                     - 1) | DNNL_ARG_SRC_1,
                                     dnnl_buff_mem});
+                    break;
+                }
+                case post_op_type_t::sum: {
+                    log_info("Adding Sum post-op");
+                    matmul_pops.append_sum(
+                            lowoha_params.postop_[po].alpha_or_default(),
+                            static_cast<int32_t>(
+                                    lowoha_params.postop_[po].beta));
                     break;
                 }
                 default: break;
             }
-            post_op_index++;
         }
     }
 

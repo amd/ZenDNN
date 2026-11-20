@@ -80,7 +80,7 @@ Per-op vectors must all have length `num_ops = M.size()`, except `src` whose len
 | `dst` | `vector<void*>` | C pointers |
 | `ldc` | `vector<int>` | Leading dimension of C |
 | `is_weights_const` | `vector<bool>` | Weight-caching hint per op. `true` covers the weight's attached quantization metadata (for example W4A8 per-group scales) as well as its data bytes; clear the grouped-matmul caches before recycling either storage. |
-| `params` | `vector<matmul_params>&` | dtypes, threads, post-ops, plus the optional `active_matmul / total_matmul` prepack-extras hint (see [Framework prepack-extras contract](#framework-prepack-extras-contract)) |
+| `params` | `vector<matmul_params>&` | dtypes, threads, post-ops (not the `sum` post-op: an operation with one returns `status_t::unimplemented`, dst untouched), plus the optional `active_matmul / total_matmul` prepack-extras hint (see [Framework prepack-extras contract](#framework-prepack-extras-contract)) |
 | `moe_postop` | `const group_matmul_moe_postop_params*` | Optional MoE post-op; **`nullptr`** disables (default) |
 | `gated_act` | `const grp_matmul_gated_act_params*` | Optional gated activation; **`nullptr`** disables (default). Requires N even, dst dtype f32/bf16/f16. Applied after GEMM, before `moe_postop`. |
 | `fused_moe` | `const grp_matmul_fused_moe_params*` | Optional fused MoE: Op1(gate+up) → activation → Op2(down_proj) in one call; **`nullptr`** disables (default). See [Fused MoE](#fused-moe-op1--activation--op2). |

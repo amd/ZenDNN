@@ -574,6 +574,7 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
     // Reject mish on AOCL INT8 sym_quant / dynamic-quant / W4A8 paths.
     bool dlp_int8_path_checked = false;
     bool dlp_int8_path = false;
+    int sum_count = 0;
     for (size_t i = 0; i < params.postop_.size(); ++i) {
         auto &po = params.postop_[i];
         if (po.po_type == post_op_type_t::clip) {
@@ -610,6 +611,48 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
                         "sym_quant / dynamic_quant / W4A8 / GGML packed paths");
                 return status_t::failure;
             }
+        } else if (po.po_type == post_op_type_t::sum) {
+            if (++sum_count > 1) {
+                log_error("Post-op[", i,
+                        "]: a call takes at most one sum post-op");
+                return status_t::failure;
+            }
+            if (po.buff != nullptr) {
+                log_error("Post-op[", i,
+                        "]: sum reads dst and takes no buffer (use "
+                        "binary_add to add a tensor)");
+                return status_t::failure;
+            }
+            if (po.dtype != data_type_t::none
+                    && po.dtype != params.dtypes.dst) {
+                log_error("Post-op[", i, "]: sum reads dst as ",
+                        dtype_info(params.dtypes.dst), ", not ",
+                        dtype_info(po.dtype));
+                return status_t::failure;
+            }
+            const float scale = po.alpha_or_default();
+            if (!std::isfinite(scale)) {
+                log_error("Post-op[", i,
+                        "]: sum scale (alpha) must be finite, got ", scale);
+                return status_t::failure;
+            }
+            // A zero point is an int32 value; 2^31 is the first float past
+            // that range.
+            if (!(po.beta >= -2147483648.0f && po.beta < 2147483648.0f)
+                    || std::trunc(po.beta) != po.beta) {
+                log_error("Post-op[", i,
+                        "]: sum zero point (beta) must be an int32 value, got ",
+                        po.beta);
+                return status_t::failure;
+            }
+            if (po.beta != 0.0f && params.dtypes.dst != data_type_t::s8
+                    && params.dtypes.dst != data_type_t::u8) {
+                log_error("Post-op[", i,
+                        "]: a sum zero point (beta) takes an s8 / u8 "
+                        "destination, not ",
+                        dtype_info(params.dtypes.dst));
+                return status_t::failure;
+            }
         }
     }
     return status_t::success;
@@ -630,6 +673,7 @@ inline const char *post_op_type_to_string(post_op_type_t type) {
         case post_op_type_t::binary_add: return "binary_add";
         case post_op_type_t::binary_mul: return "binary_mul";
         case post_op_type_t::mish: return "mish";
+        case post_op_type_t::sum: return "sum";
         default: return "unknown";
     }
 }
@@ -878,7 +922,7 @@ unsigned int get_auto_tuner_ver() {
 
 matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
         int batch_count, int M, int N, int K, int num_threads, const void *bias,
-        const bool is_weights_const) {
+        const bool is_weights_const, float beta) {
 
     matmul_config_t &matmul_config = matmul_config_t::instance();
     int32_t algo;
@@ -979,6 +1023,7 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
         kernel = matmul_algo_t::aocl_dlp;
     }
 
+    const bool dispatched = kernel == matmul_algo_t::dynamic_dispatch;
     if (kernel == matmul_algo_t::dynamic_dispatch) {
         if (batch_count > 1) {
             if (params.dtypes.wei == data_type_t::bf16) {
@@ -1105,6 +1150,13 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
                         && bias == nullptr && params.postop_.empty());
         if (!is_onednn_algo && !is_aocl_algo && !f16_batched_sgemm_eligible) {
             log_info("Switching to aocl_dlp_blocked kernel for F16 GEMM");
+            // The bias-free batches without post-ops on the same weight stay
+            // on the batched SGEMM, which reads it raw, so this call keeps it
+            // raw (weight cache mode 1 at most).
+            if (kernel == matmul_algo_t::batched_sgemm) {
+                params.weight_cache_type
+                        = std::min<int32_t>(params.weight_cache_type, 1);
+            }
             kernel = matmul_algo_t::aocl_dlp_blocked;
         }
     }
@@ -1130,6 +1182,26 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
 #else
         kernel = matmul_algo_t::reference;
 #endif
+    }
+    // Of the kernels left, AOCL-DLP and oneDNN apply a sum post-op; the
+    // batched SGEMM, one chain over every matrix of the batch, does not.
+    // oneDNN takes it only as onednn_takes_sum says: the dispatch heuristics
+    // leave the others to AOCL-DLP, and matmul_direct refuses them when the
+    // call asks for oneDNN.  The calls without a sum on the same weight stay
+    // on the kernel they asked for, which may read the weight raw, so the
+    // moved call keeps it raw (weight cache mode 1 at most).
+    const bool on_onednn = kernel == matmul_algo_t::onednn
+            || kernel == matmul_algo_t::onednn_blocked;
+    if (kernel != matmul_algo_t::aocl_dlp
+            && kernel != matmul_algo_t::aocl_dlp_blocked
+            && (!on_onednn || (dispatched && !onednn_takes_sum(params, beta)))
+            && has_sum_post_op(params)) {
+        kernel = batch_count > 1 ? matmul_algo_t::aocl_dlp
+                                 : matmul_algo_t::aocl_dlp_blocked;
+        params.weight_cache_type
+                = std::min<int32_t>(params.weight_cache_type, 1);
+        log_info("A sum post-op runs on AOCL-DLP, switching to ",
+                kernel_to_string(kernel), " kernel");
     }
 #if !ZENDNNL_DEPENDS_AOCLDLP
     if (kernel == matmul_algo_t::aocl_dlp

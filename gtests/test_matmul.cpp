@@ -18,15 +18,21 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <vector>
 #include "common/bfloat16.hpp"
 #include "common/float16.hpp"
 #include "common/platform_info.hpp"
+#include "common/zendnnl_global.hpp"
 #include "gtest_utils.hpp"
 #include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
+#if ZENDNNL_DEPENDS_AOCLDLP
+#include "lowoha_operators/matmul/backends/aocl/aocl_postop.hpp"
+#endif
 #include "lowoha_operators/matmul/ggml_weight_unpack.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/native_kernel_registry.hpp"
+#include "matmul_native/native_brgemm_test_utils.hpp"
 #include <gtest/gtest.h>
 #if !defined(_WIN32)
 #include <sys/resource.h>
@@ -2446,6 +2452,1020 @@ TEST(GgmlPackedValidation, UnsupportedWeightDtypeRejected) {
                 << "a rejected unpack must not redirect the weight pointer";
     }
     clear_ggml_weight_unpack_cache();
+}
+
+namespace {
+
+/// A sum post-op; a NaN scale is the unset one, which reads as 1.
+matmul_post_op sum_post_op(float scale, float zero_point = 0.0f) {
+    matmul_post_op po;
+    po.po_type = post_op_type_t::sum;
+    po.alpha = scale;
+    po.beta = zero_point;
+    return po;
+}
+
+matmul_post_op post_op_of(
+        post_op_type_t type, float alpha = 0.0f, float beta = 0.0f) {
+    matmul_post_op po;
+    po.po_type = type;
+    po.alpha = alpha;
+    po.beta = beta;
+    return po;
+}
+
+/// The params of a call on the reference kernel whose operands are all dt.
+matmul_params reference_params(data_type_t dt) {
+    matmul_params params;
+    params.dtypes.src = dt;
+    params.dtypes.wei = dt;
+    params.dtypes.dst = dt;
+    params.lowoha_algo = matmul_algo_t::reference;
+    return params;
+}
+
+/// An integer in [-span / 2, span - 1 - span / 2]: the products, sums and
+/// halves of such values below are exact in f32 and bf16, so the sum tests
+/// compare exactly.
+float small_int(size_t i, int span) {
+    return static_cast<float>(static_cast<int>(i % span) - span / 2);
+}
+
+/// (src x wei)(i, j) of a row-major M x K source and K x N weight.
+float host_dot(const float *src, const float *wei, int N, int K, int i, int j) {
+    float acc = 0.0f;
+    for (int k = 0; k < K; ++k)
+        acc += src[i * K + k] * wei[k * N + j];
+    return acc;
+}
+
+/// A binary post-op of type over the F32 operand of dims, rows ld apart.
+matmul_post_op binary_post_op(post_op_type_t type, std::vector<float> &operand,
+        std::vector<int64_t> dims, int ld) {
+    matmul_post_op po;
+    po.po_type = type;
+    po.buff = operand.data();
+    po.dtype = data_type_t::f32;
+    po.dims = std::move(dims);
+    po.leading_dim = ld;
+    return po;
+}
+
+/// The values of v stored as dt, f32, bf16 or f16.
+struct typed_buffer_t {
+    data_type_t dt;
+    std::vector<float> f32;
+    std::vector<bfloat16_t> bf16;
+    std::vector<float16_t> f16;
+
+    typed_buffer_t(const std::vector<float> &v, data_type_t dt_) : dt(dt_) {
+        if (dt == data_type_t::bf16) {
+            bf16.assign(v.begin(), v.end());
+        } else if (dt == data_type_t::f16) {
+            f16.assign(v.begin(), v.end());
+        } else {
+            f32 = v;
+        }
+    }
+    void *data() {
+        if (dt == data_type_t::bf16) return bf16.data();
+        if (dt == data_type_t::f16) return f16.data();
+        return f32.data();
+    }
+    float at(size_t i) const {
+        if (dt == data_type_t::bf16) return static_cast<float>(bf16[i]);
+        if (dt == data_type_t::f16) return static_cast<float>(f16[i]);
+        return f32[i];
+    }
+};
+
+} // namespace
+
+/** @brief The checks of a sum post-op: one per call, no buffer, the dst data
+ *  type, a finite scale, a zero point on an s8 / u8 dst only, and there an
+ *  int32 value.
+ */
+TEST(MatmulSumPostOp, ValidationRejectsMalformedSum) {
+    constexpr int M = 2, N = 3, K = 4;
+    std::vector<float> src(M * K, 1.0f), wei(K * N, 1.0f), dst(M * N, 0.0f);
+    std::vector<float> other(M * N, 0.0f);
+    const auto validate = [&](const std::vector<matmul_post_op> &chain) {
+        matmul_params params = reference_params(data_type_t::f32);
+        params.postop_ = chain;
+        return validate_matmul_direct_inputs(src.data(), wei.data(), dst.data(),
+                M, N, K, 1, 1, params, true);
+    };
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    EXPECT_EQ(validate({sum_post_op(nan)}), status_t::success);
+    EXPECT_EQ(validate({sum_post_op(0.5f)}), status_t::success);
+    EXPECT_EQ(validate({sum_post_op(1.0f), sum_post_op(1.0f)}),
+            status_t::failure);
+    matmul_post_op with_buffer = sum_post_op(1.0f);
+    with_buffer.buff = other.data();
+    EXPECT_EQ(validate({with_buffer}), status_t::failure);
+    matmul_post_op as_bf16 = sum_post_op(1.0f);
+    as_bf16.dtype = data_type_t::bf16;
+    EXPECT_EQ(validate({as_bf16}), status_t::failure);
+    matmul_post_op as_dst = sum_post_op(1.0f);
+    as_dst.dtype = data_type_t::f32;
+    EXPECT_EQ(validate({as_dst}), status_t::success);
+    EXPECT_EQ(validate({sum_post_op(inf)}), status_t::failure);
+    EXPECT_EQ(validate({sum_post_op(1.0f, 3.0f)}), status_t::failure);
+
+    const float src_scale = 0.5f, wei_scale = 2.0f, dst_scale = 2.0f;
+    std::vector<uint8_t> u8_src(M * K, 1), u8_dst(M * N, 0);
+    std::vector<int8_t> s8_wei(K * N, 1);
+    const auto validate_zero_point = [&](float zero_point) {
+        matmul_params params;
+        params.dtypes.src = data_type_t::u8;
+        params.dtypes.wei = data_type_t::s8;
+        params.dtypes.dst = data_type_t::u8;
+        params.lowoha_algo = matmul_algo_t::reference;
+        auto &q = params.quant_params;
+        q.src_scale.buff = &src_scale;
+        q.src_scale.dt = data_type_t::f32;
+        q.src_scale.dims = {1};
+        q.wei_scale.buff = &wei_scale;
+        q.wei_scale.dt = data_type_t::f32;
+        q.wei_scale.dims = {1};
+        q.dst_scale.buff = &dst_scale;
+        q.dst_scale.dt = data_type_t::f32;
+        q.dst_scale.dims = {1};
+        params.postop_ = {sum_post_op(1.0f, zero_point)};
+        return validate_matmul_direct_inputs(u8_src.data(), s8_wei.data(),
+                u8_dst.data(), M, N, K, 1, 1, params, true);
+    };
+    EXPECT_EQ(validate_zero_point(4.0f), status_t::success);
+    EXPECT_EQ(validate_zero_point(-2147483648.0f), status_t::success);
+    EXPECT_EQ(validate_zero_point(0.5f), status_t::failure);
+    EXPECT_EQ(validate_zero_point(nan), status_t::failure);
+    EXPECT_EQ(validate_zero_point(2147483648.0f), status_t::failure);
+}
+
+/** @brief Calls with a sum post-op that fail and leave the dst as it was: a
+ *  column-major call, a group matmul, a gated activation, a second sum
+ *  post-op (with the input checks on and off), and a call that asks for
+ *  oneDNN beside a nonzero beta with a sum that does not lead the chain, so
+ *  cannot join beta's sum; oneDNN takes no sum zero point over a float source
+ *  either, and joins no sum to beta into an s32 / s8 / u8 dst of an INT8 call
+ *  or as a scale of infinity.  The Tensor Operator API takes no sum post-op.
+ */
+TEST(MatmulSumPostOp, RefusedCallsKeepDst) {
+    constexpr int M = 2, N = 8, K = 4;
+    const std::vector<float> src(M * K, 1.0f), wei(K * N, 1.0f);
+    const std::vector<float> dst0(M * N, 7.0f);
+    std::vector<float> dst = dst0;
+    matmul_params params = reference_params(data_type_t::f32);
+    params.lowoha_algo = matmul_algo_t::aocl_dlp_blocked;
+    params.weight_cache_type = 1;
+    params.postop_ = {sum_post_op(1.0f)};
+    matmul_batch_params_t batch;
+
+    EXPECT_EQ(matmul_direct('c', false, false, M, N, K, 1.0f, src.data(), M,
+                      wei.data(), K, nullptr, 0.0f, dst.data(), M, true, batch,
+                      params),
+            status_t::unimplemented);
+    EXPECT_EQ(dst, dst0);
+
+    EXPECT_EQ(group_matmul_direct({'r'}, {false}, {false}, {M}, {N}, {K},
+                      {1.0f}, {src.data()}, {K}, {wei.data()}, {N}, {nullptr},
+                      {0.0f}, {dst.data()}, {N}, {true}, {params}),
+            status_t::unimplemented);
+    EXPECT_EQ(dst, dst0);
+
+    {
+        WeightCacheGuard out_of_place(1);
+        matmul_params gated_params = reference_params(data_type_t::f32);
+        gated_params.num_threads = 1;
+        gated_params.lowoha_algo = matmul_algo_t::none;
+        gated_params.postop_ = {sum_post_op(1.0f)};
+        matmul_gated_act_params gated;
+        gated.act = matmul_gated_act_t::silu_and_mul;
+        EXPECT_EQ(matmul_direct('r', false, false, M, N, K, 1.0f, src.data(), K,
+                          wei.data(), N, nullptr, 0.0f, dst.data(), N, false,
+                          batch, gated_params, &gated),
+                status_t::unimplemented);
+        EXPECT_EQ(dst, dst0);
+    }
+
+    matmul_params two_sums = params;
+    two_sums.postop_ = {sum_post_op(1.0f), sum_post_op(1.0f)};
+    EXPECT_EQ(matmul_direct('r', false, false, M, N, K, 1.0f, src.data(), K,
+                      wei.data(), N, nullptr, 0.0f, dst.data(), N, true, batch,
+                      two_sums),
+            status_t::failure);
+    EXPECT_EQ(dst, dst0);
+    native_brgemm_test::expect_in_child(
+            {{"ZENDNNL_DIAGNOSTICS_ENABLE", "0"}}, [&] {
+        const status_t status = matmul_direct('r', false, false, M, N, K, 1.0f,
+                src.data(), K, wei.data(), N, nullptr, 0.0f, dst.data(), N,
+                true, batch, two_sums);
+        int bad = 0;
+        if (status != status_t::failure) {
+            std::fprintf(stderr, "status %d, not failure\n",
+                    static_cast<int>(status));
+            ++bad;
+        }
+        if (dst != dst0) {
+            std::fprintf(stderr, "dst written\n");
+            ++bad;
+        }
+        return bad;
+    }, "a second sum post-op fails with the input checks off");
+
+    if (ZENDNNL_DEPENDS_ONEDNN) {
+        matmul_params beside_beta = params;
+        beside_beta.lowoha_algo = matmul_algo_t::onednn;
+        beside_beta.postop_
+                = {post_op_of(post_op_type_t::relu), sum_post_op(1.0f)};
+        EXPECT_EQ(matmul_direct('r', false, false, M, N, K, 1.0f, src.data(), K,
+                          wei.data(), N, nullptr, 0.25f, dst.data(), N, true,
+                          batch, beside_beta),
+                status_t::unimplemented);
+        EXPECT_EQ(dst, dst0);
+    }
+    matmul_params float_src;
+    float_src.dtypes.src = data_type_t::f32;
+    float_src.dtypes.wei = data_type_t::f32;
+    float_src.dtypes.dst = data_type_t::u8;
+    float_src.postop_ = {sum_post_op(1.0f, 3.0f)};
+    EXPECT_FALSE(onednn_takes_sum(float_src, 0.0f));
+    matmul_params int8_src = float_src;
+    int8_src.dtypes.src = data_type_t::u8;
+    int8_src.dtypes.wei = data_type_t::s8;
+    EXPECT_TRUE(onednn_takes_sum(int8_src, 0.0f));
+    EXPECT_FALSE(onednn_takes_sum(int8_src, 0.25f))
+            << "oneDNN took a sum with a zero point beside a nonzero beta";
+    matmul_params joined = int8_src;
+    joined.postop_ = {sum_post_op(1.0f)};
+    for (const data_type_t dt :
+            {data_type_t::s32, data_type_t::s8, data_type_t::u8}) {
+        joined.dtypes.dst = dt;
+        EXPECT_FALSE(onednn_takes_sum(joined, 1.0f))
+                << "oneDNN joined a sum to beta into an " << dtype_info(dt)
+                << " dst of an INT8 call";
+    }
+    joined.dtypes.dst = data_type_t::f32;
+    EXPECT_TRUE(onednn_takes_sum(joined, 1.0f));
+    joined.postop_ = {sum_post_op(std::numeric_limits<float>::max())};
+    EXPECT_FALSE(onednn_takes_sum(joined, std::numeric_limits<float>::max()))
+            << "oneDNN took a joined scale of infinity";
+
+    tensor_factory_t factory;
+    tensor_t weights
+            = factory.uniform_dist_tensor({K, N}, data_type_t::f32, 1.0f);
+    weights.set_name("weights");
+    post_op_t sum_op(sum_params_t {1.0f, 0});
+    matmul_context_t context = matmul_context_t().set_param("weights", weights);
+    context = context.set_post_op(sum_op);
+    context = context.create();
+    matmul_operator_t matmul = matmul_operator_t()
+                                       .set_name("sum_matmul")
+                                       .set_context(context)
+                                       .create();
+    EXPECT_TRUE(matmul.is_bad_object())
+            << "the Tensor Operator API took a sum post-op";
+}
+
+/** @brief The reference kernel, AOCL-DLP and oneDNN add the dst a call found
+ *  at the sum's place in the chain: f32, bf16 and (with AVX512-FP16) f16, one
+ *  row and seven, the default scale and 0.5, beta 0 and 0.25, a bias, rows of
+ *  dst wider than N, and a sum alone, between a relu and a clip, between a
+ *  binary_add and a binary_mul, before a binary_add, and before a none and two
+ *  binary operands, which oneDNN, appending nothing for the none, binds past
+ *  it.  A call oneDNN does not take (onednn_takes_sum) returns unimplemented
+ *  with dst untouched.
+ */
+TEST(MatmulSumPostOp, KernelsAddDstAtItsChainPosition) {
+    constexpr int N = 6, K = 5, ldc = N + 3;
+    constexpr float kPad = 99.0f, kLower = -1.0f, kUpper = 3.0f;
+    enum class chain_t {
+        sum,
+        relu_sum_clip,
+        add_sum_mul,
+        sum_add,
+        sum_none_add_mul
+    };
+    std::vector<matmul_algo_t> kernels {matmul_algo_t::reference,
+            matmul_algo_t::aocl_dlp, matmul_algo_t::aocl_dlp_blocked};
+    if (ZENDNNL_DEPENDS_ONEDNN) {
+        kernels.push_back(matmul_algo_t::onednn);
+        kernels.push_back(matmul_algo_t::onednn_blocked);
+    }
+    const auto run = [&](matmul_algo_t kernel, data_type_t dt, int M,
+                             float scale, float beta, chain_t chain) {
+        SCOPED_TRACE(std::string(kernel_to_string(kernel)) + ", "
+                + dtype_info(dt) + ", M " + std::to_string(M) + ", scale "
+                + std::to_string(scale) + ", beta " + std::to_string(beta)
+                + ", chain " + std::to_string(static_cast<int>(chain)));
+        clear_matmul_test_caches();
+        std::vector<float> src(static_cast<size_t>(M) * K), wei(K * N), bias(N),
+                add(static_cast<size_t>(M) * N), mul(N),
+                dst0(static_cast<size_t>(M) * ldc, kPad);
+        for (size_t i = 0; i < src.size(); ++i)
+            src[i] = small_int(i, 5);
+        for (size_t i = 0; i < wei.size(); ++i)
+            wei[i] = small_int(i + 1, 3);
+        for (size_t i = 0; i < add.size(); ++i)
+            add[i] = small_int(i + 2, 5);
+        for (int j = 0; j < N; ++j) {
+            bias[j] = small_int(j, 3);
+            mul[j] = static_cast<float>(1 + j % 2);
+        }
+        for (int i = 0; i < M; ++i)
+            for (int j = 0; j < N; ++j)
+                dst0[static_cast<size_t>(i) * ldc + j]
+                        = 0.5f * small_int(static_cast<size_t>(i * N + j), 7);
+        typed_buffer_t src_b(src, dt), wei_b(wei, dt), dst_b(dst0, dt);
+
+        matmul_params params;
+        params.dtypes.src = dt;
+        params.dtypes.wei = dt;
+        params.dtypes.dst = dt;
+        params.dtypes.bias = data_type_t::f32;
+        params.lowoha_algo = kernel;
+        const matmul_post_op sum = sum_post_op(scale);
+        const matmul_post_op add_po
+                = binary_post_op(post_op_type_t::binary_add, add, {M, N}, N);
+        const matmul_post_op mul_po
+                = binary_post_op(post_op_type_t::binary_mul, mul, {1, N}, N);
+        switch (chain) {
+            case chain_t::sum: params.postop_ = {sum}; break;
+            case chain_t::relu_sum_clip:
+                params.postop_ = {post_op_of(post_op_type_t::relu), sum,
+                        post_op_of(post_op_type_t::clip, kLower, kUpper)};
+                break;
+            case chain_t::add_sum_mul:
+                params.postop_ = {add_po, sum, mul_po};
+                break;
+            case chain_t::sum_add: params.postop_ = {sum, add_po}; break;
+            case chain_t::sum_none_add_mul:
+                params.postop_ = {
+                        sum, post_op_of(post_op_type_t::none), add_po, mul_po};
+                break;
+        }
+        matmul_params probe = params;
+        const matmul_algo_t selected = kernel_select(
+                probe, 1, 1, 1, M, N, K, 1, bias.data(), true, beta);
+        const bool on_onednn = selected == matmul_algo_t::onednn
+                || selected == matmul_algo_t::onednn_blocked;
+        const bool refused = on_onednn && !onednn_takes_sum(probe, beta);
+
+        matmul_batch_params_t batch;
+        const status_t status = matmul_direct('r', false, false, M, N, K, 1.0f,
+                src_b.data(), K, wei_b.data(), N, bias.data(), beta,
+                dst_b.data(), ldc, true, batch, params);
+        if (refused) {
+            EXPECT_EQ(status, status_t::unimplemented);
+            for (size_t i = 0; i < dst0.size(); ++i)
+                EXPECT_EQ(dst_b.at(i), dst0[i]) << "dst written at " << i;
+            return;
+        }
+        ASSERT_EQ(status, status_t::success);
+        const float s = std::isnan(scale) ? 1.0f : scale;
+        bool sum_shows = false, order_matters = false;
+        for (int i = 0; i < M; ++i) {
+            for (int j = 0; j < ldc; ++j) {
+                const size_t at = static_cast<size_t>(i) * ldc + j;
+                if (j >= N) {
+                    EXPECT_EQ(dst_b.at(at), kPad)
+                            << "padding at (" << i << ", " << j << ")";
+                    continue;
+                }
+                const float acc = host_dot(src.data(), wei.data(), N, K, i, j)
+                        + bias[j] + beta * dst0[at];
+                const float a = add[static_cast<size_t>(i) * N + j];
+                const auto chained = [&](float added) {
+                    switch (chain) {
+                        case chain_t::relu_sum_clip:
+                            return std::clamp(std::max(acc, 0.0f) + added,
+                                    kLower, kUpper);
+                        case chain_t::add_sum_mul:
+                        case chain_t::sum_none_add_mul:
+                            return (acc + a + added) * mul[j];
+                        case chain_t::sum_add: return acc + added + a;
+                        default: return acc + added;
+                    }
+                };
+                const float added = s * dst0[at];
+                const float want = chained(added);
+                sum_shows |= want != chained(0.0f);
+                order_matters |= want
+                        != std::clamp(
+                                std::max(acc + added, 0.0f), kLower, kUpper);
+                EXPECT_EQ(dst_b.at(at), want)
+                        << "at (" << i << ", " << j << ")";
+            }
+        }
+        EXPECT_TRUE(sum_shows) << "the data does not tell the sum from none";
+        if (chain == chain_t::relu_sum_clip) {
+            EXPECT_TRUE(order_matters) << "the data does not tell a sum before "
+                                          "the relu from one after it";
+        }
+    };
+    const float unset = std::numeric_limits<float>::quiet_NaN();
+    std::vector<data_type_t> dts {data_type_t::f32, data_type_t::bf16};
+    if (zendnnl_platform_info().get_avx512_f16_status())
+        dts.push_back(data_type_t::f16);
+    for (const matmul_algo_t kernel : kernels)
+        for (const data_type_t dt : dts)
+            for (const int M : {1, 7})
+                for (const float scale : {unset, 0.5f})
+                    for (const float beta : {0.0f, 0.25f})
+                        for (const chain_t chain :
+                                {chain_t::sum, chain_t::relu_sum_clip,
+                                        chain_t::add_sum_mul, chain_t::sum_add,
+                                        chain_t::sum_none_add_mul})
+                            run(kernel, dt, M, scale, beta, chain);
+    clear_matmul_test_caches();
+}
+
+/** @brief On each kernel an INT8 call adds scale * (dst - zero point) of the
+ *  dst it found after the source and weight scales and before the dst scale
+ *  and zero point: a u8 dst with a sum and a dst zero point, an s8 dst with a
+ *  negative sum zero point, an s32 dst with the default scale, and an f32
+ *  dst.  The u8 and s8 results reach both ends of their range, where the
+ *  store saturates, and halfway values, which it rounds to even.
+ */
+TEST(MatmulSumPostOp, Int8OnEveryKernel) {
+    constexpr int M = 3, N = 8, K = 4;
+    // Their product is not 1, so a sum added before them would show.
+    const float src_scale = 0.5f, wei_scale = 6.0f;
+    struct dst_case_t {
+        data_type_t dt;
+        float scale, zero_point;
+        int32_t dst_zp;
+        float dst_scale;
+    };
+    const dst_case_t dsts[] = {{data_type_t::u8, 4.0f, 100.0f, 64, 0.5f},
+            {data_type_t::s8, 4.0f, -3.0f, 0, 0.5f},
+            {data_type_t::s32, std::numeric_limits<float>::quiet_NaN(), 0.0f, 0,
+                    1.0f},
+            {data_type_t::f32, 0.5f, 0.0f, 0, 1.0f}};
+    std::vector<matmul_algo_t> kernels {matmul_algo_t::reference,
+            matmul_algo_t::aocl_dlp, matmul_algo_t::aocl_dlp_blocked};
+    if (ZENDNNL_DEPENDS_ONEDNN) kernels.push_back(matmul_algo_t::onednn);
+    std::vector<uint8_t> src(M * K);
+    std::vector<int8_t> wei(K * N);
+    for (size_t i = 0; i < src.size(); ++i)
+        src[i] = static_cast<uint8_t>(i % 5);
+    for (size_t i = 0; i < wei.size(); ++i)
+        wei[i] = static_cast<int8_t>(static_cast<int>(i % 3) - 1);
+
+    for (const matmul_algo_t kernel : kernels) {
+        for (const dst_case_t &d : dsts) {
+            SCOPED_TRACE(std::string(kernel_to_string(kernel)) + ", "
+                    + dtype_info(d.dt));
+            clear_matmul_test_caches();
+            // u8 and s8 values spread over their range, some below the sum's
+            // zero point.
+            std::vector<float> c0(M * N);
+            for (size_t i = 0; i < c0.size(); ++i) {
+                const int spread = static_cast<int>(i * 37 % 256);
+                const int v = d.dt == data_type_t::u8 ? spread
+                        : d.dt == data_type_t::s8     ? spread - 128
+                                                  : static_cast<int>(i % 7) - 3;
+                c0[i] = d.dt == data_type_t::f32 ? 0.5f * v
+                                                 : static_cast<float>(v);
+            }
+            std::vector<int32_t> dst_s32(c0.size());
+            std::vector<float> dst_f32(c0.size());
+            std::vector<uint8_t> dst_u8(c0.size());
+            std::vector<int8_t> dst_s8(c0.size());
+            for (size_t i = 0; i < c0.size(); ++i) {
+                switch (d.dt) {
+                    case data_type_t::u8:
+                        dst_u8[i] = static_cast<uint8_t>(c0[i]);
+                        break;
+                    case data_type_t::s8:
+                        dst_s8[i] = static_cast<int8_t>(c0[i]);
+                        break;
+                    case data_type_t::s32:
+                        dst_s32[i] = static_cast<int32_t>(c0[i]);
+                        break;
+                    default: dst_f32[i] = c0[i]; break;
+                }
+            }
+            void *dst = d.dt == data_type_t::u8
+                    ? static_cast<void *>(dst_u8.data())
+                    : d.dt == data_type_t::s8
+                    ? static_cast<void *>(dst_s8.data())
+                    : d.dt == data_type_t::s32
+                    ? static_cast<void *>(dst_s32.data())
+                    : static_cast<void *>(dst_f32.data());
+            const auto load = [&](size_t i) -> float {
+                switch (d.dt) {
+                    case data_type_t::u8: return dst_u8[i];
+                    case data_type_t::s8: return dst_s8[i];
+                    case data_type_t::s32:
+                        return static_cast<float>(dst_s32[i]);
+                    default: return dst_f32[i];
+                }
+            };
+
+            matmul_params params;
+            params.dtypes.src = data_type_t::u8;
+            params.dtypes.wei = data_type_t::s8;
+            params.dtypes.dst = d.dt;
+            params.lowoha_algo = kernel;
+            auto &q = params.quant_params;
+            q.src_scale.buff = &src_scale;
+            q.src_scale.dt = data_type_t::f32;
+            q.src_scale.dims = {1};
+            q.wei_scale.buff = &wei_scale;
+            q.wei_scale.dt = data_type_t::f32;
+            q.wei_scale.dims = {1};
+            const bool quantized
+                    = d.dt == data_type_t::u8 || d.dt == data_type_t::s8;
+            if (quantized) {
+                q.dst_scale.buff = &d.dst_scale;
+                q.dst_scale.dt = data_type_t::f32;
+                q.dst_scale.dims = {1};
+                if (d.dst_zp != 0) {
+                    q.dst_zp.buff = &d.dst_zp;
+                    q.dst_zp.dt = data_type_t::s32;
+                    q.dst_zp.dims = {1};
+                }
+            }
+            params.postop_ = {sum_post_op(d.scale, d.zero_point)};
+            matmul_batch_params_t batch;
+            ASSERT_EQ(matmul_direct('r', false, false, M, N, K, 1.0f,
+                              src.data(), K, wei.data(), N, nullptr, 0.0f, dst,
+                              N, true, batch, params),
+                    status_t::success);
+
+            const float s = std::isnan(d.scale) ? 1.0f : d.scale;
+            const float lo = d.dt == data_type_t::u8 ? 0.0f : -128.0f;
+            const float hi = d.dt == data_type_t::u8 ? 255.0f : 127.0f;
+            bool sum_shows = false, order_shows = false;
+            int below = 0, above = 0, halfway = 0;
+            for (int i = 0; i < M; ++i) {
+                for (int j = 0; j < N; ++j) {
+                    const size_t at = static_cast<size_t>(i) * N + j;
+                    int32_t dot = 0;
+                    for (int k = 0; k < K; ++k)
+                        dot += src[i * K + k] * wei[k * N + j];
+                    // before_scales: the sum added before the source and
+                    // weight scales instead of after them.
+                    const auto unclamped
+                            = [&](float added, bool before_scales) {
+                        const float acc = before_scales
+                                ? (static_cast<float>(dot) + added) * src_scale
+                                        * wei_scale
+                                : static_cast<float>(dot) * src_scale
+                                                * wei_scale
+                                        + added;
+                        return quantized ? acc * d.dst_scale
+                                        + static_cast<float>(d.dst_zp)
+                                         : acc;
+                    };
+                    const auto result = [&](float added, bool before_scales) {
+                        const float x = unclamped(added, before_scales);
+                        return quantized ? std::nearbyint(std::clamp(x, lo, hi))
+                                         : x;
+                    };
+                    const float added = s * (c0[at] - d.zero_point);
+                    const float x = unclamped(added, false);
+                    below += x < lo;
+                    above += x > hi;
+                    halfway += x > lo && x < hi && x - std::floor(x) == 0.5f;
+                    const float want = result(added, false);
+                    sum_shows |= want != result(0.0f, false);
+                    order_shows |= want != result(added, true);
+                    EXPECT_EQ(load(at), want)
+                            << "at (" << i << ", " << j << ")";
+                }
+            }
+            EXPECT_TRUE(sum_shows);
+            EXPECT_TRUE(order_shows)
+                    << "the data does not tell a sum after the source and "
+                       "weight scales from one before them";
+            if (quantized) {
+                EXPECT_GT(below, 0) << "no value saturates at the low end";
+                EXPECT_GT(above, 0) << "no value saturates at the high end";
+                EXPECT_GT(halfway, 0) << "no value is halfway";
+            }
+        }
+    }
+    clear_matmul_test_caches();
+}
+
+/** @brief A sum post-op whose copy of dst, 4 x 2^30 x 2^30 f32 values,
+ *  overflows size_t fails before the call allocates it or reads dst, whose
+ *  buffer is far smaller than that.
+ */
+TEST(MatmulSumPostOp, AddendSizeOverflowFails) {
+    if (!ZENDNNL_DEPENDS_AOCLDLP) GTEST_SKIP() << "needs AOCL-DLP";
+    native_brgemm_test::expect_in_child(
+            {{"ZENDNNL_MATMUL_ALGO", nullptr}, {"ZENDNNL_BMM_ALGO", nullptr}},
+            [] {
+        constexpr int MN = 1 << 30;
+        std::vector<float> src(16, 1.0f), wei(16, 1.0f), dst(16, 7.0f);
+        matmul_params params = reference_params(data_type_t::f32);
+        params.lowoha_algo = matmul_algo_t::aocl_dlp;
+        params.postop_ = {sum_post_op(1.0f)};
+        matmul_batch_params_t batch;
+        batch.Batch_A = 4;
+        const status_t status = matmul_direct('r', false, false, MN, MN, 1,
+                1.0f, src.data(), 1, wei.data(), MN, nullptr, 0.0f, dst.data(),
+                MN, false, batch, params);
+        if (status == status_t::failure) return 0;
+        std::fprintf(
+                stderr, "status %d, not failure\n", static_cast<int>(status));
+        return 1;
+    }, "a sum whose copy of dst overflows size_t fails");
+}
+
+/** @brief A batched call adds to each matrix the dst it found there: three
+ *  matrices on one weight or on three, rows of dst wider than N and matrices
+ *  further apart than M rows, an M of several blocks over four threads, on
+ *  the default batched kernel, AOCL-DLP, oneDNN and the reference kernel.
+ */
+TEST(MatmulSumPostOp, BatchedAddsEachMatrixDst) {
+    constexpr int batches = 3, M = 37, N = 24, K = 16, ldc = N + 2;
+    constexpr size_t dst_stride = static_cast<size_t>(M) * ldc + 5;
+    constexpr float kPad = 99.0f, kScale = 0.5f;
+    std::vector<matmul_algo_t> kernels {matmul_algo_t::none,
+            matmul_algo_t::aocl_dlp, matmul_algo_t::reference};
+    if (ZENDNNL_DEPENDS_ONEDNN) kernels.push_back(matmul_algo_t::onednn);
+    std::vector<float> src(static_cast<size_t>(batches) * M * K);
+    for (size_t i = 0; i < src.size(); ++i)
+        src[i] = small_int(i, 5);
+    for (const matmul_algo_t kernel : kernels) {
+        for (const int batch_b : {1, batches}) {
+            for (const bool relu_first : {false, true}) {
+                SCOPED_TRACE(std::string(kernel_to_string(kernel))
+                        + ", Batch_B " + std::to_string(batch_b)
+                        + (relu_first ? ", [relu, sum]" : ", [sum]"));
+                clear_matmul_test_caches();
+                std::vector<float> wei(static_cast<size_t>(batch_b) * K * N);
+                for (size_t i = 0; i < wei.size(); ++i)
+                    wei[i] = small_int(i + 1, 3);
+                std::vector<float> dst0((batches - 1) * dst_stride
+                                + static_cast<size_t>(M) * ldc,
+                        kPad);
+                for (int b = 0; b < batches; ++b)
+                    for (int i = 0; i < M; ++i)
+                        for (int j = 0; j < N; ++j)
+                            dst0[b * dst_stride + static_cast<size_t>(i) * ldc
+                                    + j]
+                                    = 0.5f
+                                    * small_int(static_cast<size_t>(
+                                                        b * 5 + i * N + j),
+                                            7);
+                std::vector<float> dst = dst0;
+
+                matmul_params params = reference_params(data_type_t::f32);
+                params.lowoha_algo = kernel;
+                params.num_threads = 4;
+                if (relu_first) {
+                    params.postop_ = {post_op_of(post_op_type_t::relu),
+                            sum_post_op(kScale)};
+                } else {
+                    params.postop_ = {sum_post_op(kScale)};
+                }
+                matmul_batch_params_t batch;
+                batch.Batch_A = batches;
+                batch.Batch_B = batch_b;
+                batch.batch_stride_dst = dst_stride;
+                ASSERT_EQ(matmul_direct('r', false, false, M, N, K, 1.0f,
+                                  src.data(), K, wei.data(), N, nullptr, 0.0f,
+                                  dst.data(), ldc, true, batch, params),
+                        status_t::success);
+
+                for (size_t at = 0; at < dst.size(); ++at) {
+                    const size_t b = at / dst_stride, in = at % dst_stride;
+                    const int i = static_cast<int>(in / ldc);
+                    const int j = static_cast<int>(in % ldc);
+                    if (i >= M || j >= N) {
+                        EXPECT_EQ(dst[at], kPad) << "padding at " << at;
+                        continue;
+                    }
+                    const float acc = host_dot(src.data() + b * M * K,
+                            wei.data() + (batch_b == 1 ? 0 : b) * K * N, N, K,
+                            i, j);
+                    const float want = (relu_first ? std::max(acc, 0.0f) : acc)
+                            + kScale * dst0[at];
+                    EXPECT_EQ(dst[at], want) << "matrix " << b << " at (" << i
+                                             << ", " << j << ")";
+                }
+            }
+        }
+    }
+    clear_matmul_test_caches();
+}
+
+/** @brief A call with a sum post-op that asks for a kernel which does not
+ *  apply it runs on AOCL-DLP, keeps its weight raw, and adds the dst once:
+ *  libxsmm, the batched SGEMM on one matrix and on three, the auto tuner,
+ *  and a call dynamic dispatch sends to oneDNN beside a nonzero beta with a
+ *  sum oneDNN cannot merge.  An f16 batch on the batched SGEMM, which the
+ *  F16 rule moves first, keeps its weight raw too (kernel selection only).
+ */
+TEST(MatmulSumPostOp, KernelsThatDoNotApplyItRunOnAoclDlp) {
+    if (!ZENDNNL_DEPENDS_AOCLDLP)
+        GTEST_SKIP() << "without AOCL-DLP these calls run on the reference "
+                        "kernel";
+    // The auto tuner and dynamic dispatch would turn a process weight cache
+    // mode 2 into mode 1 for the rest of the run.
+    WeightCacheGuard out_of_place(1);
+    const auto check = [](const char *what, matmul_algo_t asked, int batches,
+                               data_type_t dt, int M, int N, int K, float beta,
+                               bool relu_first, bool remapped) {
+        SCOPED_TRACE(what);
+        clear_matmul_test_caches();
+        std::vector<float> src(static_cast<size_t>(batches) * M * K),
+                wei(static_cast<size_t>(batches) * K * N),
+                dst0(static_cast<size_t>(batches) * M * N);
+        for (size_t i = 0; i < src.size(); ++i)
+            src[i] = i % 3 == 0 ? 1.0f : 0.0f;
+        for (size_t i = 0; i < wei.size(); ++i)
+            wei[i] = small_int(i + 1, 3);
+        for (size_t i = 0; i < dst0.size(); ++i)
+            dst0[i] = 4.0f * small_int(i, 7);
+        typed_buffer_t src_b(src, dt), wei_b(wei, dt), dst_b(dst0, dt);
+
+        matmul_params params;
+        params.dtypes.src = dt;
+        params.dtypes.wei = dt;
+        params.dtypes.dst = dt;
+        params.lowoha_algo = asked;
+        const matmul_post_op sum
+                = sum_post_op(std::numeric_limits<float>::quiet_NaN());
+        if (relu_first) {
+            params.postop_ = {post_op_of(post_op_type_t::relu), sum};
+        } else {
+            params.postop_ = {sum};
+        }
+        matmul_params probe = params;
+        const matmul_algo_t selected = kernel_select(probe, batches, batches,
+                batches, M, N, K, 1, nullptr, true, beta);
+        EXPECT_TRUE(selected == matmul_algo_t::aocl_dlp
+                || selected == matmul_algo_t::aocl_dlp_blocked)
+                << kernel_to_string(selected);
+        if (remapped) { EXPECT_LE(probe.weight_cache_type, 1); }
+
+        matmul_batch_params_t batch;
+        batch.Batch_A = batches;
+        batch.Batch_B = batches;
+        ASSERT_EQ(matmul_direct('r', false, false, M, N, K, 1.0f, src_b.data(),
+                          K, wei_b.data(), N, nullptr, beta, dst_b.data(), N,
+                          true, batch, params),
+                status_t::success);
+        for (int b = 0; b < batches; ++b) {
+            for (int i = 0; i < M; ++i) {
+                for (int j = 0; j < N; ++j) {
+                    const size_t at = (static_cast<size_t>(b) * M + i) * N + j;
+                    const float acc
+                            = host_dot(src.data() + b * M * K,
+                                      wei.data() + b * K * N, N, K, i, j)
+                            + beta * dst0[at];
+                    const float want = (relu_first ? std::max(acc, 0.0f) : acc)
+                            + dst0[at];
+                    EXPECT_EQ(dst_b.at(at), want) << "matrix " << b << " at ("
+                                                  << i << ", " << j << ")";
+                }
+            }
+        }
+    };
+    check("libxsmm", matmul_algo_t::libxsmm, 1, data_type_t::f32, 4, 16, 8,
+            0.0f, false, ZENDNNL_DEPENDS_LIBXSMM);
+    check("batched SGEMM on one matrix", matmul_algo_t::batched_sgemm, 1,
+            data_type_t::f32, 4, 16, 8, 0.0f, false, true);
+    check("batched SGEMM on three", matmul_algo_t::batched_sgemm, 3,
+            data_type_t::f32, 4, 16, 8, 0.0f, false, true);
+    check("auto tuner", matmul_algo_t::auto_tuner, 1, data_type_t::f32, 4, 16,
+            8, 0.0f, false, true);
+    // The F16 rule moves an f16 batch with a sum off the batched SGEMM before
+    // the sum's own move: the call keeps its weight raw all the same.
+    {
+        matmul_params f16_batch;
+        f16_batch.dtypes.src = data_type_t::f16;
+        f16_batch.dtypes.wei = data_type_t::f16;
+        f16_batch.dtypes.dst = data_type_t::f16;
+        f16_batch.lowoha_algo = matmul_algo_t::batched_sgemm;
+        f16_batch.postop_
+                = {sum_post_op(std::numeric_limits<float>::quiet_NaN())};
+        const matmul_algo_t selected = kernel_select(
+                f16_batch, 3, 3, 3, 4, 16, 8, 1, nullptr, true, 0.0f);
+        EXPECT_TRUE(selected == matmul_algo_t::aocl_dlp
+                || selected == matmul_algo_t::aocl_dlp_blocked)
+                << "f16 batch: " << kernel_to_string(selected);
+        EXPECT_LE(f16_batch.weight_cache_type, 1) << "f16 batch";
+    }
+    if (ZENDNNL_DEPENDS_ONEDNN) {
+        // Dynamic dispatch keeps a bf16 call of M <= 8 on AOCL-DLP.
+        constexpr int M = 16, N = 192, K = 64;
+        matmul_params plain;
+        plain.dtypes.src = data_type_t::bf16;
+        plain.dtypes.wei = data_type_t::bf16;
+        plain.dtypes.dst = data_type_t::bf16;
+        plain.lowoha_algo = matmul_algo_t::dynamic_dispatch;
+        const matmul_algo_t picked = kernel_select(
+                plain, 1, 1, 1, M, N, K, 1, nullptr, true, 0.25f);
+        const bool to_onednn = picked == matmul_algo_t::onednn
+                || picked == matmul_algo_t::onednn_blocked;
+        EXPECT_TRUE(to_onednn)
+                << "dynamic dispatch sends this bf16 shape to "
+                << kernel_to_string(picked) << ": pick one it sends to oneDNN";
+        if (to_onednn) {
+            check("dynamic dispatch", matmul_algo_t::dynamic_dispatch, 1,
+                    data_type_t::bf16, M, N, K, 0.25f, true, true);
+        }
+    }
+    clear_matmul_test_caches();
+}
+
+/** @brief Later calls on the same weight and chain take the AOCL-DLP post-op
+ *  metadata the first one cached, with its number of rows and with another,
+ *  and add the dst each found rather than the first call's: other buffers
+ *  and other dst values, while a block of the size of the first call's copy
+ *  of dst stays allocated, for a sum alone and after a binary_add.
+ */
+TEST(MatmulSumPostOp, CacheHitTakesTheNewDst) {
+#if ZENDNNL_DEPENDS_AOCLDLP
+    constexpr int N = 16, K = 8;
+    constexpr int kRows[] = {4, 4, 7};
+    constexpr float kScale = 0.5f;
+    std::vector<float> wei(K * N);
+    for (size_t i = 0; i < wei.size(); ++i)
+        wei[i] = small_int(i + 1, 3);
+    for (const bool with_add : {false, true}) {
+        SCOPED_TRACE(with_add ? "[binary_add, sum]" : "[sum]");
+        clear_matmul_test_caches();
+        const size_t cached = get_aocl_postop_metadata_cache_size();
+        std::unique_ptr<void, void (*)(void *)> held(
+                nullptr, zendnnl_aligned_free);
+        for (int call = 0; call < 3; ++call) {
+            const int M = kRows[call];
+            if (call == 1) {
+                held.reset(zendnnl_aligned_alloc(
+                        64, static_cast<size_t>(M) * N * sizeof(float)));
+            }
+            std::vector<float> src(static_cast<size_t>(M) * K),
+                    add(static_cast<size_t>(M) * N),
+                    dst0(static_cast<size_t>(M) * N);
+            for (size_t i = 0; i < src.size(); ++i)
+                src[i] = small_int(i + call, 5);
+            for (size_t i = 0; i < add.size(); ++i)
+                add[i] = small_int(i + 2 * call, 5);
+            for (size_t i = 0; i < dst0.size(); ++i)
+                dst0[i] = 0.5f * small_int(i + 3 * call, 7);
+            std::vector<float> dst = dst0;
+            matmul_params params = reference_params(data_type_t::f32);
+            params.lowoha_algo = matmul_algo_t::aocl_dlp_blocked;
+            if (with_add) {
+                params.postop_ = {binary_post_op(post_op_type_t::binary_add,
+                                          add, {M, N}, N),
+                        sum_post_op(kScale)};
+            } else {
+                params.postop_ = {sum_post_op(kScale)};
+            }
+            matmul_batch_params_t batch;
+            ASSERT_EQ(matmul_direct('r', false, false, M, N, K, 1.0f,
+                              src.data(), K, wei.data(), N, nullptr, 0.0f,
+                              dst.data(), N, true, batch, params),
+                    status_t::success);
+            for (int i = 0; i < M; ++i) {
+                for (int j = 0; j < N; ++j) {
+                    const size_t at = static_cast<size_t>(i) * N + j;
+                    const float want
+                            = host_dot(src.data(), wei.data(), N, K, i, j)
+                            + (with_add ? add[at] : 0.0f) + kScale * dst0[at];
+                    EXPECT_EQ(dst[at], want) << "call " << call << " at (" << i
+                                             << ", " << j << ")";
+                }
+            }
+            if (zendnnl::common::is_postop_cache_enabled()) {
+                EXPECT_EQ(get_aocl_postop_metadata_cache_size(), cached + 1)
+                        << "call " << call << ", M " << M;
+            }
+        }
+    }
+    clear_matmul_test_caches();
+#else
+    GTEST_SKIP() << "needs AOCL-DLP";
+#endif
+}
+
+namespace {
+
+/// At weight cache mode 2, a call of `batches` matrices of T (dt) with a sum
+/// post-op that asks for the batched SGEMM runs on AOCL-DLP and leaves its
+/// weight raw, so the same call without the sum, which stays on the batched
+/// SGEMM and reads the weight as given, computes from the caller's values.
+/// A control call on aocl_dlp_blocked first checks that AOCL-DLP rewrites
+/// this weight in place; `must_rewrite` makes a weight it keeps out of place
+/// a failure, not a note.  Returns the failures it describes on stderr.
+template <typename T>
+int moved_sum_call_keeps_weight_raw(
+        const char *what, data_type_t dt, int batches, bool must_rewrite) {
+    // N spans several column panels, so the blocked layout differs from the
+    // raw one.
+    constexpr int M = 4, N = 128, K = 64;
+    constexpr float kScale = 0.5f;
+    const size_t mn = static_cast<size_t>(batches) * M * N;
+    std::vector<T> src(static_cast<size_t>(batches) * M * K),
+            wei(static_cast<size_t>(batches) * K * N), dst0(mn);
+    for (size_t i = 0; i < src.size(); ++i)
+        src[i] = small_int(i, 5);
+    for (size_t i = 0; i < wei.size(); ++i)
+        wei[i] = small_int(i + 1, 3);
+    for (size_t i = 0; i < mn; ++i)
+        dst0[i] = 0.5f * small_int(i, 7);
+    const std::vector<T> raw = wei;
+    const size_t wei_bytes = wei.size() * sizeof(T);
+    matmul_batch_params_t batch;
+    batch.Batch_A = batches;
+    batch.Batch_B = batches;
+    const auto run = [&](matmul_algo_t algo, std::vector<matmul_post_op> chain,
+                             std::vector<T> &weight, std::vector<T> &dst) {
+        matmul_params params = reference_params(dt);
+        params.lowoha_algo = algo;
+        params.num_threads = 1;
+        params.postop_ = std::move(chain);
+        return matmul_direct('r', false, false, M, N, K, 1.0f, src.data(), K,
+                weight.data(), N, nullptr, 0.0f, dst.data(), N, true, batch,
+                params);
+    };
+    int bad = 0;
+
+    std::vector<T> control = raw, out(mn, 0.0f);
+    if (run(matmul_algo_t::aocl_dlp_blocked, {}, control, out)
+            != status_t::success) {
+        std::fprintf(stderr, "%s: the aocl_dlp_blocked call failed\n", what);
+        ++bad;
+    } else if (std::memcmp(control.data(), raw.data(), wei_bytes) == 0) {
+        std::fprintf(stderr,
+                "%s: %sAOCL-DLP keeps this weight out of place, so the "
+                "in-place rewrite would not show\n",
+                what, must_rewrite ? "" : "note: ");
+        bad += must_rewrite;
+    }
+    clear_matmul_test_caches();
+
+    std::vector<T> dst = dst0, plain(mn, 0.0f);
+    if (run(matmul_algo_t::batched_sgemm, {sum_post_op(kScale)}, wei, dst)
+            != status_t::success) {
+        std::fprintf(stderr, "%s: the sum call failed\n", what);
+        ++bad;
+    }
+    if (std::memcmp(wei.data(), raw.data(), wei_bytes) != 0) {
+        std::fprintf(
+                stderr, "%s: the sum call rewrote its weight in place\n", what);
+        ++bad;
+    }
+    if (run(matmul_algo_t::batched_sgemm, {}, wei, plain)
+            != status_t::success) {
+        std::fprintf(stderr, "%s: the call without the sum failed\n", what);
+        ++bad;
+    }
+    int wrong_sum = 0, wrong_plain = 0;
+    for (int b = 0; b < batches; ++b) {
+        for (int i = 0; i < M; ++i) {
+            for (int j = 0; j < N; ++j) {
+                const size_t at = (static_cast<size_t>(b) * M + i) * N + j;
+                float acc = 0.0f;
+                for (int k = 0; k < K; ++k)
+                    acc += static_cast<float>(src[(b * M + i) * K + k])
+                            * static_cast<float>(raw[(b * K + k) * N + j]);
+                wrong_sum += static_cast<float>(dst[at])
+                        != acc + kScale * static_cast<float>(dst0[at]);
+                wrong_plain += static_cast<float>(plain[at]) != acc;
+            }
+        }
+    }
+    if (wrong_sum != 0 || wrong_plain != 0) {
+        std::fprintf(stderr,
+                "%s: %d values of the sum call and %d of the call without it "
+                "differ from the model\n",
+                what, wrong_sum, wrong_plain);
+        ++bad;
+    }
+    clear_matmul_test_caches();
+    return bad;
+}
+
+} // namespace
+
+/** @brief moved_sum_call_keeps_weight_raw for an f32 call of one matrix, and
+ *  (with AVX512-FP16) a bias-free f16 batch, which the F16 rule moves to
+ *  AOCL-DLP before the sum's own move.  In a process of its own, which no
+ *  group matmul has put in grouped AUTO mixed mode (that mode keeps these
+ *  weights out of place anyway).
+ */
+TEST(MatmulSumPostOp, MovedCallKeepsTheWeightRaw) {
+    if (!ZENDNNL_DEPENDS_AOCLDLP) GTEST_SKIP() << "needs AOCL-DLP";
+    native_brgemm_test::expect_in_child(
+            {{"ZENDNNL_MATMUL_WEIGHT_CACHE", "2"}}, [] {
+        int bad = moved_sum_call_keeps_weight_raw<float>(
+                "f32 call", data_type_t::f32, 1, true);
+        if (zendnnl_platform_info().get_avx512_f16_status())
+            bad += moved_sum_call_keeps_weight_raw<float16_t>(
+                    "f16 batch", data_type_t::f16, 2, false);
+        return bad;
+    }, "a moved sum call keeps its weight raw at weight cache mode 2");
 }
 
 /** @brief Test INT8 sym_quant: per-token source scale, bf16 output */

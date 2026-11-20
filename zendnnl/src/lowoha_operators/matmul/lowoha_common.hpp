@@ -59,6 +59,12 @@ struct matmul_data_types {
 
 /**
  * @brief Structure for post-operation parameters
+ *
+ * A sum post-op adds alpha * (dst - beta), where dst is the destination as
+ * the call found it: alpha is the scale (default 1) and beta the zero point,
+ * which only an s8 / u8 destination takes. It reads dst in the destination
+ * data type and takes no buffer: buff stays nullptr, and dtype is none or the
+ * destination type.
  */
 struct matmul_post_op {
     zendnnl::common::post_op_type_t po_type; ///< Type of post-operation
@@ -96,7 +102,8 @@ struct matmul_post_op {
         if (has_alpha()) { return alpha; }
         switch (po_type) {
             case zendnnl::common::post_op_type_t::elu:
-            case zendnnl::common::post_op_type_t::swish: return 1.0f;
+            case zendnnl::common::post_op_type_t::swish:
+            case zendnnl::common::post_op_type_t::sum: return 1.0f;
             default: return 0.0f;
         }
     }
@@ -385,6 +392,46 @@ struct matmul_params {
     /// per-tile warm-pack builds.
     bool wei_is_column_tile = false;
 };
+
+/// The chain of params has a sum post-op.
+inline bool has_sum_post_op(const matmul_params &params) noexcept {
+    for (const matmul_post_op &po : params.postop_)
+        if (po.po_type == zendnnl::common::post_op_type_t::sum) return true;
+    return false;
+}
+
+/// beta * C is oneDNN's sum at the head of the chain: the sum post-op of
+/// params joins it when it leads the chain without a zero point.
+inline bool onednn_merges_sum_into_beta(const matmul_params &params) noexcept {
+    const std::vector<matmul_post_op> &chain = params.postop_;
+    return !chain.empty()
+            && chain[0].po_type == zendnnl::common::post_op_type_t::sum
+            && chain[0].beta == 0.0f;
+}
+
+/// oneDNN applies the chain of params with beta: a sum zero point only over an
+/// s8 / u8 source, and with a nonzero beta a sum post-op only when it joins
+/// beta's sum, since oneDNN's optimized kernels take several sums only when
+/// their scales and zero points agree.  The joined scale, beta plus the sum's,
+/// must be finite, and an s32 / s8 / u8 dst of an s8 / u8 source takes no
+/// joined sum: there beta * C goes into the integer sum before the source and
+/// weight scales, and the sum post-op after them.
+inline bool onednn_takes_sum(const matmul_params &params, float beta) noexcept {
+    const data_type_t src = params.dtypes.src, dst = params.dtypes.dst;
+    const bool int8_src = src == data_type_t::s8 || src == data_type_t::u8;
+    bool has_sum = false;
+    for (const matmul_post_op &po : params.postop_) {
+        if (po.po_type != zendnnl::common::post_op_type_t::sum) { continue; }
+        if (po.beta != 0.0f && !int8_src) { return false; }
+        has_sum = true;
+    }
+    if (!has_sum || beta == 0.0f) { return true; }
+    const bool int_dst = dst == data_type_t::s32 || dst == data_type_t::s8
+            || dst == data_type_t::u8;
+    if (int8_src && int_dst) { return false; }
+    return onednn_merges_sum_into_beta(params)
+            && std::isfinite(beta + params.postop_[0].alpha_or_default());
+}
 
 /**
  * @brief Returns the cache mode allowed by both process and call settings.

@@ -25,7 +25,8 @@ post_op_t::post_op_t(post_op_type_t type_)
     , leaky_relu_params {}
     , clip_params {}
     , binary_add_params {}
-    , binary_mul_params {} {
+    , binary_mul_params {}
+    , sum_params {} {
     LOG_DEBUG_INFO("Setting Post-op post_op_t");
     switch (type_) {
         case post_op_type_t::elu: elu_params.alpha = 1.0; break;
@@ -43,6 +44,7 @@ post_op_t::post_op_t(post_op_type_t type_)
             binary_mul_params.scale = 1.0;
             binary_mul_params.tensor_name = "binary_mul_tensor_";
             break;
+        case post_op_type_t::sum: sum_params.scale = 1.0; break;
         default: break;
     }
 }
@@ -66,6 +68,7 @@ std::string post_op_t::post_op_info(post_op_t post_op) {
             return std::string("binary_mul");
             break;
         case post_op_type_t::mish: return std::string("mish"); break;
+        case post_op_type_t::sum: return std::string("sum"); break;
         default: return std::string("");
     }
 }
@@ -77,7 +80,8 @@ post_op_t::post_op_t(elu_params_t params_)
     , leaky_relu_params {}
     , clip_params {}
     , binary_add_params {}
-    , binary_mul_params {} {}
+    , binary_mul_params {}
+    , sum_params {} {}
 
 post_op_t::post_op_t(leaky_relu_params_t params_)
     : type {post_op_type_t::leaky_relu}
@@ -86,7 +90,8 @@ post_op_t::post_op_t(leaky_relu_params_t params_)
     , leaky_relu_params {params_}
     , clip_params {}
     , binary_add_params {}
-    , binary_mul_params {} {}
+    , binary_mul_params {}
+    , sum_params {} {}
 
 post_op_t::post_op_t(swish_params_t params_)
     : type {post_op_type_t::swish}
@@ -95,7 +100,8 @@ post_op_t::post_op_t(swish_params_t params_)
     , leaky_relu_params {}
     , clip_params {}
     , binary_add_params {}
-    , binary_mul_params {} {}
+    , binary_mul_params {}
+    , sum_params {} {}
 
 post_op_t::post_op_t(clip_params_t params_)
     : type {post_op_type_t::clip}
@@ -104,7 +110,8 @@ post_op_t::post_op_t(clip_params_t params_)
     , leaky_relu_params {}
     , clip_params {params_}
     , binary_add_params {}
-    , binary_mul_params {} {}
+    , binary_mul_params {}
+    , sum_params {} {}
 
 post_op_t::post_op_t(binary_add_params_t params_)
     : type {post_op_type_t::binary_add}
@@ -113,7 +120,8 @@ post_op_t::post_op_t(binary_add_params_t params_)
     , leaky_relu_params {}
     , clip_params {}
     , binary_add_params {params_.scale, "binary_add_tensor_"}
-    , binary_mul_params {} {}
+    , binary_mul_params {}
+    , sum_params {} {}
 
 post_op_t::post_op_t(binary_mul_params_t params_)
     : type {post_op_type_t::binary_mul}
@@ -122,7 +130,18 @@ post_op_t::post_op_t(binary_mul_params_t params_)
     , leaky_relu_params {}
     , clip_params {}
     , binary_add_params {}
-    , binary_mul_params {params_.scale, "binary_mul_tensor_"} {}
+    , binary_mul_params {params_.scale, "binary_mul_tensor_"}
+    , sum_params {} {}
+
+post_op_t::post_op_t(sum_params_t params_)
+    : type {post_op_type_t::sum}
+    , elu_params {}
+    , swish_params {}
+    , leaky_relu_params {}
+    , clip_params {}
+    , binary_add_params {}
+    , binary_mul_params {}
+    , sum_params {params_} {}
 
 } //namespace common
 } //namespace zendnnl

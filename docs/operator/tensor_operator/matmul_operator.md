@@ -358,6 +358,8 @@ This table provides a detailed overview of supported configurations for matrix m
 
 > **Note:** Binary post-ops require an extra buffer from the user.
 
+> **Note:** The operator does not take the `sum` post-op (`post_op_t(sum_params_t {...})`): context creation fails. `matmul_direct` applies it; see [Sum Post-Op](../low_overhead_operator/lowoha_matmul_operator.md#sum-post-op).
+
 ## Tensor
 
 A **tensor** is a multi-dimensional array that serves as the primary data structure in deep learning models. It generalizes vectors (1D) and matrices (2D) to higher dimensions (3D, etc.). Tensors are a fundamental building block for neural network computations, enabling efficient data manipulation and mathematical operations.

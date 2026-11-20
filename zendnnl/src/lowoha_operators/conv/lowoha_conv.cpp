@@ -83,6 +83,15 @@ status_t conv_direct(const void *input, const void *filter, const void *bias,
         }
     }
 
+    for (const conv_postop &po : params.postop_) {
+        if (po.po_type == zendnnl::common::post_op_type_t::sum) {
+            log_error(
+                    "conv_direct: no convolution kernel applies a sum "
+                    "post-op");
+            return status_t::unimplemented;
+        }
+    }
+
     // Log API call
     [[maybe_unused]] std::ostringstream ss;
     if (apilog_info_enabled() || is_profile) {

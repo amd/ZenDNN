@@ -326,7 +326,8 @@ inline bool aocl_dlp_maps_post_op(post_op_type_t type) noexcept {
         case post_op_type_t::clip:
         case post_op_type_t::mish:
         case post_op_type_t::binary_add:
-        case post_op_type_t::binary_mul: return true;
+        case post_op_type_t::binary_mul:
+        case post_op_type_t::sum: return true;
         default: return false;
     }
 }
@@ -608,11 +609,13 @@ inline matmul_algo_t select_algo_by_heuristics_bf16_mm(int M, int N, int K);
 * @param num_threads Number of available threads for parallel execution
 * @param bias Pointer to bias data; nullptr if no bias is used
 * @param is_weights_const Indicates if the weights are constant
+* @param beta The call's beta, which decides whether oneDNN takes a sum
+*        post-op (onednn_takes_sum)
 * @return matmul_algo_t The selected kernel algorithm (e.g., AOCL DLP, OneDNN, LibXSMM)
 */
 matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
         int batch_count, int M, int N, int K, int num_threads, const void *bias,
-        const bool is_weights_const);
+        const bool is_weights_const, float beta = 0.0f);
 
 /**
  * @brief Get the auto-tuner version number

@@ -16,6 +16,7 @@
 #ifndef _POST_OP_HPP_
 #define _POST_OP_HPP_
 
+#include <cstdint>
 #include <string>
 #include "common/zendnnl_global.hpp"
 #include <initializer_list>
@@ -53,7 +54,8 @@ enum class post_op_type_t {
     clip, /*!< eltwise clip */
     binary_add, /*!< eltwise add with another tensor */
     binary_mul, /*!< eltwise mul with another tensor */
-    mish /*!< eltwise mish */
+    mish, /*!< eltwise mish */
+    sum /*!< add the destination as it was before the operator ran */
 };
 
 /** @struct elu_params_t
@@ -101,6 +103,18 @@ struct binary_mul_params_t {
     std::string tensor_name;
 };
 
+/** @struct sum_params_t
+ *  @brief Sum parameters.
+ *
+ *  A sum post-op adds scale * (dst - zero_point) at its place in the chain,
+ *  where dst is the destination as it was before the operator ran. Only an
+ *  s8 / u8 destination takes a zero point.
+ */
+struct sum_params_t {
+    float scale;
+    int32_t zero_point;
+};
+
 /** @struct post_op_t
  *  @brief Post Op Struct
  *
@@ -125,6 +139,8 @@ struct post_op_t {
     post_op_t(binary_add_params_t params_);
     /** @brief Constructor for binary mul with a tensor */
     post_op_t(binary_mul_params_t params_);
+    /** @brief Constructor for sum */
+    post_op_t(sum_params_t params_);
 
     post_op_type_t type;
     elu_params_t elu_params;
@@ -133,6 +149,7 @@ struct post_op_t {
     clip_params_t clip_params;
     binary_add_params_t binary_add_params;
     binary_mul_params_t binary_mul_params;
+    sum_params_t sum_params;
 
     std::string post_op_info(post_op_t post_op);
 };
@@ -155,6 +172,7 @@ using swish_params_t = zendnnl::common::swish_params_t;
 using clip_params_t = zendnnl::common::clip_params_t;
 using binary_add_params_t = zendnnl::common::binary_add_params_t;
 using binary_mul_params_t = zendnnl::common::binary_mul_params_t;
+using sum_params_t = zendnnl::common::sum_params_t;
 using post_op_t = zendnnl::common::post_op_t;
 } // namespace interface
 } //namespace zendnnl

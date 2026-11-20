@@ -38,7 +38,8 @@ namespace conv {
  * @param is_weights_const Flag indicating if weights are constant (enables caching)
  * @param params           Convolution parameters
  *
- * @return status_t::success or status_t::failure
+ * @return status_t::success, status_t::failure, or status_t::unimplemented for
+ *         a sum post-op, which no convolution kernel applies
  */
 ZENDNNL_API status_t conv_direct(const void *input, // [N, H, W, C]
         const void *filter, // [KH, KW, C_in, C_out]

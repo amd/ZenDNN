@@ -355,7 +355,8 @@ MatmulType::MatmulType(const MatmulInput &matmul_input, uint32_t test_index,
             beta = rand() % 2;
         }
         // gelu_tanh, mish, swish and clip are not supported for LIBXSMM
-        // binary_mul and binary_add dropped for accuracy issues
+        // binary_mul and binary_add dropped for accuracy issues.  A call with
+        // a sum runs on AOCL-DLP instead (kernel_select).
         for (uint32_t i = 0; i < po_types.size(); ++i) {
             if (po_types[i] == post_op_type_t::gelu_tanh
                     || po_types[i] == post_op_type_t::binary_mul
@@ -378,6 +379,38 @@ MatmulType::MatmulType(const MatmulInput &matmul_input, uint32_t test_index,
             } else {
                 kept_gelu_erf = true;
             }
+        }
+    }
+    // A call takes one sum post-op, which the operator API does not apply
+    // and the native BRGEMM refuses (run_matmul_direct checks the refusal).
+    // oneDNN applies one inside the chain beside beta 0, and beside a nonzero
+    // beta only one that leads the chain, which joins beta's sum.
+    bool kept_sum = false;
+    for (post_op_type_t &po : po_types) {
+        if (po != post_op_type_t::sum) { continue; }
+        if (kept_sum || !use_LOWOHA) {
+            log_info(kept_sum
+                            ? "Dropping an extra sum post-op: a call takes one."
+                            : "Dropping the sum post-op: the operator API "
+                              "does not apply it.");
+            po = post_op_type_t::none;
+        } else {
+            kept_sum = true;
+        }
+    }
+    if (kept_sum
+            && (algo == matmul_algo_t::onednn
+                    || algo == matmul_algo_t::onednn_blocked)) {
+        if (!matmul_input.beta && gen() % 2 == 0) {
+            beta = 0.0f;
+        } else if (beta != 0.0f) {
+            log_info(
+                    "Moving the sum post-op to the head of the chain: oneDNN "
+                    "takes it beside a nonzero beta only there.");
+            std::stable_partition(
+                    po_types.begin(), po_types.end(), [](post_op_type_t po) {
+                return po == post_op_type_t::sum;
+            });
         }
     }
 
@@ -1952,6 +1985,7 @@ post_op_type_t strToPostOps(const std::string &str) {
     if (str == "binary_add") { return post_op_type_t::binary_add; }
     if (str == "binary_mul") { return post_op_type_t::binary_mul; }
     if (str == "mish") { return post_op_type_t::mish; }
+    if (str == "sum") { return post_op_type_t::sum; }
     if (str == "none") { return post_op_type_t::none; }
     EXCEPTION("Unknown post-op name \"" + str + "\".");
 }
@@ -1968,6 +2002,7 @@ std::string postOpsToStr(post_op_type_t post_op) {
         case post_op_type_t::binary_add: return "binary_add";
         case post_op_type_t::binary_mul: return "binary_mul";
         case post_op_type_t::mish: return "mish";
+        case post_op_type_t::sum: return "sum";
         default: return "none";
     }
 }
@@ -2852,6 +2887,52 @@ void fill_tensor_with_nan(tensor_t &tensor) {
             tensor.get_buffer_sz_bytes(), tensor.get_data_type());
 }
 
+void fill_tensor_for_sum(tensor_t &tensor) {
+    if (!tensor.check()) { return; }
+    void *buf = tensor.get_raw_handle_unsafe();
+    const size_t bytes = tensor.get_buffer_sz_bytes();
+    const auto value = [](size_t i) { return static_cast<int>(i % 7) - 3; };
+    switch (tensor.get_data_type()) {
+        case data_type_t::f32: {
+            auto *p = static_cast<float *>(buf);
+            for (size_t i = 0; i < bytes / sizeof(float); ++i)
+                p[i] = 0.5f * value(i);
+            break;
+        }
+        case data_type_t::bf16: {
+            auto *p = static_cast<bfloat16_t *>(buf);
+            for (size_t i = 0; i < bytes / sizeof(bfloat16_t); ++i)
+                p[i] = bfloat16_t(0.5f * value(i));
+            break;
+        }
+        case data_type_t::f16: {
+            auto *p = static_cast<float16_t *>(buf);
+            for (size_t i = 0; i < bytes / sizeof(float16_t); ++i)
+                p[i] = float16_t(0.5f * value(i));
+            break;
+        }
+        case data_type_t::s32: {
+            auto *p = static_cast<int32_t *>(buf);
+            for (size_t i = 0; i < bytes / sizeof(int32_t); ++i)
+                p[i] = value(i);
+            break;
+        }
+        case data_type_t::s8: {
+            auto *p = static_cast<int8_t *>(buf);
+            for (size_t i = 0; i < bytes; ++i)
+                p[i] = static_cast<int8_t>(value(i));
+            break;
+        }
+        case data_type_t::u8: {
+            auto *p = static_cast<uint8_t *>(buf);
+            for (size_t i = 0; i < bytes; ++i)
+                p[i] = static_cast<uint8_t>(value(i) + 3);
+            break;
+        }
+        default: break;
+    }
+}
+
 namespace {
 
 thread_local bool native_refusal_seen = false;
@@ -2867,9 +2948,9 @@ thread_local bool native_refusal_explained = false;
 /// that name it, column-major calls, reordered sources, weight zero points,
 /// source zero points with s4 weights or on a source the call quantizes to
 /// s8, AOCL-DLP prepacks of s4 and f16 weights, an f32 or f16 call into
-/// another dst, and a
-/// softmax after a gated activation.  Judged from the call's arguments
-/// alone, so a wrong refusal in the library is not explained by itself.
+/// another dst, a softmax after a gated activation, and a sum post-op.
+/// Judged from the call's arguments alone, so a wrong refusal in the library
+/// is not explained by itself.
 bool refusal_explained(const std::string &reason, char layout,
         const matmul_batch_params_t &batch, const matmul_params &params,
         const matmul_gated_act_params *gated_act) {
@@ -2929,6 +3010,12 @@ bool refusal_explained(const std::string &reason, char layout,
                 && std::any_of(params.postop_.begin(), params.postop_.end(),
                         [](const matmul_post_op &po) {
             return po.po_type == post_op_type_t::softmax;
+        });
+    if (reason == "a post-op the epilogue does not apply")
+        return std::any_of(params.postop_.begin(), params.postop_.end(),
+                [](const matmul_post_op &po) {
+            return po.po_type == post_op_type_t::sum
+                    || po.po_type == post_op_type_t::pooling;
         });
     return false;
 }
@@ -3022,8 +3109,15 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
     if (!use_reference) native_refusal_seen = false;
     try {
         // beta == 0 must overwrite every element. A finite prefill can hide
-        // a skipped store; the reference path keeps the caller's buffer.
-        if (!use_reference && beta == 0.0f) {
+        // a skipped store; the reference path keeps the caller's buffer.  A
+        // call whose sum post-op reads dst finds the same nonzero values in
+        // the kernel's run and the reference's.
+        const bool reads_dst = std::find(po_types.begin(), po_types.end(),
+                                       post_op_type_t::sum)
+                != po_types.end();
+        if (reads_dst) {
+            fill_tensor_for_sum(output_tensor);
+        } else if (!use_reference && beta == 0.0f) {
             fill_tensor_with_nan(output_tensor);
         }
 
@@ -3473,6 +3567,19 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
                         if (hi - lo < 1e-6f) { hi = lo + 1e-3f; }
                         postop_item.alpha = lo;
                         postop_item.beta = hi;
+                    } else if (po == post_op_type_t::sum) {
+                        postop_item.alpha = MATMUL_POSTOP_SUM_SCALE;
+                        // A zero point takes an s8 / u8 dst, and on oneDNN
+                        // an s8 / u8 source and no beta to join.
+                        const data_type_t in_dt = input_tensor.get_data_type();
+                        if (beta == 0.0f
+                                && (out_data_type == data_type_t::s8
+                                        || out_data_type == data_type_t::u8)
+                                && (in_dt == data_type_t::s8
+                                        || in_dt == data_type_t::u8)) {
+                            postop_item.beta = static_cast<float>(
+                                    MATMUL_POSTOP_SUM_ZERO_POINT);
+                        }
                     }
                     params.postop_.push_back(postop_item);
                 }

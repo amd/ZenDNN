@@ -14,6 +14,11 @@
 # * limitations under the License.
 # *******************************************************************************/
 
+#include <cstring>
+#include <limits>
+#include <memory>
+#include "common/bfloat16.hpp"
+#include "common/float16.hpp"
 #include "common/zendnnl_compat.hpp"
 #include "ggml_weight_unpack.hpp"
 #include "lowoha_matmul_utils.hpp"
@@ -22,6 +27,7 @@
 #include "lowoha_operators/matmul/aocl_unreorder_cache.hpp"
 #include "lowoha_operators/matmul/auto_tuner/auto_tuner.hpp"
 #include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
+#include <type_traits>
 #if ZENDNNL_DEPENDS_AOCLDLP
 #include "lowoha_operators/matmul/backends/aocl/aocl_postop.hpp"
 #endif
@@ -179,6 +185,120 @@ static constexpr bool runs_off_aocl_dlp(matmul_algo_t kernel) noexcept {
                     && (kernel == matmul_algo_t::onednn
                             || kernel == matmul_algo_t::onednn_blocked));
 }
+
+namespace {
+
+struct aligned_free_t {
+    void operator()(float *p) const noexcept { zendnnl_aligned_free(p); }
+};
+using sum_addend_t = std::unique_ptr<float, aligned_free_t>;
+
+// scale * (c - zero_point) of the batch_count M x N matrices of dst, rows ldc
+// and matrices batch_stride apart, into rows of N values.
+template <typename T>
+void fill_sum_addend(const T *dst, int M, int N, int ldc, size_t batch_stride,
+        int batch_count, float scale, float zero_point, float *addend) {
+    const int64_t rows = static_cast<int64_t>(batch_count) * M;
+    const bool parallel = !omp_in_parallel() && rows * N >= (int64_t {1} << 16);
+#pragma omp parallel for num_threads(effective_num_threads()) if (parallel)
+    for (int64_t r = 0; r < rows; ++r) {
+        const T *from = dst + (r / M) * static_cast<int64_t>(batch_stride)
+                + (r % M) * ldc;
+        float *to = addend + r * N;
+        if constexpr (std::is_same_v<T, float>) {
+            if (scale == 1.0f && zero_point == 0.0f) {
+                std::memcpy(to, from, static_cast<size_t>(N) * sizeof(float));
+                continue;
+            }
+        }
+        for (int j = 0; j < N; ++j)
+            to[j] = scale * (static_cast<float>(from[j]) - zero_point);
+    }
+}
+
+// AOCL-DLP takes the sum post-op of params as a binary_add of addend, an F32
+// copy of what it adds taken before anything writes dst: [M, N], or
+// [batch_count, M, N] for a batched call, which each tile offsets as it does
+// any operand of that shape.  Fails with dst untouched when there is no
+// memory for the copy.
+status_t lower_sum_to_binary_add(matmul_params &params, const void *dst, int M,
+        int N, int ldc, int batch_count,
+        const matmul_batch_params_t &batch_params, sum_addend_t &addend) {
+    const auto po = std::find_if(params.postop_.begin(), params.postop_.end(),
+            [](const matmul_post_op &p) {
+        return p.po_type == post_op_type_t::sum;
+    });
+    if (po == params.postop_.end()) { return status_t::success; }
+    const size_t batch_stride
+            = batch_params.batch_stride_dst != static_cast<size_t>(-1)
+            ? batch_params.batch_stride_dst
+            : static_cast<size_t>(M) * ldc;
+    const size_t m = static_cast<size_t>(M), n = static_cast<size_t>(N),
+                 batches = static_cast<size_t>(batch_count);
+    // zendnnl_aligned_alloc rounds the byte count up to a multiple of 64.
+    constexpr size_t kMaxCount
+            = (std::numeric_limits<size_t>::max() - 63) / sizeof(float);
+    if (m != 0 && n != 0
+            && (n > kMaxCount / m || batches > kMaxCount / (m * n))) {
+        log_error("matmul_direct: the copy of dst a sum post-op adds, ",
+                batch_count, " x ", M, " x ", N, " values, overflows size_t");
+        return status_t::failure;
+    }
+    const size_t count = batches * m * n;
+    addend.reset(static_cast<float *>(zendnnl_aligned_alloc(
+            64, std::max<size_t>(count, 1) * sizeof(float))));
+    if (!addend) {
+        log_error("matmul_direct: no memory for the ", count * sizeof(float),
+                " byte copy of dst a sum post-op adds");
+        return status_t::failure;
+    }
+    const float scale = po->alpha_or_default();
+    const float zp = po->beta;
+    float *to = addend.get();
+    switch (params.dtypes.dst) {
+        case data_type_t::f32:
+            fill_sum_addend(static_cast<const float *>(dst), M, N, ldc,
+                    batch_stride, batch_count, scale, zp, to);
+            break;
+        case data_type_t::bf16:
+            fill_sum_addend(
+                    static_cast<const zendnnl::common::bfloat16_t *>(dst), M, N,
+                    ldc, batch_stride, batch_count, scale, zp, to);
+            break;
+        case data_type_t::f16:
+            fill_sum_addend(
+                    static_cast<const zendnnl::common::float16_t *>(dst), M, N,
+                    ldc, batch_stride, batch_count, scale, zp, to);
+            break;
+        case data_type_t::s32:
+            fill_sum_addend(static_cast<const int32_t *>(dst), M, N, ldc,
+                    batch_stride, batch_count, scale, zp, to);
+            break;
+        case data_type_t::s8:
+            fill_sum_addend(static_cast<const int8_t *>(dst), M, N, ldc,
+                    batch_stride, batch_count, scale, zp, to);
+            break;
+        case data_type_t::u8:
+            fill_sum_addend(static_cast<const uint8_t *>(dst), M, N, ldc,
+                    batch_stride, batch_count, scale, zp, to);
+            break;
+        default:
+            log_error("matmul_direct: a sum post-op does not read a ",
+                    dtype_info(params.dtypes.dst), " destination");
+            return status_t::unimplemented;
+    }
+    po->po_type = post_op_type_t::binary_add;
+    po->buff = to;
+    po->dtype = data_type_t::f32;
+    po->leading_dim = N;
+    po->dims = batch_count > 1 ? std::vector<int64_t> {batch_count, M, N}
+                               : std::vector<int64_t> {M, N};
+    po->alpha = 1.0f;
+    po->beta = 0.0f;
+    return status_t::success;
+}
+
+} // namespace
 
 // What the reference kernel does not serve of a call it takes for a post-op
 // the AOCL-DLP chain does not take, or nullptr: it reads row-major operands
@@ -362,6 +482,7 @@ struct direct_call_t {
     /// A post-op the AOCL-DLP chain does not take (aocl_dlp_maps_post_op).
     bool aocl_unmapped_post_op = false;
     bool pooling_post_op = false; ///< and one of them is pooling
+    bool sum_post_op = false; ///< a sum post-op
     /// An f16 operand on a CPU without AVX512-FP16 admitted for the native
     /// BRGEMM alone (native_takes_f16).
     bool f16_isa_deferred = false;
@@ -433,15 +554,24 @@ ZENDNNL_ALWAYS_INLINE inline status_t prepare_direct_call(const int M,
     // Defaults N for binary post-ops when leading_dim is -1. Mutates the
     // call's copy only. Must always execute regardless of
     // ZENDNNL_DIAGNOSTICS_ENABLE.
-    // Notes the post-ops the AOCL-DLP chain does not take.
+    // Notes a sum post-op, and the post-ops the AOCL-DLP chain does not take.
     for (auto &po : call.params.postop_) {
+        if (po.po_type == post_op_type_t::sum) {
+            // The kernels hold one copy of the dst a sum post-op adds.
+            if (call.sum_post_op) {
+                log_error(
+                        "matmul_direct: a call takes at most one sum post-op");
+                return status_t::failure;
+            }
+            call.sum_post_op = true;
+        }
         if (!aocl_dlp_maps_post_op(po.po_type)) {
             call.aocl_unmapped_post_op = true;
             call.pooling_post_op |= po.po_type == post_op_type_t::pooling;
         }
         // Materialize operation-specific defaults on the per-call copy.
-        // In particular, an omitted Swish/ELU alpha becomes 1 while an
-        // explicitly supplied zero remains zero.
+        // In particular, an omitted Swish/ELU alpha or sum scale becomes 1
+        // while an explicitly supplied zero remains zero.
         po.apply_alpha_default();
         if (po.po_type == post_op_type_t::binary_add
                 || po.po_type == post_op_type_t::binary_mul) {
@@ -846,7 +976,22 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
 
     matmul_algo_t kernel = kernel_select(exec_params, exec_batch_params.Batch_A,
             exec_batch_params.Batch_B, batch_count, M, N, K, num_threads, bias,
-            is_weights_const);
+            is_weights_const, beta);
+    if (call.sum_post_op && layout != 'r' && layout != 'R') {
+        log_error("matmul_direct: a sum post-op takes a row-major call");
+        return status_t::unimplemented;
+    }
+    if ((kernel == matmul_algo_t::onednn
+                || kernel == matmul_algo_t::onednn_blocked)
+            && !onednn_takes_sum(exec_params, beta)) {
+        log_error(
+                "matmul_direct: oneDNN takes a sum zero point only over an "
+                "s8 / u8 source, and with a nonzero beta a sum post-op only "
+                "first in the chain, without a zero point, with a finite beta "
+                "plus scale, and not into an s32 / s8 / u8 dst of an s8 / u8 "
+                "source");
+        return status_t::unimplemented;
+    }
     // The auto tuner runs each call on one of its candidates: with every
     // candidate off AOCL-DLP the call is not AOCL-DLP's, and a call AOCL-DLP
     // refuses runs on the first candidate off AOCL-DLP, or fails without one.
@@ -920,10 +1065,27 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
             ? reordered_lda
             : lda;
 
+    sum_addend_t sum_addend;
+    if (call.sum_post_op
+            && (kernel == matmul_algo_t::aocl_dlp
+                    || kernel == matmul_algo_t::aocl_dlp_blocked)) {
+        const status_t lowered = lower_sum_to_binary_add(exec_params, dst, M, N,
+                ldc, batch_count, exec_batch_params, sum_addend);
+        if (lowered != status_t::success) {
+            if (is_profile) { profiler.tbp_stop(); }
+            return lowered;
+        }
+    }
+
     if (kernel == matmul_algo_t::reference) {
-        reference_matmul_execute(layout, transA, transB, M, N, K, alpha,
-                exec_src, exec_lda, exec_weight, ldb, bias, beta, dst, ldc,
-                is_weights_const, exec_batch_params, exec_params);
+        const status_t ref_status = reference_matmul_execute(layout, transA,
+                transB, M, N, K, alpha, exec_src, exec_lda, exec_weight, ldb,
+                bias, beta, dst, ldc, is_weights_const, exec_batch_params,
+                exec_params);
+        if (ref_status != status_t::success) {
+            if (is_profile) { profiler.tbp_stop(); }
+            return ref_status;
+        }
     } else if (batch_count > 1) {
         // Batch Matrix Multiplication (BMM)
         bmm::bmm_execute(layout, transA, transB, M, N, K, alpha, exec_src,

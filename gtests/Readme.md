@@ -155,8 +155,15 @@ The following post-operations are supported for matmul and its variations:
 - `mish`
 - `binary_add`
 - `binary_mul`
+- `sum` (adds the destination as the call found it, at most one per chain; see below)
 
 **Note:** If specified post-op is not from above mention list, then no post-op will be applied to operator.
+
+**Sum post-op in the matmul and batched-matmul suites:** a `sum` takes the scale `MATMUL_POSTOP_SUM_SCALE` (0.5), and the zero point `MATMUL_POSTOP_SUM_ZERO_POINT` (3) on a call with an s8 / u8 source and destination and beta 0. Both runs of a test, the kernel's and the reference's, start from the same nonzero destination values. The suites rewrite a chain as follows, with one info line each time:
+- a second `sum` is dropped, and so is every `sum` under `--lowoha false` (the operator API does not apply it);
+- on oneDNN a test with a `sum` and no `--beta` runs with beta 0 half the time; otherwise, beside a nonzero beta, the `sum` moves to the head of the chain, the only place oneDNN takes it there.
+
+A `sum` on the native BRGEMM (`--backend native_brgemm`, or `ZENDNNL_MATMUL_ALGO=10`) is refused, and the test checks the refusal; libxsmm, the batched SGEMM and the auto tuner run such a call on AOCL-DLP instead. The `MatmulSumPostOp.*` tests check these paths, and AOCL-DLP and oneDNN, against exact host values.
 
 **Post-op chain length:** At most `POST_OPS_LIMIT` post-ops may appear in one chain (see **Configurable Parameters**). Longer chains from `--postop` or an input file are rejected.
 
@@ -544,7 +551,7 @@ fusedlayeradd,4:4096,true,true,f32,f32
 |-------|--------|
 | **M, K, N** | Positive integers |
 | **BS** | Batch matmul or LOWOHA reorder batch size |
-| **postOp** | Chain with `:` (`relu:gelu_tanh`). Tokens: `relu`, `gelu_tanh`, `gelu_erf`, `sigmoid`, `swish`, `tanh`, `binary_add`, `binary_mul`, empty/`none`. Max length `POST_OPS_LIMIT` (default 3) |
+| **postOp** | Chain with `:` (`relu:gelu_tanh`). Tokens: `relu`, `gelu_tanh`, `gelu_erf`, `sigmoid`, `swish`, `tanh`, `clip`, `mish`, `binary_add`, `binary_mul`, `sum`, empty/`none`. Max length `POST_OPS_LIMIT` (default 3) |
 | **kernel** | `aocl_dlp`, `aocl_dlp_blocked`, `onednn`, `onednn_blocked`, `libxsmm`, `libxsmm_blocked`, `native_brgemm`. Overridden by matmul env vars above |
 | **Booleans** | `true`/`1`, `false`/`0`, or empty (random). Other values skip the line |
 | **alpha, beta** | Float GEMM scales |
