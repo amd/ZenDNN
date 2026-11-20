@@ -384,7 +384,7 @@ Requires `--op normalization`:
 
 | Flag | Values / description |
 |------|----------------------|
-| `--norm_type` | `layer`, `batch`, `rms`, `fusedaddrms`, `fusedlayeradd` |
+| `--norm_type` | `layer`, `batch`, `rms`, `fusedaddrms`, `fusedlayeradd`, `rmsaddrms` |
 | `--norm_shape` | Comma-separated dims, e.g. `2,4096` (`batch` needs ≥2). Input file uses **`:`** — see [Normalization](#normalization-input-file-format) |
 | `--use_scale`, `--use_shift` | Boolean |
 | `--gamma_dt`, `--beta_dt` | **`f32`**, **`bf16`**, or **`f16`** (`f16` only on AVX512-FP16-capable hosts; otherwise rejected with a log message and a random fallback) |
@@ -529,7 +529,7 @@ num_embeddings,embedding_dim,num_indices,padding_index,is_weights,indices_dtype,
 norm_type,norm_shape,use_scale,use_shift,gamma_dt,beta_dt
 ```
 
-`norm_type`: `layer`, `batch`, `rms`, `fusedaddrms`, `fusedlayeradd`. `norm_shape`: colon-separated dims (e.g. `2:4096`, `32:64:56:56`) — not commas; CLI `--norm_shape` uses commas instead. `gamma_dt` / `beta_dt`: `f32`, `bf16`.
+`norm_type`: `layer`, `batch`, `rms`, `fusedaddrms`, `fusedlayeradd`, `rmsaddrms`. `norm_shape`: colon-separated dims (e.g. `2:4096`, `32:64:56:56`) — not commas; CLI `--norm_shape` uses commas instead. `gamma_dt` / `beta_dt`: `f32`, `bf16`.
 
 ```
 layer,2:3,,,,
@@ -927,9 +927,9 @@ Passing `--lowoha false` no longer enables the regular reorder + matmul path; it
 ### Normalization Tests
  - Normalization TestSuite has seven testcases (F32_F32, BF16_BF16, BF16_F32,
    F32_BF16, F16_F16, F16_F32, F32_F16)
- - Supports five normalization types: LayerNorm, RMSNorm, FusedAddRMSNorm, FusedLayerNormAdd, BatchNorm
+ - Supports six normalization types: LayerNorm, RMSNorm, FusedAddRMSNorm, FusedLayerNormAdd, RMSNormAddRMSNorm, BatchNorm
  - Test parameters (shape, norm_ndims, use_scale, use_shift, gamma/beta data types) are randomly generated
- - Validates native kernel output against the reference (scalar) kernel output
+ - Validates native kernel output against the reference (scalar) kernel output; for FusedAddRMSNorm and RMSNormAddRMSNorm the updated residual is compared as well
  - F16 tests skip at runtime if the platform lacks AVX512-FP16 ISA support
    (returns `status_t::isa_unsupported`)
 
@@ -977,7 +977,7 @@ Passing `--lowoha false` no longer enables the regular reorder + matmul path; it
    `1, 31, 33, 47, 63, 95, 129`. These force the masked AVX512-FP16 tail path in
    the F16 kernels (`f16_maskz_loadu_vec` / `f16_mask_storeu_vec`), covering
    tail-only, single-block + tail, and multi-block + tail remainders.
- - Sizes are exercised across RMSNorm, LayerNorm, and FusedLayerNormAdd (the norm types that use the F16 kernels by default). FusedLayerNormAdd is included because its residual add is a store-time epilogue (residual dtype `dst_dt`), so it shares the same F16 eligibility as LayerNorm with no build flag. FusedAddRMSNorm is intentionally excluded from this shared suite (it pins `gamma_dt=f32`, which cannot trigger the native fused-add FP16 path). When the library is built with `-DZENDNNL_FUSED_ADD_RMS_F16=ON`, the dedicated standalone test `NormalizationFusedTailF16.MaskedTail` covers the fused-add masked-tail path with strict all-f16 dtypes (skipped at runtime on non-AVX512-FP16 hosts).
+ - Sizes are exercised across RMSNorm, LayerNorm, and FusedLayerNormAdd (the norm types that use the F16 kernels by default), plus RMSNormAddRMSNorm, which always runs on the FP32-accumulating AVX-512 kernel and so covers that kernel's masked tail. FusedLayerNormAdd is included because its residual add is a store-time epilogue (residual dtype `dst_dt`), so it shares the same F16 eligibility as LayerNorm with no build flag. FusedAddRMSNorm is intentionally excluded from this shared suite (it pins `gamma_dt=f32`, which cannot trigger the native fused-add FP16 path). When the library is built with `-DZENDNNL_FUSED_ADD_RMS_F16=ON`, the dedicated standalone test `NormalizationFusedTailF16.MaskedTail` covers the fused-add masked-tail path with strict all-f16 dtypes (skipped at runtime on non-AVX512-FP16 hosts).
  - It exists as a **separate instantiation prefix** (not a new testcase) because
    in GoogleTest the test name (`TEST_P`) selects a *behavior* while the
    instantiation prefix selects the *set of parameter values*; the random
@@ -999,6 +999,22 @@ Passing `--lowoha false` no longer enables the regular reorder + matmul path; it
 3. List the registered tail-coverage cases without running them:
 ``` bash
 ./install/gtests/gtests --gtest_list_tests --gtest_filter='NormalizationTail/*'
+```
+
+### RMSNormAddRMSNorm Aliasing Tests
+ - **`NormalizationRmsAddRms.InPlaceMatchesSeparateOutput`** runs RMSNormAddRMSNorm
+   with `output` aliasing `input` (allowed when `src_dt == dst_dt`) and checks
+   that the output and the updated residual are bit-identical to a run with a
+   separate output. It covers f32, bf16 and f16 (native f16 cases skip on hosts
+   without AVX512-FP16), batch 1 and 7 (the serial and OpenMP row loops), and
+   both the native dispatch and the reference.
+ - **`NormalizationRmsAddRms.RejectsUnsupportedAliasing`** checks that in-place
+   calls with `src_dt != dst_dt`, and a residual aliasing the input or the
+   output, return `status_t::failure`.
+
+1. Run the RMSNormAddRMSNorm aliasing tests:
+``` bash
+./install/gtests/gtests --gtest_filter='NormalizationRmsAddRms.*'
 ```
 
 ### OMP API Tests

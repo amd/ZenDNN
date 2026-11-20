@@ -88,7 +88,13 @@ enum class norm_type_t : int {
     RMS_NORM = 2, ///< Root Mean Square Normalization
     FUSED_ADD_RMS_NORM = 3, ///< Fused Add and RMS Normalization
     FUSED_LAYER_NORM_ADD = 4, ///< Layer Normalization followed by residual add
-    FUSED_GATED_LAYER_NORM = 5 ///< Layer Normalization multiplied by act(gate)
+    FUSED_GATED_LAYER_NORM = 5, ///< Layer Normalization multiplied by act(gate)
+    /// RMS Normalization whose output is added into the residual and
+    /// normalized again: residual += rms_norm(input, gamma), then
+    /// output = rms_norm(residual, beta). The post-norm / residual-add /
+    /// pre-norm boundary of sandwich-norm models (Gemma 2/3/4). `beta` carries
+    /// the second scale (`beta_dt`); the residual has `dst_dt`.
+    RMS_NORM_ADD_RMS_NORM = 6
 };
 
 /**

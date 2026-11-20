@@ -35,7 +35,7 @@ namespace normalization {
  * benchmark, including tensor shape, normalization type, data types, epsilon, scale/shift
  * flags, and iteration counts.
  *
- * @var norm_type Normalization variant: "layer_norm", "batch_norm", "rms_norm", "fused_add_rms_norm", or "fused_layer_norm_add".
+ * @var norm_type Normalization variant: "layer_norm", "batch_norm", "rms_norm", "fused_add_rms_norm", "fused_layer_norm_add", or "rms_norm_add_rms_norm".
  * @var shape Full N-D shape from user input (e.g. {2, 4096} or {32, 64, 56, 56}).
  * @var norm_ndims Number of trailing dimensions to normalize over.
  *                 0 for batch_norm; 1..ndims-1 for the other norm types.
@@ -86,7 +86,8 @@ struct NormalizationConfig {
  * @brief Converts a normalization type string to its canonical form.
  *
  * Accepts strings like "layer_norm", "batch_norm", "rms_norm", "fused_add_rms_norm",
- * "fused_layer_norm_add" (case-insensitive) and returns the canonical lowercase form.
+ * "fused_layer_norm_add", "rms_norm_add_rms_norm" (case-insensitive) and returns
+ * the canonical lowercase form.
  *
  * @param str Input string representing the normalization type.
  * @return std::string Canonical normalization type string, or empty string if unknown.
@@ -120,7 +121,7 @@ norm_algo_t strToLowohaAlgo(const std::string &algo);
  * `norm_ndims`  — trailing dims to normalize together:
  *                   * 0 for batch_norm
  *                   * 1..ndims-1 for layer_norm / rms_norm / fused_add_rms_norm /
- *                     fused_layer_norm_add
+ *                     fused_layer_norm_add / rms_norm_add_rms_norm
  *                 The shape is flattened to (batch, [num_channels,] norm_size)
  *                 internally.
  *

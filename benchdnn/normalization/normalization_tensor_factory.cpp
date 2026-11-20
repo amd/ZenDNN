@@ -59,8 +59,13 @@ int create_gamma_tensor(tensor_factory_t &tensor_factory,
 
 int create_beta_tensor(tensor_factory_t &tensor_factory,
         const NormalizationConfig &cfg, tensor_t &beta) {
-    if (!cfg.use_shift || cfg.norm_type == "rms_norm"
-            || cfg.norm_type == "fused_add_rms_norm") {
+    // rms_norm_add_rms_norm reads beta as its second scale, so it follows
+    // use_scale rather than use_shift.
+    const bool needs_beta = (cfg.norm_type == "rms_norm_add_rms_norm")
+            ? cfg.use_scale
+            : cfg.use_shift && cfg.norm_type != "rms_norm"
+                    && cfg.norm_type != "fused_add_rms_norm";
+    if (!needs_beta) {
         beta = tensor_t();
         return OK;
     }
@@ -114,8 +119,10 @@ int create_residual_tensor(tensor_factory_t &tensor_factory,
                 flat_shape(cfg), cfg.src_dt, 2.0f, "residual_tensor");
         return OK;
     }
-    if (cfg.norm_type == "fused_layer_norm_add") {
-        // Residual is a read-only addend in the output domain (dst_dt).
+    if (cfg.norm_type == "fused_layer_norm_add"
+            || cfg.norm_type == "rms_norm_add_rms_norm") {
+        // Residual is in the output domain (dst_dt): a read-only addend for
+        // fused_layer_norm_add, updated in place by rms_norm_add_rms_norm.
         residual = tensor_factory.uniform_dist_tensor(
                 flat_shape(cfg), cfg.dst_dt, 2.0f, "residual_tensor");
         return OK;

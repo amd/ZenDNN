@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cmath>
 #include <omp.h>
+#include <vector>
 #include "avx512_utils.hpp"
 
 namespace zendnnl {
@@ -392,12 +393,43 @@ static inline void fused_add_rms_row_avx512(const void *__restrict in_row,
     }
 }
 
+// ---------------------------------------------------------------------------
+// RMS_NORM_ADD_RMS_NORM: rms_norm(input, gamma) feeding
+// fused_add_rms_norm(., residual, gamma_residual).
+//
+// The two steps reuse the existing FP32-accumulating row kernels unchanged,
+// so the arithmetic and the intermediate rounding are identical to issuing
+// the two norms separately when both of those also run on this kernel. On
+// AVX-512-FP16 hosts a standalone f16 RMS_NORM takes the FP16-FMA kernel
+// instead, so the split sequence can differ there; this type always
+// accumulates in FP32. What changes is where the intermediate lives:
+// `scratch_row` holds a single row (a few KB, L1-resident) instead of the
+// split form materializing the whole tensor and reading it back through L3.
+// The row is read in full before anything is stored, so `out_row` may alias
+// `in_row`. Across rows that holds only when src_dt == dst_dt, which
+// normalization_direct enforces.
+// ---------------------------------------------------------------------------
+static inline void norm_add_norm_row_avx512(const void *in_row, void *out_row,
+        void *__restrict res_row, const void *__restrict gamma,
+        const void *__restrict gamma_residual, void *__restrict scratch_row,
+        uint64_t norm_size, float inv_n, float epsilon, bool use_scale,
+        data_type_t src_dt, data_type_t dst_dt, data_type_t gamma_dt,
+        data_type_t gamma_residual_dt) {
+    rms_norm_row_avx512(in_row, scratch_row, gamma, norm_size, inv_n, epsilon,
+            use_scale, src_dt, dst_dt, gamma_dt);
+    // The scratch now carries the first norm's output, so it is the source
+    // dtype of the second step.
+    fused_add_rms_row_avx512(scratch_row, out_row, res_row, gamma_residual,
+            norm_size, inv_n, epsilon, use_scale, dst_dt, dst_dt,
+            gamma_residual_dt);
+}
+
 // =====================================================================
-// Dispatches RMS_NORM and FUSED_ADD_RMS_NORM
+// Dispatches RMS_NORM, FUSED_ADD_RMS_NORM and RMS_NORM_ADD_RMS_NORM
 // =====================================================================
 
 status_t rms_norm_avx512(const void *input, void *output, void *residual,
-        const void *gamma, norm_params &params) {
+        const void *gamma, const void *gamma_residual, norm_params &params) {
     const float inv_n = 1.0f / static_cast<float>(params.norm_size);
     const data_type_t src_dt = params.src_dt;
     const data_type_t dst_dt = params.dst_dt;
@@ -408,9 +440,19 @@ status_t rms_norm_avx512(const void *input, void *output, void *residual,
     const int64_t batch = static_cast<int64_t>(params.batch);
     const bool is_fused
             = (params.norm_type == norm_type_t::FUSED_ADD_RMS_NORM && residual);
+    const bool is_norm_add_norm
+            = (params.norm_type == norm_type_t::RMS_NORM_ADD_RMS_NORM
+                    && residual);
 
-    auto row_loop = [&](int64_t b) {
-        if (!is_fused) {
+    auto row_loop = [&](int64_t b, void *scratch) {
+        if (is_norm_add_norm) {
+            norm_add_norm_row_avx512(
+                    static_cast<const char *>(input) + b * N * src_sz,
+                    static_cast<char *>(output) + b * N * dst_sz,
+                    static_cast<char *>(residual) + b * N * dst_sz, gamma,
+                    gamma_residual, scratch, N, inv_n, params.epsilon,
+                    params.use_scale, src_dt, dst_dt, gamma_dt, params.beta_dt);
+        } else if (!is_fused) {
             rms_norm_row_avx512(
                     static_cast<const char *>(input) + b * N * src_sz,
                     static_cast<char *>(output) + b * N * dst_sz, gamma, N,
@@ -426,14 +468,22 @@ status_t rms_norm_avx512(const void *input, void *output, void *residual,
         }
     };
 
+    // One scratch row per thread, allocated outside the row loop.
+    const size_t scratch_bytes = is_norm_add_norm ? N * dst_sz : 0;
+
     if (batch <= 1) {
+        std::vector<char> scratch(scratch_bytes);
         for (int64_t b = 0; b < batch; ++b) {
-            row_loop(b);
+            row_loop(b, scratch.data());
         }
     } else {
-#pragma omp parallel for schedule(static)
-        for (int64_t b = 0; b < batch; ++b) {
-            row_loop(b);
+#pragma omp parallel
+        {
+            std::vector<char> scratch(scratch_bytes);
+#pragma omp for schedule(static)
+            for (int64_t b = 0; b < batch; ++b) {
+                row_loop(b, scratch.data());
+            }
         }
     }
     return status_t::success;

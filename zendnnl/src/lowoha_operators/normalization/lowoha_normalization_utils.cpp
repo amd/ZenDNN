@@ -92,9 +92,11 @@ status_t validate_normalization_inputs(const void *input, const void *output,
     }
 
     // Validate shift (beta) parameter
-    // Beta is never used by RMSNorm or FusedAddRMSNorm regardless of use_shift
+    // Beta is never a shift for the RMS family regardless of use_shift
+    // (RMSNormAddRMSNorm reads it as its second scale, validated below)
     if (params.use_shift && params.norm_type != norm_type_t::RMS_NORM
-            && params.norm_type != norm_type_t::FUSED_ADD_RMS_NORM) {
+            && params.norm_type != norm_type_t::FUSED_ADD_RMS_NORM
+            && params.norm_type != norm_type_t::RMS_NORM_ADD_RMS_NORM) {
         if (!beta) {
             log_error(
                     "Normalization: use_shift=true but beta pointer is null "
@@ -119,6 +121,49 @@ status_t validate_normalization_inputs(const void *input, const void *output,
                     "Normalization: FUSED_ADD_RMS_NORM requires a non-null "
                     "writable residual buffer");
             return status_t::failure;
+        }
+    }
+
+    // RMSNormAddRMSNorm-specific validations. The residual (dst_dt) is
+    // read-modify-written while the output is stored, so the two must not
+    // alias; the output may alias the input only when src_dt == dst_dt;
+    // `beta` carries the second scale.
+    if (params.norm_type == norm_type_t::RMS_NORM_ADD_RMS_NORM) {
+        if (!residual) {
+            log_error(
+                    "Normalization: RMS_NORM_ADD_RMS_NORM requires a non-null "
+                    "writable residual buffer");
+            return status_t::failure;
+        }
+        if (residual == output || residual == input) {
+            log_error(
+                    "Normalization: RMS_NORM_ADD_RMS_NORM residual must not "
+                    "alias the input or output buffer");
+            return status_t::failure;
+        }
+        if (output == input && params.src_dt != params.dst_dt) {
+            log_error(
+                    "Normalization: RMS_NORM_ADD_RMS_NORM with output "
+                    "aliasing input requires src_dt == dst_dt");
+            return status_t::failure;
+        }
+        if (params.use_scale) {
+            if (!beta) {
+                log_error(
+                        "Normalization: RMS_NORM_ADD_RMS_NORM with use_scale "
+                        "requires beta (the second scale)");
+                return status_t::failure;
+            }
+            if (params.beta_dt != data_type_t::f32
+                    && params.beta_dt != data_type_t::bf16
+                    && params.beta_dt != data_type_t::f16) {
+                log_error(
+                        "Normalization: Unsupported second scale (beta) "
+                        "data type (",
+                        static_cast<int>(params.beta_dt),
+                        "). Supported: f32, bf16, f16");
+                return status_t::failure;
+            }
         }
     }
 
@@ -211,6 +256,7 @@ std::string norm_type_to_str(norm_type_t type) {
         case norm_type_t::FUSED_ADD_RMS_NORM: return "FusedAddRMSNorm";
         case norm_type_t::FUSED_LAYER_NORM_ADD: return "FusedLayerNormAdd";
         case norm_type_t::FUSED_GATED_LAYER_NORM: return "FusedGatedLayerNorm";
+        case norm_type_t::RMS_NORM_ADD_RMS_NORM: return "RMSNormAddRMSNorm";
         default: return "Unknown";
     }
 }

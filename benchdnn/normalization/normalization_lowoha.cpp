@@ -95,11 +95,12 @@ int normalization_lowoha_benchdnn(std::vector<NormalizationConfig> configs,
             const void *gamma_data = cfg.use_scale
                     ? gamma_tensor.get_raw_handle_const()
                     : nullptr;
+            const bool uses_beta = (cfg.norm_type == "rms_norm_add_rms_norm")
+                    ? cfg.use_scale
+                    : cfg.use_shift && cfg.norm_type != "rms_norm"
+                            && cfg.norm_type != "fused_add_rms_norm";
             const void *beta_data
-                    = (cfg.use_shift && cfg.norm_type != "rms_norm"
-                              && cfg.norm_type != "fused_add_rms_norm")
-                    ? beta_tensor.get_raw_handle_const()
-                    : nullptr;
+                    = uses_beta ? beta_tensor.get_raw_handle_const() : nullptr;
             const void *running_mean_data = (cfg.norm_type == "batch_norm")
                     ? running_mean_tensor.get_raw_handle_const()
                     : nullptr;
@@ -108,7 +109,8 @@ int normalization_lowoha_benchdnn(std::vector<NormalizationConfig> configs,
                     : nullptr;
             void *residual_data
                     = (cfg.norm_type == "fused_add_rms_norm"
-                              || cfg.norm_type == "fused_layer_norm_add")
+                              || cfg.norm_type == "fused_layer_norm_add"
+                              || cfg.norm_type == "rms_norm_add_rms_norm")
                     ? residual_tensor.get_raw_handle_unsafe()
                     : nullptr;
 

@@ -26,7 +26,7 @@ namespace normalization {
 // ---------------------------------------------------------------------------
 // AVX-512 optimized RMS Normalization (plain and fused-add variants).
 //
-// Supports both RMS_NORM and FUSED_ADD_RMS_NORM:
+// Supports RMS_NORM, FUSED_ADD_RMS_NORM and RMS_NORM_ADD_RMS_NORM:
 //
 //   Plain RMS:
 //     rms    = sqrt( (1/N) * Σ input[b,i]² + eps )
@@ -37,19 +37,29 @@ namespace normalization {
 //     rms    = sqrt( (1/N) * Σ residual[b,i]² + eps )
 //     y[b,i] = gamma[i] * residual[b,i] / rms
 //
-// @param input      Input tensor (contiguous, row-major). Element type
-//                   matches params.src_dt (FP32, BF16, or F16).
-// @param output     Output tensor. Element type matches params.dst_dt
-//                   (FP32, BF16, or F16).
-// @param residual   Residual stream (read-write for FUSED_ADD_RMS_NORM,
-//                   nullptr for RMS_NORM). Element type matches params.src_dt.
-// @param gamma      Scale parameter (FP32, BF16, or F16, nullptr if !use_scale)
-// @param params     Normalization parameters
+//   RMS + Fused Add + RMS:
+//     residual[b,i] += rms_norm(input, gamma)[b,i]
+//     y[b,i] = rms_norm(residual, gamma_residual)[b,i]
+//
+// @param input          Input tensor (contiguous, row-major). Element type
+//                       matches params.src_dt (FP32, BF16, or F16).
+// @param output         Output tensor. Element type matches params.dst_dt
+//                       (FP32, BF16, or F16). May alias `input` for
+//                       RMS_NORM_ADD_RMS_NORM when src_dt == dst_dt.
+// @param residual       Residual stream (read-write for FUSED_ADD_RMS_NORM and
+//                       RMS_NORM_ADD_RMS_NORM, nullptr for RMS_NORM). Element
+//                       type matches params.src_dt, or params.dst_dt for
+//                       RMS_NORM_ADD_RMS_NORM.
+// @param gamma          Scale parameter (FP32, BF16, or F16, nullptr if
+//                       !use_scale)
+// @param gamma_residual Second norm's scale for RMS_NORM_ADD_RMS_NORM
+//                       (params.beta_dt), nullptr otherwise.
+// @param params         Normalization parameters
 //
 // @return status_t::success on successful execution
 // ---------------------------------------------------------------------------
 status_t rms_norm_avx512(const void *input, void *output, void *residual,
-        const void *gamma, norm_params &params);
+        const void *gamma, const void *gamma_residual, norm_params &params);
 
 } // namespace normalization
 } // namespace lowoha

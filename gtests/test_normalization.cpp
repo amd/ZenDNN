@@ -83,10 +83,13 @@ protected:
                                            {gamma_size}, gamma_dt, 1.0f)
                                  : tensor_t();
 
-        bool needs_beta = use_shift
-                && (norm_type == norm_type_t::LAYER_NORM
-                        || norm_type == norm_type_t::BATCH_NORM
-                        || norm_type == norm_type_t::FUSED_LAYER_NORM_ADD);
+        bool beta_is_shift = norm_type == norm_type_t::LAYER_NORM
+                || norm_type == norm_type_t::BATCH_NORM
+                || norm_type == norm_type_t::FUSED_LAYER_NORM_ADD;
+        // RMS_NORM_ADD_RMS_NORM reads `beta` as its second scale.
+        bool needs_beta = (use_shift && beta_is_shift)
+                || (use_scale
+                        && norm_type == norm_type_t::RMS_NORM_ADD_RMS_NORM);
         beta_tensor = needs_beta ? tensor_factory.uniform_dist_tensor(
                                            {gamma_size}, beta_dt, 1.0f)
                                  : tensor_t();
@@ -115,9 +118,10 @@ protected:
             std::memcpy(residual_tensor_ref.get_raw_handle_unsafe(),
                     residual_tensor.get_raw_handle_unsafe(),
                     total_elements * elem_bytes);
-        } else if (norm_type == norm_type_t::FUSED_LAYER_NORM_ADD) {
-            // Residual is a read-only addend in the output domain (dst_dt). Native
-            // and reference read identical values; neither modifies the buffer.
+        } else if (norm_type == norm_type_t::FUSED_LAYER_NORM_ADD
+                || norm_type == norm_type_t::RMS_NORM_ADD_RMS_NORM) {
+            // Residual is in the output domain (dst_dt). FUSED_LAYER_NORM_ADD
+            // only reads it; RMS_NORM_ADD_RMS_NORM updates each copy in place.
             residual_tensor
                     = tensor_factory.uniform_dist_tensor(shape, dst_dt, 2.0f);
             residual_tensor_ref = tensor_factory.zero_tensor(shape, dst_dt);
@@ -148,6 +152,22 @@ protected:
         const size_t nbytes
                 = static_cast<size_t>(total_elements) * size_of(dst_dt);
         return std::memcmp(native_res, golden_res, nbytes) == 0;
+    }
+
+    /**
+   * @brief FUSED_ADD_RMS_NORM and RMS_NORM_ADD_RMS_NORM update the residual in
+   *        place, so the native and reference runs must leave matching values
+   *        in their copies. No-op for every other norm type
+   *        (FUSED_LAYER_NORM_ADD's read-only residual is checked by
+   *        residual_unmodified instead).
+   */
+    void compare_updated_residual(float tol, bool &is_test_successful) {
+        if (norm_type != norm_type_t::FUSED_ADD_RMS_NORM
+                && norm_type != norm_type_t::RMS_NORM_ADD_RMS_NORM) {
+            return;
+        }
+        compare_norm_tensors(residual_tensor, residual_tensor_ref, shape,
+                total_elements, tol, is_test_successful);
     }
 
     norm_type_t norm_type;
@@ -202,6 +222,7 @@ TEST_P(TestNormalization, F32_F32) {
     if (is_test_successful) {
         compare_norm_tensors(output_tensor, output_tensor_ref, shape,
                 total_elements, NORM_F32_TOL, is_test_successful);
+        compare_updated_residual(NORM_F32_TOL, is_test_successful);
         EXPECT_TRUE(residual_unmodified(dst_dt))
                 << "FUSED_LAYER_NORM_ADD must not modify the read-only "
                    "residual buffer";
@@ -242,6 +263,7 @@ TEST_P(TestNormalization, BF16_BF16) {
     if (is_test_successful) {
         compare_norm_tensors(output_tensor, output_tensor_ref, shape,
                 total_elements, NORM_BF16_TOL, is_test_successful);
+        compare_updated_residual(NORM_BF16_TOL, is_test_successful);
         EXPECT_TRUE(residual_unmodified(dst_dt))
                 << "FUSED_LAYER_NORM_ADD must not modify the read-only "
                    "residual buffer";
@@ -282,6 +304,7 @@ TEST_P(TestNormalization, BF16_F32) {
     if (is_test_successful) {
         compare_norm_tensors(output_tensor, output_tensor_ref, shape,
                 total_elements, NORM_F32_TOL, is_test_successful);
+        compare_updated_residual(NORM_F32_TOL, is_test_successful);
         EXPECT_TRUE(residual_unmodified(dst_dt))
                 << "FUSED_LAYER_NORM_ADD must not modify the read-only "
                    "residual buffer";
@@ -322,6 +345,7 @@ TEST_P(TestNormalization, F32_BF16) {
     if (is_test_successful) {
         compare_norm_tensors(output_tensor, output_tensor_ref, shape,
                 total_elements, NORM_BF16_TOL, is_test_successful);
+        compare_updated_residual(NORM_BF16_TOL, is_test_successful);
         EXPECT_TRUE(residual_unmodified(dst_dt))
                 << "FUSED_LAYER_NORM_ADD must not modify the read-only "
                    "residual buffer";
@@ -366,6 +390,7 @@ TEST_P(TestNormalization, F16_F16) {
     if (is_test_successful) {
         compare_norm_tensors(output_tensor, output_tensor_ref, shape,
                 total_elements, NORM_F16_TOL, is_test_successful);
+        compare_updated_residual(NORM_F16_TOL, is_test_successful);
         EXPECT_TRUE(residual_unmodified(dst_dt))
                 << "FUSED_LAYER_NORM_ADD must not modify the read-only "
                    "residual buffer";
@@ -410,6 +435,7 @@ TEST_P(TestNormalization, F16_F32) {
     if (is_test_successful) {
         compare_norm_tensors(output_tensor, output_tensor_ref, shape,
                 total_elements, NORM_F16_TOL, is_test_successful);
+        compare_updated_residual(NORM_F16_TOL, is_test_successful);
         EXPECT_TRUE(residual_unmodified(dst_dt))
                 << "FUSED_LAYER_NORM_ADD must not modify the read-only "
                    "residual buffer";
@@ -454,6 +480,7 @@ TEST_P(TestNormalization, F32_F16) {
     if (is_test_successful) {
         compare_norm_tensors(output_tensor, output_tensor_ref, shape,
                 total_elements, NORM_F16_TOL, is_test_successful);
+        compare_updated_residual(NORM_F16_TOL, is_test_successful);
         EXPECT_TRUE(residual_unmodified(dst_dt))
                 << "FUSED_LAYER_NORM_ADD must not modify the read-only "
                    "residual buffer";
@@ -487,7 +514,8 @@ static std::vector<NormalizationType> make_norm_tail_cases() {
     // dedicated NormalizationFusedTailF16 test below covers the fused-add masked
     // tail with all-f16 dtypes when built with -DZENDNNL_FUSED_ADD_RMS_F16=ON.
     const std::vector<norm_type_t> norm_types = {norm_type_t::RMS_NORM,
-            norm_type_t::LAYER_NORM, norm_type_t::FUSED_LAYER_NORM_ADD};
+            norm_type_t::LAYER_NORM, norm_type_t::FUSED_LAYER_NORM_ADD,
+            norm_type_t::RMS_NORM_ADD_RMS_NORM};
 
     std::vector<NormalizationType> cases;
     cases.reserve(norm_types.size() * tail_sizes.size());
@@ -501,7 +529,10 @@ static std::vector<NormalizationType> make_norm_tail_cases() {
             c.norm_size = ns;
             c.num_channels = 0; // unused for non-batch-norm
             c.shape = {c.batch, ns};
-            c.epsilon = (nt == norm_type_t::RMS_NORM) ? 1e-6f : 1e-5f;
+            c.epsilon = (nt == norm_type_t::RMS_NORM
+                                || nt == norm_type_t::RMS_NORM_ADD_RMS_NORM)
+                    ? 1e-6f
+                    : 1e-5f;
             c.use_scale = true;
             c.use_shift = (nt == norm_type_t::LAYER_NORM
                     || nt == norm_type_t::FUSED_LAYER_NORM_ADD);
@@ -525,6 +556,168 @@ static std::vector<NormalizationType> make_norm_tail_cases() {
  */
 INSTANTIATE_TEST_SUITE_P(NormalizationTail, TestNormalization,
         ::testing::ValuesIn(make_norm_tail_cases()));
+
+/** @brief norm_params for the standalone RMS_NORM_ADD_RMS_NORM tests below:
+ *         f32 first scale, bf16 second scale, two threads.
+ */
+static norm_params make_rms_add_rms_params(uint64_t batch, uint64_t norm_size,
+        data_type_t src_dt, data_type_t dst_dt) {
+    norm_params np;
+    np.norm_type = norm_type_t::RMS_NORM_ADD_RMS_NORM;
+    np.batch = batch;
+    np.norm_size = norm_size;
+    np.num_channels = 0;
+    np.epsilon = 1e-6f;
+    np.use_scale = true;
+    np.use_shift = false;
+    np.src_dt = src_dt;
+    np.dst_dt = dst_dt;
+    np.gamma_dt = data_type_t::f32;
+    np.beta_dt = data_type_t::bf16;
+    np.num_threads = 2;
+    return np;
+}
+
+/** @brief Runs one RMS_NORM_ADD_RMS_NORM case twice, with a separate output
+ *         and in place on a copy of the input, and checks that the output and
+ *         the updated residual are bit-identical. Returns without checking
+ *         when the native F16 path is unsupported on this host.
+ */
+static void check_rms_add_rms_in_place(
+        data_type_t dt, uint64_t batch, uint64_t ns, norm_algo_t algo) {
+    tensor_factory_t tensor_factory {};
+    const std::vector<uint64_t> shape = {batch, ns};
+    const size_t nbytes = batch * ns * size_of(dt);
+
+    auto input_tensor = tensor_factory.uniform_dist_tensor(shape, dt, 2.0f);
+    auto output_tensor = tensor_factory.zero_tensor(shape, dt);
+    auto inplace_tensor = tensor_factory.zero_tensor(shape, dt);
+    void *inplace = inplace_tensor.get_raw_handle_unsafe();
+    std::memcpy(inplace, input_tensor.get_raw_handle_unsafe(), nbytes);
+
+    auto residual_tensor = tensor_factory.uniform_dist_tensor(shape, dt, 2.0f);
+    auto residual_inplace_tensor = tensor_factory.zero_tensor(shape, dt);
+    void *residual_inplace = residual_inplace_tensor.get_raw_handle_unsafe();
+    std::memcpy(
+            residual_inplace, residual_tensor.get_raw_handle_unsafe(), nbytes);
+
+    auto gamma_tensor
+            = tensor_factory.uniform_dist_tensor({ns}, data_type_t::f32, 1.0f);
+    auto beta_tensor
+            = tensor_factory.uniform_dist_tensor({ns}, data_type_t::bf16, 1.0f);
+    tensor_t running_mean_tensor, running_var_tensor;
+
+    norm_params np = make_rms_add_rms_params(batch, ns, dt, dt);
+    status_t status = normalization_kernel_test(input_tensor, output_tensor,
+            gamma_tensor, beta_tensor, running_mean_tensor, running_var_tensor,
+            residual_tensor, np, algo);
+    if (status == status_t::isa_unsupported) { return; }
+    ASSERT_EQ(status, status_t::success);
+
+    norm_params np_inplace = make_rms_add_rms_params(batch, ns, dt, dt);
+    status = normalization_kernel_test(inplace_tensor, inplace_tensor,
+            gamma_tensor, beta_tensor, running_mean_tensor, running_var_tensor,
+            residual_inplace_tensor, np_inplace, algo);
+    ASSERT_EQ(status, status_t::success);
+
+    EXPECT_EQ(
+            std::memcmp(inplace, output_tensor.get_raw_handle_unsafe(), nbytes),
+            0)
+            << "in-place output differs from separate output";
+    EXPECT_EQ(std::memcmp(residual_inplace,
+                      residual_tensor.get_raw_handle_unsafe(), nbytes),
+            0)
+            << "in-place residual differs from separate-output residual";
+}
+
+/** @brief RMS_NORM_ADD_RMS_NORM with `output` aliasing `input`.
+ *
+ *  The output may alias the input when src_dt == dst_dt, which is how
+ *  in-place callers use this type, but every TestNormalization case passes a
+ *  separate output. Covers the native dispatch and the reference; batch 1
+ *  takes the serial row loop and batch 7 the OpenMP one. Native F16 cases
+ *  skip on hosts without AVX512-FP16.
+ */
+TEST(NormalizationRmsAddRms, InPlaceMatchesSeparateOutput) {
+    omp_set_num_threads(2);
+    for (data_type_t dt :
+            {data_type_t::f32, data_type_t::bf16, data_type_t::f16}) {
+        for (uint64_t batch : {1, 7}) {
+            for (uint64_t ns : {33, 2560}) {
+                for (norm_algo_t algo :
+                        {norm_algo_t::none, norm_algo_t::reference}) {
+                    SCOPED_TRACE(::testing::Message()
+                            << "dt=" << dtype_info(dt) << " batch=" << batch
+                            << " norm_size=" << ns
+                            << " algo=" << algo_to_string(algo));
+                    check_rms_add_rms_in_place(dt, batch, ns, algo);
+                }
+            }
+        }
+    }
+}
+
+/** @brief RMS_NORM_ADD_RMS_NORM rejects aliasing its kernels cannot honor:
+ *         an in-place call whose src and dst rows differ in width (one row's
+ *         output would overlap another row's input), and a residual aliasing
+ *         the input or the output (the row kernels take the residual as
+ *         __restrict). These checks are always on, so this also holds with
+ *         ZENDNNL_DIAGNOSTICS_ENABLE=0.
+ */
+TEST(NormalizationRmsAddRms, RejectsUnsupportedAliasing) {
+    const uint64_t batch = 4;
+    const uint64_t ns = 64;
+    const std::vector<uint64_t> shape = {batch, ns};
+    tensor_factory_t tensor_factory {};
+    omp_set_num_threads(2);
+
+    // Every buffer is f32, the widest type, so a call that is wrongly
+    // accepted still stays inside its buffers.
+    auto buf_tensor
+            = tensor_factory.uniform_dist_tensor(shape, data_type_t::f32, 2.0f);
+    auto other_tensor
+            = tensor_factory.uniform_dist_tensor(shape, data_type_t::f32, 2.0f);
+    auto residual_tensor
+            = tensor_factory.uniform_dist_tensor(shape, data_type_t::f32, 2.0f);
+    auto gamma_tensor
+            = tensor_factory.uniform_dist_tensor({ns}, data_type_t::f32, 1.0f);
+    auto beta_tensor
+            = tensor_factory.uniform_dist_tensor({ns}, data_type_t::bf16, 1.0f);
+    tensor_t running_mean_tensor, running_var_tensor;
+
+    const std::vector<std::pair<data_type_t, data_type_t>> mixed_widths
+            = {{data_type_t::bf16, data_type_t::f32},
+                    {data_type_t::f32, data_type_t::bf16}};
+
+    for (norm_algo_t algo : {norm_algo_t::none, norm_algo_t::reference}) {
+        SCOPED_TRACE(::testing::Message() << "algo=" << algo_to_string(algo));
+        for (const auto &[src_dt, dst_dt] : mixed_widths) {
+            norm_params np = make_rms_add_rms_params(batch, ns, src_dt, dst_dt);
+            EXPECT_EQ(normalization_kernel_test(buf_tensor, buf_tensor,
+                              gamma_tensor, beta_tensor, running_mean_tensor,
+                              running_var_tensor, residual_tensor, np, algo),
+                    status_t::failure)
+                    << "in place with src_dt=" << dtype_info(src_dt)
+                    << ", dst_dt=" << dtype_info(dst_dt);
+        }
+
+        norm_params np = make_rms_add_rms_params(
+                batch, ns, data_type_t::f32, data_type_t::f32);
+        EXPECT_EQ(normalization_kernel_test(buf_tensor, other_tensor,
+                          gamma_tensor, beta_tensor, running_mean_tensor,
+                          running_var_tensor, buf_tensor, np, algo),
+                status_t::failure)
+                << "residual aliasing input";
+
+        np = make_rms_add_rms_params(
+                batch, ns, data_type_t::f32, data_type_t::f32);
+        EXPECT_EQ(normalization_kernel_test(buf_tensor, other_tensor,
+                          gamma_tensor, beta_tensor, running_mean_tensor,
+                          running_var_tensor, other_tensor, np, algo),
+                status_t::failure)
+                << "residual aliasing output";
+    }
+}
 
 #if defined(ZENDNNL_FUSED_ADD_RMS_F16)
 /** @brief Dedicated masked-tail coverage for the native FP16 FusedAddRMSNorm

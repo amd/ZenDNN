@@ -5,13 +5,13 @@
 
 ## Overview
 
-The **LowOHA Normalization Operator** is a high-performance, low-overhead normalization operator designed for **latency-sensitive inference workloads**. It provides a single `normalization_direct` entry point that dispatches to six normalization variants — LayerNorm, RMSNorm, FusedAddRMSNorm, FusedLayerNormAdd, FusedGatedLayerNorm, and BatchNorm — with minimal per-call overhead.
+The **LowOHA Normalization Operator** is a high-performance, low-overhead normalization operator designed for **latency-sensitive inference workloads**. It provides a single `normalization_direct` entry point that dispatches to seven normalization variants — LayerNorm, RMSNorm, FusedAddRMSNorm, FusedLayerNormAdd, FusedGatedLayerNorm, RMSNormAddRMSNorm, and BatchNorm — with minimal per-call overhead.
 
 Unlike the standard operator factory pattern, LowOHA Normalization provides a **function-based interface** optimized for:
 - Minimal execution overhead — no operator / context object lifecycle on the hot path
 - FP32, BF16, and F16 data types for input, output, gamma, and beta (chosen independently)
 - Six normalization variants behind a single API
-- Native AVX-512 and AVX-512-FP16 vectorized kernels for LayerNorm, RMSNorm, FusedAddRMSNorm, and FusedLayerNormAdd; an AVX-512 kernel for FusedGatedLayerNorm
+- Native AVX-512 and AVX-512-FP16 vectorized kernels for LayerNorm, RMSNorm, FusedAddRMSNorm, and FusedLayerNormAdd; AVX-512 kernels for FusedGatedLayerNorm and RMSNormAddRMSNorm
 - Build-time switch to force FP32 accumulation for numerical reproducibility
 - Direct control over execution parameters (data types, threads, epsilon)
 
@@ -87,6 +87,22 @@ Math is FP32; the AVX-512 kernel's silu uses a fast exp (relative error about 5e
 
 **Use case:** The HSTU output block of DLRM v3 / generative-recommenders, `cat([silu(u), x, silu(u) * LayerNorm(x)])` before the output projection. `u` is read directly from the fused `uvqk` GEMM output (row stride `4 * D`), and the three slices of the `[L, 3D]` result are written in one pass (`gate_out` = column 0, `src_out` = column `D`, `output` = column `2D`, all with stride `3D`).
 
+### RMSNormAddRMSNorm
+
+Normalizes the input, adds the result into the residual buffer **in-place**, and normalizes the updated residual with a second scale, which is passed through `beta`. The intermediate never leaves a per-thread row buffer.
+
+$$
+\text{residual}_i \mathrel{+}= \gamma_i \cdot \frac{x_i}{\sqrt{\frac{1}{N}\sum_j x_j^2 + \epsilon}}
+$$
+
+$$
+y_i = \beta_i \cdot \frac{\text{residual}_i}{\sqrt{\frac{1}{N}\sum_j \text{residual}_j^2 + \epsilon}}
+$$
+
+The intermediate is rounded to `dst_dt`, and both steps run on the FP32-accumulating AVX-512 kernel, so the result matches an `RMS_NORM` call followed by a `FUSED_ADD_RMS_NORM` call whenever those two calls also run on that kernel. That covers every call without `f16` data, and every call when the library is built with `-DZENDNNL_NATIVE_F32_ACCUM=ON`. On AVX-512-FP16 hosts, a standalone `f16` `RMS_NORM` uses the [F16 FMA Mode](#f16-fma-mode) kernel instead, so the two-call sequence can differ slightly from this type, which always accumulates in FP32.
+
+**Use case:** Sandwich-norm decoder layers (Gemma 2/3/4), where a sub-layer output is normalized (post-norm), added to the residual stream, and normalized again for the next sub-layer (pre-norm). Saves the full read+write pass the intermediate costs between two separate calls.
+
 ### BatchNorm (Inference)
 
 Normalizes per channel using **pre-computed** running statistics from training.
@@ -107,10 +123,10 @@ status_t normalization_direct(
   const void *input,         // Input tensor (read-only)
   void       *output,        // Output tensor (same shape as input)
   const void *gamma,         // Scale parameters (may be nullptr)
-  const void *beta,          // Shift parameters (may be nullptr)
+  const void *beta,          // Shift parameters; second scale for RMSNormAddRMSNorm (may be nullptr)
   const void *running_mean,  // Pre-computed mean (BatchNorm only, may be nullptr)
   const void *running_var,   // Pre-computed variance (BatchNorm only, may be nullptr)
-  void       *residual,      // Residual buffer (FusedAddRMSNorm / FusedLayerNormAdd, may be nullptr)
+  void       *residual,      // Residual buffer (FusedAddRMSNorm / FusedLayerNormAdd / RMSNormAddRMSNorm, may be nullptr)
   norm_params &params        // Normalization parameters (non-const reference)
 );
 ```
@@ -129,6 +145,7 @@ status_t normalization_direct(
 - `FUSED_ADD_RMS_NORM` → the FP32-accumulating AVX-512 kernel by default. When the library is built with `-DZENDNNL_FUSED_ADD_RMS_F16=ON`, it uses the AVX-512-FP16 (`__m512h`) kernel under a strict all-f16 gate (see [F16 FMA Mode](#f16-fma-mode)); otherwise it falls through to the FP32-accumulating AVX-512 kernel.
 - `FUSED_LAYER_NORM_ADD` → same path as `LAYER_NORM`: AVX-512-FP16 (`__m512h`) when [F16 FMA Mode](#f16-fma-mode) eligibility holds, otherwise the FP32-accumulating AVX-512 kernel. The residual add is a store-time epilogue (residual dtype `dst_dt`), so the native FP16 path needs no build flag.
 - `FUSED_GATED_LAYER_NORM` → the FP32-accumulating AVX-512 kernel, which shares the LayerNorm statistics pass; silu is the grouped-MatMul AVX-512 activation.
+- `RMS_NORM_ADD_RMS_NORM` → the FP32-accumulating AVX-512 kernel (no AVX-512-FP16 fast path).
 - `BATCH_NORM` → Reference (scalar) kernel.
 - For non-F16 configurations, any path falls back to the reference kernel when AVX-512 is unavailable.
 - F16 configurations (any actually-used buffer is `f16`) other than `FUSED_GATED_LAYER_NORM` require AVX-512-FP16 up-front; the API returns `status_t::isa_unsupported` and does **not** fall back to the reference kernel.
@@ -143,7 +160,7 @@ The main configuration structure for LowOHA Normalization. The caller must set `
 ```cpp
 struct norm_params {
   // --- Normalization variant ---
-  norm_type_t  norm_type;       // LAYER_NORM / RMS_NORM / FUSED_ADD_RMS_NORM / FUSED_LAYER_NORM_ADD / FUSED_GATED_LAYER_NORM / BATCH_NORM
+  norm_type_t  norm_type;       // LAYER_NORM / RMS_NORM / FUSED_ADD_RMS_NORM / FUSED_LAYER_NORM_ADD / FUSED_GATED_LAYER_NORM / RMS_NORM_ADD_RMS_NORM / BATCH_NORM
 
   // --- Flattened dimensions (set by caller) ---
   uint64_t     batch;           // Product of all outer (non-normalized) dims
@@ -153,7 +170,7 @@ struct norm_params {
   // --- Normalization parameters ---
   float        epsilon;         // Numerical-stability constant (default 1e-5)
   bool         use_scale;       // Apply gamma
-  bool         use_shift;       // Apply beta (ignored by RMSNorm / FusedAddRMSNorm)
+  bool         use_shift;       // Apply beta (ignored by RMSNorm / FusedAddRMSNorm / RMSNormAddRMSNorm)
 
   // --- Data types ---
   data_type_t  src_dt;          // Source dtype:      f32 / bf16 / f16
@@ -185,7 +202,8 @@ enum class norm_type_t : int {
   RMS_NORM             =  2,
   FUSED_ADD_RMS_NORM   =  3,
   FUSED_LAYER_NORM_ADD =  4,
-  FUSED_GATED_LAYER_NORM = 5
+  FUSED_GATED_LAYER_NORM = 5,
+  RMS_NORM_ADD_RMS_NORM = 6
 };
 ```
 
@@ -222,19 +240,19 @@ The caller flattens tensor dimensions before calling `normalization_direct`. The
 
 ### Parameter Requirements by Norm Type
 
-| Parameter      | LayerNorm     | RMSNorm      | FusedAddRMSNorm     | FusedLayerNormAdd      | FusedGatedLayerNorm      | BatchNorm        |
-|----------------|---------------|--------------|---------------------|------------------------|--------------------------|------------------|
-| `norm_type`    | `LAYER_NORM`  | `RMS_NORM`   | `FUSED_ADD_RMS_NORM`| `FUSED_LAYER_NORM_ADD` | `FUSED_GATED_LAYER_NORM` | `BATCH_NORM`     |
-| `batch`        | required      | required     | required            | required               | required                 | required (`N`)   |
-| `norm_size`    | required      | required     | required            | required               | required                 | required (`H*W`) |
-| `num_channels` | unused        | unused       | unused              | unused                 | unused                   | required (`C`)   |
-| `gamma`        | optional      | optional     | optional            | optional               | optional                 | optional         |
-| `beta`         | optional      | nullptr      | nullptr             | optional               | optional                 | optional         |
-| `running_mean` | nullptr       | nullptr      | nullptr             | nullptr                | nullptr                  | required (FP32)  |
-| `running_var`  | nullptr       | nullptr      | nullptr             | nullptr                | nullptr                  | required (FP32)  |
-| `residual`     | nullptr       | nullptr      | required (`src_dt`) | required (`dst_dt`)    | nullptr                  | nullptr          |
-| `use_scale`    | true / false  | true / false | true / false        | true / false           | true / false             | true / false     |
-| `use_shift`    | true / false  | unused       | unused              | true / false           | true / false             | true / false     |
+| Parameter      | LayerNorm     | RMSNorm      | FusedAddRMSNorm     | FusedLayerNormAdd      | FusedGatedLayerNorm      | RMSNormAddRMSNorm         | BatchNorm        |
+|----------------|---------------|--------------|---------------------|------------------------|--------------------------|---------------------------|------------------|
+| `norm_type`    | `LAYER_NORM`  | `RMS_NORM`   | `FUSED_ADD_RMS_NORM`| `FUSED_LAYER_NORM_ADD` | `FUSED_GATED_LAYER_NORM` | `RMS_NORM_ADD_RMS_NORM`   | `BATCH_NORM`     |
+| `batch`        | required      | required     | required            | required               | required                 | required                  | required (`N`)   |
+| `norm_size`    | required      | required     | required            | required               | required                 | required                  | required (`H*W`) |
+| `num_channels` | unused        | unused       | unused              | unused                 | unused                   | unused                    | required (`C`)   |
+| `gamma`        | optional      | optional     | optional            | optional               | optional                 | optional (first scale)    | optional         |
+| `beta`         | optional      | nullptr      | nullptr             | optional               | optional                 | second scale, required if `use_scale` | optional         |
+| `running_mean` | nullptr       | nullptr      | nullptr             | nullptr                | nullptr                  | nullptr                   | required (FP32)  |
+| `running_var`  | nullptr       | nullptr      | nullptr             | nullptr                | nullptr                  | nullptr                   | required (FP32)  |
+| `residual`     | nullptr       | nullptr      | required (`src_dt`) | required (`dst_dt`)    | nullptr                  | required (`dst_dt`)       | nullptr          |
+| `use_scale`    | true / false  | true / false | true / false        | true / false           | true / false             | true / false (both scales)| true / false     |
+| `use_shift`    | true / false  | unused       | unused              | true / false           | true / false             | unused                    | true / false     |
 
 ### Backend Selection
 
@@ -257,14 +275,15 @@ enum class norm_algo_t : int {
 
 ### Gamma and Beta
 
-- **Gamma (scale):** Shape `[norm_size]` for LayerNorm / RMSNorm / FusedAddRMSNorm / FusedLayerNormAdd, `[num_channels]` for BatchNorm. Supports `f32` (default), `bf16`, or `f16` — set `params.gamma_dt` to match the buffer's element type. Pass `nullptr` if `use_scale == false`.
-- **Beta (shift):** Shape `[norm_size]` for LayerNorm / FusedLayerNormAdd, `[num_channels]` for BatchNorm. Unused by RMSNorm and FusedAddRMSNorm. Supports `f32` (default), `bf16`, or `f16` — set `params.beta_dt` accordingly. Pass `nullptr` if `use_shift == false` or not applicable.
+- **Gamma (scale):** Shape `[norm_size]` for LayerNorm / RMSNorm / FusedAddRMSNorm / FusedLayerNormAdd / RMSNormAddRMSNorm, `[num_channels]` for BatchNorm. Supports `f32` (default), `bf16`, or `f16` — set `params.gamma_dt` to match the buffer's element type. Pass `nullptr` if `use_scale == false`.
+- **Beta (shift):** Shape `[norm_size]` for LayerNorm / FusedLayerNormAdd, `[num_channels]` for BatchNorm. Unused by RMSNorm and FusedAddRMSNorm. Supports `f32` (default), `bf16`, or `f16` — set `params.beta_dt` accordingly. For LayerNorm / FusedLayerNormAdd / BatchNorm, pass `nullptr` if `use_shift == false`; for RMSNorm and FusedAddRMSNorm, pass `nullptr`.
+- **Beta (second scale, RMSNormAddRMSNorm only):** RMSNormAddRMSNorm reads `beta` as the second norm's scale, shape `[norm_size]`, element type `params.beta_dt`. It follows `use_scale`, not `use_shift`: `beta` is **required** when `use_scale == true` (a null `beta` is rejected even with diagnostics disabled), and may be `nullptr` when `use_scale == false`. `use_shift` is ignored.
 
 If `gamma_dt` / `beta_dt` is not explicitly set, it defaults to `data_type_t::f32`. When providing BF16/F16 gamma/beta buffers, you **must** set the corresponding dtype field — a mismatch between the field and the actual buffer leads to undefined behavior.
 
-### Residual Buffer (FusedAddRMSNorm / FusedLayerNormAdd)
+### Residual Buffer (FusedAddRMSNorm / FusedLayerNormAdd / RMSNormAddRMSNorm)
 
-The `residual` parameter is used by two norm types, with different semantics:
+The `residual` parameter is used by three norm types, with different semantics:
 
 **`FUSED_ADD_RMS_NORM`** (add-then-norm):
 - **Required:** non-null when `norm_type == FUSED_ADD_RMS_NORM`.
@@ -278,6 +297,12 @@ The `residual` parameter is used by two norm types, with different semantics:
 - **Access:** read-only; **not** modified. Must not alias the `output` buffer.
 - **Effect:** the residual is added to the LayerNorm result before the store — `y[i] = LayerNorm(x)[i] + residual[i]`.
 
+**`RMS_NORM_ADD_RMS_NORM`** (norm-add-norm):
+- **Required:** non-null when `norm_type == RMS_NORM_ADD_RMS_NORM`.
+- **Element type:** same as `params.dst_dt` (the output domain; f32 / bf16 / f16).
+- **Access:** read-write, modified in-place. Must not alias the `input` or `output` buffer. `output` itself may alias `input`, but only when `src_dt == dst_dt`: input rows are strided by the `src_dt` width and output rows by the `dst_dt` width, so with mixed widths one row's output would overlap another row's input. Both rules are checked even with diagnostics disabled.
+- **After the call:** `residual[i] = old_residual[i] + RMSNorm(input, gamma)[i]`, and `y[i] = RMSNorm(residual, beta)[i]`.
+
 For all other norm types, pass `nullptr`.
 
 ### BatchNorm Running Statistics
@@ -289,7 +314,7 @@ For all other norm types, pass `nullptr`.
 
 Native AVX-512-FP16 acceleration is selected when **all** of the following hold:
 
-- `norm_type` is `LAYER_NORM`, `RMS_NORM`, or `FUSED_LAYER_NORM_ADD` (BatchNorm is never F16-eligible; FusedAddRMSNorm is F16-eligible only when built with `-DZENDNNL_FUSED_ADD_RMS_F16=ON`, and then only under a strict `src_dt == dst_dt == gamma_dt == f16` gate). `FUSED_LAYER_NORM_ADD` follows the same F16 eligibility as `LAYER_NORM` with no build flag — its residual add (dtype `dst_dt`) is a pure store-time epilogue and does not affect accumulation precision.
+- `norm_type` is `LAYER_NORM`, `RMS_NORM`, or `FUSED_LAYER_NORM_ADD` (BatchNorm and RMSNormAddRMSNorm are never F16-eligible; FusedAddRMSNorm is F16-eligible only when built with `-DZENDNNL_FUSED_ADD_RMS_F16=ON`, and then only under a strict `src_dt == dst_dt == gamma_dt == f16` gate). `FUSED_LAYER_NORM_ADD` follows the same F16 eligibility as `LAYER_NORM` with no build flag — its residual add (dtype `dst_dt`) is a pure store-time epilogue and does not affect accumulation precision.
 - At least one of `src_dt` / `dst_dt` is `f16`.
 - Actually-used `gamma_dt` / `beta_dt` is `f16` or `f32` (`bf16` forces the FP32 path).
 - Host CPU exposes AVX-512-FP16.
@@ -616,9 +641,10 @@ int batch_norm_inference_example() {
   | RMSNorm            | LLaMA, Mistral, Qwen, modern LLMs                                       |
   | FusedAddRMSNorm    | LLM decoder blocks with residual streams (fuses add + norm in one pass) |
   | FusedLayerNormAdd  | Blocks shaped `AddV2(LayerNorm(F(x)), x)` (fuses norm + trailing residual add) |
+  | RMSNormAddRMSNorm  | Sandwich-norm decoder layers (Gemma 2/3/4): post-norm, residual add, pre-norm in one pass |
   | BatchNorm          | CNN inference (ResNet, VGG, MobileNet)                                  |
 
-- **Diagnostics Toggle:** Input validation runs by default. On verified production hot paths, set `ZENDNNL_DIAGNOSTICS_ENABLE=0` to reduce the gate to a single predicted-taken branch. Always-on failure causes (F16/BF16 cross-mixing, FusedAddRMSNorm with null residual) are still checked.
+- **Diagnostics Toggle:** Input validation runs by default. On verified production hot paths, set `ZENDNNL_DIAGNOSTICS_ENABLE=0` to reduce the gate to a single predicted-taken branch. The always-on checks listed under [Validation](#validation) are still performed.
 
 
 ## Integration Workflow
@@ -660,23 +686,26 @@ The operator performs the following validations:
 2. `FUSED_ADD_RMS_NORM` with a null `residual` buffer (rejected).
 3. `FUSED_LAYER_NORM_ADD` with a null `residual` buffer (rejected).
 4. `FUSED_LAYER_NORM_ADD` with `residual` aliasing the `output` buffer (rejected).
-5. F16 buffer requested on a host without AVX-512-FP16 (returns `status_t::isa_unsupported`, unless the request runs on the scalar reference kernel — `params.algorithm == norm_algo_t::reference`, or `BATCH_NORM`, which has no native kernel — since it converts F16 in software and runs on any host; also skipped when the library was built with `-DZENDNNL_NATIVE_F32_ACCUM=ON`).
+5. `RMS_NORM_ADD_RMS_NORM` with a null `residual` buffer, or with `use_scale == true` and a null `gamma` or `beta` (rejected).
+6. `RMS_NORM_ADD_RMS_NORM` with `residual` aliasing the `input` or `output` buffer (rejected).
+7. `RMS_NORM_ADD_RMS_NORM` with `output` aliasing `input` and `src_dt != dst_dt` (rejected).
+8. F16 buffer requested on a host without AVX-512-FP16 (returns `status_t::isa_unsupported`, unless the request runs on the scalar reference kernel — `params.algorithm == norm_algo_t::reference`, or `BATCH_NORM`, which has no native kernel — since it converts F16 in software and runs on any host; also skipped when the library was built with `-DZENDNNL_NATIVE_F32_ACCUM=ON`).
 
 **Additional checks when `ZENDNNL_DIAGNOSTICS_ENABLE=1` (default):**
 
-6. Null `input` or `output` pointer.
-7. `norm_type == NONE` (not specified).
-8. Unsupported `src_dt` / `dst_dt` (not one of `f32`, `bf16`, `f16`).
-9. `batch == 0` or `norm_size == 0`.
-10. Unsupported `gamma_dt` (when `use_scale == true`) or `beta_dt` (when `use_shift == true`).
-11. `use_scale == true` but `gamma == nullptr`.
-12. `use_shift == true` but `beta == nullptr` (LayerNorm / BatchNorm / FusedLayerNormAdd only; RMSNorm and FusedAddRMSNorm skip this check).
-13. BatchNorm missing `running_mean` or `running_var`.
-14. `epsilon <= 0`.
+9. Null `input` or `output` pointer.
+10. `norm_type == NONE` (not specified).
+11. Unsupported `src_dt` / `dst_dt` (not one of `f32`, `bf16`, `f16`).
+12. `batch == 0` or `norm_size == 0`.
+13. Unsupported `gamma_dt` (when `use_scale == true`) or `beta_dt` (when `use_shift == true`, or `use_scale == true` for RMSNormAddRMSNorm).
+14. `use_scale == true` but `gamma == nullptr`.
+15. `use_shift == true` but `beta == nullptr` (LayerNorm / BatchNorm / FusedLayerNormAdd only; RMSNorm, FusedAddRMSNorm and RMSNormAddRMSNorm skip this check).
+16. BatchNorm missing `running_mean` or `running_var`.
+17. `epsilon <= 0`.
 
 ## Diagnostics and Profiling
 
-- **Input validation** runs by default; toggle with `ZENDNNL_DIAGNOSTICS_ENABLE` (defaults to `1`). Set to `0` to skip optional validation on production hot paths — the always-on checks (F16/BF16 cross-mixing, FusedAddRMSNorm with null residual, FusedLayerNormAdd with null or output-aliasing residual) remain in place.
+- **Input validation** runs by default; toggle with `ZENDNNL_DIAGNOSTICS_ENABLE` (defaults to `1`). Set to `0` to skip optional validation on production hot paths — the always-on checks (F16/BF16 cross-mixing, FusedAddRMSNorm with null residual, FusedLayerNormAdd with null or output-aliasing residual, RMSNormAddRMSNorm with null residual or scales, an aliasing residual, or a mixed-width in-place call) remain in place.
 - **Profiling** is controlled by `ZENDNNL_ENABLE_PROFILER=1` and `ZENDNNL_PROFILE_LOG_LEVEL=4`. When active, `normalization_direct` logs execution time and operator parameters.
 - **F16-FMA build-time toggle:** Build with `-DZENDNNL_NATIVE_F32_ACCUM=ON` to disable the native AVX-512-FP16 fast path for LayerNorm / RMSNorm on AVX-512-FP16-capable hosts; those dispatches take the FP32-accumulating AVX-512 kernel instead. The flag also enables F16 inputs on hosts without AVX-512-FP16 (storage handled via F16C convert in the FP32 kernel). It has no effect on BatchNorm or `bf16`-gamma/beta combos. See the [F16 FMA Mode](#f16-fma-mode) section for details.
 - **FusedAddRMSNorm F16 opt-in:** FusedAddRMSNorm has no native AVX-512-FP16 path by default. Build with `-DZENDNNL_FUSED_ADD_RMS_F16=ON` to enable it under a strict `src_dt == dst_dt == gamma_dt == f16` gate (A/B precision experiments only). `-DZENDNNL_NATIVE_F32_ACCUM=ON` overrides it and keeps FusedAddRMSNorm on the FP32-accumulating kernel.

@@ -155,12 +155,15 @@ status_t normalization_kernel_wrapper(const void *input, void *output,
 
     if (has_avx512f
             && (params.norm_type == norm_type_t::RMS_NORM
-                    || params.norm_type == norm_type_t::FUSED_ADD_RMS_NORM)) {
+                    || params.norm_type == norm_type_t::FUSED_ADD_RMS_NORM
+                    || params.norm_type
+                            == norm_type_t::RMS_NORM_ADD_RMS_NORM)) {
         log_info(
                 "Using AVX512 kernel for ", norm_type_to_str(params.norm_type));
         params.accum_type = data_type_t::f32;
+        // RMS_NORM_ADD_RMS_NORM carries its second scale in `beta`.
         status_t status
-                = rms_norm_avx512(input, output, residual, gamma, params);
+                = rms_norm_avx512(input, output, residual, gamma, beta, params);
         if (status != status_t::success) {
             log_error(norm_type_to_str(params.norm_type), " kernel failed");
         }
@@ -221,13 +224,16 @@ status_t normalization_direct(const void *input, void *output,
     // Only checks dtype fields whose buffer the kernel will actually read or
     // write: src and dst are always touched; gamma is read iff use_scale is
     // true; beta is read iff use_shift is true AND norm_type uses beta
-    // (RMS_NORM and FUSED_ADD_RMS_NORM ignore beta regardless of use_shift).
+    // (RMS_NORM and FUSED_ADD_RMS_NORM ignore beta regardless of use_shift;
+    // RMS_NORM_ADD_RMS_NORM reads it as its second scale iff use_scale).
     // This avoids spurious isa_unsupported failures on non-AVX512-FP16
     // hardware when an unused dtype field happens to be f16.
     const bool uses_gamma = params.use_scale;
-    const bool uses_beta = params.use_shift
-            && params.norm_type != norm_type_t::RMS_NORM
-            && params.norm_type != norm_type_t::FUSED_ADD_RMS_NORM;
+    const bool uses_beta
+            = (params.norm_type == norm_type_t::RMS_NORM_ADD_RMS_NORM)
+            ? params.use_scale
+            : params.use_shift && params.norm_type != norm_type_t::RMS_NORM
+                    && params.norm_type != norm_type_t::FUSED_ADD_RMS_NORM;
     // FUSED_GATED_LAYER_NORM has no F16-FMA kernel: its f16 buffers go
     // through the F16C conversions of the FP32 AVX-512 kernel.
     [[maybe_unused]] const bool is_f16
@@ -276,6 +282,36 @@ status_t normalization_direct(const void *input, void *output,
                 "Normalization: FUSED_ADD_RMS_NORM requires a non-null "
                 "residual buffer");
         return status_t::failure;
+    }
+
+    // Reject invalid RMS_NORM_ADD_RMS_NORM buffers:
+    // - a null residual, or a null gamma / beta (the second scale) with
+    //   use_scale, would be dereferenced.
+    // - residual aliasing input or output is undefined behavior because the
+    //   row kernels use __restrict on the residual pointer.
+    // - output may alias input only when src_dt == dst_dt. Input rows are
+    //   strided by the src_dt width and output rows by the dst_dt width, so
+    //   with mixed widths one row's output overlaps another row's input.
+    if (params.norm_type == norm_type_t::RMS_NORM_ADD_RMS_NORM) {
+        if (!residual || (params.use_scale && (!gamma || !beta))) {
+            log_error(
+                    "Normalization: RMS_NORM_ADD_RMS_NORM requires a non-null "
+                    "residual buffer, and gamma and beta (the second scale) "
+                    "when use_scale is set");
+            return status_t::failure;
+        }
+        if (residual == input || residual == output) {
+            log_error(
+                    "Normalization: RMS_NORM_ADD_RMS_NORM residual must not "
+                    "alias the input or output buffer");
+            return status_t::failure;
+        }
+        if (output == input && params.src_dt != params.dst_dt) {
+            log_error(
+                    "Normalization: RMS_NORM_ADD_RMS_NORM with output "
+                    "aliasing input requires src_dt == dst_dt");
+            return status_t::failure;
+        }
     }
 
     // Reject invalid FUSED_LAYER_NORM_ADD residual usage:

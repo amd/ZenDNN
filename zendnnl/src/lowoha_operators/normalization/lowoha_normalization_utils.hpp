@@ -80,7 +80,7 @@ status_t validate_gated_norm_params(const norm_params &params);
  *
  * @param type  The normalization type enum value
  * @return A string representation (e.g. "LayerNorm", "RMSNorm", "BatchNorm",
- *         "FusedAddRMSNorm", "FusedLayerNormAdd")
+ *         "FusedAddRMSNorm", "FusedLayerNormAdd", "RMSNormAddRMSNorm")
  */
 std::string norm_type_to_str(norm_type_t type);
 

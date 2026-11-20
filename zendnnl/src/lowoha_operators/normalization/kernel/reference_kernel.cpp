@@ -650,6 +650,33 @@ static void gated_layer_norm_impl(const void *input, void *output,
     }
 }
 
+// ============================================================================
+// RMSNormAddRMSNorm
+//
+// For each sample (row) in the batch:
+//   residual[i] += rms_norm(input, gamma)[i]
+//   y_i          = rms_norm(residual, beta)[i]
+//
+// Composed from the RMSNorm and FusedAddRMSNorm references through a dst_dt
+// intermediate, i.e. the rounding of issuing the two norms back to back.
+// `beta` is the second scale (beta_dt); the residual has dst_dt.
+// ============================================================================
+static void rms_norm_add_rms_norm_impl(const void *input, void *output,
+        void *residual, const void *gamma, const void *beta,
+        const norm_params &params, int num_threads) {
+    const size_t dst_sz = (params.dst_dt == data_type_t::f32)
+            ? sizeof(float)
+            : sizeof(uint16_t);
+    std::vector<char> normed(params.batch * params.norm_size * dst_sz);
+    rms_norm_impl(input, normed.data(), gamma, params, num_threads);
+
+    norm_params second = params;
+    second.src_dt = params.dst_dt;
+    second.gamma_dt = params.beta_dt;
+    fused_add_rms_norm_impl(
+            normed.data(), output, residual, beta, second, num_threads);
+}
+
 // ===================================================
 // Reference entry point – dispatches on norm type
 // ===================================================
@@ -712,6 +739,18 @@ status_t normalization_reference_wrapper(const void *input, void *output,
             }
             gated_layer_norm_impl(
                     input, output, gamma, beta, params, num_threads);
+            return status_t::success;
+
+        case norm_type_t::RMS_NORM_ADD_RMS_NORM:
+            if (!residual || (params.use_scale && (!gamma || !beta))) {
+                log_error(
+                        "Normalization Reference: RMS_NORM_ADD_RMS_NORM "
+                        "requires a non-null residual buffer, and gamma and "
+                        "beta when use_scale is set");
+                return status_t::failure;
+            }
+            rms_norm_add_rms_norm_impl(
+                    input, output, residual, gamma, beta, params, num_threads);
             return status_t::success;
 
         default:

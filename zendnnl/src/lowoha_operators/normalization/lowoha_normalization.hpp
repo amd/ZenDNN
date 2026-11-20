@@ -28,8 +28,8 @@ namespace normalization {
 
 /**
  * @brief Execute normalization (LayerNorm / RMSNorm / BatchNorm /
- *        FusedAddRMSNorm / FusedLayerNormAdd) via the unified LOWOHA
- *        low-overhead API.
+ *        FusedAddRMSNorm / FusedLayerNormAdd / RMSNormAddRMSNorm) via the
+ *        unified LOWOHA low-overhead API.
  *
  * This is the user API for all normalization
  * variants.  The caller populates @c params with the tensor shape, norm type,
@@ -39,15 +39,17 @@ namespace normalization {
  *
  * Required fields in @c params before calling:
  *   - norm_type   : LAYER_NORM, RMS_NORM, BATCH_NORM, FUSED_ADD_RMS_NORM,
- *                   or FUSED_LAYER_NORM_ADD
+ *                   FUSED_LAYER_NORM_ADD, or RMS_NORM_ADD_RMS_NORM
  *   - shape       : tensor dimensions (e.g. params.shape = {batch, hidden_dim})
  *   - norm_ndims  : number of trailing dims to normalize (LayerNorm/RMSNorm/FusedAddRMSNorm)
  *   - src_dt      : source data type (f32, bf16, or f16)
  *   - dst_dt      : destination data type (f32, bf16, or f16; cannot mix
  *                   f16 with bf16 between src and dst)
  *   - epsilon     : numerical-stability constant (e.g. 1e-5f)
- *   - use_scale   : whether gamma is applied
- *   - use_shift   : whether beta is applied (ignored by RMSNorm/FusedAddRMSNorm)
+ *   - use_scale   : whether gamma is applied (and, for RMSNormAddRMSNorm,
+ *                   beta as the second scale)
+ *   - use_shift   : whether beta is applied (ignored by RMSNorm /
+ *                   FusedAddRMSNorm / RMSNormAddRMSNorm)
  *   - algorithm   : norm_algo_t::none for auto-select, or a specific backend
  *
  * Inference formulas:
@@ -70,20 +72,31 @@ namespace normalization {
  *                      read-only addend in the output domain, element type
  *                      dst_dt, added right before the store)
  *
+ *   RMSNormAddRMSNorm: residual[i] += gamma * x / sqrt(mean(x^2) + eps)
+ *                      y = beta * residual / sqrt(mean(residual^2) + eps)
+ *                      (sandwich-norm boundary: post-norm, residual add and
+ *                      pre-norm in a single call; beta is the second scale)
+ *
  * @param input             Pointer to input tensor data (read-only).
  *                          Element type must match params.src_dt.
  * @param output            Pointer to output tensor data (same shape as input).
  *                          Element type must match params.dst_dt.
+ *                          RMSNormAddRMSNorm: may alias input when
+ *                          params.src_dt == params.dst_dt.
  * @param gamma             Pointer to scale (gamma) parameters (read-only)
- *                          - LayerNorm / RMSNorm / FusedAddRMSNorm / FusedLayerNormAdd:
- *                            shape = [norm_size]
+ *                          - LayerNorm / RMSNorm / FusedAddRMSNorm / FusedLayerNormAdd /
+ *                            RMSNormAddRMSNorm: shape = [norm_size]
  *                          - BatchNorm:           shape = [num_channels]
  *                          May be nullptr if params.use_scale == false.
  * @param beta              Pointer to shift (beta) parameters (read-only)
  *                          - LayerNorm / FusedLayerNormAdd:  shape = [norm_size]
  *                          - BatchNorm:  shape = [num_channels]
  *                          - RMSNorm / FusedAddRMSNorm: unused (may be nullptr)
- *                          May be nullptr if params.use_shift == false.
+ *                          May be nullptr if params.use_shift == false, except:
+ *                          - RMSNormAddRMSNorm: the second norm's scale,
+ *                            shape = [norm_size], element type params.beta_dt.
+ *                            Required if params.use_scale == true, regardless
+ *                            of params.use_shift.
  * @param running_mean      (BatchNorm only) Pre-computed per-channel mean from
  *                          training, shape = [num_channels]. Required for BatchNorm.
  *                          nullptr for all other norm types.
@@ -99,7 +112,13 @@ namespace normalization {
  *                            the LayerNorm output (y += residual). Same shape as
  *                            the output and element type params.dst_dt. Must not
  *                            alias the output buffer.
- *                          Required for both fused types; nullptr otherwise.
+ *                          - RMS_NORM_ADD_RMS_NORM: updated in-place; on return
+ *                            residual[i] = old_residual[i]
+ *                            + rms_norm(input, gamma)[i], and the output is
+ *                            rms_norm(residual, beta). Element type
+ *                            params.dst_dt. Must not alias input or output.
+ *                          Required for the three fused types; nullptr
+ *                          otherwise.
  * @param params            Normalization parameters (type, dims, data types, etc.)
  *                          Must have shape and norm_type populated.
  *
@@ -122,12 +141,15 @@ ZENDNNL_API status_t normalization_direct(const void *input, void *output,
  * @param input             Input tensor data (read-only)
  * @param output            Output tensor data
  * @param gamma             Scale parameter data (read-only, may be nullptr)
- * @param beta              Shift parameter data (read-only, may be nullptr)
+ * @param beta              Shift parameter data (read-only, may be nullptr);
+ *                          the second scale for RMSNormAddRMSNorm
  * @param running_mean      Pre-computed running mean (BatchNorm only, read-only)
  * @param running_var       Pre-computed running variance (BatchNorm only, read-only)
  * @param residual          Residual buffer. FusedAddRMSNorm: modified in-place,
  *                          same shape/element type as input. FusedLayerNormAdd:
- *                          read-only addend, element type dst_dt. nullptr otherwise.
+ *                          read-only addend, element type dst_dt.
+ *                          RMSNormAddRMSNorm: modified in-place, element type
+ *                          dst_dt. nullptr otherwise.
  * @param params            Normalization parameters
  *
  * @return status_t::success, status_t::failure, or status_t::unimplemented

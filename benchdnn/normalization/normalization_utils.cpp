@@ -50,7 +50,8 @@ static std::vector<uint64_t> parse_shape(const std::string &s) {
 // Flatten a full N-D shape into (batch, [num_channels,] norm_size) for the
 // LOWOHA normalization op, given the user-specified norm_ndims.
 //
-//   layer_norm / rms_norm / fused_add_rms_norm:
+//   layer_norm / rms_norm / fused_add_rms_norm / fused_layer_norm_add /
+//   rms_norm_add_rms_norm:
 //     norm_ndims must be 1..ndims-1.
 //     batch     = product of dims[0 .. ndims-norm_ndims)
 //     norm_size = product of dims[ndims-norm_ndims .. ndims)
@@ -122,6 +123,9 @@ std::string strToNormType(const std::string &str) {
     if (lower == "fused_layer_norm_add" || lower == "fusedlayernormadd") {
         return "fused_layer_norm_add";
     }
+    if (lower == "rms_norm_add_rms_norm" || lower == "rmsnormaddrmsnorm") {
+        return "rms_norm_add_rms_norm";
+    }
     return "";
 }
 
@@ -153,6 +157,9 @@ norm_type_t strToLowohaType(const std::string &norm_type) {
     }
     if (norm_type == "fused_layer_norm_add") {
         return norm_type_t::FUSED_LAYER_NORM_ADD;
+    }
+    if (norm_type == "rms_norm_add_rms_norm") {
+        return norm_type_t::RMS_NORM_ADD_RMS_NORM;
     }
     return norm_type_t::NONE;
 }
@@ -188,7 +195,8 @@ void inputParser(
             if (cfg.norm_type.empty()) {
                 commonlog_error("Unknown norm_type: ", fields[id],
                         ". Supported: layer_norm, batch_norm, rms_norm, "
-                        "fused_add_rms_norm, fused_layer_norm_add");
+                        "fused_add_rms_norm, fused_layer_norm_add, "
+                        "rms_norm_add_rms_norm");
                 continue;
             }
             id++;
