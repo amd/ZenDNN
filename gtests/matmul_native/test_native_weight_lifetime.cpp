@@ -3212,8 +3212,10 @@ TEST_F(NativeWeightLifetime, AWeightAtAPartOfATombstoneNamesTheSecondClear) {
             nat::native_weight_find_image(fresh.ptr(), fresh.buf.bytes, found));
     EXPECT_TRUE(found.tomb);
     EXPECT_TRUE(found.holds_no_checked_byte);
-    EXPECT_NE(std::string(nat::native_image_refusal(found))
-                      .find("clear the weight caches once more"),
+    const std::string advice = nat::native_image_refusal(found);
+    EXPECT_NE(advice.find("clear the weight caches once more"),
+            std::string::npos);
+    EXPECT_NE(advice.find("reload every other weight a mode 2 call rewrote"),
             std::string::npos);
     dense_t d(kBf16, fresh.K);
     EXPECT_EQ(d.run(fresh, 1), status_t::failure);

@@ -1594,17 +1594,22 @@ void reclaim_retired_locked() {
         return;
     memo_readers_t &readers = memo_readers();
     std::lock_guard<std::mutex> guard(readers.mutex);
-    for (auto it = state.retired.begin(); it != state.retired.end();) {
-        bool unread = it->tracked;
-        for (size_t i = 0; unread && i < it->readers.size(); ++i) {
-            const memo_reader_t *r = it->readers[i].first;
-            const uint64_t at = it->readers[i].second;
-            unread = r->free
+    // One pass: the mutexes are held, and an exiting reader can make
+    // thousands of entries reclaimable at once.
+    const auto unread = [](const native_retired_t &dropped) {
+        bool reclaimable = dropped.tracked;
+        for (size_t i = 0; reclaimable && i < dropped.readers.size(); ++i) {
+            const memo_reader_t *r = dropped.readers[i].first;
+            const uint64_t at = dropped.readers[i].second;
+            reclaimable = r->free
                     || r->reading.load(std::memory_order_acquire)
                             > at + (at & 1);
         }
-        it = unread ? state.retired.erase(it) : std::next(it);
-    }
+        return reclaimable;
+    };
+    state.retired.erase(
+            std::remove_if(state.retired.begin(), state.retired.end(), unread),
+            state.retired.end());
 }
 
 std::atomic<unsigned> g_failing_retirements {0};
@@ -2494,7 +2499,9 @@ const char *native_image_refusal(const native_image_check_t &found) {
                "overwrote part of it, and holds none of the bytes its record "
                "checks, so it cannot be told from the image: reload the raw "
                "weight of the image's whole buffer, or, if that buffer was "
-               "freed, clear the weight caches once more while no call runs";
+               "freed, clear the weight caches once more while no call runs "
+               "and reload every other weight a mode 2 call rewrote before "
+               "calls resume";
     if (found.tomb)
         return "the bytes it reads still hold an in-place image that serves "
                "no call, as a weight cache clear forgot it or other bytes "
