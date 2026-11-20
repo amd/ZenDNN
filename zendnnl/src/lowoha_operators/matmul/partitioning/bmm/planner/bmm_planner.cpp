@@ -47,7 +47,7 @@ int calculate_optimal_m_block(const BmmConfig &config) {
         if (config.kernel == matmul_algo_t::libxsmm) {
             M_block = std::min(128, config.M);
         } else {
-            M_block = std::min(36, config.M);
+            M_block = std::min(64, config.M);
         }
     } else if ((config.batch_count == 64 && config.M >= 512)
             || (config.batch_count == 128 && config.M >= 512)) {
