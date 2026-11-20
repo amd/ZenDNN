@@ -1,0 +1,43 @@
+# ******************************************************************************
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+# All rights reserved.
+# ******************************************************************************
+name: PR Auto Review
+
+on:
+  pull_request:
+    types: [opened, ready_for_review, reopened]
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  auto-review:
+    if: |
+      (github.event_name == 'pull_request' && ! github.event.pull_request.draft)
+      || (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/review') && github.event.issue.pull_request)
+
+    timeout-minutes: 2
+
+    runs-on: amd-zenai-arc-nano-af
+
+    steps:
+      - name: Determine PR number
+        id: pr
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Trigger review via Dope API
+        run: |
+          curl -sSf -X POST "${{ secrets.AHA_API_URL }}" \
+            -H "X-API-Key: ${{ secrets.DOPE_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "prompt": "Use the pr-auto-review skill to review and post comments on https://github.com/${{ github.repository }}/pull/${{ steps.pr.outputs.number }}. This is an automated CI trigger — post the review without asking for confirmation.",
+              "async_mode": true
+            }'
