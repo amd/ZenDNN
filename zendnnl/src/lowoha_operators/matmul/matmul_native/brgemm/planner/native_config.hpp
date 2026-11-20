@@ -214,7 +214,8 @@ struct heuristic_params_t {
     /// other streams of the domain fill the link while one idles, past the
     /// first cm_sync_tiles tiles of each worker (the workers start in step);
     /// while it is faster, one core's stream limits, and the long K pass
-    /// (cm_drift_kib) and the INT8 rule of cm_int8_l1_pct apply.
+    /// (cm_drift_kib), the INT8 rule of cm_int8_l1_pct and the K bound of
+    /// the M blocks of cm_block_kib (cm_block_k) apply.
     /// At a tie neither holds: the derived cm_mem_cycles of 16 threads to a
     /// domain is 600.
     int cm_stream_cycles = 600;
@@ -259,6 +260,12 @@ struct heuristic_params_t {
     /// worker streams longer than it computes, a single row block of more
     /// than two calls takes M blocks of tile_rows rows over all of K.
     int cm_block_kib = 16384;
+    /// K past which, where one core streams slower than its share of the
+    /// domain's link, the M blocks of cm_block_kib of a BF16 plan whose team
+    /// fills each L3 domain it spans (threads a multiple of domain_threads)
+    /// apply; a K of at most this keeps the block's K passes.  0: no such
+    /// bound.
+    int cm_block_k = 2048;
     /// Percent of L1 the INT8 L1 pass of tile_rows rows per call takes
     /// where the cost model gives a single INT8 row block of three calls
     /// those rows; 0: no such rule.
@@ -304,8 +311,8 @@ struct native_config_t {
     std::optional<int> cm_stream_cycles, cm_sync_tiles;
     std::optional<int> cm_group_slab_pct, cm_group_l3_pct, cm_group_skew_pct;
     std::optional<int> cm_group_rows_pct, cm_drift_kib, cm_pass_kib;
-    std::optional<int> cm_pass_calls, cm_block_kib, cm_int8_l1_pct;
-    std::optional<int> cm_int4_min_m;
+    std::optional<int> cm_pass_calls, cm_block_kib, cm_block_k;
+    std::optional<int> cm_int8_l1_pct, cm_int4_min_m;
 
     bool empty() const;
     bool operator==(const native_config_t &o) const;

@@ -33,11 +33,6 @@
 #include <string>
 #include <vector>
 
-#ifndef _WIN32
-#include <unistd.h>
-#include <sys/mman.h>
-#endif
-
 #include <gtest/gtest.h>
 
 #include "gtest_utils.hpp"
@@ -53,6 +48,7 @@ namespace nt = native_brgemm_test;
 namespace mm = zendnnl::lowoha::matmul;
 namespace nat = zendnnl::lowoha::matmul::native;
 using nt::buffer_t;
+using nt::guarded_t;
 using zendnnl::common::matmul_algo_t;
 using zendnnl::common::post_op_type_t;
 using zendnnl::memory::data_type_t;
@@ -66,50 +62,6 @@ constexpr data_type_t kS8 = data_type_t::s8;
 constexpr data_type_t kU8 = data_type_t::u8;
 constexpr data_type_t kS32 = data_type_t::s32;
 constexpr data_type_t kNone = data_type_t::none;
-
-/// Storage that ends where an unreadable page starts: an access past its end
-/// faults.  An unreadable page also precedes its span of whole pages, which
-/// the storage starts at only when its size is a whole number of pages.
-class guarded_t {
-public:
-    explicit guarded_t(size_t bytes) : bytes_(bytes) {
-#ifndef _WIN32
-        page_ = static_cast<size_t>(sysconf(_SC_PAGESIZE));
-        span_ = (std::max<size_t>(bytes, 1) + page_ - 1) / page_ * page_;
-        void *m = mmap(nullptr, span_ + 2 * page_, PROT_READ | PROT_WRITE,
-                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (m == MAP_FAILED) return;
-        base_ = static_cast<uint8_t *>(m);
-        if (mprotect(base_, page_, PROT_NONE) != 0
-                || mprotect(base_ + page_ + span_, page_, PROT_NONE) != 0)
-            return;
-        data_ = base_ + page_ + span_ - bytes;
-#else
-        heap_ = nt::make_buffer(bytes);
-        data_ = heap_.as<uint8_t>();
-#endif
-    }
-    ~guarded_t() {
-#ifndef _WIN32
-        if (base_ != nullptr) munmap(base_, span_ + 2 * page_);
-#endif
-    }
-    guarded_t(const guarded_t &) = delete;
-    guarded_t &operator=(const guarded_t &) = delete;
-    uint8_t *get() const { return data_; }
-    size_t bytes() const { return bytes_; }
-
-private:
-    size_t bytes_ = 0;
-    uint8_t *data_ = nullptr;
-#ifndef _WIN32
-    size_t page_ = 0;
-    size_t span_ = 0;
-    uint8_t *base_ = nullptr;
-#else
-    buffer_t heap_;
-#endif
-};
 
 /// A guarded copy of b (nullptr when b holds nothing).
 std::unique_ptr<guarded_t> guarded_copy(const buffer_t &b) {

@@ -79,10 +79,26 @@ struct native_problem_t {
     bool int8() const {
         return wei_dt == data_type_t::s8 || wei_dt == data_type_t::s4;
     }
-    /// An s4 weight: the INT4 group kernels, always per group.
+    /// An s4 weight: the INT4 kernels, of one group over K
+    /// (int4_one_group()) or the group kernels (native_int4_scheme);
+    /// int8_scheme is per_group for every s4 weight.
     bool int4() const { return wei_dt == data_type_t::s4; }
+    /// An s4 weight of one group over K ({1, N} weight scales; a group of 0
+    /// is one, as the layout query and the cost model take it): the INT4
+    /// kernels of one group, which take more rows per call.
+    bool int4_one_group() const {
+        return int4() && (wei_group_size == 0 || wei_group_size >= K);
+    }
     bool operator==(const native_problem_t &o) const;
 };
+
+/// The family of INT4 kernels of the s4 problem p, as the kernel registry
+/// tags it: per_channel, the kernels of one group over K, for a weight of
+/// one group; per_group, the group kernels, for any other.
+inline native_int8_scheme_t native_int4_scheme(const native_problem_t &p) {
+    return p.int4_one_group() ? native_int8_scheme_t::per_channel
+                              : native_int8_scheme_t::per_group;
+}
 
 size_t hash_native_problem(const native_problem_t &p) noexcept;
 

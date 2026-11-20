@@ -215,8 +215,8 @@ def _value_rule(key: str, p: Problem, schema: Schema) -> List[Any]:
         "cm_reuse_pct": [25, 100], "cm_stream_cycles": [400, 900], "cm_sync_tiles": [1, 20],
         "cm_group_slab_pct": [50, 150], "cm_group_l3_pct": [50, 150], "cm_group_skew_pct": [100, 150],
         "cm_group_rows_pct": [100, 150], "cm_drift_kib": [1024, 16384], "cm_pass_kib": [0, 64, 256],
-        "cm_pass_calls": [2, 8], "cm_block_kib": [4096, 65536], "cm_int8_l1_pct": [50, 100],
-        "cm_int4_min_m": [0, 16, 128],
+        "cm_pass_calls": [2, 8], "cm_block_kib": [4096, 65536], "cm_block_k": [0, 1024, 4096],
+        "cm_int8_l1_pct": [50, 100], "cm_int4_min_m": [0, 16, 128],
     }
     if key in fixed:
         return fixed[key]

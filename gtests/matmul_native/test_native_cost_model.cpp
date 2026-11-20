@@ -625,6 +625,76 @@ TEST(NativeCostModel, ShortBlocksForLongMemoryBoundStreams) {
             32);
 }
 
+// Where one core streams slower than its share of the link, the M blocks
+// of a BF16 team that fills each L3 domain it spans take only a K above
+// cm_block_k: on the 32-thread domains the M 32 lm_heads of N 262144,
+// K 1536 and of N 151936, K 2048 keep their K passes at 32 threads, which
+// the 8- and 16-thread domains replace by the blocks, and K 2560 takes
+// them.  cm_block_k=0 and a slower core's limit lifted give the blocks
+// back.  Teams of 8 to 28 and of 48 threads, and f16 plans, take the plan
+// of no bound: the blocks at 16 threads for N 128256, K 2048.
+TEST(NativeCostModel, ShortBlocksNeedALongerKWhereOneCoreStreamsSlower) {
+    if (!bf16_kernels()) GTEST_SKIP() << "needs AVX512-BF16";
+    const nat::heuristic_params_t unbounded = params("cm_block_k=0");
+    const int heads[][2] = {{262144, 1536}, {151936, 2048}, {128256, 2048}};
+    for (const auto &s : heads)
+        for (const int threads : {8, 16, 24, 28, 48}) {
+            SCOPED_TRACE("N " + std::to_string(s[0]) + " K "
+                    + std::to_string(s[1]) + " threads "
+                    + std::to_string(threads));
+            const nat::native_problem_t p
+                    = problem(32, s[0], s[1], threads, true);
+            EXPECT_TRUE(same(nat::heuristic_plan(p, domains32(),
+                                     nat::heuristic_params_t {}),
+                    nat::heuristic_plan(p, domains32(), unbounded)));
+        }
+    const nat::native_plan_t t16 = plan(domains32(), 32, 128256, 2048, 16);
+    EXPECT_EQ(t16.mb, 6) << text(t16);
+    EXPECT_EQ(t16.kc, 2048);
+    for (const auto &s : heads) {
+        SCOPED_TRACE(
+                "f16 N " + std::to_string(s[0]) + " K " + std::to_string(s[1]));
+        nat::native_problem_t p = problem(32, s[0], s[1], 32, true);
+        p.src_dt = p.wei_dt = p.dst_dt = data_type_t::f16;
+        const nat::native_plan_t f = nat::heuristic_plan(
+                p, domains32(), nat::heuristic_params_t {});
+        EXPECT_TRUE(same(f, nat::heuristic_plan(p, domains32(), unbounded)));
+        if (f.kind == nat::native_kernel_kind_t::f16_ph && s[0] != 128256) {
+            EXPECT_EQ(f.mb, 6) << text(f);
+            EXPECT_EQ(f.kc, s[1]);
+        }
+    }
+    const int shapes[][2] = {{262144, 1536}, {151936, 2048}};
+    for (const auto &s : shapes) {
+        SCOPED_TRACE(
+                "N " + std::to_string(s[0]) + " K " + std::to_string(s[1]));
+        const nat::native_problem_t p = problem(32, s[0], s[1], 32, true);
+        const nat::native_plan_t q = plan(domains32(), 32, s[0], s[1], 32);
+        EXPECT_EQ(q.mb, 32) << text(q);
+        EXPECT_LT(q.kc, s[1]);
+        for (const nat::UarchParams *u : {&domains8(), &domains16()}) {
+            const nat::native_plan_t b = plan(*u, 32, s[0], s[1], 32);
+            EXPECT_EQ(b.mb, 6) << text(b);
+            EXPECT_EQ(b.kc, s[1]);
+        }
+        for (const std::string lift :
+                {"cm_block_k=0", "cm_stream_cycles=424"}) {
+            const nat::native_plan_t b
+                    = nat::heuristic_plan(p, domains32(), params(lift));
+            EXPECT_EQ(b.mb, 6) << lift << " " << text(b);
+            EXPECT_EQ(b.kc, s[1]) << lift;
+            EXPECT_EQ(nat::validate_native_plan(b, p), nullptr) << lift;
+        }
+    }
+    const nat::native_plan_t r = plan(domains32(), 32, 262144, 2560, 32);
+    EXPECT_EQ(r.mb, 6) << text(r);
+    EXPECT_EQ(r.kc, 2560);
+    EXPECT_EQ(nat::heuristic_plan(problem(32, 262144, 2560, 32, true),
+                      domains32(), params("cm_block_k=2560"))
+                      .mb,
+            32);
+}
+
 // The rules for long weight streams keep a blocks schedule and its unit
 // tiles: under schedule=blocks,mr=12 the M 55 block of N 65536, K 5120 on
 // the 32-thread domain takes the long K pass (2048) in the blocks of the
@@ -960,6 +1030,43 @@ TEST(NativeCostModel, Int4RowBlocks) {
                           .m_blocks,
                 1);
     }
+}
+
+// The s4 row blocks of a weight of one group over K are the ones the model
+// rates at the INT4 group kernel's rows per call (the plan at int8_mr=6),
+// on both hierarchies, and the plan keeps the 12 rows per call of the
+// kernels of one group inside them: among them the slices that 12-row
+// prices would block otherwise (M 55 of N 7680, K 5120 and of N 6656, K
+// 4096; M 64-128 of N 4608, K 6656), and blocks every price takes.
+TEST(NativeCostModel, Int4OneGroupRowBlocksAtTheGroupKernelRows) {
+    const nat::heuristic_params_t built_in;
+    const nat::heuristic_params_t six = params("int8_mr=6");
+    if (!int8_kernels()) GTEST_SKIP() << "needs AVX512-VNNI";
+    size_t blocked = 0;
+    for (const nat::UarchParams *u : kBoth) {
+        SCOPED_TRACE("domain " + std::to_string(u->l3_domain_cores));
+        const struct {
+            int N, K;
+        } shapes[] = {{7680, 5120}, {6656, 4096}, {4608, 6656}, {3840, 15360},
+                {6656, 19968}, {128256, 4096}};
+        for (const auto &s : shapes)
+            for (const int M : {48, 55, 64, 80, 96, 112, 128}) {
+                const nat::native_problem_t p
+                        = int4_problem(M, s.N, s.K, 32, s.K);
+                const nat::native_plan_t q
+                        = nat::heuristic_plan(p, *u, built_in);
+                const nat::native_plan_t g = nat::heuristic_plan(p, *u, six);
+                const std::string at = std::to_string(M) + " "
+                        + std::to_string(s.N) + " " + std::to_string(s.K);
+                EXPECT_EQ(q.int8_rows_nv2, 12) << at;
+                EXPECT_EQ(g.int8_rows_nv2, 6) << at;
+                EXPECT_EQ(q.mb, g.mb) << at << " " << text(q);
+                EXPECT_EQ(q.m_blocks, g.m_blocks) << at;
+                EXPECT_EQ(nat::validate_native_plan(q, p), nullptr) << at;
+                blocked += q.m_blocks > 1;
+            }
+    }
+    EXPECT_GT(blocked, 0u);
 }
 
 // Under the cost model one group over K takes the int8_l2_pct share of L2,

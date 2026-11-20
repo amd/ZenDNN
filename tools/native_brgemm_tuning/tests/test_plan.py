@@ -28,7 +28,7 @@ from helpers import DESIGN, NEWER, NO_BLOCKS, OLDER, RULES_OFF, SCHEMA, UARCH  #
 from native_brgemm_tuning import plan as PL  # noqa: E402
 from native_brgemm_tuning.candidates import parse_settings  # noqa: E402
 from native_brgemm_tuning.problems import Problem  # noqa: E402
-from native_brgemm_tuning.schema import Uarch  # noqa: E402
+from native_brgemm_tuning.schema import Schema, Uarch  # noqa: E402
 
 # The cache hierarchies and shapes of the library's rule tests.
 SMALL = Uarch(l1d_bytes=48 << 10, l2_bytes=1 << 20, l3_bytes=32 << 20, family_l3_cores=1, l3_domain_cores=8)
@@ -632,6 +632,41 @@ class TestPerGroup(unittest.TestCase):
             Problem("bf16", 1, 32, 32, int8_scheme="per_group")
         with self.assertRaises(ValueError):
             Problem("s8", 1, 32, 32, int8_scheme="per_row")
+
+
+class TestOneGroupS4(unittest.TestCase):
+    """s4 weights of one group over K ({1, N} weight scales) run the INT4 kernels of one group, as the
+    library's rule test of s4 weights states it: the rules' plan of several groups at their rows per call."""
+
+    def test_rules_plan_at_the_rows_of_one_group(self):
+        rows = (SCHEMA.int4_max_mr(1, "per_channel"), SCHEMA.int4_max_mr(2, "per_channel"))
+        self.assertEqual(rows, (12, 12))
+        for u in (SMALL, LARGE):
+            for n, k in SHAPES:
+                if k % 256:
+                    continue
+                for m in MS:
+                    for threads in (32, 64):
+                        one = Problem("s4", m, n, k, threads=threads, group=k)
+                        r = plan_of("cost_model=0", Problem("s4", m, n, k, threads=threads, group=128), u)
+                        want = dataclasses.replace(r, int8_rows_nv1=rows[0], int8_rows_nv2=rows[1])
+                        self.assertEqual(plan_of("cost_model=0", one, u), want, one.label())
+                        self.assertIsNone(PL.validate_plan(plan_of("", one, u), one, SCHEMA), one.label())
+
+    def test_validation_of_the_rows(self):
+        one, groups = Problem("s4", 32, 4096, 4096, group=4096), Problem("s4", 32, 4096, 4096, group=128)
+        q = builtin(one)
+        self.assertEqual((q.kind, q.int8_rows_nv1, q.int8_rows_nv2), ("int4", 12, 12))
+        self.assertIsNone(PL.validate_plan(q, one, SCHEMA))
+        self.assertIn("no INT4 kernel", PL.validate_plan(q, groups, SCHEMA))
+        # A build without the kernels of one group runs the group kernels for every s4 weight.
+        group_kernels = [k for k in SCHEMA.doc["kernels"]
+                         if not (k["kind"] == "int4" and k["int8_schemes"] == ["per_channel"])]
+        older = Schema(dict(SCHEMA.doc, kernels=group_kernels))
+        r = PL.builtin_plan(one, UARCH, older)
+        self.assertEqual((r.int8_rows_nv1, r.int8_rows_nv2), (12, 6))
+        self.assertIsNone(PL.validate_plan(r, one, older))
+        self.assertIn("no INT4 kernel", PL.validate_plan(q, one, older))
 
 
 class TestLibraryPlans(unittest.TestCase):

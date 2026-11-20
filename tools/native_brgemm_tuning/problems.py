@@ -135,6 +135,13 @@ class Problem:
         return self.dtype == "s4"
 
     @property
+    def int4_one_group(self) -> bool:
+        """An s4 weight of one group over K ({1, N} weight scales): the INT4 kernels of one
+        group, which take more rows per call (native_problem_t::int4_one_group, which also
+        takes a group of 0 as one; an s4 Problem never has it)."""
+        return self.int4 and self.group >= self.k
+
+    @property
     def plan_n(self) -> int:
         """The N of the planner's problem (make_native_problem): N rounded up to whole
         pack_nr blocks when it is not a multiple of the layout's blocks."""

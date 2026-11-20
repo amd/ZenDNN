@@ -165,6 +165,7 @@ constexpr native_config_key_t kKeys[] = {
         {"cm_pass_kib", key_type::int32, 0, kBig20, 1, false},
         {"cm_pass_calls", key_type::int32, 1, 4096, 1, false},
         {"cm_block_kib", key_type::int32, 0, kBig30, 1, false},
+        {"cm_block_k", key_type::int32, 0, kBig30, 1, false},
         {"cm_int8_l1_pct", key_type::int32, 0, 1000, 1, false,
                 kNativeKeyPerChannel},
         {"cm_int4_min_m", key_type::int32, 0, kBig30, 1, false,
@@ -263,6 +264,7 @@ const field_t *fields() {
             bind(&c::cm_pass_kib, &p::cm_pass_kib),
             bind(&c::cm_pass_calls, &p::cm_pass_calls),
             bind(&c::cm_block_kib, &p::cm_block_kib),
+            bind(&c::cm_block_k, &p::cm_block_k),
             bind(&c::cm_int8_l1_pct, &p::cm_int8_l1_pct),
             bind(&c::cm_int4_min_m, &p::cm_int4_min_m),
     };

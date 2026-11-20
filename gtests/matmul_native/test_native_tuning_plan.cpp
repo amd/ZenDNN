@@ -351,6 +351,7 @@ TEST(NativeTuningPlan, DefaultParamsAreTheBuiltInConstants) {
     EXPECT_EQ(hp.cm_pass_kib, 128);
     EXPECT_EQ(hp.cm_pass_calls, 4);
     EXPECT_EQ(hp.cm_block_kib, 16384);
+    EXPECT_EQ(hp.cm_block_k, 2048);
     EXPECT_EQ(hp.cm_int8_l1_pct, 0);
     EXPECT_EQ(hp.cm_int4_min_m, 48);
 }

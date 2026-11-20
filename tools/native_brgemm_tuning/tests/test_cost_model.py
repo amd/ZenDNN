@@ -35,6 +35,7 @@ from native_brgemm_tuning.schema import Schema, Uarch  # noqa: E402
 # 128 MiB per 32 cores.
 DOMAINS8 = Uarch(l1d_bytes=48 << 10, l2_bytes=1 << 20, l3_bytes=32 << 20, family_l3_cores=1, l3_domain_cores=8)
 DOMAINS32 = Uarch(l1d_bytes=48 << 10, l2_bytes=1 << 20, l3_bytes=128 << 20, family_l3_cores=1, l3_domain_cores=32)
+DOMAINS16 = Uarch(l1d_bytes=48 << 10, l2_bytes=1 << 20, l3_bytes=32 << 20, family_l3_cores=1, l3_domain_cores=16)
 BOTH = (DOMAINS8, DOMAINS32)
 
 
@@ -135,6 +136,43 @@ class TestBf16Choices(unittest.TestCase):
             p = bf16(16, 151936, 2048)
             self.assertEqual(plan(u, p, "cost_model=0"), PL.rules_plan(p, u, params(), SCHEMA))
 
+    def test_short_blocks_need_a_longer_k_where_one_core_streams_slower(self):
+        # The M 32 lm_heads of K 1536 and 2048 keep their K passes on the 32-thread domains at 32
+        # threads and take the M blocks on the 8- and 16-thread ones; cm_block_k=0 or a lifted
+        # limit give them back, and K 2560 takes them.  Teams of 8 to 28 and of 48 threads, and f16
+        # plans, take the plan of no bound: the blocks at 16 threads for N 128256, K 2048.
+        heads = ((262144, 1536), (151936, 2048), (128256, 2048))
+        for n, k in heads:
+            for threads in (8, 16, 24, 28, 48):
+                p = bf16(32, n, k, threads)
+                self.assertEqual(plan(DOMAINS32, p), plan(DOMAINS32, p, "cm_block_k=0"), (n, k, threads))
+        t16 = plan(DOMAINS32, bf16(32, 128256, 2048, 16))
+        self.assertEqual((t16.mb, t16.kc), (6, 2048))
+        unbounded = params("cm_block_k=0")
+        for kind in ("f16_ph", "f16"):
+            schema = with_kernels(kind)
+            for n, k in heads:
+                p = Problem("f16", 32, n, k)
+                f = PL.heuristic_plan(p, DOMAINS32, params(), schema)
+                self.assertEqual(f, PL.heuristic_plan(p, DOMAINS32, unbounded, schema), (kind, n, k))
+                if kind == "f16_ph" and n != 128256:
+                    self.assertEqual((f.kind, f.mb, f.kc), ("f16_ph", 6, k), (n, k))
+        for n, k in ((262144, 1536), (151936, 2048)):
+            p = bf16(32, n, k)
+            q = plan(DOMAINS32, p)
+            self.assertEqual(q.mb, 32, (n, k))
+            self.assertLess(q.kc, k, (n, k))
+            for u in (DOMAINS8, DOMAINS16):
+                b = plan(u, p)
+                self.assertEqual((b.mb, b.kc), (6, k), (n, k, u.l3_domain_cores))
+            for lift in ("cm_block_k=0", "cm_stream_cycles=424"):
+                b = plan(DOMAINS32, p, lift)
+                self.assertEqual((b.mb, b.kc), (6, k), (n, k, lift))
+                self.assertIsNone(PL.validate_plan(b, p, SCHEMA), (n, k, lift))
+        r = plan(DOMAINS32, bf16(32, 262144, 2560))
+        self.assertEqual((r.mb, r.kc), (6, 2560))
+        self.assertEqual(plan(DOMAINS32, bf16(32, 262144, 2560), "cm_block_k=2560").mb, 32)
+
 
 class TestInt4Choices(unittest.TestCase):
     def test_row_blocks(self):
@@ -152,6 +190,22 @@ class TestInt4Choices(unittest.TestCase):
             below = int4(47, 6656, 19968, 32, 128)
             self.assertEqual(plan(u, below), plan(u, below, "cost_model=0"))
             self.assertGreater(plan(u, below, "cm_int4_min_m=47").m_blocks, 1)
+
+    def test_one_group_row_blocks_at_the_group_kernel_rows(self):
+        # The row blocks of a weight of one group over K are those the model rates at the group
+        # kernel's rows per call (the plan at int8_mr=6); the plan keeps the 12 rows per call of the
+        # kernels of one group.
+        blocked = 0
+        for u in BOTH:
+            for n, k in ((7680, 5120), (6656, 4096), (4608, 6656), (3840, 15360), (6656, 19968), (128256, 4096)):
+                for m in (48, 55, 64, 80, 96, 112, 128):
+                    p = int4(m, n, k, 32, k)
+                    q, g = plan(u, p), plan(u, p, "int8_mr=6")
+                    self.assertEqual((q.int8_rows_nv2, g.int8_rows_nv2), (12, 6), (m, n, k))
+                    self.assertEqual((q.mb, q.m_blocks), (g.mb, g.m_blocks), (m, n, k, u.l3_domain_cores))
+                    self.assertIsNone(PL.validate_plan(q, p, SCHEMA), (m, n, k))
+                    blocked += q.m_blocks > 1
+        self.assertGreater(blocked, 0)
 
     def test_one_group_takes_the_l2_share(self):
         def passes(q, k):
@@ -179,6 +233,9 @@ class TestInt4Choices(unittest.TestCase):
         p = int4(16, 4096, 4096, 32, 128)
         q = PL.builtin_plan(p, DOMAINS8, SCHEMA)
         self.assertEqual((q.kind, q.int8_rows_nv1, q.int8_rows_nv2), ("int4", 12, 6))
+        # One group over K: the kernels of one group, 12 rows per call at both widths.
+        one = int4(16, 4096, 4096, 32, 4096)
+        self.assertEqual(PL.plan_log_fields(PL.builtin_plan(one, DOMAINS8, SCHEMA), one)["int8_rows"], "12/12")
         # A decode plan's groups take batches of the int4_l1_pct share of L1.
         self.assertEqual(q.int8_pass_budget, min(DOMAINS8.l2_bytes // 2, DOMAINS8.l1d_bytes * 125 // 100))
         self.assertEqual(plan(DOMAINS8, p, "int4_l1_pct=0").int8_pass_budget, DOMAINS8.l2_bytes // 2)

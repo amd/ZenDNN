@@ -58,6 +58,32 @@ struct buffer_t {
 buffer_t make_buffer(size_t bytes);
 size_t dt_bytes(data_type_t dt);
 
+/// Storage that ends where an unreadable page starts: an access past its end
+/// faults.  An unreadable page also precedes its span of whole pages, which
+/// the storage starts at only when its size is a whole number of pages.  On
+/// Windows, plain heap storage without the guard pages.  get() is nullptr
+/// when the storage could not be had.
+class guarded_t {
+public:
+    explicit guarded_t(size_t bytes);
+    ~guarded_t();
+    guarded_t(const guarded_t &) = delete;
+    guarded_t &operator=(const guarded_t &) = delete;
+    uint8_t *get() const { return data_; }
+    size_t bytes() const { return bytes_; }
+
+private:
+    size_t bytes_ = 0;
+    uint8_t *data_ = nullptr;
+#ifndef _WIN32
+    size_t page_ = 0;
+    size_t span_ = 0;
+    uint8_t *base_ = nullptr;
+#else
+    buffer_t heap_;
+#endif
+};
+
 /// b, whose memory stays allocated until the process exits, so that no
 /// later buffer takes its address: the group route keeps entries by the
 /// addresses in its weights in caches of its worker threads, which only

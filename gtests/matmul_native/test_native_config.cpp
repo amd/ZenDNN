@@ -376,6 +376,8 @@ const key_doc_t kKeyDocs[] = {
                 &field_value<int, &hp_t::cm_pass_calls>},
         {"cm_block_kib", "bf16", true, false, "16384",
                 &field_value<int, &hp_t::cm_block_kib>},
+        {"cm_block_k", "bf16", true, false, "2048",
+                &field_value<int, &hp_t::cm_block_k>},
         {"cm_int8_l1_pct", "int8", true, false, "0",
                 &field_value<int, &hp_t::cm_int8_l1_pct>},
         {"cm_int4_min_m", "int8", true, false, "48",
@@ -834,6 +836,42 @@ TEST(NativeConfigValidate, RejectsEachRule) {
     ASSERT_EQ(validate_native_plan(g, gp), nullptr);
     EXPECT_TRUE(rejects(gp, g, [](native_plan_t &q) { q.int8_rows_nv2 = 7; }));
     EXPECT_NE(validate_native_plan(i, gp), nullptr);
+    // An s4 weight of several groups takes the INT4 group kernel's rows, 12
+    // and 6; one of one group over K the kernels of one group, 12 at both
+    // widths, which a weight of several groups may not take.
+    native_problem_t s4 = gp;
+    s4.wei_dt = data_type_t::s4;
+    s4.wei_group_size = 128;
+    s4.wei_scale_bytes = 2;
+    const native_plan_t q4 = heuristic_plan(s4, u, heuristic_params_t {});
+    EXPECT_FALSE(s4.int4_one_group());
+    EXPECT_EQ(q4.int8_rows_nv1, 12);
+    EXPECT_EQ(q4.int8_rows_nv2, 6);
+    ASSERT_EQ(validate_native_plan(q4, s4), nullptr);
+    EXPECT_TRUE(rejects(s4, q4, [](native_plan_t &q) { q.int8_rows_nv2 = 7; }));
+    native_problem_t whole = s4;
+    whole.wei_group_size = whole.K;
+    const native_plan_t q1 = heuristic_plan(whole, u, heuristic_params_t {});
+    EXPECT_TRUE(whole.int4_one_group());
+    EXPECT_EQ(q1.int8_rows_nv1, 12);
+    EXPECT_EQ(q1.int8_rows_nv2, 12);
+    ASSERT_EQ(validate_native_plan(q1, whole), nullptr);
+    EXPECT_TRUE(
+            rejects(whole, q1, [](native_plan_t &q) { q.int8_rows_nv2 = 13; }));
+    const char *why = validate_native_plan(q1, s4);
+    ASSERT_NE(why, nullptr);
+    EXPECT_EQ(std::string(why).rfind("no INT4 kernel for the rows per call", 0),
+            0u)
+            << why;
+    // A group of 0 is one group over K, as the layout query takes it.
+    native_problem_t zero = s4;
+    zero.wei_group_size = 0;
+    EXPECT_TRUE(zero.int4_one_group());
+    EXPECT_EQ(native_int4_scheme(zero), native_int8_scheme_t::per_channel);
+    EXPECT_EQ(native_int4_scheme(s4), native_int8_scheme_t::per_group);
+    const native_plan_t q0 = heuristic_plan(zero, u, heuristic_params_t {});
+    EXPECT_EQ(q0.int8_rows_nv2, 12);
+    EXPECT_EQ(validate_native_plan(q0, zero), nullptr);
 }
 
 TEST(NativeConfigOverride, FiltersAndFirstMatch) {
@@ -2185,6 +2223,44 @@ TEST(NativeConfigRegistry, MatchesTheSelectors) {
         EXPECT_FALSE(r.covers(native_kernel_kind_t::int4, c->max_mr + 1, nr))
                 << nr;
         EXPECT_NE(r.int8_caps(nr, native_int8_scheme_t::per_group), c) << nr;
+        EXPECT_EQ(r.caps(native_kernel_kind_t::int4, nr,
+                          native_int8_scheme_t::per_group),
+                c)
+                << nr;
+        // The kernels of one group over K serve {1, N} weight scales, 12
+        // rows at either width.
+        const native_kernel_caps_t *one = r.caps(native_kernel_kind_t::int4, nr,
+                native_int8_scheme_t::per_channel);
+        ASSERT_NE(one, nullptr) << nr;
+        EXPECT_NE(one, c) << nr;
+        EXPECT_EQ(one->kind, native_kernel_kind_t::int4) << nr;
+        EXPECT_EQ(one->max_mr, native_int4_one_group_ukernel_max_mr(nr / 16))
+                << nr;
+        EXPECT_EQ(one->max_mr, 12) << nr;
+        for (int mr = 1; mr <= one->max_mr; ++mr)
+            for (const native_int8_order_t order : {native_int8_order_t::fused,
+                         native_int8_order_t::reference})
+                EXPECT_NE(select_native_int4_one_group_ukernel(
+                                  mr, nr / 16, order),
+                        nullptr)
+                        << nr << " " << mr;
+        EXPECT_TRUE(one->serves(native_int8_scheme_t::per_channel)) << nr;
+        EXPECT_FALSE(one->serves(native_int8_scheme_t::per_group)) << nr;
+        EXPECT_TRUE(r.covers(native_kernel_kind_t::int4, 12, nr,
+                native_int8_scheme_t::per_channel))
+                << nr;
+        EXPECT_FALSE(r.covers(native_kernel_kind_t::int4, 13, nr,
+                native_int8_scheme_t::per_channel))
+                << nr;
+        EXPECT_FALSE(r.covers(native_kernel_kind_t::int4, 0, nr,
+                native_int8_scheme_t::per_channel))
+                << nr;
+        EXPECT_EQ(r.covers(native_kernel_kind_t::int4, 7, nr,
+                          native_int8_scheme_t::per_group),
+                c->max_mr >= 7)
+                << nr;
+        EXPECT_NE(r.int8_caps(nr, native_int8_scheme_t::per_channel), one)
+                << nr;
     }
     // FP32 tiles are 16 or 32 columns wide, every row count 1 .. 12.
     for (const int nr : {16, 32}) {
@@ -2460,6 +2536,23 @@ nlohmann::ordered_json schema_json() {
                 {"int8_schemes", scheme_names(c->int8_schemes)}});
     }
     for (const int nr : {16, 32}) {
+        const native_kernel_caps_t *c = r.caps(native_kernel_kind_t::int4, nr,
+                native_int8_scheme_t::per_channel);
+        if (c == nullptr) continue;
+        uint32_t mask = 0;
+        for (int mr = 1; mr <= 12; ++mr)
+            if (select_native_int4_one_group_ukernel(
+                        mr, nr / 16, native_int8_order_t::fused)
+                            != nullptr
+                    && select_native_int4_one_group_ukernel(
+                               mr, nr / 16, native_int8_order_t::reference)
+                            != nullptr)
+                mask |= 1u << (mr - 1);
+        kernels.push_back({{"kind", "int4"}, {"nr", nr}, {"mr_mask", mask},
+                {"max_mr", c->max_mr}, {"k_unit", kNativeS4Octet},
+                {"int8_schemes", scheme_names(c->int8_schemes)}});
+    }
+    for (const int nr : {16, 32}) {
         const native_kernel_caps_t *c = r.caps(native_kernel_kind_t::f32, nr);
         if (c == nullptr) continue;
         kernels.push_back({{"kind", "f32"}, {"nr", nr},
@@ -2657,8 +2750,8 @@ TEST(NativeConfigSchema, SchemaDump) {
                  {"cm_group_skew_pct", 110}, {"cm_group_rows_pct", 115},
                  {"cm_drift_kib", 4096}, {"cm_pass_kib", 128},
                  {"cm_pass_calls", 4}, {"cm_block_kib", 16384},
-                 {"cm_int8_l1_pct", 0}, {"cm_int4_min_m", 48},
-                 {"int4_l1_pct", 125}}) {
+                 {"cm_block_k", 2048}, {"cm_int8_l1_pct", 0},
+                 {"cm_int4_min_m", 48}, {"int4_l1_pct", 125}}) {
         EXPECT_EQ(key(name).value("default", json()), value) << name;
         EXPECT_EQ(key(name).value("bits", json()), "same") << name;
     }
@@ -2681,8 +2774,8 @@ TEST(NativeConfigSchema, SchemaDump) {
         EXPECT_EQ(key(name).value("applies", json()), "both") << name;
         EXPECT_EQ(key(name).value("kind", json()), "param") << name;
     }
-    for (const char *name :
-            {"cm_drift_kib", "cm_pass_kib", "cm_pass_calls", "cm_block_kib"}) {
+    for (const char *name : {"cm_drift_kib", "cm_pass_kib", "cm_pass_calls",
+                 "cm_block_kib", "cm_block_k"}) {
         EXPECT_EQ(key(name).value("applies", json()), "bf16") << name;
         EXPECT_EQ(key(name).value("kind", json()), "param") << name;
     }
@@ -2710,16 +2803,22 @@ TEST(NativeConfigSchema, SchemaDump) {
                               : both;
         EXPECT_EQ(e.at("int8_schemes"), want) << name;
     }
-    // Each INT8 kernel family serves one scheme; the s4 kernels per group,
-    // K in octets, every row count to their widest tile.
+    // Each INT8 kernel family serves one scheme; the s4 group kernels per
+    // group and those of one group over K per channel, K in octets, every
+    // row count to their widest tile.
     size_t group_kernels = 0;
     size_t int4_kernels = 0;
+    size_t int4_one_group_kernels = 0;
     for (const json &c : doc.at("kernels")) {
         if (c.at("kind") == "int4") {
-            ++int4_kernels;
-            EXPECT_EQ(c.at("int8_schemes"), json::array({"per_group"}));
+            const bool one_group
+                    = c.at("int8_schemes") == json::array({"per_channel"});
+            ++(one_group ? int4_one_group_kernels : int4_kernels);
+            EXPECT_TRUE(one_group
+                    || c.at("int8_schemes") == json::array({"per_group"}));
             EXPECT_EQ(c.at("k_unit"), 8);
             const int max_mr = c.at("max_mr");
+            if (one_group) { EXPECT_EQ(max_mr, 12) << c.at("nr"); }
             EXPECT_EQ(c.at("mr_mask"), (1u << max_mr) - 1) << c.at("nr");
             continue;
         }
@@ -2734,6 +2833,7 @@ TEST(NativeConfigSchema, SchemaDump) {
     }
     EXPECT_EQ(group_kernels, detect_uarch().avx512vnni ? 2u : 0u);
     EXPECT_EQ(int4_kernels, detect_uarch().avx512vnni ? 2u : 0u);
+    EXPECT_EQ(int4_one_group_kernels, detect_uarch().avx512vnni ? 2u : 0u);
     // The FP32 kernels: every row count 1 .. 12 at 16 and 32 columns, K in
     // steps of one.
     std::vector<json> f32_kernels;

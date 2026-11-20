@@ -155,6 +155,27 @@ native_kernel_registry_t::native_kernel_registry_t(
                 = native_int8_scheme_bit(native_int8_scheme_t::per_group);
         if (c.max_mr > 0) all_.push_back(c);
     }
+    for (int w = 0; int8_isa && w < kWidths; ++w) {
+        native_kernel_caps_t c;
+        c.kind = native_kernel_kind_t::int4;
+        c.nr = 16 << w;
+        const int nv = c.nr / 16;
+        // A weight of one group over K: the fused or the reference order.
+        uint32_t mask = 0;
+        for (int mr = 1; mr <= kMaxRows; ++mr) {
+            if (select_native_int4_one_group_ukernel(
+                        mr, nv, native_int8_order_t::fused)
+                            != nullptr
+                    && select_native_int4_one_group_ukernel(
+                               mr, nv, native_int8_order_t::reference)
+                            != nullptr)
+                mask |= 1u << (mr - 1);
+        }
+        c.max_mr = full_rows(mask);
+        c.int8_schemes
+                = native_int8_scheme_bit(native_int8_scheme_t::per_channel);
+        if (c.max_mr > 0) all_.push_back(c);
+    }
     for (int w = 0; f32_isa && w < kWidths; ++w) {
         native_kernel_caps_t c;
         c.kind = native_kernel_kind_t::f32;
@@ -207,19 +228,18 @@ bool native_kernel_registry_t::covers(
     return c != nullptr && mr >= 1 && mr <= c->max_mr;
 }
 
-const native_kernel_caps_t *native_kernel_registry_t::int8_caps(
-        int nr, native_int8_scheme_t scheme) const noexcept {
+const native_kernel_caps_t *native_kernel_registry_t::caps(
+        native_kernel_kind_t kind, int nr,
+        native_int8_scheme_t scheme) const noexcept {
     for (const native_kernel_caps_t &c : all_) {
-        if (c.kind == native_kernel_kind_t::int8 && c.nr == nr
-                && c.serves(scheme))
-            return &c;
+        if (c.kind == kind && c.nr == nr && c.serves(scheme)) return &c;
     }
     return nullptr;
 }
 
-bool native_kernel_registry_t::covers_int8(
-        int mr, int nr, native_int8_scheme_t scheme) const noexcept {
-    const native_kernel_caps_t *c = int8_caps(nr, scheme);
+bool native_kernel_registry_t::covers(native_kernel_kind_t kind, int mr, int nr,
+        native_int8_scheme_t scheme) const noexcept {
+    const native_kernel_caps_t *c = caps(kind, nr, scheme);
     return c != nullptr && mr >= 1 && mr <= c->max_mr;
 }
 

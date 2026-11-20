@@ -39,6 +39,7 @@
 
 #include <gtest/gtest.h>
 
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/native_int4_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_config.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_planner.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_tuning_file.hpp"
@@ -566,8 +567,10 @@ TEST(NativeTuningRules, Int4Weights) {
                         nat::native_problem_t s8 = problem(M, s.N, s.K,
                                 nat::kNativeLayoutPackNr, threads, false);
                         s8.int8_scheme = nat::native_int8_scheme_t::per_group;
+                        // At least two groups over K.
+                        const int gs = std::min(128, s.K / 2);
                         const nat::native_problem_t s4
-                                = int4_problem(M, s.N, s.K, threads, 128);
+                                = int4_problem(M, s.N, s.K, threads, gs);
                         const nat::native_plan_t q
                                 = nat::heuristic_plan(s4, u, hp);
                         const unsigned diff = plan_fields(
@@ -577,14 +580,15 @@ TEST(NativeTuningRules, Int4Weights) {
                             return rules[r].setting + " " + describe(s4)
                                     + " changes a field of another rule";
                         });
-                        const nat::native_problem_t g32
-                                = int4_problem(M, s.N, s.K, threads, 32);
+                        const nat::native_problem_t quarter
+                                = int4_problem(M, s.N, s.K, threads, gs / 4);
                         nat::heuristic_params_t rules_only = hp;
                         rules_only.cost_model = 0;
-                        report.check(same_plan(nat::heuristic_plan(
-                                                       s4, u, rules_only),
+                        const nat::native_plan_t r4
+                                = nat::heuristic_plan(s4, u, rules_only);
+                        report.check(same_plan(r4,
                                              nat::heuristic_plan(
-                                                     g32, u, rules_only)),
+                                                     quarter, u, rules_only)),
                                 [&] {
                             return rules[r].setting + " " + describe(s4)
                                     + ": the plan depends on the group size";
@@ -595,6 +599,31 @@ TEST(NativeTuningRules, Int4Weights) {
                         report.check(why == nullptr, [&] {
                             return rules[r].setting + " " + describe(s4)
                                     + ": illegal plan: " + why;
+                        });
+                        // One group over K: the rules' plan of several
+                        // groups at the rows of the kernels of one group.
+                        const nat::native_problem_t one
+                                = int4_problem(M, s.N, s.K, threads, s.K);
+                        nat::native_plan_t want = r4;
+                        want.int8_rows_nv1 = std::min(rules_only.int8_mr,
+                                nat::native_int4_one_group_ukernel_max_mr(1));
+                        want.int8_rows_nv2 = std::min(rules_only.int8_mr,
+                                nat::native_int4_one_group_ukernel_max_mr(2));
+                        report.check(same_plan(nat::heuristic_plan(
+                                                       one, u, rules_only),
+                                             want),
+                                [&] {
+                            return rules[r].setting + " " + describe(one)
+                                    + ": the plan of one group differs in "
+                                      "more than its rows per call";
+                        });
+                        const char *why_one = kernels
+                                ? nat::validate_native_plan(
+                                          nat::heuristic_plan(one, u, hp), one)
+                                : nullptr;
+                        report.check(why_one == nullptr, [&] {
+                            return rules[r].setting + " " + describe(one)
+                                    + ": illegal plan: " + why_one;
                         });
                     }
     }

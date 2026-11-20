@@ -28,6 +28,11 @@
 #include <set>
 #include <sstream>
 
+#ifndef _WIN32
+#include <unistd.h>
+#include <sys/mman.h>
+#endif
+
 #include "common/bfloat16.hpp"
 #include "common/float16.hpp"
 #include "common/zendnnl_compat.hpp"
@@ -56,6 +61,30 @@ buffer_t make_buffer(size_t bytes) {
             p, [](uint8_t *q) { zendnnl_aligned_free(q); });
     b.bytes = bytes;
     return b;
+}
+
+guarded_t::guarded_t(size_t bytes) : bytes_(bytes) {
+#ifndef _WIN32
+    page_ = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+    span_ = (std::max<size_t>(bytes, 1) + page_ - 1) / page_ * page_;
+    void *m = mmap(nullptr, span_ + 2 * page_, PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (m == MAP_FAILED) return;
+    base_ = static_cast<uint8_t *>(m);
+    if (mprotect(base_, page_, PROT_NONE) != 0
+            || mprotect(base_ + page_ + span_, page_, PROT_NONE) != 0)
+        return;
+    data_ = base_ + page_ + span_ - bytes;
+#else
+    heap_ = make_buffer(bytes);
+    data_ = heap_.as<uint8_t>();
+#endif
+}
+
+guarded_t::~guarded_t() {
+#ifndef _WIN32
+    if (base_ != nullptr) munmap(base_, span_ + 2 * page_);
+#endif
 }
 
 buffer_t kept_until_exit(buffer_t b) {

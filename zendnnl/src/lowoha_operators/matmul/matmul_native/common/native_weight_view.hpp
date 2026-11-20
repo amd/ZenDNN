@@ -72,6 +72,11 @@ struct native_weight_view_t {
         return base + static_cast<size_t>(nb) * block_bytes;
     }
 
+    /// The bytes of the weight's blocks, which hold its N in whole blocks.
+    size_t bytes() const {
+        return block_bytes * static_cast<size_t>((N + pack_nr - 1) / pack_nr);
+    }
+
     /// s8 only: the column sums of block nb.
     const int32_t *col_sums(int nb) const {
         return reinterpret_cast<const int32_t *>(

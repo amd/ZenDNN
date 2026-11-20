@@ -387,6 +387,326 @@ TEST(NativeBrgemmInt4GroupKernel, MatchesTheModel) {
                         }
 }
 
+TEST(NativeBrgemmInt4OneGroupKernel, Table) {
+    for (int nv : {1, 2}) {
+        const int max_mr = nat::native_int4_one_group_ukernel_max_mr(nv);
+        EXPECT_EQ(max_mr, 12) << nv;
+        for (const auto order : {nat::native_int8_order_t::fused,
+                     nat::native_int8_order_t::reference}) {
+            EXPECT_EQ(nat::select_native_int4_one_group_ukernel(0, nv, order),
+                    nullptr);
+            EXPECT_EQ(nat::select_native_int4_one_group_ukernel(
+                              max_mr + 1, nv, order),
+                    nullptr);
+            for (int mr = 1; mr <= max_mr; ++mr) {
+                const auto one = nat::select_native_int4_one_group_ukernel(
+                        mr, nv, order);
+                EXPECT_NE(one, nullptr) << mr << " " << nv;
+                // The group kernel's own instances where it has the rows.
+                const auto group
+                        = nat::select_native_int4_group_ukernel(mr, nv, order);
+                if (mr <= nat::native_int4_group_ukernel_max_mr(nv)) {
+                    EXPECT_EQ(one, group) << mr << " " << nv;
+                } else {
+                    EXPECT_EQ(group, nullptr) << mr << " " << nv;
+                }
+            }
+        }
+        for (int mr = 1; mr <= max_mr; ++mr)
+            EXPECT_NE(nat::select_native_int4_one_group_ukernel(
+                              mr, nv, nat::native_int8_order_t::fused),
+                    nat::select_native_int4_one_group_ukernel(
+                            mr, nv, nat::native_int8_order_t::reference))
+                    << mr << " " << nv;
+    }
+    for (int nv : {3, 4}) {
+        EXPECT_EQ(nat::native_int4_one_group_ukernel_max_mr(nv), 0);
+        EXPECT_EQ(nat::select_native_int4_one_group_ukernel(
+                          1, nv, nat::native_int8_order_t::fused),
+                nullptr);
+    }
+}
+
+// The kernels of a weight of one group over K: the group kernel's contract
+// at a batch of one group (the exact int32 sum from the row's shift, the
+// weight read as w + 8, a pass starting on either nibble plane of an
+// octet; then one FMA with the weight scale and, with finish, the source
+// scale, in the fused order, or the source scale, the weight scale and one
+// add in the reference order), from C (or +0.0), stored to C or to a bf16 /
+// f32 destination; the same group taken in 1 to 3 K passes, the int32 sum
+// carried in C, the first pass prefetching or not.  At two vectors the
+// second 16 columns sit next to the first or, as a paired tile's up run,
+// at the end of a later block with their weight scales scale_second
+// elements on.  Bit for bit against a scalar model over every row count,
+// width, order, scale type and pass split, and above the group kernel's
+// rows against the group kernel over the same rows in two calls, its rows
+// and then the rest, C and the destination compared whole.  Nothing past
+// the tile's columns is written.
+TEST(NativeBrgemmInt4OneGroupKernel, MatchesTheModel) {
+    if (!vnni()) GTEST_SKIP() << "no AVX-512 VNNI";
+    enum class store_t { c, f32, bf16 };
+    std::mt19937 rng(20261113);
+    std::uniform_int_distribution<int> byte(0, 255);
+    std::uniform_int_distribution<int> s8(-128, 127);
+    std::uniform_real_distribution<float> scale(0.002f, 0.01f);
+    std::mt19937 draws(13);
+    std::uniform_int_distribution<int> pick(0, 47);
+    int variant = 0;
+    for (const auto order : {nat::native_int8_order_t::fused,
+                 nat::native_int8_order_t::reference})
+        for (const data_type_t sb_dt : {kF32, kBf16, kF16})
+            for (int nv : {1, 2})
+                for (int mr = 1;
+                        mr <= nat::native_int4_one_group_ukernel_max_mr(nv);
+                        ++mr)
+                    for (int k_quads : {1, 2, 3, 5, 8, 33, 64})
+                        for (int passes : {1, 2, 3}) {
+                            if (passes > k_quads) continue;
+                            const int v = variant++;
+                            const bool fused
+                                    = order == nat::native_int8_order_t::fused;
+                            const int nr = 16 * nv;
+                            const int pack_nr = 64, col0 = nv == 1 ? 16 : 32;
+                            const bool apart = nv == 2 && (v / 2) % 2 == 1;
+                            const int scale_second = apart ? 48 : 16;
+                            const int s = pick(draws);
+                            const store_t store = static_cast<store_t>(s % 3);
+                            const bool accumulate
+                                    = passes == 1 && (s / 3) % 2 == 1;
+                            const bool finish = fused && (s / 6) % 2 == 0;
+                            const int lda = k_quads * 4 + 4 * (s % 4);
+                            const int quad0 = (s / 12) % 2;
+                            const bool zero_row = v % 5 == 2;
+                            SCOPED_TRACE(std::string("order=")
+                                    + (fused ? "fused" : "reference")
+                                    + " mr=" + std::to_string(mr)
+                                    + " nv=" + std::to_string(nv) + " k_quads="
+                                    + std::to_string(k_quads) + " passes="
+                                    + std::to_string(passes) + " quad0="
+                                    + std::to_string(quad0) + " store="
+                                    + std::to_string(static_cast<int>(store))
+                                    + " accumulate="
+                                    + std::to_string(accumulate)
+                                    + " finish=" + std::to_string(finish)
+                                    + " lda=" + std::to_string(lda)
+                                    + " wei_scale=" + dt_name(sb_dt)
+                                    + " apart=" + std::to_string(apart));
+                            std::vector<int8_t> a(
+                                    static_cast<size_t>(mr) * lda);
+                            for (auto &x : a)
+                                x = static_cast<int8_t>(s8(rng));
+                            if (zero_row)
+                                std::fill(
+                                        a.begin(), a.begin() + lda, int8_t {0});
+                            const int octets = (quad0 + k_quads + 1) / 2;
+                            const int b_stride = pack_nr * 4;
+                            const size_t block
+                                    = static_cast<size_t>(octets) * b_stride;
+                            std::vector<uint8_t> b((apart ? 2 : 1) * block);
+                            for (auto &x : b)
+                                x = static_cast<uint8_t>(byte(rng));
+                            // Column n of the call: pack column col0 + n of
+                            // the first block, or of the second for the
+                            // second 16 apart.
+                            const auto column = [&](int n) {
+                                return (apart && n >= 16 ? block : 0)
+                                        + static_cast<size_t>(col0 + n) * 4;
+                            };
+                            const auto w_at = [&](int k, int n) {
+                                const int q = quad0 + k / 4;
+                                const uint8_t x = b[static_cast<size_t>(q / 2)
+                                                * b_stride
+                                        + column(n) + k % 4];
+                                return (q % 2 ? x >> 4 : x & 0x0F) - 8;
+                            };
+                            std::vector<int32_t> shift(mr);
+                            for (int m = 0; m < mr; ++m) {
+                                int32_t sum = 0;
+                                for (int k = 0; k < k_quads * 4; ++k)
+                                    sum += a[static_cast<size_t>(m) * lda + k];
+                                shift[m] = -8 * sum;
+                            }
+                            std::vector<float> sa(mr);
+                            for (auto &x : sa)
+                                x = scale(rng) * (zero_row ? -1.0f : 1.0f);
+                            // The weight scales of column n: element n, or
+                            // scale_second + n - 16 for the second 16.
+                            const int scales
+                                    = apart ? scale_second + 32 : nr + 16;
+                            const auto scale_of = [&](int n) {
+                                return n < 16 ? n : scale_second + n - 16;
+                            };
+                            buffer_t sb = nt::make_buffer(
+                                    static_cast<size_t>(scales)
+                                    * nt::dt_bytes(sb_dt));
+                            for (int i = 0; i < scales; ++i)
+                                nt::store_f32(sb.get(), sb_dt, i,
+                                        scale(rng) * (i % 7 == 3 ? -1 : 1));
+                            const int ldc = nr + 16, dst_ldc = nr + 32;
+                            std::vector<float> c_in(
+                                    static_cast<size_t>(mr) * ldc);
+                            for (auto &x : c_in)
+                                x = scale(rng) * 100.0f - 0.5f;
+                            const std::vector<uint8_t> dst_in(
+                                    static_cast<size_t>(mr) * dst_ldc * 4,
+                                    0x5A);
+
+                            const size_t esz = store == store_t::bf16 ? 2 : 4;
+                            // The call's passes over the kernel's rows from
+                            // row r0 on, the last applying the scales and the
+                            // store.
+                            const auto run
+                                    = [&](nat::native_int4_group_ukernel_fn_t
+                                                      kernel,
+                                              int r0, std::vector<float> &c,
+                                              std::vector<uint8_t> &dst) {
+                                const size_t row = static_cast<size_t>(r0);
+                                const int per = (k_quads + passes - 1) / passes;
+                                for (int k0 = 0; k0 < k_quads; k0 += per) {
+                                    const bool last = k0 + per >= k_quads;
+                                    nat::native_int4_group_ukernel_args_t args;
+                                    const int quad = quad0 + k0;
+                                    args.A = reinterpret_cast<const uint8_t *>(
+                                                     a.data())
+                                            + row * lda + k0 * 4;
+                                    args.lda = lda;
+                                    args.a_step
+                                            = static_cast<size_t>(k_quads) * 4;
+                                    args.B = b.data()
+                                            + static_cast<size_t>(quad / 2)
+                                                    * b_stride
+                                            + column(0);
+                                    args.b_stride = b_stride;
+                                    args.b_second = column(16) - column(0);
+                                    args.scale_second = scale_second;
+                                    args.quad0 = quad % 2;
+                                    args.k_quads = last ? k_quads - k0 : per;
+                                    args.batch = 1;
+                                    args.shift = shift.data() + row;
+                                    args.shift_ld = 1;
+                                    args.src_scale = sa.data() + row;
+                                    args.src_scale_ld = 1;
+                                    args.wei_scale = sb.get();
+                                    args.wei_scale_dt = sb_dt;
+                                    args.C = c.data() + row * ldc;
+                                    args.ldc = ldc;
+                                    args.accumulate = accumulate;
+                                    args.partial_in = k0 > 0;
+                                    args.partial_out = !last;
+                                    args.finish = finish && last;
+                                    args.request_limit_octets
+                                            = k0 == 0 && v % 2 == 0
+                                            ? octets - quad / 2
+                                            : 0;
+                                    if (last && store != store_t::c) {
+                                        args.dst = dst.data()
+                                                + row * dst_ldc * esz;
+                                        args.dst_ldc = dst_ldc;
+                                        args.dst_bf16 = store == store_t::bf16;
+                                    }
+                                    kernel(args);
+                                }
+                            };
+                            std::vector<float> c = c_in;
+                            std::vector<uint8_t> dst = dst_in;
+                            run(nat::select_native_int4_one_group_ukernel(
+                                        mr, nv, order),
+                                    0, c, dst);
+
+                            size_t bad = 0;
+                            for (int m = 0; m < mr; ++m)
+                                for (int n = 0; n < nr; ++n) {
+                                    float sum = accumulate
+                                            ? c_in[static_cast<size_t>(m) * ldc
+                                                      + n]
+                                            : 0.0f;
+                                    int64_t exact = 0;
+                                    for (int k = 0; k < k_quads * 4; ++k)
+                                        exact += static_cast<int64_t>(
+                                                         w_at(k, n))
+                                                * a[static_cast<size_t>(m) * lda
+                                                        + k];
+                                    const float d = static_cast<float>(exact);
+                                    const float ws = nt::load_f32(
+                                            sb.get(), sb_dt, scale_of(n));
+                                    if (fused) {
+                                        sum = std::fma(d, ws, sum);
+                                        if (finish) sum = sum * sa[m];
+                                    } else {
+                                        float t = d * sa[m];
+                                        t = t * ws;
+                                        sum = sum + t;
+                                    }
+                                    const size_t ci
+                                            = static_cast<size_t>(m) * ldc + n;
+                                    const size_t di
+                                            = static_cast<size_t>(m) * dst_ldc
+                                            + n;
+                                    if (store == store_t::c) {
+                                        if (std::memcmp(&c[ci], &sum, 4) != 0)
+                                            ++bad;
+                                    } else if (store == store_t::f32) {
+                                        if (std::memcmp(dst.data() + 4 * di,
+                                                    &sum, 4)
+                                                != 0)
+                                            ++bad;
+                                    } else {
+                                        uint16_t want = 0;
+                                        nt::store_f32(&want, kBf16, 0, sum);
+                                        if (std::memcmp(dst.data() + 2 * di,
+                                                    &want, 2)
+                                                != 0)
+                                            ++bad;
+                                    }
+                                }
+                            EXPECT_EQ(bad, 0u);
+                            // A tile stored to a destination in one pass
+                            // leaves C as it was; earlier passes leave their
+                            // int32 sum there.
+                            const int first_col
+                                    = store != store_t::c && passes == 1 ? 0
+                                                                         : nr;
+                            size_t written = 0;
+                            for (int m = 0; m < mr; ++m)
+                                for (int n = first_col; n < ldc; ++n) {
+                                    const size_t ci
+                                            = static_cast<size_t>(m) * ldc + n;
+                                    written += std::memcmp(&c[ci], &c_in[ci], 4)
+                                            != 0;
+                                }
+                            for (size_t i = 0; i < dst.size(); ++i) {
+                                const size_t row = i / (dst_ldc * esz);
+                                const size_t col = i % (dst_ldc * esz) / esz;
+                                if (store != store_t::c
+                                        && row < static_cast<size_t>(mr)
+                                        && col < static_cast<size_t>(nr))
+                                    continue;
+                                written += dst[i] != dst_in[i];
+                            }
+                            EXPECT_EQ(written, 0u);
+                            // Up to the group kernel's rows the kernel is the
+                            // group kernel's own instance; above them, the
+                            // group kernel's bits over the same rows in two
+                            // calls.
+                            const int group_mr
+                                    = nat::native_int4_group_ukernel_max_mr(nv);
+                            if (mr > group_mr) {
+                                std::vector<float> gc = c_in;
+                                std::vector<uint8_t> gdst = dst_in;
+                                run(nat::select_native_int4_group_ukernel(
+                                            group_mr, nv, order),
+                                        0, gc, gdst);
+                                run(nat::select_native_int4_group_ukernel(
+                                            mr - group_mr, nv, order),
+                                        group_mr, gc, gdst);
+                                EXPECT_EQ(std::memcmp(gc.data(), c.data(),
+                                                  c.size() * sizeof(float)),
+                                        0);
+                                EXPECT_EQ(gdst, dst);
+                            }
+                        }
+}
+
 // ── DA8W4 calls ─────────────────────────────────────────────────────────
 
 /// A bf16 / f32 source quantized in the call to s8, or a static s8 source.
@@ -1279,6 +1599,20 @@ std::vector<case_t> call_cases() {
         q.alpha = 1.0f;
         add(q);
     }
+    // Gated activations over a weight of one group over K, with the scales
+    // in the kernels: N an odd number of 32-column runs pairs runs of 16
+    // columns in tiles of 32, whose up run's weight scales are N / 2
+    // elements on, at 7 to 12 rows per call.
+    for (int N : {96, 160})
+        for (int M : {8, 12}) {
+            case_t c;
+            c.G = 1;
+            c.gs = 64;
+            c.M = M;
+            c.N = N;
+            c.gated = mm::matmul_gated_act_t::silu_and_mul;
+            add(c);
+        }
     // Gated activations over the plain layout: [gate | up] halves paired in
     // the tiles (N a multiple of 64) or staged rows (every other even N),
     // and interleaved pairs.
@@ -2424,6 +2758,181 @@ TEST(NativeBrgemmInt4Bounds, RowStridesOfTwelveRowsPastAnInt) {
 #else
     GTEST_SKIP() << "needs a sparse anonymous mapping";
 #endif
+}
+
+// The kernels of one group read only the weight's octets and the source's
+// rows: each ends where an unreadable page starts (guarded_t; on Windows
+// without the guard, and only the sums are checked).  The call's columns
+// sit at pack column 32 of 64, its second 16 next to its first or at the
+// end of a later block (a paired tile's up run), so the last octet it reads
+// ends the weight; the passes start on either nibble plane and request the
+// weight's octets from their own on, or none.  The int32 sums the passes
+// leave in C (partial_out) are exact.
+TEST(NativeBrgemmInt4Bounds, OneGroupKernelsReadOnlyTheWeight) {
+    if (!vnni()) GTEST_SKIP() << "no AVX-512 VNNI";
+    std::mt19937 rng(20261114);
+    std::uniform_int_distribution<int> byte(0, 255);
+    std::uniform_int_distribution<int> s8(-128, 127);
+    constexpr int kPackNr = 64, kStride = kPackNr * 4, kCol0 = 32;
+    const std::vector<float> ones(32, 1.0f);
+    for (const bool apart : {false, true})
+        for (int mr = nat::native_int4_group_ukernel_max_mr(2) + 1;
+                mr <= nat::native_int4_one_group_ukernel_max_mr(2); ++mr)
+            for (int k_quads : {1, 2, 3, 31, 32, 33, 34, 35, 64, 65})
+                for (int quad0 : {0, 1})
+                    for (int passes : {1, 2})
+                        for (const bool prefetch : {false, true}) {
+                            if (passes > k_quads) continue;
+                            SCOPED_TRACE(std::string(apart ? "apart" : "next")
+                                    + " mr=" + std::to_string(mr)
+                                    + " k_quads=" + std::to_string(k_quads)
+                                    + " quad0=" + std::to_string(quad0)
+                                    + " passes=" + std::to_string(passes)
+                                    + " prefetch=" + std::to_string(prefetch));
+                            const int octets = (quad0 + k_quads + 1) / 2;
+                            const size_t block
+                                    = static_cast<size_t>(octets) * kStride;
+                            const int lda = k_quads * 4;
+                            nt::guarded_t w((apart ? 2 : 1) * block);
+                            nt::guarded_t a(static_cast<size_t>(mr) * lda);
+                            if (w.get() == nullptr || a.get() == nullptr)
+                                GTEST_SKIP() << "no guarded mapping";
+                            for (size_t i = 0; i < (apart ? 2 : 1) * block; ++i)
+                                w.get()[i] = static_cast<uint8_t>(byte(rng));
+                            for (size_t i = 0;
+                                    i < static_cast<size_t>(mr) * lda; ++i)
+                                a.get()[i] = static_cast<uint8_t>(s8(rng));
+                            // Column n of the call: pack column kCol0 + n of
+                            // the first block, or of the second for the
+                            // second 16 apart.
+                            const auto column = [&](int n) {
+                                return (apart && n >= 16 ? block : 0)
+                                        + static_cast<size_t>(kCol0 + n) * 4;
+                            };
+                            const auto src = [&](int m, int k) {
+                                return static_cast<int>(static_cast<int8_t>(
+                                        a.get()[static_cast<size_t>(m) * lda
+                                                + k]));
+                            };
+                            std::vector<int32_t> shift(mr);
+                            for (int m = 0; m < mr; ++m) {
+                                int32_t sum = 0;
+                                for (int k = 0; k < k_quads * 4; ++k)
+                                    sum += src(m, k);
+                                shift[m] = -8 * sum;
+                            }
+                            std::vector<float> c(static_cast<size_t>(mr) * 32);
+                            const int per = (k_quads + passes - 1) / passes;
+                            for (int k0 = 0; k0 < k_quads; k0 += per) {
+                                const int quad = quad0 + k0;
+                                nat::native_int4_group_ukernel_args_t args;
+                                args.A = a.get() + k0 * 4;
+                                args.lda = lda;
+                                args.a_step = static_cast<size_t>(lda);
+                                args.B = w.get()
+                                        + static_cast<size_t>(quad / 2)
+                                                * kStride
+                                        + column(0);
+                                args.b_stride = kStride;
+                                args.b_second = column(16) - column(0);
+                                args.quad0 = quad % 2;
+                                args.k_quads = std::min(per, k_quads - k0);
+                                args.batch = 1;
+                                args.shift = shift.data();
+                                args.shift_ld = 1;
+                                args.src_scale = ones.data();
+                                args.src_scale_ld = 1;
+                                args.wei_scale = ones.data();
+                                args.wei_scale_dt = kF32;
+                                args.C = c.data();
+                                args.ldc = 32;
+                                args.partial_in = k0 > 0;
+                                args.partial_out = true;
+                                args.request_limit_octets
+                                        = prefetch ? octets - quad / 2 : 0;
+                                nat::select_native_int4_one_group_ukernel(mr, 2,
+                                        nat::native_int8_order_t::fused)(args);
+                            }
+                            size_t bad = 0;
+                            for (int m = 0; m < mr; ++m)
+                                for (int n = 0; n < 32; ++n) {
+                                    int64_t exact = 0;
+                                    for (int k = 0; k < k_quads * 4; ++k) {
+                                        const int q = quad0 + k / 4;
+                                        const uint8_t x = w.get()[column(n)
+                                                + static_cast<size_t>(q / 2)
+                                                        * kStride
+                                                + k % 4];
+                                        exact += static_cast<int64_t>(
+                                                         (q % 2 ? x >> 4
+                                                                : x & 0x0F)
+                                                         - 8)
+                                                * src(m, k);
+                                    }
+                                    int32_t got;
+                                    std::memcpy(&got,
+                                            &c[static_cast<size_t>(m) * 32 + n],
+                                            sizeof(got));
+                                    bad += got != exact;
+                                }
+                            EXPECT_EQ(bad, 0u);
+                        }
+}
+
+// The octets the kernels of one group may request end at the end of the
+// packed weight (native_packed_bytes): from the octet of a pass that starts
+// at K quad k0, its reach less k0 / 2 octets, at the call's second run,
+// end the weight for calls whose second run is the next 16 columns or a
+// paired tile's up run in the last block, and at the first run for calls
+// of one vector.
+TEST(NativeBrgemmInt4Bounds, RequestOctetsEndAtTheWeight) {
+    constexpr int kPackNr = nat::kNativeLayoutPackNr;
+    for (const int K : {64, 136, 1000, 4096})
+        for (const int N : {96, 160, 4096}) {
+            const size_t bytes
+                    = nat::native_packed_bytes(data_type_t::s4, K, N, kPackNr);
+            std::vector<uint8_t> packed(bytes);
+            nat::native_weight_view_t w;
+            w.base = packed.data();
+            w.wei_dt = data_type_t::s4;
+            w.K = K;
+            w.N = N;
+            w.pack_nr = kPackNr;
+            w.k_groups = (K + 7) / 8;
+            w.block_bytes
+                    = nat::native_block_bytes(data_type_t::s4, K, kPackNr);
+            const size_t stride = static_cast<size_t>(w.group_stride());
+            const int last = nat::native_padded_n(N, kPackNr) - 32;
+            struct call_t {
+                const char *what;
+                int p0, nv;
+                size_t b_second;
+            };
+            const call_t calls[] = {
+                    {"last block, next 16", last, 2, 64},
+                    {"paired, up run in the last block", 0, 2,
+                            w.column_distance(0, last + 16)},
+                    {"one vector, last block", last + 16, 1, 0},
+            };
+            for (const call_t &c : calls)
+                for (const int k0 : {0, 1, 2, 5}) {
+                    SCOPED_TRACE(std::string(c.what) + " K " + std::to_string(K)
+                            + " N " + std::to_string(N) + " k0 "
+                            + std::to_string(k0));
+                    const int64_t limit = nat::native_int4_request_octets(
+                                                  w, c.p0, c.nv, c.b_second)
+                            - k0 / 2;
+                    ASSERT_GT(limit, 0);
+                    const size_t from
+                            = static_cast<size_t>(w.column(c.p0) - w.base)
+                            + static_cast<size_t>(k0 / 2) * stride
+                            + (c.nv == 2 ? c.b_second : 0);
+                    const size_t end_of_last = from
+                            + static_cast<size_t>(limit - 1) * stride + 64;
+                    EXPECT_LE(end_of_last, bytes);
+                    EXPECT_GT(end_of_last + stride, bytes);
+                }
+        }
 }
 
 } // namespace

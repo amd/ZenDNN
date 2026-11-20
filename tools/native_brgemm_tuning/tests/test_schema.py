@@ -43,7 +43,7 @@ COST_KEYS = ["cost_model", "cm_gain_pct", "cm_short_rows", "cm_fma_pipes", "cm_f
              "cm_tall_pct", "cm_l2_bytes", "cm_l3_cycles", "cm_mem_cycles", "cm_prefetch_kib", "cm_overlap_pct",
              "cm_reuse_pct", "cm_stream_cycles", "cm_sync_tiles", "cm_group_slab_pct", "cm_group_l3_pct",
              "cm_group_skew_pct", "cm_group_rows_pct", "cm_drift_kib", "cm_pass_kib", "cm_pass_calls",
-             "cm_block_kib", "cm_int8_l1_pct", "cm_int4_min_m"]
+             "cm_block_kib", "cm_block_k", "cm_int8_l1_pct", "cm_int4_min_m"]
 # The keys of the planner's schema, in its order: the design's, unit_tiles after traversal,
 # int4_l1_pct after int8_kc, f16_wide_min_m after the narrow-N rule, then the cost model's.
 SCHEMA_KEYS = (DESIGN_KEYS[:7] + ["unit_tiles"] + DESIGN_KEYS[7:24] + ["int4_l1_pct"] + DESIGN_KEYS[24:]
@@ -114,7 +114,9 @@ class TestFixture(unittest.TestCase):
                             "kernel f16 nr 16: None vs (4095, 12, 1)", "kernel f16 nr 32: None vs (4095, 12, 1)"]
                          + ["kernel f16_ph nr %d: None vs (4095, 12, 1)" % nr for nr in SCHEMA.nr_widths("f16_ph")]
                          + ["kernel f32 nr 16: None vs (4095, 12, 1)", "kernel f32 nr 32: None vs (4095, 12, 1)",
+                            "kernel int4 nr 16 (per_channel): None vs (4095, 12, 8)",
                             "kernel int4 nr 16 (per_group): None vs (4095, 12, 8)",
+                            "kernel int4 nr 32 (per_channel): None vs (4095, 12, 8)",
                             "kernel int4 nr 32 (per_group): None vs (63, 6, 8)",
                             "kernel int8 nr 16 (per_channel): None vs (4095, 12, 4)",
                             "kernel int8 nr 16 (per_channel/per_group): (4095, 12, 4) vs None",
@@ -147,10 +149,33 @@ class TestFixture(unittest.TestCase):
         self.assertEqual(SCHEMA.nr_widths("bf16"), [16, 32, 64, 128])
         self.assertEqual(SCHEMA.nr_widths("f32"), [16, 32])
         self.assertEqual(S.kernel_kind("f32"), "f32")
-        # s4 weights run the INT4 group kernels (rows 1 .. 12 at 16 columns, 1 .. 6 at 32); f16 weights the
-        # F16_PH kernels where the registry has them (also two blocks wide), else the F16 kernels.
+        # s4 weights run the INT4 group kernels (rows 1 .. 12 at 16 columns, 1 .. 6 at 32), a weight of one
+        # group over K the kernels of one group (1 .. 12 at both); f16 weights the F16_PH kernels where the
+        # registry has them (also two blocks wide), else the F16 kernels.
         self.assertEqual((S.kernel_kind("s4"), SCHEMA.int4_max_mr(1), SCHEMA.int4_max_mr(2)), ("int4", 12, 6))
+        self.assertEqual((SCHEMA.int4_max_mr(1, "per_channel"), SCHEMA.int4_max_mr(2, "per_channel")), (12, 12))
         self.assertEqual(SCHEMA.nr_widths("int4"), [16, 32])
+        self.assertEqual(SCHEMA.caps("int4", 32, "per_group").schemes, ("per_group",))
+        self.assertEqual(SCHEMA.caps("int4", 32, "per_channel").schemes, ("per_channel",))
+        self.assertTrue(SCHEMA.covers("int4", 12, 32, "per_channel"))
+        self.assertFalse(SCHEMA.covers("int4", 7, 32, "per_group"))
+        self.assertEqual((SCHEMA.int4_scheme(True), SCHEMA.int4_scheme(False)), ("per_channel", "per_group"))
+        # A build without the kernels of one group runs every s4 weight on the group kernels.
+        group_only = S.Schema(dict(SCHEMA.doc, kernels=[
+            k for k in SCHEMA.doc["kernels"] if not (k["kind"] == "int4" and k["int8_schemes"] == ["per_channel"])]))
+        self.assertEqual((group_only.int4_scheme(True), group_only.int4_max_mr(2, "per_channel")), ("per_group", 0))
+        # Without a scheme, caps and covers take what the library's caps(kind, nr) takes: the INT4
+        # group kernels and the per-channel INT8 kernels, with or without the kernels of one group.
+        for s in (SCHEMA, group_only):
+            self.assertEqual(s.caps("int4", 32), s.caps("int4", 32, "per_group"))
+            self.assertEqual(s.caps("int4", 32).schemes, ("per_group",))
+            self.assertEqual((s.covers("int4", 6, 32), s.covers("int4", 7, 32)), (True, False))
+            self.assertEqual(s.caps("int8", 32), s.caps("int8", 32, "per_channel"))
+        # A family that lists no scheme serves every scheme, for int4_scheme as for caps.
+        unlisted = S.Schema(dict(SCHEMA.doc, kernels=[
+            dict(k, int8_schemes=[]) if k["kind"] == "int4" else k for k in group_only.doc["kernels"]]))
+        self.assertEqual(unlisted.int4_scheme(True), "per_channel")
+        self.assertEqual(unlisted.caps("int4", 32, "per_channel"), unlisted.caps("int4", 32))
         self.assertEqual(SCHEMA.nr_widths("f16"), [16, 32])
         kinds = {c.kind for c in SCHEMA.kernels}
         self.assertEqual(SCHEMA.f16_kind(), "f16_ph" if "f16_ph" in kinds else "f16")

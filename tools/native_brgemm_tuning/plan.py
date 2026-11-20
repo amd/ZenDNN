@@ -62,14 +62,14 @@ BUILTIN_PARAMS: Dict[str, Any] = {
     "cm_mem_cycles": 0, "cm_prefetch_kib": 4, "cm_overlap_pct": 20, "cm_reuse_pct": 50,
     "cm_stream_cycles": 600, "cm_sync_tiles": 5, "cm_group_slab_pct": 75, "cm_group_l3_pct": 75,
     "cm_group_skew_pct": 110, "cm_group_rows_pct": 115, "cm_drift_kib": 4096, "cm_pass_kib": 128,
-    "cm_pass_calls": 4, "cm_block_kib": 16384, "cm_int8_l1_pct": 0, "cm_int4_min_m": 48,
+    "cm_pass_calls": 4, "cm_block_kib": 16384, "cm_block_k": 2048, "cm_int8_l1_pct": 0, "cm_int4_min_m": 48,
 }
 AUTO_PINS = ("nr", "mr", "mb", "kc", "col_groups", "unit_tiles", "threads_cap", "domain_threads", "int8_kc")
 # Keys whose built-in value a rule or the hardware decides (an auto value in the schema).
 AUTO_KEYS = AUTO_PINS + ("row_unit", "cm_fma_pipes", "cm_tall_pct", "cm_mem_cycles")
 RULE_SWITCHES = ("makespan", "l1_pass", "traffic_groups", "bf16_alias", "bf16_narrow_n", "blocks", "cost_model")
 # Keys whose rule a build without them does not have: their value that leaves it out.
-RULE_OFF_VALUES = {"int4_l1_pct": 0, "cm_int4_min_m": 0, "f16_wide_min_m": (1 << 31) - 1}
+RULE_OFF_VALUES = {"int4_l1_pct": 0, "cm_int4_min_m": 0, "f16_wide_min_m": (1 << 31) - 1, "cm_block_k": 0}
 # row_unit has no auto value in the planner: a unit other than this one is a pin.
 BUILTIN_ROW_UNIT = 12
 # Column tiles per unit of the blocks schedule without a pin.
@@ -555,12 +555,13 @@ def rules_plan(p: Problem, uarch: Any, hp: Dict[str, Any], schema: Any) -> Plan:
     q.traversal = hp["traversal"]
     q.scratch_floats = scratch_floats(q, p)
     # A per-group call runs the group kernel, with its own rows per call, an s4
-    # weight the INT4 group kernel.
+    # weight the INT4 group kernel, or the INT4 kernel of one group.
     group_kernel = int8 and p.int8_scheme == "per_group"
+    int4_scheme = schema.int4_scheme(p.int4_one_group)
 
     def int8_max_mr(nv: int) -> int:
         if int4:
-            return schema.int4_max_mr(nv)
+            return schema.int4_max_mr(nv, int4_scheme)
         return schema.int8_max_mr(nv, "per_group" if group_kernel else "per_channel")
 
     q.int8_rows_nv1 = min(hp["int8_mr"], int8_max_mr(1))
@@ -645,9 +646,15 @@ def model_plan(p: Problem, uarch: Any, hp: Dict[str, Any], q: Plan, schema: Any)
     pass_k = (hp["cm_pass_kib"] * 1024 // (q.nr * 2)) & ~1
     long_pass = (hp["kc"] == 0 and q.m_blocks == 1 and ceil_div(q.mb, q.mr) >= hp["cm_pass_calls"]
                  and pass_k >= 2 and pass_k > q.kc and pass_k < k)
+    # Where one core streams slower than its share of the domain's link, the short
+    # M blocks of a BF16 plan whose team fills each L3 domain it spans take only a K
+    # above cm_block_k.
+    block_k_bound = (p.bf16 and cm.core_streams(uarch, hp)
+                     and q.threads % cm.domain_threads(uarch, hp) == 0)
     short_blocks = (hp["mb"] == 0 and hp["kc"] == 0 and q.m_blocks == 1 and m > 2 * q.mr
                     and hp["tile_rows"] < q.mr
-                    and (m + q.nr) * k * 2 * 100 <= uarch.l2_bytes * hp["bf16_l2_pct"])
+                    and (m + q.nr) * k * 2 * 100 <= uarch.l2_bytes * hp["bf16_l2_pct"]
+                    and (k > hp["cm_block_k"] or not block_k_bound))
     if not short_rows and not row_groups and not long_pass and not short_blocks:
         return q
     base = cm.plan_cost(q, p, uarch, hp).cycles
@@ -735,12 +742,19 @@ def int8_model_plan(p: Problem, uarch: Any, hp: Dict[str, Any], q: Plan, schema:
 def int4_model_plan(p: Problem, uarch: Any, hp: Dict[str, Any], q: Plan, schema: Any) -> Plan:
     """The cost model's plan for the rules' s4 plan q (int4_model_plan): M blocks of
     ceil(M / b) rows, b 2 to 4, for a single row block whose slice does not divide its
-    column tiles over the threads."""
+    column tiles over the threads.  The model's s4 tile is the INT4 group kernel's: the
+    plans of a weight of one group are weighed at its rows per call and keep their own."""
     if (hp["cm_int4_min_m"] <= 0 or p.m < hp["cm_int4_min_m"] or hp["mb"] != 0 or hp["col_groups"] >= 0
             or hp["schedule"] != "auto" or q.nr < MAX_TILE_COLS or q.m_blocks != 1 or q.col_groups != 0
             or q.unit_tiles != 0 or q.n_tiles < q.threads or q.n_tiles % q.threads == 0):
         return q
-    base = cm.plan_cost(q, p, uarch, hp).cycles
+
+    def cost(c: Plan) -> float:
+        c = replace(c, int8_rows_nv1=min(c.int8_rows_nv1, schema.int4_max_mr(1)),
+                    int8_rows_nv2=min(c.int8_rows_nv2, schema.int4_max_mr(2)))
+        return cm.plan_cost(c, p, uarch, hp).cycles
+
+    base = cost(q)
     if not base > 0:
         return q
     best, bound = q, _gain_bound_cycles(base, hp)
@@ -751,7 +765,7 @@ def int4_model_plan(p: Problem, uarch: Any, hp: Dict[str, Any], q: Plan, schema:
         c = rules_plan(p, uarch, dict(hp, mb=mb), schema)
         if c.m_blocks < 2 or validate_plan(c, p, schema) is not None:
             continue
-        cycles = cm.plan_cost(c, p, uarch, hp).cycles
+        cycles = cost(c)
         if cycles < bound:
             best, bound = c, cycles
     return best
@@ -828,10 +842,14 @@ def validate_plan(q: Plan, p: Problem, schema: Any) -> Optional[str]:
                 continue
             r = q.rows(nv)
             if p.int4:
-                served = p.int8_scheme == "per_group" and schema.covers("int4", r, width)
+                served = p.int8_scheme == "per_group" and schema.covers(
+                    "int4", r, width, schema.int4_scheme(p.int4_one_group))
             else:
                 served = schema.int8_serves(r, width, p.int8_scheme)
             if not 1 <= r <= MAX_CALL_ROWS or not served:
+                if p.int4:
+                    return ("no INT4 kernel for %d rows per call at width %d (the kernels of one group "
+                            "over K, or the group kernels)" % (r, width))
                 return "no INT8 kernel of the call's scheme for %d rows per call at width %d" % (r, width)
         if q.int8_pass_quads < 0 or q.int8_pass_budget < 0:
             return "int8_pass_quads or int8_pass_budget is negative"

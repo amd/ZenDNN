@@ -97,6 +97,14 @@ struct native_int4_group_ukernel_args_t {
     /// is then false.
     bool partial_in = false;
     bool partial_out = false;
+    /// The number of octets, counted from the octet at B, whose lines at
+    /// both runs of 16 columns (at B and at B + b_second) lie inside the
+    /// weight.  The kernels of one group above the group kernel's rows
+    /// request lines up to there, kNativeInt4PrefetchOctets octets ahead of
+    /// the octet they read, past their own octets into the weight's next
+    /// ones; 0: no requests (the later row calls of a pass, which read the
+    /// slab from cache).  The group kernel's instances ignore it.
+    int request_limit_octets = 0;
     /// When set, the result is stored here instead of C: MR rows dst_ldc
     /// elements apart, bf16 rounded to nearest even or f32.
     void *dst = nullptr;
@@ -128,6 +136,30 @@ int native_int4_group_ukernel_max_mr(int nv);
 /// the fused order over source scales per group.
 native_int4_group_ukernel_fn_t select_native_int4_group_ukernel(
         int mr, int nv, native_int8_order_t order, bool src_groups = false);
+
+/// K octets between the octet the kernels of one group read and the octet
+/// whose weight lines they request (the distance; request_limit_octets is
+/// the bound).
+inline constexpr int kNativeInt4PrefetchOctets = 16;
+
+/// Largest MR of the kernels of a weight of one group over K ({1, N} weight
+/// scales), for NR = 16 * nv: 12 at nv 1 and 2, 0 otherwise.  One group
+/// needs no f32 accumulator across the K loop: at two vectors the 24 int32
+/// accumulators, an octet's two weight vectors and one quad's nibble
+/// planes, the broadcast source quad and the nibble mask fit the 32 vector
+/// registers.
+int native_int4_one_group_ukernel_max_mr(int nv);
+
+/// The kernel of a batch of one group (batch 1, no source scales per
+/// group; above the group kernel's rows only an assert checks it): the
+/// group kernel's instance where it has the rows, and above them a kernel
+/// of the group kernel's operations and bits whose int32 sums are the only
+/// accumulators across the K loop, K passes included; with
+/// request_limit_octets that one requests each K octet's weight lines
+/// kNativeInt4PrefetchOctets octets before it reads them.  nullptr outside
+/// MR 1 .. native_int4_one_group_ukernel_max_mr(nv).
+native_int4_group_ukernel_fn_t select_native_int4_one_group_ukernel(
+        int mr, int nv, native_int8_order_t order);
 
 } // namespace native
 } // namespace matmul

@@ -114,6 +114,7 @@
     {"name": "cm_pass_kib", "type": "int", "default": 128, "min": 0, "max": 1048576, "applies": "bf16", "int8_schemes": [], "bits": "same", "kind": "param"},
     {"name": "cm_pass_calls", "type": "int", "default": 4, "min": 1, "max": 4096, "applies": "bf16", "int8_schemes": [], "bits": "same", "kind": "param"},
     {"name": "cm_block_kib", "type": "int", "default": 16384, "min": 0, "max": 1073741824, "applies": "bf16", "int8_schemes": [], "bits": "same", "kind": "param"},
+    {"name": "cm_block_k", "type": "int", "default": 2048, "min": 0, "max": 1073741824, "applies": "bf16", "int8_schemes": [], "bits": "same", "kind": "param"},
     {"name": "cm_int8_l1_pct", "type": "int", "default": 0, "min": 0, "max": 1000, "applies": "int8", "int8_schemes": ["per_channel"], "bits": "same", "kind": "param"},
     {"name": "cm_int4_min_m", "type": "int", "default": 48, "min": 0, "max": 1073741824, "applies": "int8", "int8_schemes": ["per_group"], "bits": "same", "kind": "param"}
   ],
@@ -151,6 +152,8 @@
     {"kind": "int8", "nr": 32, "mr_mask": 63, "max_mr": 6, "k_unit": 4, "int8_schemes": ["per_group"]},
     {"kind": "int4", "nr": 16, "mr_mask": 4095, "max_mr": 12, "k_unit": 8, "int8_schemes": ["per_group"]},
     {"kind": "int4", "nr": 32, "mr_mask": 63, "max_mr": 6, "k_unit": 8, "int8_schemes": ["per_group"]},
+    {"kind": "int4", "nr": 16, "mr_mask": 4095, "max_mr": 12, "k_unit": 8, "int8_schemes": ["per_channel"]},
+    {"kind": "int4", "nr": 32, "mr_mask": 4095, "max_mr": 12, "k_unit": 8, "int8_schemes": ["per_channel"]},
     {"kind": "f32", "nr": 16, "mr_mask": 4095, "max_mr": 12, "k_unit": 1, "int8_schemes": []},
     {"kind": "f32", "nr": 32, "mr_mask": 4095, "max_mr": 12, "k_unit": 1, "int8_schemes": []},
     {"kind": "f16", "nr": 16, "mr_mask": 4095, "max_mr": 12, "k_unit": 1, "int8_schemes": []},

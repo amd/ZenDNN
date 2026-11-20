@@ -46,9 +46,9 @@ WEIGHT_DTYPES = ("bf16", "s8", "f32", "s4", "f16")
 INT8_SCHEMES = ("per_channel", "per_group")
 # The INT8 scheme of a problem that names none: per-channel weight scales.
 INT8_SCHEME = "per_channel"
-# The planner's kernel kinds (native_kernel_kind_t): int4 is the group kernels of an s4
-# weight, f16 the kernels of an f16 weight over a source widened to f32, f16_ph the
-# kernels that multiply-add in f16.
+# The planner's kernel kinds (native_kernel_kind_t): int4 is the kernels of an s4 weight
+# (the group kernels, and those of a weight of one group over K), f16 the kernels of an
+# f16 weight over a source widened to f32, f16_ph the kernels that multiply-add in f16.
 KERNEL_KINDS = ("bf16", "int8", "f32", "int4", "f16", "f16_ph")
 # Weight types whose tiles are INT8 tiles (the keys the schema says apply to int8).
 INT8_DTYPES = ("s8", "s4")
@@ -258,8 +258,8 @@ class KeySpec:
 
 class KernelCaps:
     """What the micro-kernels of one kind offer at one tile width (native_kernel_caps_t).
-    An INT8 family serves the schemes it lists; one that lists none serves every scheme.
-    A kind the tuner does not know (of a newer build) is kept with known False."""
+    An INT8 or INT4 family serves the schemes it lists; one that lists none serves every
+    scheme. A kind the tuner does not know (of a newer build) is kept with known False."""
 
     K_UNITS = {"bf16": 2, "int8": 4, "int4": 8, "f32": 1, "f16": 1, "f16_ph": 1}
 
@@ -449,15 +449,21 @@ class Schema:
         except KeyError:
             raise SchemaError("unknown config key %r" % (name,))
 
-    def caps(self, kind: str, nr: int, scheme: str = INT8_SCHEME) -> Optional[KernelCaps]:
-        """The kernels of kind at width nr; for INT8 the family that serves scheme."""
+    def caps(self, kind: str, nr: int, scheme: Optional[str] = None) -> Optional[KernelCaps]:
+        """native_kernel_registry_t::caps: the kernels of kind at width nr; for INT8 and INT4
+        the family that serves scheme (the INT4 kernels of one group over K serve per_channel,
+        the INT4 group kernels per_group).  Without a scheme, as the library's caps(kind, nr):
+        the per-channel INT8 kernels, the INT4 group kernels."""
+        if scheme is None:
+            scheme = "per_group" if kind == "int4" else INT8_SCHEME
         for c in self.kernels:
-            if c.kind == kind and c.nr == nr and (kind != "int8" or c.serves(scheme)):
+            if c.kind == kind and c.nr == nr and (kind not in ("int8", "int4") or c.serves(scheme)):
                 return c
         return None
 
-    def covers(self, kind: str, mr: int, nr: int, scheme: str = INT8_SCHEME) -> bool:
-        """native_kernel_registry_t::covers: a kernel for every row count 1 .. mr at nr."""
+    def covers(self, kind: str, mr: int, nr: int, scheme: Optional[str] = None) -> bool:
+        """native_kernel_registry_t::covers (with the scheme for INT8 and INT4): a kernel for
+        every row count 1 .. mr at nr."""
         c = self.caps(kind, nr, scheme)
         return c is not None and 1 <= mr <= c.max_mr
 
@@ -476,10 +482,20 @@ class Schema:
         c = self.caps("int8", 16 * nv, scheme)
         return c.max_mr if c else 0
 
-    def int4_max_mr(self, nv: int) -> int:
-        """native_int4_group_ukernel_max_mr: rows of the INT4 group kernels at nr 16 nv."""
-        c = self.caps("int4", 16 * nv)
+    def int4_max_mr(self, nv: int, scheme: str = "per_group") -> int:
+        """Rows of the INT4 kernels of scheme at nr 16 nv: per_group those of the group
+        kernels (native_int4_group_ukernel_max_mr), per_channel those of the kernels of one
+        group over K (native_int4_one_group_ukernel_max_mr)."""
+        c = self.caps("int4", 16 * nv, scheme)
         return c.max_mr if c else 0
+
+    def int4_scheme(self, one_group: bool) -> str:
+        """The scheme of the INT4 kernels an s4 weight takes: per_channel for a weight of one
+        group over K where the registry has the kernels of one group, else per_group (a
+        build without them runs the group kernels for every s4 weight)."""
+        if one_group and any(c.kind == "int4" and c.serves("per_channel") for c in self.kernels):
+            return "per_channel"
+        return "per_group"
 
     def f16_kind(self) -> str:
         """native_kernel_registry_t::f16_kind: f16_ph where the registry has those kernels."""

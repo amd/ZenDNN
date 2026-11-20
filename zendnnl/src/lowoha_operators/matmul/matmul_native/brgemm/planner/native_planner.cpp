@@ -736,12 +736,15 @@ native_plan_t rules_plan(const native_problem_t &p, const UarchParams &uarch,
     q.traversal = hp.traversal;
     q.scratch_floats = native_plan_scratch_floats(q, p);
     // A per-group call runs the group kernel, with its own rows per call,
-    // of an s4 weight the INT4 group kernel.
+    // of an s4 weight the INT4 group kernel, or the INT4 kernel of one group.
     const bool group_kernel
             = int8 && p.int8_scheme == native_int8_scheme_t::per_group;
     const bool int4 = p.int4();
-    const auto int8_max_mr = [group_kernel, int4](int nv) {
-        if (int4) return native_int4_group_ukernel_max_mr(nv);
+    const bool one_group = p.int4_one_group();
+    const auto int8_max_mr = [group_kernel, int4, one_group](int nv) {
+        if (int4)
+            return one_group ? native_int4_one_group_ukernel_max_mr(nv)
+                             : native_int4_group_ukernel_max_mr(nv);
         return group_kernel ? native_int8_group_ukernel_max_mr(nv)
                             : native_int8_ukernel_max_mr(nv);
     };
@@ -845,8 +848,10 @@ bool row_groups_split(int M, int unit, const heuristic_params_t &hp) {
 /// row_unit pins another unit.  A single row block of a long weight stream
 /// then takes M blocks of tile_rows rows, or, where one core streams
 /// slower than its share of the domain's link, the long K pass (below), at
-/// the rules' rows per call and row unit; the chosen row groups take it
-/// only where that unit splits the rows within the bounds above.  Fewer
+/// the rules' rows per call and row unit; there the M blocks of a BF16 plan
+/// whose team fills each L3 domain it spans need a K above cm_block_k.
+/// The chosen row groups take either only where that unit splits the rows
+/// within the bounds above.  Fewer
 /// column tiles than threads are left to the narrowing, the narrow-N and
 /// the blocks rules.
 native_plan_t model_plan(const native_problem_t &p, const UarchParams &uarch,
@@ -891,11 +896,16 @@ native_plan_t model_plan(const native_problem_t &p, const UarchParams &uarch,
             && pass_k > q.kc && pass_k < p.K;
     // A single row block of more than two calls whose source rows and slab
     // over all of K fit the bf16_l2_pct share of L2 may take M blocks of
-    // tile_rows rows.
+    // tile_rows rows; where one core streams slower than its share of the
+    // domain's link, a BF16 plan whose team fills each L3 domain it spans
+    // only over a K above cm_block_k.
+    const bool block_k_bound = p.bf16() && native_plan_core_streams(uarch, hp)
+            && q.threads % native_plan_domain_threads(uarch, hp) == 0;
     const bool short_blocks = hp.mb == 0 && hp.kc == 0 && q.m_blocks == 1
             && p.M > 2 * q.mr && hp.tile_rows < q.mr
             && (static_cast<int64_t>(p.M) + q.nr) * p.K * 2 * 100
-                    <= static_cast<int64_t>(uarch.l2_bytes) * hp.bf16_l2_pct;
+                    <= static_cast<int64_t>(uarch.l2_bytes) * hp.bf16_l2_pct
+            && (p.K > hp.cm_block_k || !block_k_bound);
     if (!short_rows && !row_groups && !long_pass && !short_blocks) return q;
     const double base = native_plan_cost(q, p, uarch, hp).cycles;
     if (!(base > 0)) return q;
@@ -1026,7 +1036,9 @@ constexpr int kInt4RowBlocks = 4;
 /// rows, are modeled more than cm_gain_pct percent faster; then the
 /// fastest, the fewer blocks on a tie.  The row blocks deal the tiles of
 /// the slice more evenly.  mb, col_groups and the schedule pin what they
-/// set.
+/// set.  The model's s4 tile describes the INT4 group kernel: the plans of
+/// a weight of one group are weighed at its rows per call, and keep their
+/// own.
 native_plan_t int4_model_plan(const native_problem_t &p,
         const UarchParams &uarch, const heuristic_params_t &hp,
         const native_plan_t &q) {
@@ -1036,7 +1048,14 @@ native_plan_t int4_model_plan(const native_problem_t &p,
             || q.unit_tiles != 0 || q.n_tiles < q.threads
             || q.n_tiles % q.threads == 0)
         return q;
-    const double base = native_plan_cost(q, p, uarch, hp).cycles;
+    const auto cost = [&](native_plan_t c) {
+        c.int8_rows_nv1 = std::min(
+                c.int8_rows_nv1, native_int4_group_ukernel_max_mr(1));
+        c.int8_rows_nv2 = std::min(
+                c.int8_rows_nv2, native_int4_group_ukernel_max_mr(2));
+        return native_plan_cost(c, p, uarch, hp).cycles;
+    };
+    const double base = cost(q);
     if (!(base > 0)) return q;
     native_plan_t best = q;
     double bound = base * (100 - std::clamp(hp.cm_gain_pct, 0, 100)) / 100.0;
@@ -1046,7 +1065,7 @@ native_plan_t int4_model_plan(const native_problem_t &p,
         if (v.mb < hp.tile_rows) break;
         const native_plan_t c = rules_plan(p, uarch, v);
         if (c.m_blocks < 2 || validate_native_plan(c, p) != nullptr) continue;
-        const double cycles = native_plan_cost(c, p, uarch, hp).cycles;
+        const double cycles = cost(c);
         if (cycles < bound) {
             best = c;
             bound = cycles;
@@ -1064,7 +1083,7 @@ native_plan_t int4_model_plan(const native_problem_t &p,
 native_plan_t int4_group_passes(const native_problem_t &p,
         const UarchParams &uarch, const heuristic_params_t &hp,
         const native_plan_t &q) {
-    if (p.wei_group_size < p.K) return q;
+    if (!p.int4_one_group()) return q;
     const int cw = native_int8_col_width(q, q.nr);
     const int rows = native_int8_call_rows(q, cw / 16);
     const int quads = ceil_div(p.K, 4);
@@ -1146,12 +1165,15 @@ const char *validate_native_plan(
             const int rows = native_int8_call_rows(q, nv);
             const bool served = p.int4()
                     ? p.int8_scheme == native_int8_scheme_t::per_group
-                            && kernels.covers(
-                                    native_kernel_kind_t::int4, rows, width)
+                            && kernels.covers(native_kernel_kind_t::int4, rows,
+                                    width, native_int4_scheme(p))
                     : kernels.covers_int8(rows, width, p.int8_scheme);
             if (rows < 1 || rows > kMaxCallRows || !served)
-                return "no INT8 kernel of the call's scheme for the rows per "
-                       "call at an allowed width";
+                return p.int4() ? "no INT4 kernel for the rows per call at an "
+                                  "allowed width (the kernels of one group "
+                                  "over K, or the group kernels)"
+                                : "no INT8 kernel of the call's scheme for the "
+                                  "rows per call at an allowed width";
         }
         if (q.int8_pass_quads < 0 || q.int8_pass_budget < 0)
             return "int8_pass_quads or int8_pass_budget is negative";

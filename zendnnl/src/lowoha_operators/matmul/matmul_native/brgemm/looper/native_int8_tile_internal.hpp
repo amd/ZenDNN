@@ -241,6 +241,14 @@ void compute_int4_group_tile(const native_plan_t &plan,
         int mr, int n0, int nr, float *C, int ldc,
         const native_int8_out_t *out);
 
+/// The number of octets, counted from K group 0 of column p0 of the s4
+/// weight w, whose lines at both runs of 16 columns of a call of nv vectors
+/// (the second b_second bytes after the first) lie inside the weight; past
+/// K they are the next block's.  The kernels of one group request lines up
+/// to there (native_int4_group_ukernel_args_t::request_limit_octets).
+int64_t native_int4_request_octets(
+        const native_weight_view_t &w, int p0, int nv, size_t b_second);
+
 /// Groups per batch of a per-group tile over a plain pack, cw columns wide
 /// and rows tall, max_mr rows per call, groups of group_quads K quads of
 /// quad_bytes bytes per column (4 for an s8 weight, 2 for s4): all groups

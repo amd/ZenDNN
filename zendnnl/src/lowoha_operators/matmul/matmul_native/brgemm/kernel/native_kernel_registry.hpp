@@ -66,9 +66,10 @@ struct native_kernel_caps_t {
     int max_mr = 0; ///< every row count 1 .. max_mr has a kernel
     /// INT8: the weight-scale schemes the kernel serves, a mask of
     /// native_int8_scheme_bit: the per-channel kernels serve per_channel, the
-    /// group kernels per_group (as do the INT4 kernels).
-    /// validate_native_plan checks the call's scheme against the mask, so a
-    /// kernel is never planned for the other.
+    /// group kernels per_group (as do the INT4 group kernels; the INT4
+    /// kernels of one group over K, whose weight scales are {1, N}, serve
+    /// per_channel).  validate_native_plan checks the call's scheme against
+    /// the mask, so a kernel is never planned for the other.
     uint8_t int8_schemes = 0;
 
     bool serves(native_int8_scheme_t scheme) const noexcept {
@@ -79,17 +80,29 @@ struct native_kernel_caps_t {
 class native_kernel_registry_t {
 public:
     /// nullptr when kind has no kernel at nr on this CPU; for INT8, the
-    /// per-channel kernels.
+    /// per-channel kernels; for INT4, the group kernels.
     const native_kernel_caps_t *caps(
             native_kernel_kind_t kind, int nr) const noexcept;
-    /// The INT8 kernels that serve scheme at nr; nullptr when none.
-    const native_kernel_caps_t *int8_caps(
-            int nr, native_int8_scheme_t scheme) const noexcept;
+    /// The kernels of kind at nr that serve scheme (INT8 and INT4:
+    /// per_channel, or per_group for the group kernels; the INT4 kernels of
+    /// one group over K serve per_channel); nullptr when none.
+    const native_kernel_caps_t *caps(native_kernel_kind_t kind, int nr,
+            native_int8_scheme_t scheme) const noexcept;
     /// A kernel for every row count 1 .. mr at nr.
     bool covers(native_kernel_kind_t kind, int mr, int nr) const noexcept;
-    /// An INT8 kernel that serves scheme, for every row count 1 .. mr at nr.
+    /// A kernel of kind that serves scheme, for every row count 1 .. mr at
+    /// nr.
+    bool covers(native_kernel_kind_t kind, int mr, int nr,
+            native_int8_scheme_t scheme) const noexcept;
+    /// caps and covers of the INT8 kernels.
+    const native_kernel_caps_t *int8_caps(
+            int nr, native_int8_scheme_t scheme) const noexcept {
+        return caps(native_kernel_kind_t::int8, nr, scheme);
+    }
     bool covers_int8(
-            int mr, int nr, native_int8_scheme_t scheme) const noexcept;
+            int mr, int nr, native_int8_scheme_t scheme) const noexcept {
+        return covers(native_kernel_kind_t::int8, mr, nr, scheme);
+    }
     /// BF16 kernels by row count (index 0 unused, size 13) of the calls of a
     /// tile nr wide, native_bf16_slab_cols(nr) columns each; nullptr when
     /// caps(bf16, nr) is nullptr.
@@ -125,7 +138,8 @@ private:
 
 /// Built once by probing select_bf16_brgemm_tall_kernel (mr 1 .. 12 at nr
 /// 16 / 32), select_native_int8_ukernel, select_native_int8_group_ukernel,
-/// select_native_int4_group_ukernel (both orders),
+/// select_native_int4_group_ukernel and
+/// select_native_int4_one_group_ukernel (both orders),
 /// select_native_fp32_ukernel and select_native_f16_ukernel (mr 1 .. 12 at
 /// nv 1 / 2), and select_native_f16_ph_ukernel (mr 1 .. 12 at nv 1 / 2 / 4).
 /// BF16 tiles of 64 and 128 columns take the row counts of nr 32.  A dtype is probed only

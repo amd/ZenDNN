@@ -223,7 +223,8 @@ const char *const kSameBitsSettings[] = {"nr=16", "nr=32", "mr=1", "mr=4",
         "cm_prefetch_kib=0,cm_reuse_pct=1000,domain_threads=64",
         "cm_mem_cycles=1,cm_l2_bytes=1,cm_l3_cycles=1048576,cm_overlap_pct=0",
         "cm_stream_cycles=0,cm_sync_tiles=0",
-        "cm_group_slab_pct=100000,cm_group_l3_pct=100000,cm_block_kib=0",
+        "cm_group_slab_pct=100000,cm_group_l3_pct=100000,cm_block_kib=0,"
+        "cm_block_k=0",
         "cm_group_skew_pct=100,cm_group_rows_pct=200",
         "cm_drift_kib=0,cm_pass_kib=1048576,cm_pass_calls=1",
         "cm_int8_l1_pct=1"};
@@ -1017,9 +1018,10 @@ bool takes_model_tile(
 // share of the link keep the bits on the calls they take: with that
 // limit lifted (cm_stream_cycles above the domain's rate), a BF16 block of
 // five calls that computes longer than it streams takes the long K pass, one
-// of three calls that streams longer takes M blocks of 6 rows over all of K,
-// and an INT8 block takes 6 rows per call with the shorter L1 pass
-// (cm_int8_l1_pct) or two row groups.  The built-in plan of an s4 call of
+// of three calls that streams longer takes M blocks of 6 rows over all of K
+// (its K of 2048 with cm_block_k 0), and an INT8 block takes 6 rows per
+// call with the shorter L1 pass (cm_int8_l1_pct) or two row groups.  The
+// built-in plan of an s4 call of
 // one row block whose column tiles do not divide over its threads takes two
 // to four M blocks (cm_int4_min_m), with a per-token and with a per-group
 // source.  A planner over 8-core domains takes each setting's cases, and a
@@ -1048,7 +1050,8 @@ TEST_F(NativeTuningExec, CostModelChoicesKeepTheBits) {
     } settings[] = {{"cm_stream_cycles=1048576,cm_mem_cycles=50,cm_drift_kib=0,"
                      "cm_int8_l1_pct=40",
                             {"bf16_long_pass", "int8_three_calls"}},
-            {"cm_stream_cycles=1048576,cm_block_kib=0", {"bf16_short_blocks"}},
+            {"cm_stream_cycles=1048576,cm_block_kib=0,cm_block_k=0",
+                    {"bf16_short_blocks"}},
             {"cm_stream_cycles=1048576,cm_mem_cycles=424,cm_group_skew_pct=100",
                     {"int8_groups"}},
             {"cost_model=1", {"int4_row_blocks", "int4_row_blocks_groups"}}};
