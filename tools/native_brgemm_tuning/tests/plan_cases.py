@@ -30,14 +30,19 @@ config plans with the library's defaults, those of its schema (--schema); a
 fraction of the cases sets every rule switch to 0, and another every cost-model
 input.  --machine fixes the machine of every case.  The kernels of an f16 call
 follow the registry, so the dump and the schema come from machines of one ISA.
-fixtures/plan_check.json holds the SHA-256 of each chunk of those lines and the
-counts of the kinds of case; tuner_line() is the same line from plan.py.
+fixtures/plan_check.json holds the SHA-256 of each chunk of those lines, the
+counts of the kinds of case and the kernel kinds of the schema given (--schema:
+the dump machine's), which the test plans with: a fixture made on a machine
+without every kernel kind checks no F16_PH plan; tuner_line() is the same line
+from plan.py.
 
 --nb draws the N block's cases instead (their own seed and count): every case
 sets nb, half of them the blocks schedule, a quarter unit_tiles too (nb
-replaces it). fixtures/plan_check_nb.json holds their digests and the kernel
-kinds of the schema given (--schema: the dump machine's), which the test plans
-with, so a machine without every kernel kind can make it.
+replaces it). fixtures/plan_check_nb.json holds their digests and kernel kinds
+the same way, from the F16 kernels (a dump and schema made under
+ZENDNNL_MATMUL_NATIVE_F16_ACCUM=f32, or without AVX512-FP16), while
+plan_check.json holds the F16_PH kernels' plans: one fixture per f16 kernel
+family.
 
   plan_cases.py cases   [--nb] [--seed S] [--count N] [--machine M]       the dump's input
   plan_cases.py compare DUMP [--nb] [--seed S] [--count N] [--machine M] [--schema]
@@ -399,9 +404,8 @@ def main(argv: Optional[List[str]] = None) -> int:
               "mismatches %d" % (len(cs), counts["no_config"], counts["rules_off"], blocks, bad))
         return 1 if bad else 0
     doc = {"origin": "plans of the library's planner for the %scases of plan_cases.py" % ("nb " if a.nb else ""),
-           "seed": seed, "count": count, "chunk": a.chunk, "cases": counts}
-    if a.nb:
-        doc["kernels"] = sorted({k["kind"] for k in schema.doc["kernels"]})
+           "seed": seed, "count": count, "chunk": a.chunk, "cases": counts,
+           "kernels": sorted({k["kind"] for k in schema.doc["kernels"]})}
     doc["sha256"] = digests(dump, a.chunk)
     sys.stdout.write(json.dumps(doc, indent=1) + "\n")
     return 0

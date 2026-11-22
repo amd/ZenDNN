@@ -245,6 +245,11 @@ struct int8_operands_t {
     bool direct = false;
 };
 
+/// Slabs of the widest tile of kind's kernels (native_slab_cols).
+constexpr int max_slabs(native_kernel_kind_t kind) {
+    return kNativeMaxTileCols / native_slab_cols(kind);
+}
+
 /// The kernel calls of tiles column tiles from n0: per K pass, per tile, per
 /// row call, the slabs of the tile (one slab, or nr / 32 slabs of 32
 /// columns, each inside one block at the weight columns the tile holds), so
@@ -260,10 +265,11 @@ template <bool Tail>
 void bf16_block(const native_plan_t &p, const bf16_operands_t &op,
         const native_weight_view_t &w, const native_epilogue_t &ep, int mb,
         int K, int m0, int n0, int tiles, float *acc) {
+    constexpr native_kernel_kind_t kind = native_kernel_kind_t::bf16;
     const int b_stride = w.group_stride();
-    const int slab = native_bf16_slab_cols(p.nr);
+    const int slab = native_tile_slab_cols(kind, p.nr);
     const int slabs = p.nr / slab;
-    assert(slabs <= kNativeBf16MaxTileCols / kNativeBf16SlabCols);
+    assert(slabs <= max_slabs(kind));
     const bool one_pass = p.kc >= K;
     for (native_k_passes_t pass {K, p.kc}; pass.next();) {
         const int k0 = pass.k0, kl = pass.kl;
@@ -273,8 +279,7 @@ void bf16_block(const native_plan_t &p, const bf16_operands_t &op,
             const int n = n0 + t * p.nr;
             const int cols = Tail ? std::min(p.nr, w.N - n) : p.nr;
             if (Tail && cols <= 0) continue;
-            const uint16_t
-                    *slab_b[kNativeBf16MaxTileCols / kNativeBf16SlabCols];
+            const uint16_t *slab_b[max_slabs(kind)];
             for (int s = 0; s < slabs; ++s)
                 slab_b[s] = reinterpret_cast<const uint16_t *>(w.layout_column(
                                     w.tile_col(n, p.nr, s * slab)))
@@ -329,17 +334,23 @@ void bf16_block(const native_plan_t &p, const bf16_operands_t &op,
     }
 }
 
-/// The kernel calls of tiles column tiles from n0: per K pass, per tile, per
-/// row call, one call over the tile's nr columns, so a pass's source rows
-/// serve every tile.  Across K passes each tile keeps its own mb * nr
-/// accumulators, in acc or, with op.dst, in the destination.  Tail as
-/// bf16_block; a tile of fewer columns than nr accumulates in acc, whatever
-/// op.dst.
-template <bool Tail>
-void f32_block(const native_plan_t &p, const f32_operands_t &op,
+/// The kernel calls of tiles column tiles from n0 on the FP32, F16 or F16_PH
+/// kernels (Kind, weight elements of B): per K pass, per tile, per row call,
+/// the slabs of the tile in turn as bf16_block's, so a pass's source rows
+/// serve every tile; each slab lies inside one block.  Across K passes each
+/// tile keeps its own mb * nr accumulators, in acc or, with op.dst, in the
+/// destination.  Tail as bf16_block; a tile of fewer columns than nr
+/// accumulates in acc, whatever op.dst.  call(mr, a, b, c, ldc, kl, beta)
+/// runs the kernel of mr rows over the slab whose pass starts at b.
+template <bool Tail, native_kernel_kind_t Kind, typename B, typename Op,
+        typename Call>
+void slab_block(const native_plan_t &p, const Op &op,
         const native_weight_view_t &w, const native_epilogue_t &ep, int mb,
-        int K, int m0, int n0, int tiles, float *acc) {
+        int K, int m0, int n0, int tiles, float *acc, const Call &call) {
     const int b_stride = w.group_stride();
+    const int slab = native_tile_slab_cols(Kind, p.nr);
+    const int slabs = p.nr / slab;
+    assert(slabs <= max_slabs(Kind));
     const bool one_pass = p.kc >= K;
     for (native_k_passes_t pass {K, p.kc}; pass.next();) {
         const int k0 = pass.k0, kl = pass.kl;
@@ -349,24 +360,30 @@ void f32_block(const native_plan_t &p, const f32_operands_t &op,
             const int n = n0 + t * p.nr;
             const int cols = Tail ? std::min(p.nr, w.N - n) : p.nr;
             if (Tail && cols <= 0) continue;
-            const float *b
-                    = reinterpret_cast<const float *>(w.block(n / w.pack_nr))
-                    + n % w.pack_nr + k_off;
+            const B *slab_b[max_slabs(Kind)];
+            for (int s = 0; s < slabs; ++s) {
+                const int col = n + s * slab;
+                slab_b[s]
+                        = reinterpret_cast<const B *>(w.block(col / w.pack_nr))
+                        + col % w.pack_nr + k_off;
+            }
             float *tile_acc
                     = one_pass ? acc : acc + static_cast<size_t>(t) * mb * p.nr;
             for (int ir = 0; ir < mb; ir += p.mr) {
                 const int mr = std::min(p.mr, mb - ir);
-                const float *a
+                const auto *a
                         = op.A + static_cast<size_t>(m0 + ir) * op.lda + k0;
                 if (op.dst != nullptr && (!Tail || cols == p.nr)) {
-                    op.kern[mr](a, op.lda, b, b_stride,
-                            op.dst + static_cast<size_t>(m0 + ir) * op.ldc + n,
-                            op.ldc, kl, kl, beta);
+                    float *d = op.dst + static_cast<size_t>(m0 + ir) * op.ldc
+                            + n;
+                    for (int s = 0; s < slabs; ++s)
+                        call(mr, a, slab_b[s], d + s * slab, op.ldc, kl, beta);
                     continue;
                 }
                 float *c = one_pass ? tile_acc
                                     : tile_acc + static_cast<size_t>(ir) * p.nr;
-                op.kern[mr](a, op.lda, b, b_stride, c, p.nr, kl, kl, beta);
+                for (int s = 0; s < slabs; ++s)
+                    call(mr, a, slab_b[s], c + s * slab, p.nr, kl, beta);
                 if (k0 + kl == K)
                     apply_epilogue_tile(
                             ep, c, p.nr, m0 + ir, mr, n, Tail ? cols : p.nr);
@@ -375,91 +392,51 @@ void f32_block(const native_plan_t &p, const f32_operands_t &op,
     }
 }
 
-/// f32_block over an f16 weight, from the widened source rows; its K
-/// passes step without passing K.
+/// slab_block on the FP32 kernels.
+template <bool Tail>
+void f32_block(const native_plan_t &p, const f32_operands_t &op,
+        const native_weight_view_t &w, const native_epilogue_t &ep, int mb,
+        int K, int m0, int n0, int tiles, float *acc) {
+    const int b_stride = w.group_stride();
+    slab_block<Tail, native_kernel_kind_t::f32, float>(p, op, w, ep, mb, K, m0,
+            n0, tiles, acc,
+            [&](int mr, const float *a, const float *b, float *c, int ldc,
+                    int kl, float beta) {
+        op.kern[mr](a, op.lda, b, b_stride, c, ldc, kl, kl, beta);
+    });
+}
+
+/// slab_block on the F16 kernels, from the widened source rows.
 template <bool Tail>
 void f16_block(const native_plan_t &p, const f16_operands_t &op,
         const native_weight_view_t &w, const native_epilogue_t &ep, int mb,
         int K, int m0, int n0, int tiles, float *acc) {
     const int b_stride = w.group_stride();
-    const bool one_pass = p.kc >= K;
-    for (int k0 = 0, kl = 0; k0 < K; k0 += kl) {
-        kl = std::min(p.kc, K - k0);
-        const float beta = k0 == 0 ? 0.0f : 1.0f;
-        const size_t k_off = static_cast<size_t>(k0) * b_stride;
-        for (int t = 0; t < tiles; ++t) {
-            const int n = n0 + t * p.nr;
-            const int cols = Tail ? std::min(p.nr, w.N - n) : p.nr;
-            if (Tail && cols <= 0) continue;
-            const uint16_t *b
-                    = reinterpret_cast<const uint16_t *>(w.block(n / w.pack_nr))
-                    + n % w.pack_nr + k_off;
-            float *tile_acc
-                    = one_pass ? acc : acc + static_cast<size_t>(t) * mb * p.nr;
-            for (int ir = 0; ir < mb; ir += p.mr) {
-                const int mr = std::min(p.mr, mb - ir);
-                const float *a
-                        = op.A + static_cast<size_t>(m0 + ir) * op.lda + k0;
-                if (op.dst != nullptr && (!Tail || cols == p.nr)) {
-                    op.kern[mr](a, op.lda, b, b_stride,
-                            op.dst + static_cast<size_t>(m0 + ir) * op.ldc + n,
-                            op.ldc, kl, kl, beta);
-                    continue;
-                }
-                float *c = one_pass ? tile_acc
-                                    : tile_acc + static_cast<size_t>(ir) * p.nr;
-                op.kern[mr](a, op.lda, b, b_stride, c, p.nr, kl, kl, beta);
-                if (k0 + kl == K)
-                    apply_epilogue_tile(
-                            ep, c, p.nr, m0 + ir, mr, n, Tail ? cols : p.nr);
-            }
-        }
-    }
+    slab_block<Tail, native_kernel_kind_t::f16, uint16_t>(p, op, w, ep, mb, K,
+            m0, n0, tiles, acc,
+            [&](int mr, const float *a, const uint16_t *b, float *c, int ldc,
+                    int kl, float beta) {
+        op.kern[mr](a, op.lda, b, b_stride, c, ldc, kl, kl, beta);
+    });
 }
 
-/// f16_block on the F16_PH kernels, from the call's f16 source rows: the
+/// slab_block on the F16_PH kernels, from the call's f16 source rows: the
 /// plan's K passes are whole blocks of the kernels' f16 accumulation, so
-/// each block covers the same K whatever the plan.  A tile of 64 columns
-/// reads its second 32 columns from the next pack block.
+/// each block covers the same K whatever the plan.  A call of 64 columns
+/// (a tile of 64, or each slab of a tile of 128) reads its second 32
+/// columns from the next pack block.
 template <bool Tail>
 void f16_ph_block(const native_plan_t &p, const f16_ph_operands_t &op,
         const native_weight_view_t &w, const native_epilogue_t &ep, int mb,
         int K, int m0, int n0, int tiles, float *acc) {
     const int b_stride = w.group_stride();
     const size_t b_next = w.block_bytes / sizeof(uint16_t);
-    const bool one_pass = p.kc >= K;
-    for (int k0 = 0, kl = 0; k0 < K; k0 += kl) {
-        kl = std::min(p.kc, K - k0);
-        const float beta = k0 == 0 ? 0.0f : 1.0f;
-        const size_t k_off = static_cast<size_t>(k0) * b_stride;
-        for (int t = 0; t < tiles; ++t) {
-            const int n = n0 + t * p.nr;
-            const int cols = Tail ? std::min(p.nr, w.N - n) : p.nr;
-            if (Tail && cols <= 0) continue;
-            const uint16_t *b
-                    = reinterpret_cast<const uint16_t *>(w.block(n / w.pack_nr))
-                    + n % w.pack_nr + k_off;
-            float *tile_acc
-                    = one_pass ? acc : acc + static_cast<size_t>(t) * mb * p.nr;
-            for (int ir = 0; ir < mb; ir += p.mr) {
-                const int mr = std::min(p.mr, mb - ir);
-                const uint16_t *a
-                        = op.A + static_cast<size_t>(m0 + ir) * op.lda + k0;
-                if (op.dst != nullptr && (!Tail || cols == p.nr)) {
-                    op.kern[mr](a, op.lda, b, b_stride, b_next,
-                            op.dst + static_cast<size_t>(m0 + ir) * op.ldc + n,
-                            op.ldc, kl, beta);
-                    continue;
-                }
-                float *c = one_pass ? tile_acc
-                                    : tile_acc + static_cast<size_t>(ir) * p.nr;
-                op.kern[mr](a, op.lda, b, b_stride, b_next, c, p.nr, kl, beta);
-                if (k0 + kl == K)
-                    apply_epilogue_tile(
-                            ep, c, p.nr, m0 + ir, mr, n, Tail ? cols : p.nr);
-            }
-        }
-    }
+    slab_block<Tail, native_kernel_kind_t::f16_ph, uint16_t>(p, op, w, ep, mb,
+            K, m0, n0, tiles, acc,
+            [&](int mr, const uint16_t *a, const uint16_t *b, float *c, int ldc,
+                    int kl, float beta) {
+        op.kern[mr](a, op.lda, b, b_stride, b_next, c, ldc, kl, beta);
+    });
 }
 
 /// The INT8 tiles of tiles column tiles from n0, each over all of K, stored
@@ -1237,17 +1214,14 @@ status_t run_gemv(gemv_call_t &g, int workers, int threads, size_t packed,
     return status_t::success;
 }
 
-/// The plan the paired tiles of a gated call over [gate | up] halves run
-/// (native_weight_view_t) at width (native_paired_width): planned's, with
-/// tiles width wide when that is wider, and for BF16 the accumulators of a
-/// tile's rows.  Where the wider tiles leave the static deal fewer units
-/// than threads, row blocks of fewer rows give back the units the plan was
-/// balanced for.
-native_plan_t paired_plan(const native_plan_t &planned,
+} // namespace
+
+native_plan_t native_paired_plan(const native_plan_t &planned,
         const native_problem_t &problem, int width) {
     native_plan_t p = planned;
     if (width > planned.nr) {
         p.nr = width;
+        p.paired_wider = true;
         p.n_tiles = problem.N / p.nr;
         if (p.unit_tiles > 0)
             p.unit_tiles = std::max(1, p.unit_tiles * planned.nr / width);
@@ -1270,6 +1244,8 @@ native_plan_t paired_plan(const native_plan_t &planned,
                 = std::max(p.scratch_floats, static_cast<size_t>(p.mb) * p.nr);
     return p;
 }
+
+namespace {
 
 /// The [MATMUL.NATIVE_BRGEMM] line of a call that ran; paired: its tiles
 /// paired the halves of a gated call.
@@ -1393,7 +1369,7 @@ status_t run_tiles(const GemmDescriptor &desc,
             ? native_paired_width(desc.N, p.nr, p.m_blocks, p.threads)
             : 0;
     const bool paired = paired_width > 0;
-    if (paired) p = paired_plan(p, problem, paired_width);
+    if (paired) p = native_paired_plan(p, problem, paired_width);
     const bool bias_in_dequant
             = c.int8 && p.int8_bias_in_dequant && decision.bias_in_dequant;
     native_epilogue_t ep;

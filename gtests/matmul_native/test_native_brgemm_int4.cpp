@@ -55,6 +55,16 @@
 #include "lowoha_operators/matmul/quantization/reorder_quantization.hpp"
 #include "matmul_native/native_brgemm_test_utils.hpp"
 
+// The INT8 tile's internal header leaves native_planner.cpp's file-local
+// names free: its kMaxTileCols, the widest kernel call, can sit beside it
+// and be read in namespace native, as validate_native_plan reads it.
+namespace zendnnl::lowoha::matmul::native {
+namespace {
+constexpr int kMaxTileCols = 32;
+} // namespace
+static_assert(kMaxTileCols == native_slab_cols(native_kernel_kind_t::int8));
+} // namespace zendnnl::lowoha::matmul::native
+
 namespace {
 
 namespace nt = native_brgemm_test;
@@ -1144,57 +1154,61 @@ nat::native_problem_t problem_of(const nt::call_t &c) {
             nat::decide_int8_call(desc, c.params, c.bias));
 }
 
-/// The batches of groups the full tiles of the call over its plain pack take
-/// at the process planner's plan, at each of their call widths, as
-/// compute_int4_group_tile cuts them (native_int8_group_span): more than
-/// one, and with odd the batches past the first starting on the high
-/// nibbles of a K octet (an odd number of K quads per batch).
-::testing::AssertionResult tiles_take_batches(
-        const case_t &c, const operands_t &o, bool odd) {
+/// The process planner's plan of the call.
+nat::native_plan_t process_plan(const case_t &c, const operands_t &o) {
     const buffer_t scale = copy_of(o.src_scale);
-    const nat::native_plan_t plan = nat::native_planner().plan(
+    return nat::native_planner().plan(
             problem_of(make_call(c, o, o.wei.get(), nullptr, scale)));
+}
+
+/// The batches of groups the full tiles of the call over its plain pack take
+/// at plan, over the columns of the calls that take each batch in turn
+/// (native_int8_turn_width), as compute_int4_group_tile cuts them
+/// (native_int8_group_span): more than one, and with odd the batches past
+/// the first starting on the high nibbles of a K octet (an odd number of K
+/// quads per batch).
+::testing::AssertionResult tiles_take_batches(
+        const case_t &c, const nat::native_plan_t &plan, bool odd) {
     const int rows = std::min(plan.mb, c.M);
     const int quads = c.gs / 4;
     for (int col = 0; col < plan.nr;) {
         const int cw = nat::native_int8_col_width(plan, plan.nr - col);
+        const int width = nat::native_int8_turn_width(plan, plan.nr, cw, false);
         const int max_mr = nat::native_int8_call_rows(plan, cw / 16);
         const int span = nat::native_int8_group_span(
-                plan, c.G, quads, cw, rows, max_mr, 2);
+                plan, c.G, quads, width, rows, max_mr, 2);
         if (span >= c.G)
             return ::testing::AssertionFailure()
-                    << "one batch of " << c.G << " groups at " << cw
+                    << "one batch of " << c.G << " groups at " << width
                     << " columns";
         if (odd && span * quads % 2 == 0)
             return ::testing::AssertionFailure()
                     << "batches of " << span << " groups of " << quads
                     << " quads start on whole octets";
-        col += cw;
+        col += width;
     }
     return ::testing::AssertionSuccess();
 }
 
 /// The K passes of the one group the full tiles of the call over its plain
-/// pack take at the process planner's plan, at each of their call widths,
-/// as compute_int4_group_tile cuts them (native_int4_pass_quads): more than
-/// one.
+/// pack take at plan, over the columns of the calls that take each pass in
+/// turn (native_int8_turn_width), as compute_int4_group_tile cuts them
+/// (native_int4_pass_quads): more than one.
 ::testing::AssertionResult tiles_take_passes(
-        const case_t &c, const operands_t &o) {
-    const buffer_t scale = copy_of(o.src_scale);
-    const nat::native_plan_t plan = nat::native_planner().plan(
-            problem_of(make_call(c, o, o.wei.get(), nullptr, scale)));
+        const case_t &c, const nat::native_plan_t &plan) {
     const int rows = std::min(plan.mb, c.M);
     const int quads = c.K() / 4;
     for (int col = 0; col < plan.nr;) {
         const int cw = nat::native_int8_col_width(plan, plan.nr - col);
+        const int width = nat::native_int8_turn_width(plan, plan.nr, cw, false);
         const int max_mr = nat::native_int8_call_rows(plan, cw / 16);
         const int pass
-                = nat::native_int4_pass_quads(plan, quads, cw, rows, max_mr);
+                = nat::native_int4_pass_quads(plan, quads, width, rows, max_mr);
         if (pass >= quads)
             return ::testing::AssertionFailure()
-                    << "one pass of " << quads << " quads at " << cw
+                    << "one pass of " << quads << " quads at " << width
                     << " columns";
-        col += cw;
+        col += width;
     }
     return ::testing::AssertionSuccess();
 }
@@ -1285,8 +1299,10 @@ protected:
 TEST_P(NativeBrgemmInt4Calls, MatchTheirOrder) {
     const case_t &c = GetParam();
     const operands_t o = make_operands(c);
-    if (c.batches) { EXPECT_TRUE(tiles_take_batches(c, o, c.odd_batches)); }
-    if (c.passes) { EXPECT_TRUE(tiles_take_passes(c, o)); }
+    if (c.batches) {
+        EXPECT_TRUE(tiles_take_batches(c, process_plan(c, o), c.odd_batches));
+    }
+    if (c.passes) { EXPECT_TRUE(tiles_take_passes(c, process_plan(c, o))); }
     const buffer_t raw = copy_of(o.wei);
     const source_t s = source_of(c, o);
     // The model reads the raw weight, which an in-place call rewrites.
@@ -1799,6 +1815,121 @@ INSTANTIATE_TEST_SUITE_P(NativeBrgemmInt4Calls, NativeBrgemmInt4Calls,
         [](const ::testing::TestParamInfo<case_t> &info) {
             return info.param.name;
         });
+
+// Tiles of 64 and 128 columns, run slab by slab, give the bits of the
+// call's order: every call case whose padded N is whole tiles of a pinned
+// width takes the pin in a child process (group and one-group weights,
+// batches and K passes, tails, paired gated halves, the direct store), and
+// with INT8 call widths of 16, other rows per call and M blocks.
+TEST(NativeBrgemmInt4Wide, TilesMatchTheirOrder) {
+    if (!vnni()) GTEST_SKIP() << "no AVX-512 VNNI";
+    const struct {
+        const char *pin;
+        int nr;
+    } pins[] = {{"nr=64", 64}, {"nr=128,int8_cw=16,int8_mr=5,mb=24", 128},
+            {"nr=128,schedule=blocks,nb=256,direct_store=0", 128}};
+    const std::vector<case_t> cases = call_cases();
+    for (const auto &pin : pins) {
+        nt::expect_in_child(
+                {{"ZENDNNL_MATMUL_NATIVE_CONFIG", pin.pin},
+                        {"ZENDNNL_MATMUL_NATIVE_TUNING_FILE", nullptr}},
+                [&] {
+            mm::clear_matmul_weight_caches();
+            WeightCacheGuard global_cache(2);
+            int bad = 0, taken = 0;
+            for (const case_t &c : cases) {
+                if (nat::native_padded_n(c.N, nat::kNativeLayoutPackNr) % pin.nr
+                        != 0)
+                    continue;
+                const operands_t o = make_operands(c);
+                const source_t s = source_of(c, o);
+                const buffer_t model = model_dst(c, o, s);
+                const buffer_t scale = copy_of(o.src_scale);
+                const nat::native_plan_t plan
+                        = nat::native_planner().plan(problem_of(
+                                make_call(c, o, o.wei.get(), nullptr, scale)));
+                const buffer_t got = run_native(c, o);
+                const int cols = c.gated != mm::matmul_gated_act_t::none
+                        ? c.N / 2
+                        : c.N;
+                const ::testing::AssertionResult same = transcendental(c)
+                        ? near_model(c, o.ldc, got.get(), model.get())
+                        : nt::within_steps(got.get(), o.ldc, model.get(), o.ldc,
+                                  c.dst, c.M, cols, 0);
+                if (plan.nr != pin.nr || !same) {
+                    std::fprintf(stderr, "%s under %s: plan nr %d, %s\n",
+                            c.name.c_str(), pin.pin, plan.nr, same.message());
+                    ++bad;
+                }
+                ++taken;
+                mm::clear_matmul_weight_caches();
+            }
+            if (taken < 20) {
+                std::fprintf(stderr, "%s took %d cases\n", pin.pin, taken);
+                ++bad;
+            }
+            return bad + (::testing::Test::HasFailure() ? 1 : 0);
+        }, pin.pin);
+    }
+}
+
+// The calls of a tile of 64 columns take each batch of groups, or K pass of
+// one group, in turn, so it spans all their columns: on a machine of 1 MiB
+// of L2, M 40 in one block of several row calls, the slab of one call of 32
+// or 16 columns fits the budget (twice the budget for groups), that of the
+// tile does not.
+TEST(NativeBrgemmInt4Wide, TilesCutOverTheirCalls) {
+    if (!vnni()) GTEST_SKIP() << "no AVX-512 VNNI";
+    nat::UarchParams u;
+    u.l1d_bytes = 48 << 10;
+    u.l2_bytes = 1 << 20;
+    u.l3_domain_bytes = 32 << 20;
+    u.l3_detected = true;
+    u.l3_domain_cores = 8;
+    u.avx512f = u.avx512bf16 = u.avx512vnni = true;
+    const auto plan_of = [&u](const case_t &c, const char *cfg) {
+        nat::native_config_t config;
+        std::string why;
+        EXPECT_TRUE(nat::parse_native_config(cfg, config, why)) << why;
+        nat::GemmDescriptor d;
+        d.M = c.M;
+        d.N = c.N;
+        d.K = c.K();
+        d.src_dt = kBf16;
+        d.wei_dt = kS4;
+        d.dst_dt = kBf16;
+        d.num_threads = 4;
+        mm::matmul_params params;
+        params.dynamic_quant = true;
+        params.quant_params.wei_scale.dt = kBf16;
+        nat::native_int8_decision_t decision;
+        decision.scheme = nat::native_int8_scheme_t::per_group;
+        decision.groups = c.G;
+        const nat::native_problem_t p = nat::make_native_problem(
+                d, params, nullptr, nat::kNativeLayoutPackNr, decision);
+        const nat::native_plan_t plan = nat::heuristic_plan(
+                p, u, nat::apply_native_config({}, config));
+        EXPECT_EQ(nat::validate_native_plan(plan, p), nullptr) << cfg;
+        return plan;
+    };
+    case_t groups;
+    groups.M = 40;
+    groups.gs = 128;
+    groups.G = 32;
+    case_t one = groups;
+    one.gs = 16384;
+    one.G = 1;
+    for (const char *cfg : {"nr=64,mb=40", "nr=64,mb=40,int8_cw=16"}) {
+        EXPECT_TRUE(tiles_take_batches(groups, plan_of(groups, cfg), false))
+                << cfg;
+        EXPECT_TRUE(tiles_take_passes(one, plan_of(one, cfg))) << cfg;
+    }
+    for (const char *cfg : {"nr=32,mb=40", "nr=32,mb=40,int8_cw=16"}) {
+        EXPECT_FALSE(tiles_take_batches(groups, plan_of(groups, cfg), false))
+                << cfg;
+        EXPECT_FALSE(tiles_take_passes(one, plan_of(one, cfg))) << cfg;
+    }
+}
 
 // The plan line names the order: fused for a per-token or per-group source,
 // reference for alpha, beta or an integer dst.

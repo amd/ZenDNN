@@ -83,18 +83,6 @@ native_kernel_registry_t::native_kernel_registry_t(
         c.max_mr = full_rows(mask);
         if (c.max_mr > 0) all_.push_back(c);
     }
-    // Wider tiles run the slab kernels slab by slab.
-    const native_kernel_caps_t *slab
-            = caps(native_kernel_kind_t::bf16, kNativeBf16SlabCols);
-    if (slab != nullptr) {
-        const native_kernel_caps_t c32 = *slab;
-        for (int nr = 2 * kNativeBf16SlabCols; nr <= kNativeBf16MaxTileCols;
-                nr *= 2) {
-            native_kernel_caps_t c = c32;
-            c.nr = nr;
-            all_.push_back(c);
-        }
-    }
     for (int w = 0; int8_isa && w < kWidths; ++w) {
         native_kernel_caps_t c;
         c.kind = native_kernel_kind_t::int8;
@@ -212,6 +200,17 @@ native_kernel_registry_t::native_kernel_registry_t(
         c.max_mr = full_rows(mask);
         if (c.max_mr > 0) all_.push_back(c);
     }
+    // Wider tiles run the kernels of the slab width slab by slab.
+    const size_t probed = all_.size();
+    for (size_t i = 0; i < probed; ++i) {
+        const native_kernel_caps_t slab = all_[i];
+        if (slab.nr != native_slab_cols(slab.kind)) continue;
+        for (int nr = 2 * slab.nr; nr <= kNativeMaxTileCols; nr *= 2) {
+            native_kernel_caps_t c = slab;
+            c.nr = nr;
+            all_.push_back(c);
+        }
+    }
 }
 
 const native_kernel_caps_t *native_kernel_registry_t::caps(
@@ -245,26 +244,30 @@ bool native_kernel_registry_t::covers(native_kernel_kind_t kind, int mr, int nr,
 
 const bf16_brgemm_fn_t *native_kernel_registry_t::bf16_table(
         int nr) const noexcept {
-    if (caps(native_kernel_kind_t::bf16, nr) == nullptr) return nullptr;
-    return bf16_[width_index(native_bf16_slab_cols(nr))];
+    constexpr native_kernel_kind_t kind = native_kernel_kind_t::bf16;
+    if (caps(kind, nr) == nullptr) return nullptr;
+    return bf16_[width_index(native_tile_slab_cols(kind, nr))];
 }
 
 const native_fp32_ukernel_fn_t *native_kernel_registry_t::f32_table(
         int nr) const noexcept {
-    if (caps(native_kernel_kind_t::f32, nr) == nullptr) return nullptr;
-    return f32_[width_index(nr)];
+    constexpr native_kernel_kind_t kind = native_kernel_kind_t::f32;
+    if (caps(kind, nr) == nullptr) return nullptr;
+    return f32_[width_index(native_tile_slab_cols(kind, nr))];
 }
 
 const native_f16_ukernel_fn_t *native_kernel_registry_t::f16_table(
         int nr) const noexcept {
-    if (caps(native_kernel_kind_t::f16, nr) == nullptr) return nullptr;
-    return f16_[width_index(nr)];
+    constexpr native_kernel_kind_t kind = native_kernel_kind_t::f16;
+    if (caps(kind, nr) == nullptr) return nullptr;
+    return f16_[width_index(native_tile_slab_cols(kind, nr))];
 }
 
 const native_f16_ph_ukernel_fn_t *native_kernel_registry_t::f16_ph_table(
         int nr) const noexcept {
-    if (caps(native_kernel_kind_t::f16_ph, nr) == nullptr) return nullptr;
-    return f16_ph_[width_index(nr)];
+    constexpr native_kernel_kind_t kind = native_kernel_kind_t::f16_ph;
+    if (caps(kind, nr) == nullptr) return nullptr;
+    return f16_ph_[width_index(native_tile_slab_cols(kind, nr))];
 }
 
 native_kernel_kind_t native_kernel_registry_t::f16_kind() const noexcept {

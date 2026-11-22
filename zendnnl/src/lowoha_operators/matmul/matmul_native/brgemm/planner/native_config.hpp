@@ -48,8 +48,10 @@ struct heuristic_params_t {
     // Tile grid and schedule.
     /// pin; 0: pack_nr, at most 32 (64 for F16_PH by f16_wide_min_m),
     /// halved while tiles < team and one row block, or 64 / 128 by
-    /// bf16_narrow_n.  64 and 128 are BF16 tiles of 32-column slabs; 64 is
-    /// also an F16_PH tile of two pack blocks.
+    /// bf16_narrow_n.  64 and 128 are tiles of 32-column slabs, the widest
+    /// kernel call of every type but F16_PH, whose widest call is its tile
+    /// of 64 (two pack blocks) and whose 128 is two of those; the rules
+    /// take them for BF16 and F16_PH 64 only.
     int nr = 0;
     /// pin; 0: tall_rows for a BF16 tile of 32 columns or more, else
     /// tile_rows

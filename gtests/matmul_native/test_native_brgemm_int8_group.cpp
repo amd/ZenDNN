@@ -538,23 +538,31 @@ nat::native_problem_t problem_of(const nt::call_t &c) {
             nat::decide_int8_call(desc, c.params, c.bias));
 }
 
-/// Whether the per-group tiles of c, at the process planner's plan, run in
-/// more than one batch of groups at each of their call widths, as
-/// compute_group_tile cuts them (native_int8_group_span).
-bool tiles_take_batches(const gcase_t &c, const operands_t &o) {
-    const buffer_t scale = copy_of(o.src_scale);
-    const nat::native_plan_t plan = nat::native_planner().plan(
-            problem_of(make_call(c, o, o.wei.get(), nullptr, scale)));
+/// Whether the per-group tiles of c, at plan, run in more than one batch of
+/// groups over the columns of the calls that take each batch in turn
+/// (native_int8_turn_width), as compute_group_tile cuts them
+/// (native_int8_group_span).
+bool tiles_take_batches(const gcase_t &c, const nat::native_plan_t &plan) {
     const int rows = std::min(plan.mb, c.M);
     for (int col = 0; col < plan.nr;) {
         const int cw = nat::native_int8_col_width(plan, plan.nr - col);
+        const int width = nat::native_int8_turn_width(plan, plan.nr, cw, false);
         const int max_mr = nat::native_int8_call_rows(plan, cw / 16);
-        if (nat::native_int8_group_span(plan, c.G, c.gs / 4, cw, rows, max_mr)
+        if (nat::native_int8_group_span(
+                    plan, c.G, c.gs / 4, width, rows, max_mr)
                 >= c.G)
             return false;
-        col += cw;
+        col += width;
     }
     return true;
+}
+
+/// tiles_take_batches at the process planner's plan of c.
+bool tiles_take_batches(const gcase_t &c, const operands_t &o) {
+    const buffer_t scale = copy_of(o.src_scale);
+    return tiles_take_batches(c,
+            nat::native_planner().plan(
+                    problem_of(make_call(c, o, o.wei.get(), nullptr, scale))));
 }
 
 /// The call through native_brgemm_execute on its raw weight, packed for the
@@ -1350,7 +1358,10 @@ TEST(NativeBrgemmInt8PerGroupPlan, PinsKeepTheBits) {
             {"schedule=row_groups,domain_threads=2", true},
             {"int8_kc=64,int8_mr=5", true}, {"schedule=blocks", true},
             {"schedule=blocks,unit_tiles=3,domain_threads=2", true},
-            {"schedule=blocks,unit_tiles=2,domain_threads=2", true}};
+            {"schedule=blocks,unit_tiles=2,domain_threads=2", true},
+            {"nr=64", true}, {"nr=128", true}, {"nr=128,int8_cw=16", true},
+            {"nr=64,int8_mr=5,direct_store=0", true},
+            {"nr=128,int8_cw=32/16,int8_mr=3,mb=24", true}};
     std::vector<gcase_t> v;
     {
         gcase_t c;
@@ -1437,6 +1448,53 @@ TEST(NativeBrgemmInt8PerGroupPlan, PinsKeepTheBits) {
         return bad + (::testing::Test::HasFailure() ? 1 : 0);
     }, "per-group calls under per-call settings");
     mm::clear_matmul_weight_caches();
+}
+
+// The calls of a tile of 64 columns take each batch of groups in turn, so it
+// spans all their columns: on a machine of 1 MiB of L2, M 40 in one block of
+// several row calls, the slab of one call of 32 or 16 columns fits twice the
+// budget, that of the tile does not.
+TEST(NativeBrgemmInt8PerGroupPlan, WideTilesBatchOverTheirCalls) {
+    if (!vnni()) GTEST_SKIP() << "no AVX-512 VNNI";
+    nat::UarchParams u;
+    u.l1d_bytes = 48 << 10;
+    u.l2_bytes = 1 << 20;
+    u.l3_domain_bytes = 32 << 20;
+    u.l3_detected = true;
+    u.l3_domain_cores = 8;
+    u.avx512f = u.avx512bf16 = u.avx512vnni = true;
+    gcase_t c;
+    c.M = 40;
+    c.N = 64;
+    c.gs = 128;
+    c.G = 128;
+    nat::GemmDescriptor d;
+    d.M = c.M;
+    d.N = c.N;
+    d.K = c.gs * c.G;
+    d.src_dt = kBf16;
+    d.wei_dt = kS8;
+    d.dst_dt = kBf16;
+    d.num_threads = 4;
+    mm::matmul_params params;
+    params.dynamic_quant = true;
+    nat::native_int8_decision_t decision;
+    decision.scheme = nat::native_int8_scheme_t::per_group;
+    const nat::native_problem_t p = nat::make_native_problem(
+            d, params, nullptr, nat::kNativeLayoutPackNr, decision);
+    const auto plan_of = [&](const char *cfg) {
+        nat::native_config_t config;
+        std::string why;
+        EXPECT_TRUE(nat::parse_native_config(cfg, config, why)) << why;
+        const nat::native_plan_t plan = nat::heuristic_plan(
+                p, u, nat::apply_native_config({}, config));
+        EXPECT_EQ(nat::validate_native_plan(plan, p), nullptr) << cfg;
+        return plan;
+    };
+    for (const char *cfg : {"nr=64,mb=40", "nr=64,mb=40,int8_cw=16"})
+        EXPECT_TRUE(tiles_take_batches(c, plan_of(cfg))) << cfg;
+    for (const char *cfg : {"nr=32,mb=40", "nr=32,mb=40,int8_cw=16"})
+        EXPECT_FALSE(tiles_take_batches(c, plan_of(cfg))) << cfg;
 }
 
 // The tile check: what a group-scaled call needs, and the problem class of a

@@ -22,7 +22,7 @@ run time, gradient-boosted trees when present, numpy models otherwise).
 |---|---|
 | `schema.py` | Loads the planner's schema: config keys (type, range, default or auto value, dtype, INT8 schemes, bits), match keys, rule features and comparisons, kernel registry (BF16, FP32, an INT8 kernel family per scheme it serves, the INT4 group kernels and the INT4 kernels of one group over K, F16 and F16_PH, each with its tile widths and rows per call), hardware, uarch, the machine's value of every version 2 hardware key (`hw_match`), the fields of the `[MATMUL.NATIVE_BRGEMM]` line (`plan_line`) and the values of its `gemv` field (`plan_line_gemv`). Reads the JSON the `SchemaDump` gtest prints between `BEGIN NATIVE TUNING SCHEMA` and `END NATIVE TUNING SCHEMA` (raw or inside a gtest log), else `fixtures/schema_dump.json`, that gtest's output. `fixtures/schema_design.json`, written from the design, is the schema of an older build, without the rule keys, the blocks schedule and `hw_match`. |
 | `problems.py` | Problems (the planner's problem, `native_problem_t`: the weight type bf16, s8, f32, s4 or f16, a weight of N not a multiple of 32 planned and matched at N rounded up to whole 32-column blocks, `plan_n`, an s8 problem's INT8 scheme, an s4 problem's group size and scale bytes, the epilogue class), shape lists (TSV), M classes, the rule features as the loader computes them. |
-| `plan.py` | The built-in planner (`native_planner.cpp`) line for line: the rules' plan (the tile grid, the rules behind the switches `makespan`, `l1_pass`, `traffic_groups`, `bf16_alias`, `bf16_narrow_n` and `blocks`, the L3 rules only with an L3, BF16 tiles of 64 and 128 columns, the blocks schedule, the tiles of per-group INT8 and of s4 calls with their pass budget (12 rows per call at both widths for an s4 weight of one group over K), the F16_PH tiles of two blocks and K passes of whole blocks), then with `cost_model` the model's choice among the rules' variants (rows per call and row groups for BF16 and F16, the long K pass and short M blocks of long weight streams (where one core streams slower than its share of the link, the M blocks of a BF16 team that fills its L3 domains only over a K above `cm_block_k`), INT8 row groups and blocks of three calls, s4 M blocks (weighed at the group kernel's rows per call) and the K passes of one group); plan validation, single-override resolution, plan signature, the plan fields of the log line (a gated call's of the tiles it runs: the width they pair its halves at, `native_paired_width`, and their plan). The built-in plan has each key at the schema's default; a rule whose switch or bound the schema lacks is one its build does not have. |
+| `plan.py` | The built-in planner (`native_planner.cpp`) line for line: the rules' plan (the tile grid, the rules behind the switches `makespan`, `l1_pass`, `traffic_groups`, `bf16_alias`, `bf16_narrow_n` and `blocks`, the L3 rules only with an L3, BF16 tiles of 64 and 128 columns and every type's when pinned (slabs of each kernel kind's widest call, the INT8 K pass at the tile's width), the blocks schedule, the tiles of per-group INT8 and of s4 calls with their pass budget (12 rows per call at both widths for an s4 weight of one group over K), the F16_PH tiles of two blocks and K passes of whole blocks), then with `cost_model` the model's choice among the rules' variants (rows per call and row groups for BF16 and F16, the long K pass and short M blocks of long weight streams (where one core streams slower than its share of the link, the M blocks of a BF16 team that fills its L3 domains only over a K above `cm_block_k`), INT8 row groups and blocks of three calls, s4 M blocks (weighed at the group kernel's rows per call) and the K passes of one group); plan validation, single-override resolution, plan signature (the K passes the calls of each INT8 tile take, in turn or one at a time, the tail tile's among them), the plan fields of the log line (a gated call's of the tiles it runs: the width they pair its halves at, `native_paired_width`, and their plan). The built-in plan has each key at the schema's default; a rule whose switch or bound the schema lacks is one its build does not have. |
 | `cost_model.py` | The planner's cost model (`native_cost_model.cpp`) line for line: the modeled cycles of a plan's busiest worker, with every floating-point expression in the library's order. |
 | `candidates.py` | Override text (format, parse, clauses), static checks, the default search space, per-problem candidate spaces, de-duplication. |
 | `results.py` | Results store (JSONL) and the statistics: per-session ratios, noise, significance. |
@@ -103,8 +103,13 @@ run time, gradient-boosted trees when present, numpy models otherwise).
    (`min_gain_pct`, `idle_pct`, `decode_m`, `l1_pct`, `l1_pass_max_mb`,
    `min_pass_k`, which both dtypes read, `bf16_alias_mr`, and the bounds
    `bf16_narrow_n_min_m`, `bf16_blocks_min_m` and `int8_blocks_min_m` at 1,
-   the rule from the first row) are searched too; BF16 problems also take
-   tiles of 64 and 128 columns (`nr`), and the schedules take
+   the rule from the first row) are searched too; every type also takes
+   tiles of 64 and 128 columns (`nr`) where the build's registry lists
+   them (an older build: BF16 only), slabs of 32 columns, the widest call
+   of every kernel kind but F16_PH, whose widest call is its tile of 64
+   and whose 128 is two of those; the built-in plan takes them for BF16
+   (`bf16_narrow_n`) and F16_PH 64 only, so only a pin reaches the others.
+   The schedules take
    `schedule=blocks` and units of 64, 128 and 256 columns (`nb`, the N
    block, a pin of that schedule: the unit takes `nb` / `nr` column tiles,
    at least one, whatever `nr` the plan takes, and replaces `unit_tiles`,
@@ -485,13 +490,15 @@ are its `meta.plans`, so a planner change that moves an entry's plan fails it.
 `test_plan.py` checks `plan.py` against the library's plans:
 `fixtures/plan_check.json` holds the SHA-256 of the library's plan lines for
 the cases `tests/plan_cases.py` draws (random problems of every weight type,
-machines and configs, with pins, the rule switches, constants, the cost
-model's inputs and the blocks schedule, s4 group sizes and one group over K,
-widths that are not whole 32-column blocks, per-group INT8 calls and machines
-without an L3; a case without a config plans with the build's defaults, a
-fraction sets every rule switch to 0 and another sets cost-model inputs; the
-fixture records those counts and the cases of each weight type). Every field
-of the plan is compared, its kernels and the problem's padded width.
+machines and configs, with pins, tiles of 16 to 128 columns of every type
+among them, the rule switches, constants, the cost model's inputs and the
+blocks schedule, s4 group sizes and one group over K, widths that are not
+whole 32-column blocks, per-group INT8 calls and machines without an L3; a
+case without a config plans with the build's defaults, a fraction sets every
+rule switch to 0 and another sets cost-model inputs; the fixture records
+those counts, the cases of each weight type and the kernel kinds of the
+machine its plans came from, which the test plans with). Every field of the
+plan is compared, its kernels and the problem's padded width.
 
 When the planner, its keys or its defaults change, refresh both fixtures
 from the new build, with the plans of a machine of the ISA of its
@@ -507,7 +514,7 @@ AVX512-FP16. The planner's test compares only the field names of its `hw`,
 field the planner adds needs an example value in the fixture first:
 
     tools/native_brgemm_tuning/refresh_fixtures.sh <worktree> <SchemaDump gtest log> [build dir]
-    # or with the plan dumps made on that machine
+    # or with the plan dumps made on that machine, the nb dump under ZENDNNL_MATMUL_NATIVE_F16_ACCUM=f32
     DUMP=<dump> NB_DUMP=<nb dump> tools/native_brgemm_tuning/refresh_fixtures.sh <worktree> <SchemaDump gtest log>
 
 It builds `plan_dump/plan_dump.cpp` against the worktree's planner headers
@@ -532,13 +539,24 @@ description (`--machine l1d,l2,l3,family_l3,dom`):
 
 The N block's cases (`--nb`: every case sets `nb`, half of them the blocks
 schedule, a quarter `unit_tiles` too) have their own fixture,
-`fixtures/plan_check_nb.json`, which the refresh writes too. It names the
-kernel kinds of the machine its plans came from, and the test plans with
-those, so a machine without every kernel kind can remake it alone:
+`fixtures/plan_check_nb.json`, which the refresh writes too. Each plan
+fixture names the kernel kinds its plans came from, and the test plans with
+those; each holds one f16 kernel family. `plan_check.json` holds the plans of
+a machine with every kernel kind, its f16 calls on the F16_PH kernels (made
+without AVX512-FP16, it would check no F16_PH plan). `plan_check_nb.json`
+holds those of the F16 kernels, which serve f16 calls without AVX512-FP16
+and, on any machine, under `ZENDNNL_MATMUL_NATIVE_F16_ACCUM=f32` (then the
+`SchemaDump` lists no F16_PH); the refresh makes its dump under that setting
+and leaves F16_PH out of its kinds:
 
-    python3 $P cases --nb | /tmp/plan_dump > /tmp/nb_dump.txt
-    python3 $P compare /tmp/nb_dump.txt --nb --schema <SchemaDump gtest log>
-    python3 $P fixture /tmp/nb_dump.txt --nb --schema <SchemaDump gtest log> \
+    python3 $P cases | /tmp/plan_dump > /tmp/dump.txt
+    python3 $P compare /tmp/dump.txt --schema <SchemaDump gtest log>
+    python3 $P fixture /tmp/dump.txt --schema <SchemaDump gtest log> \
+        > tools/native_brgemm_tuning/fixtures/plan_check.json
+    # the nb dump and its SchemaDump gtest log under ZENDNNL_MATMUL_NATIVE_F16_ACCUM=f32
+    python3 $P cases --nb | ZENDNNL_MATMUL_NATIVE_F16_ACCUM=f32 /tmp/plan_dump > /tmp/nb_dump.txt
+    python3 $P compare /tmp/nb_dump.txt --nb --schema <F16 SchemaDump gtest log>
+    python3 $P fixture /tmp/nb_dump.txt --nb --schema <F16 SchemaDump gtest log> \
         > tools/native_brgemm_tuning/fixtures/plan_check_nb.json
 
 ## Keeping the tuner in sync with the planner

@@ -23,8 +23,9 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import plan_cases  # noqa: E402
-from helpers import DESIGN, NEWER, NO_BLOCKS, OLDER, RULES_OFF, SCHEMA, UARCH  # noqa: E402
+from helpers import BF16_SLABS, DESIGN, NEWER, NO_BLOCKS, OLDER, RULES_OFF, SCHEMA, UARCH  # noqa: E402
 
+from native_brgemm_tuning import cost_model as cm  # noqa: E402
 from native_brgemm_tuning import plan as PL  # noqa: E402
 from native_brgemm_tuning.candidates import parse_settings  # noqa: E402
 from native_brgemm_tuning.problems import Problem  # noqa: E402
@@ -117,7 +118,7 @@ class TestHeuristic(unittest.TestCase):
         p = Problem("s8", 64, 4096, 4096)
         q = builtin(p)
         self.assertIsNone(PL.validate_plan(q, p, SCHEMA))
-        broken = [dict(nr=64), dict(n_tiles=1), dict(mb=65), dict(mr=13), dict(threads=33),
+        broken = [dict(nr=256), dict(n_tiles=1), dict(mb=65), dict(mr=13), dict(threads=33),
                   dict(col_groups=3), dict(row_unit=0), dict(int8_cw_mask=2), dict(int8_rows_nv2=13),
                   dict(int8_pass_quads=-1), dict(scratch_floats=1)]
         for change in broken:
@@ -307,8 +308,8 @@ class TestRules(unittest.TestCase):
 
 
 class TestBf16Rules(unittest.TestCase):
-    """BF16 tiles of several 32-column slabs and the rules bf16_alias and
-    bf16_narrow_n, as the library's rule tests state them."""
+    """Tiles of several slabs (BF16's, and every other type's), the rules
+    bf16_alias and bf16_narrow_n, as the library's rule tests state them."""
 
     def plan(self, text, m, n, k, dtype="bf16", uarch=SMALL, threads=32):
         return plan_of(text, Problem(dtype, m, n, k, threads=threads), uarch, SCHEMA)
@@ -321,16 +322,58 @@ class TestBf16Rules(unittest.TestCase):
                 self.assertTrue(r.applied, (pack, nr, r.reason))
                 self.assertEqual((r.plan.nr, r.plan.mr, r.plan.n_tiles), (nr, 12, 4096 // nr))
                 self.assertIsNone(PL.validate_plan(r.plan, p, SCHEMA))
-        s = Problem("s8", 64, 4096, 4096)
-        self.assertFalse(PL.resolve(s, {"nr": 64}, SMALL, SCHEMA).applied)
         self.assertFalse(PL.resolve(Problem("bf16", 64, 4096, 4096), {"nr": 64}, SMALL, OLDER).applied)
+
+    def test_wide_tiles_of_every_type(self):
+        # Every type takes tiles of 64 and 128 columns of slabs of its widest call (32 columns, the
+        # F16_PH tile of 64), with the rows of the slab; only a pin reaches them, and a build whose
+        # registry has them for BF16 only rejects them.
+        f16_kind = SCHEMA.f16_kind()
+        cases = [(Problem("s8", 64, 4096, 4096), "int8"),
+                 (Problem("s8", 64, 4096, 4096, int8_scheme="per_group"), "int8"),
+                 (Problem("s4", 64, 4096, 4096, group=128, scale_bytes=2), "int4"),
+                 (Problem("s4", 64, 4096, 4096, group=4096, scale_bytes=2), "int4"),
+                 (Problem("f32", 64, 4096, 4096), "f32"), (Problem("f16", 64, 4096, 4096), f16_kind)]
+        for p, kind in cases:
+            self.assertTrue(PL.slab_tile_width(kind, 128, 32), kind)
+            self.assertEqual(PL.slab_tile_width(kind, 64, 32), kind != "f16_ph", kind)
+            for nr in (64, 128):
+                r = PL.resolve(p, {"nr": nr}, SMALL, SCHEMA)
+                self.assertTrue(r.applied, (p, nr, r.reason))
+                self.assertEqual((r.plan.nr, r.plan.kind, r.plan.n_tiles), (nr, kind, 4096 // nr))
+                self.assertEqual(r.plan.scratch_floats, PL.scratch_floats(r.plan, p))
+                self.assertEqual(PL.resolve(p, {"nr": nr}, SMALL, BF16_SLABS).applied, kind == "f16_ph" and nr == 64)
+            self.assertLessEqual(builtin(p).nr, 64 if kind == "f16_ph" else 32, p)
+        for kind in ("bf16", "int8", "f16_ph"):
+            self.assertFalse(PL.slab_tile_width(kind, 96, 32))
+            self.assertFalse(PL.slab_tile_width(kind, 256, 32))
+
+    def test_wide_int8_tiles_pass_and_pair_at_their_width(self):
+        # The calls of an INT8 tile of several slabs take each row call in turn, so its L1 pass covers
+        # the tile's columns (native_int8_pass_cols); a gated call pairs its halves at the pinned width.
+        p = Problem("s8", 64, 4096, 4096)
+        narrow, wide = plan_of("nr=32,mb=64", p, SMALL, SCHEMA), plan_of("nr=128,mb=64", p, SMALL, SCHEMA)
+        self.assertEqual((cm.int8_pass_cols(narrow), cm.int8_pass_cols(wide)), (32, 128))
+        self.assertGreater(narrow.int8_pass_quads, wide.int8_pass_quads)
+        self.assertGreater(wide.int8_pass_quads, 0)
+        self.assertNotEqual(PL.effective_signature(wide, p), PL.effective_signature(
+            plan_of("nr=128,mb=64,int8_l2_pct=1,l1_pass=0", p, SMALL, SCHEMA), p))
+        self.assertEqual(cm.int8_pass_cols(plan_of("nr=32,int8_cw=16", p, SMALL, SCHEMA)), 16)
+        g = Problem("s8", 16, 4096, 4096, epilogue="gated")
+        q = plan_of("nr=128", g, SMALL, SCHEMA)
+        self.assertEqual(PL.paired_plan(q, g, 128), q)
+        self.assertEqual(PL.compare_with_log(q, g, dict(PL.plan_log_fields(q, g), pairing="128")), [])
+        # Its paired tiles take that pass too; tiles the pairing widened take the plan's pass of one call.
+        d = plan_of("nr=32", g, SMALL, SCHEMA)
+        self.assertEqual((cm.int8_pass_cols(PL.paired_plan(q, g, 128)), cm.int8_pass_cols(PL.paired_plan(d, g, 64))),
+                         (128, 32))
 
     def test_wide_tiles_on_pack_blocks(self):
         # Each 32-column slab of a wide tile lies inside one pack block: blocks of whole slabs.
         for pack, legal in ((16, False), (48, False), (64, True), (128, True)):
             p = Problem("bf16", 64, 384, 4096, pack_nr=pack)
             for nr in (64, 128):
-                self.assertEqual(PL.bf16_wide_width(nr, pack), legal, (pack, nr))
+                self.assertEqual(PL.slab_tile_width("bf16", nr, pack), legal, (pack, nr))
                 r = PL.resolve(p, {"nr": nr}, SMALL, SCHEMA)
                 self.assertEqual(r.applied, legal, (pack, nr, r.reason))
                 q = dataclasses.replace(PL.resolve(p, {"nr": 16}, SMALL, SCHEMA).plan, nr=nr, n_tiles=384 // nr)
@@ -715,24 +758,44 @@ class TestLibraryPlans(unittest.TestCase):
                          "cases %s differ from the library (plan_cases.py compare%s <dump> shows the fields)" % (
                              ", ".join("%d-%d" % (i * fx["chunk"], (i + 1) * fx["chunk"] - 1) for i in bad), flag))
 
+    @staticmethod
+    def schema_of(fx):
+        """The fixture's schema with the kernel kinds of the machine that made the plans: the kernels
+        of an f16 call follow the ISA."""
+        return Schema(dict(SCHEMA.doc, kernels=[k for k in SCHEMA.doc["kernels"] if k["kind"] in fx["kernels"]]))
+
     def test_plans_match_the_library(self):
         fx = plan_cases.load_fixture()
         cs = plan_cases.cases(fx["seed"], fx["count"])
         self.assertEqual(plan_cases.case_counts(cs), fx["cases"])
         # Every kind of case, and every weight type, is a sizable share of the cases.
         self.assertGreater(min(fx["cases"].values()), 1000)
-        self.check_digests(fx, [plan_cases.tuner_line(c, SCHEMA) for c in cs])
+        schema = self.schema_of(fx)
+        lines = [plan_cases.tuner_line(c, schema) for c in cs]
+        # Tiles of slabs of every kernel kind are among the legal plans.
+        wide = {x.split(" kind=")[1].split()[0] for x in lines
+                if x.endswith("valid=1") and (" nr=64 " in x or " nr=128 " in x)}
+        self.assertEqual(wide, {"bf16", "int8", "int4", "f32", schema.f16_kind()})
+        self.check_digests(fx, lines)
 
     def test_nb_plans_match_the_library(self):
         fx = plan_cases.load_fixture(plan_cases.NB_FIXTURE)
         cs = plan_cases.cases(fx["seed"], fx["count"], nb=True)
         self.assertEqual(plan_cases.case_counts(cs), fx["cases"])
         self.assertTrue(all("nb" in c.settings() for c in cs))
-        # The kernels of an f16 call follow the ISA: plan with the kinds of the machine that made the fixture.
-        schema = Schema(dict(SCHEMA.doc, kernels=[k for k in SCHEMA.doc["kernels"] if k["kind"] in fx["kernels"]]))
+        schema = self.schema_of(fx)
         lines = [plan_cases.tuner_line(c, schema) for c in cs]
         self.assertGreater(sum(" unit_tiles=0 " not in x and x != "BADCFG" for x in lines), len(cs) // 4)
         self.check_digests(fx, lines, " --nb")
+
+    def test_each_f16_kernel_family_has_a_fixture(self):
+        # plan_check.json plans f16 calls on the F16_PH kernels, plan_check_nb.json on the F16 kernels
+        # (a machine without AVX512-FP16, or ZENDNNL_MATMUL_NATIVE_F16_ACCUM=f32).
+        main, nb = plan_cases.load_fixture(), plan_cases.load_fixture(plan_cases.NB_FIXTURE)
+        self.assertEqual(("f16" in main["kernels"], "f16_ph" in main["kernels"]), (True, True))
+        self.assertEqual(("f16" in nb["kernels"], "f16_ph" in nb["kernels"]), (True, False))
+        self.assertEqual(self.schema_of(main).f16_kind(), "f16_ph")
+        self.assertEqual(self.schema_of(nb).f16_kind(), "f16")
 
 
 class TestSignature(unittest.TestCase):
@@ -758,6 +821,26 @@ class TestSignature(unittest.TestCase):
         self.assertNotEqual(self.sig(s, int8_cw=[16]), self.sig(s))
         self.assertNotEqual(self.sig(s, direct_store=False), self.sig(s))
         self.assertNotEqual(self.sig(s, int8_mr=4), self.sig(s))
+
+    def test_every_tile_signs_the_k_passes_of_its_calls(self):
+        def sig(text, p):
+            return PL.effective_signature(plan_of(text, p), p)
+
+        # N 1000 pads to 1024: its tiles of 128 columns take 4 passes of 256 quads under the budgets of
+        # 14 and 15% of the L2, but the tail tile's 104 columns take their calls one at a time, and its
+        # calls of 32 columns take 2 passes, then 1.
+        base = "nr=128,mb=32,int8_mr=6,l1_pass=0"
+        p = Problem("s8", 64, 1000, 4096)
+        self.assertEqual(PL.int8_turn_runs(plan_of(base, p), p, False), [(16, 1, 16), (32, 1, 32), (32, 4, 128)])
+        self.assertNotEqual(sig(base + ",int8_l2_pct=14", p), sig(base + ",int8_l2_pct=15", p))
+        # On pack blocks of 64 columns, the calls of every other tile of 32 start in the middle of a
+        # block and size their pass at 64 columns: 2 passes under a budget of 256 KiB, 1 under 512.
+        base = "nr=32,mb=32,int8_mr=6,l1_pass=0"
+        p = Problem("s8", 64, 4096, 4096, pack_nr=64)
+        self.assertEqual(PL.int8_turn_runs(plan_of(base, p), p, False), [(32, 1, 32), (32, 1, 64)])
+        self.assertNotEqual(sig(base, p), sig(base + ",int8_l2_pct=25", p))
+        self.assertEqual(sig(base, dataclasses.replace(p, pack_nr=32)),
+                         sig(base + ",int8_l2_pct=25", dataclasses.replace(p, pack_nr=32)))
 
     def test_compare_with_log(self):
         p = Problem("s8", 8, 6144, 4096)

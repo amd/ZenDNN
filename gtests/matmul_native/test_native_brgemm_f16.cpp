@@ -278,10 +278,11 @@ TEST(NativeBrgemmF16Kernel, EveryRowCountWidthAndKTailMatchesTheModel) {
 }
 
 // The registry offers the F16 kernels at 16 and 32 columns, every row count
-// 1 .. 12, on a CPU with AVX-512 F, and no wider tile.
+// 1 .. 12, on a CPU with AVX-512 F, and tiles of 64 and 128 columns of
+// 32-column slabs, which take the kernels of 32.
 TEST(NativeBrgemmF16Kernel, RegistryServesEveryRowCount) {
     const nat::native_kernel_registry_t &r = nat::native_kernel_registry();
-    for (const int nr : {16, 32}) {
+    for (const int nr : {16, 32, 64, 128}) {
         const nat::native_kernel_caps_t *c
                 = r.caps(nat::native_kernel_kind_t::f16, nr);
         if (!nat::detect_uarch().avx512f) {
@@ -293,12 +294,12 @@ TEST(NativeBrgemmF16Kernel, RegistryServesEveryRowCount) {
         EXPECT_EQ(c->max_mr, 12);
         for (int mr = 1; mr <= 12; ++mr)
             EXPECT_EQ(r.f16_table(nr)[mr],
-                    nat::select_native_f16_ukernel(mr, nr / 16))
+                    nat::select_native_f16_ukernel(mr, std::min(nr, 32) / 16))
                     << nr << " " << mr;
         EXPECT_TRUE(r.covers(nat::native_kernel_kind_t::f16, 12, nr));
         EXPECT_FALSE(r.covers(nat::native_kernel_kind_t::f16, 13, nr));
     }
-    for (const int nr : {48, 64, 128}) {
+    for (const int nr : {48, 96, 256}) {
         EXPECT_EQ(r.caps(nat::native_kernel_kind_t::f16, nr), nullptr) << nr;
         EXPECT_EQ(r.f16_table(nr), nullptr) << nr;
     }
@@ -493,9 +494,10 @@ TEST(NativeBrgemmF16PhKernel, BlocksBoundTheErrorOfLongSums) {
 }
 
 // The registry offers the F16_PH kernels at 16, 32 and 64 columns, every
-// row count 1 .. 12, exactly on a CPU with AVX512-FP16 in a build that has them
-// while ZENDNNL_MATMUL_NATIVE_F16_ACCUM is unset or f16, and f16 calls then
-// take them; otherwise it has none and f16 calls take the F16 kernels.
+// row count 1 .. 12, and tiles of 128 columns of two calls of 64, exactly on
+// a CPU with AVX512-FP16 in a build that has them while
+// ZENDNNL_MATMUL_NATIVE_F16_ACCUM is unset or f16, and f16 calls then take
+// them; otherwise it has none and f16 calls take the F16 kernels.
 TEST(NativeBrgemmF16PhKernel, RegistryServesThemWhereTheCpuHasAvx512Fp16) {
     const nat::native_kernel_registry_t &r = nat::native_kernel_registry();
     const char *env = std::getenv("ZENDNNL_MATMUL_NATIVE_F16_ACCUM");
@@ -505,7 +507,7 @@ TEST(NativeBrgemmF16PhKernel, RegistryServesThemWhereTheCpuHasAvx512Fp16) {
     const bool want = nat::detect_uarch().avx512fp16
             && nat::select_native_f16_ph_ukernel(1, 2) != nullptr
             && accum != "f32";
-    for (const int nr : {16, 32, 64}) {
+    for (const int nr : {16, 32, 64, 128}) {
         const nat::native_kernel_caps_t *c
                 = r.caps(nat::native_kernel_kind_t::f16_ph, nr);
         if (!want) {
@@ -517,10 +519,11 @@ TEST(NativeBrgemmF16PhKernel, RegistryServesThemWhereTheCpuHasAvx512Fp16) {
         EXPECT_EQ(c->max_mr, 12);
         for (int mr = 1; mr <= 12; ++mr)
             EXPECT_EQ(r.f16_ph_table(nr)[mr],
-                    nat::select_native_f16_ph_ukernel(mr, nr / 16))
+                    nat::select_native_f16_ph_ukernel(
+                            mr, std::min(nr, 64) / 16))
                     << nr << " " << mr;
     }
-    for (const int nr : {48, 128})
+    for (const int nr : {48, 96, 256})
         EXPECT_EQ(r.caps(nat::native_kernel_kind_t::f16_ph, nr), nullptr) << nr;
     EXPECT_EQ(r.f16_kind(),
             want ? nat::native_kernel_kind_t::f16_ph
@@ -781,23 +784,29 @@ TEST(NativeBrgemmF16Plan, TuningNamesTakeF16) {
 }
 
 // An F16 plan takes tiles of 16 or 32 columns, any K pass of at least one
-// and the F16 kernels' rows, with the K pass of a two-byte weight; the BF16
-// tiles of 128 columns stay BF16's, and those of 64 columns are BF16's and
-// the F16_PH kernels', over two blocks.
+// and the F16 kernels' rows, with the K pass of a two-byte weight, and tiles
+// of 64 and 128 columns: 32-column slabs of the F16 kernels, or for the
+// F16_PH kernels their tile of two blocks and two of those.
 TEST(NativeBrgemmF16Plan, ValidateTheF16Tile) {
     SKIP_WITHOUT_NATIVE_ISA();
     const nat::UarchParams &u = nat::native_plan_uarch();
     const nat::native_problem_t f = problem(64, 256, 1000, 4, kF16);
     for (const char *text : {"nr=16", "nr=32", "kc=3", "kc=999", "mr=12",
-                 "nr=16,mr=12", "schedule=blocks,unit_tiles=3,kc=64"}) {
+                 "nr=16,mr=12", "schedule=blocks,unit_tiles=3,kc=64", "nr=64",
+                 "nr=128", "nr=128,mr=5,kc=256"}) {
         const nat::native_plan_t q
                 = nat::heuristic_plan(f, u, heuristic_of(text));
         EXPECT_EQ(nat::validate_native_plan(q, f), nullptr) << text;
     }
-    nat::native_plan_t q = nat::heuristic_plan(f, u, heuristic_of("nr=64"));
-    EXPECT_EQ(nat::validate_native_plan(q, f) == nullptr, f16_ph_calls());
-    q = nat::heuristic_plan(f, u, heuristic_of("nr=128"));
-    EXPECT_NE(nat::validate_native_plan(q, f), nullptr);
+    nat::native_plan_t q = nat::heuristic_plan(f, u, heuristic_of("nr=128"));
+    nat::native_plan_t other = q;
+    other.kind = f16_ph_calls() ? nat::native_kernel_kind_t::f16
+                                : nat::native_kernel_kind_t::f16_ph;
+    EXPECT_EQ(nat::validate_native_plan(other, f) == nullptr, f16_ph_calls());
+    q = nat::heuristic_plan(
+            problem(64, 288, 1000, 4, kF16), u, heuristic_of("nr=128"));
+    EXPECT_NE(nat::validate_native_plan(q, problem(64, 288, 1000, 4, kF16)),
+            nullptr);
     q = nat::heuristic_plan(f, u, {});
     q.kc = 0;
     q.scratch_floats = nat::native_plan_scratch_floats(q, f);
@@ -888,7 +897,8 @@ TEST(NativeBrgemmF16Plan, F16PhPassesAreWholeBlocks) {
 // columns where tiles of 64 would be fewer than the threads, as tiles of
 // 32.  Below f16_wide_min_m rows, and for a weight of N not whole tiles of
 // 64, they take 32, and a plan of 64 is illegal for the latter.  The F16
-// kernels never take 64, and the plans of other types do not read the key.
+// kernels take 64 only as two 32-column slabs, and the plans of other types
+// do not read the key.
 TEST(NativeBrgemmF16Plan, F16PhPlansTakeTilesOfTwoBlocks) {
     SKIP_WITHOUT_NATIVE_ISA();
     const nat::UarchParams &u = nat::native_plan_uarch();
@@ -923,7 +933,11 @@ TEST(NativeBrgemmF16Plan, F16PhPlansTakeTilesOfTwoBlocks) {
     EXPECT_NE(nat::validate_native_plan(pinned, odd), nullptr);
     nat::native_plan_t f16 = w;
     f16.kind = nat::native_kernel_kind_t::f16;
-    EXPECT_EQ(nat::validate_native_plan(f16, wide) == nullptr, w.nr != 64);
+    EXPECT_EQ(nat::validate_native_plan(f16, wide), nullptr);
+    const nat::native_plan_t slabs = nat::heuristic_plan(
+            wide, u, heuristic_of("f16_wide_min_m=1025,nr=64"));
+    EXPECT_EQ(slabs.nr, 64);
+    EXPECT_EQ(nat::validate_native_plan(slabs, wide), nullptr);
     for (const nat::native_problem_t &p :
             {problem(64, 4096, 4096, 32, kBf16, kBf16),
                     problem(1024, 4096, 4096, 32, kBf16, kBf16),
@@ -1383,6 +1397,76 @@ TEST(NativeBrgemmF16, BitsAreTheModelsWhateverThePlan) {
             }
             return bad + (::testing::Test::HasFailure() ? 1 : 0);
         }, pin);
+    }
+}
+
+/// Calls of N whose padded width is whole tiles of 64 or 128 columns (with
+/// tails), M 2 to 300, transposed sources, f16 and f32 dsts, a bias.
+std::vector<f16_call_t> wide_calls() {
+    std::vector<f16_call_t> v;
+    const int shapes[][3] = {{2, 64, 300}, {9, 100, 777}, {13, 128, 1300},
+            {70, 250, 600}, {300, 1000, 513}};
+    int i = 0;
+    for (const auto &s : shapes)
+        for (const int threads : {1, 4}) {
+            f16_call_t c;
+            c.M = s[0];
+            c.N = s[1];
+            c.K = s[2];
+            c.transA = i % 2 == 1;
+            c.transB = i % 3 == 0;
+            c.dst_dt = i % 4 < 2 ? kF16 : kF32;
+            c.bias_dt = i % 5 == 0 ? kF32 : kNone;
+            c.threads = threads;
+            ++i;
+            v.push_back(c);
+        }
+    return v;
+}
+
+// Tiles of 64 and 128 columns give the model's bits: 32-column slabs of the
+// F16 kernels, or the F16_PH tile of 64 and two of them; with K passes, rows
+// per call, M blocks and the blocks schedule.  Each pin runs in a child
+// process on the calls whose padded N is whole tiles of its width.
+TEST(NativeBrgemmF16, WideTilesGiveTheModelsBits) {
+    SKIP_WITHOUT_NATIVE_ISA();
+    const struct {
+        const char *pin;
+        int nr;
+    } pins[] = {{"dtype=f16:nr=64", 64}, {"dtype=f16:nr=128", 128},
+            {"dtype=f16:nr=128,kc=512,mr=5", 128},
+            {"dtype=f16:nr=64,schedule=blocks,nb=256,kc=256,mb=24", 64}};
+    const std::vector<f16_call_t> calls = wide_calls();
+    for (const auto &pin : pins) {
+        nt::expect_in_child(
+                {{"ZENDNNL_MATMUL_NATIVE_CONFIG", pin.pin},
+                        {"ZENDNNL_MATMUL_NATIVE_TUNING_FILE", nullptr}},
+                [&] {
+            int bad = 0, taken = 0;
+            uint32_t seed = 3500;
+            for (const f16_call_t &c : calls) {
+                const int padded = nat::native_padded_n(c.N, kNr);
+                if (padded % pin.nr != 0) continue;
+                const f16_operands_t o = operands_of(c, seed += 5);
+                const ::testing::AssertionResult r
+                        = same_bits(c, run_native(c, o), model_output(c, o));
+                const nat::native_plan_t p = nat::native_planner().plan(
+                        problem(c.M, padded, c.K, c.threads, kF16, c.dst_dt));
+                if (!r || p.nr != pin.nr
+                        || nt::top_source(p)
+                                != nat::native_plan_source_t::override) {
+                    std::fprintf(stderr, "%s under %s: plan nr %d, %s\n",
+                            str(c).c_str(), pin.pin, p.nr, r.message());
+                    ++bad;
+                }
+                ++taken;
+            }
+            if (taken < 4) {
+                std::fprintf(stderr, "%s took %d calls\n", pin.pin, taken);
+                ++bad;
+            }
+            return bad + (::testing::Test::HasFailure() ? 1 : 0);
+        }, pin.pin);
     }
 }
 

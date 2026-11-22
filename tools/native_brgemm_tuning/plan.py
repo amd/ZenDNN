@@ -79,8 +79,6 @@ CW_BITS = {16: 1, 32: 2}
 MAX_CALL_ROWS = 12
 # The widest tile a kernel computes: a wider pack takes tiles of this width.
 MAX_TILE_COLS = 32
-# The widest BF16 tile: whole 32-column slabs, each run by the 32-column kernels.
-BF16_MAX_TILE_COLS = 128
 # Steps of K an F16_PH kernel accumulates in f16 before it adds the block in f32.
 F16_ACCUM_BLOCK_K = 256
 # Source rows this many bytes apart share an L1 set.
@@ -158,6 +156,9 @@ class Plan:
     row_unit: int = 12
     traversal: str = "m_inner"
     scratch_floats: int = 0
+    # The tiles pair a gated call's halves at a width above the plan's (paired_plan): the plan's
+    # INT8 K pass is one call's.
+    paired_wider: bool = False
     int8_rows_nv1: int = 12
     int8_rows_nv2: int = 12
     int8_cw_mask: int = 3
@@ -232,11 +233,17 @@ def kernel_kind(p: Problem, schema: Any) -> str:
     return "f32" if p.f32 else "bf16"
 
 
-def bf16_wide_width(nr: int, pack_nr: int) -> bool:
-    """A BF16 tile of 64 or 128 columns: 32-column slabs, each inside one pack block (the kernel
-    reads a slab with the block's stride), of whole pack blocks or of one block."""
-    return (nr in (64, BF16_MAX_TILE_COLS) and pack_nr > 0 and pack_nr % cm.bf16_slab_cols(nr) == 0
-            and (nr % pack_nr == 0 or pack_nr % nr == 0))
+def slab_tile_width(kind: str, nr: int, pack_nr: int) -> bool:
+    """A tile of 64 or 128 columns of several slabs of kind's kernels (native_slab_cols):
+    32-column slabs, each inside one pack block (the kernel reads a slab with the block's
+    stride), of whole pack blocks or of one block; F16_PH slabs of 64 columns, each two pack
+    blocks of 32 as the F16_PH tile of 64."""
+    slab = cm.SLAB_COLS.get(kind, 32)
+    if nr not in (64, cm.MAX_SLAB_TILE_COLS) or nr <= slab:
+        return False
+    if kind == "f16_ph":
+        return pack_nr == MAX_TILE_COLS
+    return pack_nr > 0 and pack_nr % slab == 0 and (nr % pack_nr == 0 or pack_nr % nr == 0)
 
 
 def widest_tile(p: Problem, kind: str, hp: Dict[str, Any]) -> int:
@@ -577,13 +584,13 @@ def rules_plan(p: Problem, uarch: Any, hp: Dict[str, Any], schema: Any) -> Plan:
     if int4 and hp["int4_l1_pct"] > 0 and m <= hp["decode_m"]:
         q.int8_pass_budget = min(q.int8_pass_budget, uarch.l1d_bytes * hp["int4_l1_pct"] // 100)
     q.int8_pass_quads = min(hp["int8_kc"] // 4, ceil_div(k, 4)) if hp["int8_kc"] > 0 else 0
-    # The INT8 form of the L1 pass, at the tile's call width and rows per call;
+    # The INT8 form of the L1 pass, at the tile's pass width and rows per call;
     # equal passes in whole quads.  Only the per-channel tile reads it.
     if int8 and not group_kernel and hp["int8_kc"] == 0 and on.l1_pass and q.nr > 0:
         cw = int8_col_width(q, q.nr)
         rows = int8_call_rows(q, cw // 16)
         if rows > 0 and 2 * rows <= q.mb <= hp["l1_pass_max_mb"]:
-            per_k = cw + rows
+            per_k = cm.int8_pass_cols(q) + rows
             l1 = uarch.l1d_bytes * hp["l1_pct"] // 100 // per_k
             quads = max(hp["min_pass_k"], min(l1, q.int8_pass_budget // per_k)) // 4
             k_quads = (k + 3) // 4
@@ -604,9 +611,9 @@ def rules_plan(p: Problem, uarch: Any, hp: Dict[str, Any], schema: Any) -> Plan:
             and q.n_tiles < 2 * team_domains):
         work = busiest_work(q, m, nbytes)
         most = work + work * min(max(hp["min_gain_pct"], 0), 100) // 100
-        nr = BF16_MAX_TILE_COLS
+        nr = cm.MAX_SLAB_TILE_COLS
         while nr > q.nr:
-            if n % nr == 0 and n // nr < team_domains and bf16_wide_width(nr, p.pack_nr):
+            if n % nr == 0 and n // nr < team_domains and slab_tile_width("bf16", nr, p.pack_nr):
                 w = rules_plan(p, uarch, dict(hp, nr=nr), schema)
                 if busiest_work(w, m, nbytes) <= most and validate_plan(w, p, schema) is None:
                     return w
@@ -784,7 +791,7 @@ def int4_group_passes(p: Problem, uarch: Any, hp: Dict[str, Any], q: Plan) -> Pl
     cw = int8_col_width(q, q.nr)
     rows = int8_call_rows(q, cw // 16)
     quads = ceil_div(p.k, 4)
-    if rows < 1 or int4_pass_quads(q, quads, cw, q.mb, rows) >= quads:
+    if rows < 1 or int4_pass_quads(q, quads, cm.int8_pass_cols(q), q.mb, rows) >= quads:
         return q
     return replace(q, int8_pass_budget=max(q.int8_pass_budget, uarch.l2_bytes * hp["int8_l2_pct"] // 100))
 
@@ -805,9 +812,11 @@ def validate_plan(q: Plan, p: Problem, schema: Any) -> Optional[str]:
     """validate_native_plan: the first rule q breaks for p, or None."""
     narrow = q.nr in (16, 32) and q.nr <= p.pack_nr and p.pack_nr % q.nr == 0
     f16_ph_wide = q.kind == "f16_ph" and p.pack_nr == MAX_TILE_COLS and q.nr == 2 * MAX_TILE_COLS
-    if not narrow and not (p.bf16 and bf16_wide_width(q.nr, p.pack_nr)) and not f16_ph_wide:
-        return "nr=%d is not 16 or 32 dividing pack_nr=%d, or for BF16 64 or 128, or for F16_PH two blocks" % (
-            q.nr, p.pack_nr)
+    # A build whose registry has no tiles of slabs of a kind lists no such width.
+    slabs = slab_tile_width(q.kind, q.nr, p.pack_nr) and schema.caps(q.kind, q.nr) is not None
+    if not narrow and not f16_ph_wide and not slabs:
+        return ("nr=%d is not 16 or 32 dividing pack_nr=%d, for F16_PH two blocks, or 64 or 128 of slabs of "
+                "the kernels' widest call" % (q.nr, p.pack_nr))
     n = p.plan_n
     if (q.mb < 1 or q.mb > p.m or q.m_blocks != ceil_div(p.m, q.mb) or q.n_tiles < 1 or n % q.nr
             or q.n_tiles != n // q.nr):
@@ -873,10 +882,11 @@ def scratch_floats(q: Plan, p: Problem) -> int:
 
 
 def paired_plan(planned: Plan, p: Problem, width: int) -> Plan:
-    """The plan the paired tiles of a gated call run at width (the looper's paired_plan)."""
+    """The plan the paired tiles of a gated call run at width (native_paired_plan)."""
     q = replace(planned)
     if width > planned.nr:
         q.nr = width
+        q.paired_wider = True
         q.n_tiles = p.plan_n // q.nr
         if q.unit_tiles > 0:
             q.unit_tiles = max(1, q.unit_tiles * planned.nr // width)
@@ -987,11 +997,50 @@ def int8_widths(q: Plan) -> List[int]:
     return out
 
 
+def int8_turn_runs(q: Plan, p: Problem, paired: bool) -> List[Tuple[int, int, int]]:
+    """(call width, calls, K pass columns) of each run of calls of the INT8 tiles of q that take each
+    K pass (or batch of groups) and row call in turn (int8_block, native_int8_calls_in_turn): every
+    call of a tile of several slabs, else one, in a tile the pairing widened (paired_wider), a tile of
+    one slab and the tail tile (compute_int8_tail_tile: the columns past the last whole tile, rounded
+    up to 16).  A 32-column call whose second 16 columns are not the next 16 of its pack block (on
+    tiles paired at 32, the up run) takes the cache sets of twice its width (native_int8_channel_tile).
+    Distinct runs, sorted."""
+    def col(n0: int, nr: int, t: int) -> int:
+        # native_weight_view_t::tile_col: a paired tile holds runs of 16 columns of each half.
+        if not paired:
+            return n0 + t
+        half = nr // 2
+        return n0 // 2 + t if t < half else p.n // 2 + n0 // 2 + t - half
+
+    def runs(n0: int, nr: int, tail: bool) -> List[Tuple[int, int, int]]:
+        calls = 1 if tail or q.paired_wider or nr <= cm.SLAB_COLS["int8"] else nr // q.col_width(nr)
+        out, c = [], 0
+        while c < nr:
+            cw = q.col_width(nr - c)
+            cols = 0
+            for t in range(c, c + calls * cw, cw):
+                p0 = col(n0, nr, t)
+                p1 = col(n0, nr, t + 16) if paired and cw == 32 else p0 + 16
+                cols += 2 * cw if cw == 32 and (p1 != p0 + 16 or p0 % p.pack_nr) else cw
+            out.append((cw, calls, cols))
+            c += calls * cw
+        return out
+
+    whole = p.n // q.nr
+    # Which calls read apart repeats every 2 * pack_nr columns of the tiles.
+    period = 2 * p.pack_nr // gcd(q.nr, 2 * p.pack_nr)
+    found = {r for t in range(min(whole, period)) for r in runs(t * q.nr, q.nr, False)}
+    if p.n % q.nr:
+        found.update(runs(whole * q.nr, ceil_div(p.n % q.nr, 16) * 16, True))
+    return sorted(found)
+
+
 def effective_signature(q: Plan, p: Problem) -> Tuple:
     """What the call executes under q (a gated call: the plan its tiles pair its halves at): equal
-    signatures run the same work.  A per-channel INT8 call of 32 columns of tiles paired at 32 reads
-    its second 16 columns from the up run, and its K pass takes the cache sets of twice its width
-    (native_int8_channel_tile).
+    signatures run the same work.  The K passes of the per-channel INT8 tiles are sized over the
+    columns of the calls that take them in turn, the tail tile's one call at a time
+    (int8_turn_runs); the calls of a tile run in that order once a call takes more than one row
+    call or K pass.
 
     Fields the call cannot observe for p are left out (traversal of a one-row or
     one-column grid or of the blocks schedule, row_unit of a slice or blocks
@@ -1017,7 +1066,8 @@ def effective_signature(q: Plan, p: Problem) -> Tuple:
             sig += [q.copy_block, p.m * p.k >= q.copy_par_min]
         return tuple(sig)
     widths = int8_widths(q)
-    used = sorted(set(widths))
+    runs = int8_turn_runs(q, p, width > 0)
+    used = sorted({w for w, _, _ in runs})
     rows_max = p.m if row_groups else q.mb
     sig += [tuple(widths), tuple(min(q.rows(w // 16), rows_max) for w in used)]
     k_quads = ceil_div(p.k, 4)
@@ -1030,11 +1080,13 @@ def effective_signature(q: Plan, p: Problem) -> Tuple:
         else:
             last = p.m - (q.m_blocks - 1) * q.mb
             sig.append(("passes",) + tuple(
-                int8_pass_quads(q, k_quads, 2 * w if width == 32 and w == 32 else w, r, q.rows(w // 16))
-                for w in used for r in sorted({q.mb, last})))
+                int8_pass_quads(q, k_quads, cols, r, q.rows(w // 16))
+                for w, _, cols in runs for r in sorted({q.mb, last})))
     else:
         # The group tiles batch their groups by the pass budget only past one row call.
         sig.append(("budget", q.int8_pass_budget) if multi_call else ("whole",))
+    if multi_call or (p.int8_scheme == "per_channel" and 0 < q.int8_pass_quads < k_quads):
+        sig.append(("in_turn",) + tuple(calls for _, calls, _ in runs))
     if p.epilogue == "store" and p.dst in ("bf16", "f32", "f16"):
         sig.append(("direct", q.int8_direct_store))
     if p.has_bias and p.epilogue == "store" and p.int8_scheme == "per_channel":

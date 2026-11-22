@@ -47,7 +47,10 @@ struct native_int8_out_t {
 /// widths, rows per kernel call and K passes are plan's; with per-group
 /// weight scales (every call over an s4 weight, on the INT4 group kernels)
 /// the group kernel takes the groups in order, in batches of whole groups
-/// instead of K passes.  Safe to call concurrently on disjoint tiles.
+/// instead of K passes.  The calls of a tile of several slabs take each
+/// pass and row call in turn, unless the pairing of a gated call's halves
+/// widened the tile (native_int8_calls_in_turn).  Safe to call concurrently
+/// on disjoint tiles.
 void compute_int8_tile(const native_plan_t &plan,
         const native_int8_call_t &call, const native_weight_view_t &w, int m0,
         int mr, int n0, int nr, float *C, int ldc,

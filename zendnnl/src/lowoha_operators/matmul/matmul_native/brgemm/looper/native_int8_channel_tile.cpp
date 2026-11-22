@@ -112,12 +112,21 @@ void compute_channel_tile(const native_plan_t &plan,
     assert(out == nullptr || !w.paired);
     const size_t out_esz = out != nullptr && out->bf16 ? 2 : 4;
 
-    alignas(64) float scale_buf[kMaxTileNr];
-    alignas(64) float bias_buf[kMaxTileNr];
-    alignas(64) int32_t sum_buf[kMaxTileNr];
+    alignas(64) float scale_buf[kNativeMaxTileCols];
+    alignas(64) float bias_buf[kNativeMaxTileCols];
+    alignas(64) int32_t sum_buf[kNativeMaxTileCols];
     alignas(64) float ones[kMaxTileNr];
     alignas(64) int32_t zp[kMaxTileMr];
     alignas(64) float src_scale[kMaxTileMr];
+    // What each of the calls that take a row call in turn reads.
+    struct call_t {
+        int p0, p1, cols;
+        bool apart;
+        const float *col_scale, *bias;
+        const int32_t *col_sum;
+        const int8_t *b0;
+        size_t b_second;
+    } calls[kMaxTileCalls];
 
     native_int8_ukernel_args_t args;
     args.b_stride = w.group_stride();
@@ -136,55 +145,65 @@ void compute_channel_tile(const native_plan_t &plan,
         args.dst_bf16 = out->bf16;
     }
 
+    const int in_turn = native_int8_calls_in_turn(
+            plan, nr, native_int8_col_width(plan, nr), Tail);
     for (int c = 0; c < nr;) {
         const int cw = native_int8_col_width(plan, nr - c);
         assert(cw <= kMaxTileNr);
         const int nv = cw / 16;
-        // The weight columns of the call's first 16 columns, and of its
-        // second 16 (a paired tile's up run, or the next block): their
-        // sums, scales and bias then follow the first 16's in the buffers.
-        const int p0 = w.tile_col(n0, nr, c);
-        const int p1 = second_col(w, n0, nr, c, nv, p0);
-        const bool apart = second_apart(w, nv, p0, p1);
-        // Tail: the columns of this call below the weight's N.
-        const int cols = Tail ? std::min(cw, w.N - (n0 + c)) : cw;
-        const bool part = Tail && cols < cw;
-        assert(!(part && apart));
-        const float *col_scale = apart
-                ? column_values_apart(call.wei_scale, call.wei_scale_dt,
-                          call.wei_scale_stride, p0, p1, scale_buf)
-                : part ? column_values_below(call.wei_scale, call.wei_scale_dt,
-                                 call.wei_scale_stride, p0, cw, cols, scale_buf)
-                       : column_values(call.wei_scale, call.wei_scale_dt,
-                                 call.wei_scale_stride, p0, cw, scale_buf);
-        if (!reference_order) args.wei_scale = col_scale;
-        if (call.bias == nullptr)
-            args.bias = nullptr;
-        else if (apart)
-            args.bias = column_values_apart(
-                    call.bias, call.bias_dt, 1, p0, p1, bias_buf);
-        else if (part)
-            args.bias = column_values_below(
-                    call.bias, call.bias_dt, 1, p0, cw, cols, bias_buf);
-        else
-            args.bias = column_values(
-                    call.bias, call.bias_dt, 1, p0, cw, bias_buf);
-        args.col_sum
-                = apart ? col_sums_apart(w, p0, p1, sum_buf) : w.col_sum(p0);
-        args.b_second = apart ? w.column_distance(p0, p1) : 64;
-        const int8_t *b0 = reinterpret_cast<const int8_t *>(w.column(p0));
+        // The calls from c that take each row call in turn.
+        for (int j = 0; j < in_turn; ++j) {
+            call_t &k = calls[j];
+            const int cj = c + j * cw;
+            // The weight columns of the call's first 16 columns, and of its
+            // second 16 (a paired tile's up run, or the next block): their
+            // sums, scales and bias then follow the first 16's in the
+            // buffers.
+            k.p0 = w.tile_col(n0, nr, cj);
+            k.p1 = second_col(w, n0, nr, cj, nv, k.p0);
+            k.apart = second_apart(w, nv, k.p0, k.p1);
+            // Tail: the columns of this call below the weight's N.
+            k.cols = Tail ? std::min(cw, w.N - (n0 + cj)) : cw;
+            const bool part = Tail && k.cols < cw;
+            assert(!(part && k.apart));
+            float *scales = scale_buf + j * cw;
+            float *bias = bias_buf + j * cw;
+            k.col_scale = k.apart
+                    ? column_values_apart(call.wei_scale, call.wei_scale_dt,
+                              call.wei_scale_stride, k.p0, k.p1, scales)
+                    : part
+                    ? column_values_below(call.wei_scale, call.wei_scale_dt,
+                              call.wei_scale_stride, k.p0, cw, k.cols, scales)
+                    : column_values(call.wei_scale, call.wei_scale_dt,
+                              call.wei_scale_stride, k.p0, cw, scales);
+            if (call.bias == nullptr)
+                k.bias = nullptr;
+            else if (k.apart)
+                k.bias = column_values_apart(
+                        call.bias, call.bias_dt, 1, k.p0, k.p1, bias);
+            else if (part)
+                k.bias = column_values_below(
+                        call.bias, call.bias_dt, 1, k.p0, cw, k.cols, bias);
+            else
+                k.bias = column_values(
+                        call.bias, call.bias_dt, 1, k.p0, cw, bias);
+            k.col_sum = k.apart
+                    ? col_sums_apart(w, k.p0, k.p1, sum_buf + j * cw)
+                    : w.col_sum(k.p0);
+            k.b_second = k.apart ? w.column_distance(k.p0, k.p1) : 64;
+            k.b0 = reinterpret_cast<const int8_t *>(w.column(k.p0));
+        }
         const int max_mr = native_int8_call_rows(plan, nv);
         assert(max_mr >= 1 && max_mr <= kMaxTileMr);
-        // A call apart reads one line of each pair of its runs' blocks: its
-        // K pass takes the cache sets of twice its width.
         // Summed: C holds the sums of all of K, which one pass of no K quads
         // adds and finishes.
         const int pass = summed ? w.k_groups
                                 : native_int8_pass_quads(plan, w.k_groups,
-                                          apart ? 2 * cw : cw, mr, max_mr);
+                                          native_int8_channel_pass_cols(
+                                                  w, n0, nr, c, cw, in_turn),
+                                          mr, max_mr);
         for (int kq = 0; kq < w.k_groups; kq += pass) {
             args.k_quads = summed ? 0 : std::min(pass, w.k_groups - kq);
-            args.B = b0 + static_cast<size_t>(kq) * args.b_stride;
             args.first_pass = !summed && kq == 0;
             args.last_pass = summed || kq + args.k_quads == w.k_groups;
             for (int i = 0; i < mr;) {
@@ -204,29 +223,41 @@ void compute_channel_tile(const native_plan_t &plan,
                 }
                 args.A = call.A + static_cast<size_t>(m0 + i) * call.lda
                         + static_cast<size_t>(kq) * 4;
-                args.C = C + static_cast<size_t>(i) * ldc + c;
-                args.partial = summed || pass < w.k_groups
-                        ? reinterpret_cast<int32_t *>(args.C)
-                        : nullptr;
-                if (out != nullptr)
-                    args.dst = static_cast<char *>(out->dst)
-                            + (static_cast<size_t>(m0 + i) * out->ldc + n0 + c)
-                                    * out_esz;
-                select_native_int8_ukernel(rows, nv, call.src_signed)(args);
-                if (reference_order && args.last_pass && apart) {
-                    finish_in_reference_order<Tail>(call, m0 + i, rows, p0, 16,
-                            16, args.col_sum, col_scale, args.C, ldc);
-                    finish_in_reference_order<Tail>(call, m0 + i, rows, p1, 16,
-                            16, args.col_sum + 16, col_scale + 16, args.C + 16,
-                            ldc);
-                } else if (reference_order && args.last_pass) {
-                    finish_in_reference_order<Tail>(call, m0 + i, rows, p0, cw,
-                            cols, args.col_sum, col_scale, args.C, ldc);
+                for (int j = 0; j < in_turn; ++j) {
+                    const call_t &k = calls[j];
+                    const int cj = c + j * cw;
+                    if (!reference_order) args.wei_scale = k.col_scale;
+                    args.bias = k.bias;
+                    args.col_sum = k.col_sum;
+                    args.b_second = k.b_second;
+                    args.B = k.b0 + static_cast<size_t>(kq) * args.b_stride;
+                    args.C = C + static_cast<size_t>(i) * ldc + cj;
+                    args.partial = summed || pass < w.k_groups
+                            ? reinterpret_cast<int32_t *>(args.C)
+                            : nullptr;
+                    if (out != nullptr)
+                        args.dst = static_cast<char *>(out->dst)
+                                + (static_cast<size_t>(m0 + i) * out->ldc + n0
+                                          + cj)
+                                        * out_esz;
+                    select_native_int8_ukernel(rows, nv, call.src_signed)(args);
+                    if (reference_order && args.last_pass && k.apart) {
+                        finish_in_reference_order<Tail>(call, m0 + i, rows,
+                                k.p0, 16, 16, k.col_sum, k.col_scale, args.C,
+                                ldc);
+                        finish_in_reference_order<Tail>(call, m0 + i, rows,
+                                k.p1, 16, 16, k.col_sum + 16, k.col_scale + 16,
+                                args.C + 16, ldc);
+                    } else if (reference_order && args.last_pass) {
+                        finish_in_reference_order<Tail>(call, m0 + i, rows,
+                                k.p0, cw, k.cols, k.col_sum, k.col_scale,
+                                args.C, ldc);
+                    }
                 }
                 i += rows;
             }
         }
-        c += cw;
+        c += in_turn * cw;
     }
 }
 

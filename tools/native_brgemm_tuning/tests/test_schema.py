@@ -115,20 +115,24 @@ class TestFixture(unittest.TestCase):
                             + "['auto', 'slice', 'row_groups', 'blocks']",
                             "key row_unit: default 12 vs None", "key row_unit: auto None vs 12",
                             "key min_pass_k: applies 'bf16' vs 'both'",
-                            "kernel bf16 nr 64: None vs (4095, 12, 2)", "kernel bf16 nr 128: None vs (4095, 12, 2)",
-                            "kernel f16 nr 16: None vs (4095, 12, 1)", "kernel f16 nr 32: None vs (4095, 12, 1)"]
+                            "kernel bf16 nr 64: None vs (4095, 12, 2)", "kernel bf16 nr 128: None vs (4095, 12, 2)"]
+                         + ["kernel f16 nr %d: None vs (4095, 12, 1)" % nr for nr in (16, 32, 64, 128)]
                          + ["kernel f16_ph nr %d: None vs (4095, 12, 1)" % nr for nr in SCHEMA.nr_widths("f16_ph")]
-                         + ["kernel f32 nr 16: None vs (4095, 12, 1)", "kernel f32 nr 32: None vs (4095, 12, 1)",
-                            "kernel int4 nr 16 (per_channel): None vs (4095, 12, 8)",
-                            "kernel int4 nr 16 (per_group): None vs (4095, 12, 8)",
-                            "kernel int4 nr 32 (per_channel): None vs (4095, 12, 8)",
-                            "kernel int4 nr 32 (per_group): None vs (63, 6, 8)",
-                            "kernel int8 nr 16 (per_channel): None vs (4095, 12, 4)",
+                         + ["kernel f32 nr %d: None vs (4095, 12, 1)" % nr for nr in (16, 32, 64, 128)]
+                         # Tiles of 64 and 128 columns have the rows of their 32-column slab.
+                         + [line for nr in (16, 32, 64, 128) for line in (
+                             "kernel int4 nr %d (per_channel): None vs (4095, 12, 8)" % nr,
+                             "kernel int4 nr %d (per_group): None vs %s" % (
+                                 nr, (4095, 12, 8) if nr == 16 else (63, 6, 8)))]
+                         + ["kernel int8 nr 16 (per_channel): None vs (4095, 12, 4)",
                             "kernel int8 nr 16 (per_channel/per_group): (4095, 12, 4) vs None",
                             "kernel int8 nr 16 (per_group): None vs (4095, 12, 4)",
                             "kernel int8 nr 32 (per_channel): None vs (4095, 12, 4)",
                             "kernel int8 nr 32 (per_channel/per_group): (4095, 12, 4) vs None",
-                            "kernel int8 nr 32 (per_group): None vs (63, 6, 4)"])
+                            "kernel int8 nr 32 (per_group): None vs (63, 6, 4)"]
+                         + [line for nr in (64, 128) for line in (
+                             "kernel int8 nr %d (per_channel): None vs (4095, 12, 4)" % nr,
+                             "kernel int8 nr %d (per_group): None vs (63, 6, 4)" % nr)])
         self.assertEqual(S.schema_diff(NO_BLOCKS, SCHEMA)[-1],
                          "key schedule: values ['auto', 'slice', 'row_groups'] vs "
                          + "['auto', 'slice', 'row_groups', 'blocks']")
@@ -147,19 +151,22 @@ class TestFixture(unittest.TestCase):
         self.assertTrue(SCHEMA.covers("bf16", 12, 32))
         self.assertTrue(SCHEMA.covers("bf16", 12, 128))  # tiles of 32-column slabs
         self.assertIsNone(SCHEMA.caps("bf16", 256))
-        self.assertIsNone(SCHEMA.caps("int8", 64))
-        self.assertEqual(SCHEMA.int8_max_mr(4), 0)
+        # Every type's tiles of 64 and 128 columns, with the rows and schemes of the slab.
+        self.assertTrue(SCHEMA.covers("int8", 12, 64))
+        self.assertTrue(SCHEMA.covers("int8", 6, 128, "per_group"))
+        self.assertFalse(SCHEMA.covers("int8", 7, 128, "per_group"))
+        self.assertIsNone(SCHEMA.caps("int8", 256))
+        self.assertEqual((SCHEMA.int8_max_mr(3), SCHEMA.int8_max_mr(4)), (0, 12))
         self.assertEqual((SCHEMA.int8_max_mr(2), SCHEMA.int8_max_mr(2, "per_group")), (12, 6))
-        self.assertEqual(SCHEMA.nr_widths("int8"), [16, 32])
-        self.assertEqual(SCHEMA.nr_widths("bf16"), [16, 32, 64, 128])
-        self.assertEqual(SCHEMA.nr_widths("f32"), [16, 32])
+        for kind in ("bf16", "int8", "int4", "f32", "f16", "f16_ph"):
+            self.assertEqual(SCHEMA.nr_widths(kind), [16, 32, 64, 128], kind)
         self.assertEqual(S.kernel_kind("f32"), "f32")
         # s4 weights run the INT4 group kernels (rows 1 .. 12 at 16 columns, 1 .. 6 at 32), a weight of one
         # group over K the kernels of one group (1 .. 12 at both); f16 weights the F16_PH kernels where the
         # registry has them (also two blocks wide), else the F16 kernels.
         self.assertEqual((S.kernel_kind("s4"), SCHEMA.int4_max_mr(1), SCHEMA.int4_max_mr(2)), ("int4", 12, 6))
         self.assertEqual((SCHEMA.int4_max_mr(1, "per_channel"), SCHEMA.int4_max_mr(2, "per_channel")), (12, 12))
-        self.assertEqual(SCHEMA.nr_widths("int4"), [16, 32])
+        self.assertEqual(SCHEMA.caps("int4", 128, "per_channel").max_mr, 12)
         self.assertEqual(SCHEMA.caps("int4", 32, "per_group").schemes, ("per_group",))
         self.assertEqual(SCHEMA.caps("int4", 32, "per_channel").schemes, ("per_channel",))
         self.assertTrue(SCHEMA.covers("int4", 12, 32, "per_channel"))
@@ -181,11 +188,11 @@ class TestFixture(unittest.TestCase):
             dict(k, int8_schemes=[]) if k["kind"] == "int4" else k for k in group_only.doc["kernels"]]))
         self.assertEqual(unlisted.int4_scheme(True), "per_channel")
         self.assertEqual(unlisted.caps("int4", 32, "per_channel"), unlisted.caps("int4", 32))
-        self.assertEqual(SCHEMA.nr_widths("f16"), [16, 32])
+        self.assertEqual(SCHEMA.nr_widths("f16"), [16, 32, 64, 128])
         kinds = {c.kind for c in SCHEMA.kernels}
         self.assertEqual(SCHEMA.f16_kind(), "f16_ph" if "f16_ph" in kinds else "f16")
         if "f16_ph" in kinds:
-            self.assertEqual(SCHEMA.nr_widths("f16_ph"), [16, 32, 64])
+            self.assertEqual(SCHEMA.nr_widths("f16_ph"), [16, 32, 64, 128])
         self.assertEqual(SCHEMA.kind_of("f16"), SCHEMA.f16_kind())
         self.assertEqual(set(kinds) - set(S.KERNEL_KINDS), set())
         # covers_int8: the scheme's family at the width takes 1 .. max_mr rows.
@@ -193,7 +200,8 @@ class TestFixture(unittest.TestCase):
         self.assertTrue(SCHEMA.int8_serves(6, 32, "per_group"))
         self.assertFalse(SCHEMA.int8_serves(7, 32, "per_group"))
         self.assertFalse(SCHEMA.int8_serves(0, 16))
-        self.assertFalse(SCHEMA.int8_serves(1, 64))
+        self.assertTrue(SCHEMA.int8_serves(12, 64))
+        self.assertFalse(SCHEMA.int8_serves(1, 48))
 
     def test_hardware_and_uarch(self):
         # The fixture's example machine: L3 domains of 8 cores and 32 MiB, AVX512-FP16.
@@ -319,8 +327,8 @@ class TestLoading(unittest.TestCase):
             s.uarch.with_overrides("cores=8")
 
     def test_int8_kernels_per_scheme(self):
-        # The fixture's per-channel and per-group families.
-        self.assertEqual(SCHEMA.nr_widths("int8"), [16, 32])
+        # The fixture's per-channel and per-group families, at 16 and 32 columns and tiles of 64 and 128.
+        self.assertEqual(SCHEMA.nr_widths("int8"), [16, 32, 64, 128])
         self.assertEqual(SCHEMA.caps("int8", 32).schemes, ("per_channel",))
         self.assertEqual(SCHEMA.caps("int8", 32, "per_group").schemes, ("per_group",))
         self.assertTrue(SCHEMA.covers("int8", 12, 32))

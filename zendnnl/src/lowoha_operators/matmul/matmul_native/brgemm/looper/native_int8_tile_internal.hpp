@@ -36,6 +36,25 @@ namespace native {
 /// tiles hold: up to 12 rows, a width of 16 or the widest call width.
 inline constexpr int kMaxTileMr = 12;
 inline constexpr int kMaxTileNr = kNativeInt8MaxCallCols;
+/// Calls of the widest tile (kNativeMaxTileCols), which the buffers of the
+/// calls that take each row call in turn hold.
+inline constexpr int kMaxTileCalls = kNativeMaxTileCols / 16;
+
+/// The calls of the tile of pack columns n0 .. n0 + nr, cw columns each
+/// (native_int8_col_width), that take each K pass (or batch of groups) and
+/// row call in turn, as bf16_block runs the slabs of a tile: every call of
+/// a tile of several slabs (native_slab_cols) but the tail tile, paired or
+/// not, as the plan's K pass covers them (native_int8_pass_cols); else
+/// one, which takes all its passes and rows before the next call, also in
+/// a tile the pairing widened (paired_wider), whose plan sized the pass for
+/// one call.
+inline int native_int8_calls_in_turn(
+        const native_plan_t &plan, int nr, int cw, bool tail) {
+    return tail || plan.paired_wider
+                    || nr <= native_slab_cols(native_kernel_kind_t::int8)
+            ? 1
+            : nr / cw;
+}
 
 /// The f32 values at weight columns p0 .. p0 + cw (cw a multiple of 16) of
 /// a per-column (stride 1) or per-tensor (stride 0) vector of f32, bf16 or
@@ -96,6 +115,32 @@ inline int second_col(
 inline bool second_apart(
         const native_weight_view_t &w, int nv, int p0, int p1) {
     return nv == 2 && (p1 != p0 + 16 || p0 % w.pack_nr != 0);
+}
+
+/// The columns a group tile's batch of groups (or K pass of one s4 group)
+/// spans: those of the calls of cw columns of a tile nr wide that take it in
+/// turn (native_int8_calls_in_turn).
+inline int native_int8_turn_width(
+        const native_plan_t &plan, int nr, int cw, bool tail) {
+    return native_int8_calls_in_turn(plan, nr, cw, tail) * cw;
+}
+
+/// The columns compute_channel_tile sizes the K pass of the in_turn calls
+/// of cw columns from column c of the tile of pack columns n0 .. n0 + nr
+/// for: a call apart reads one line of each pair of its runs' blocks, which
+/// takes the cache sets of twice its width.
+inline int native_int8_channel_pass_cols(const native_weight_view_t &w, int n0,
+        int nr, int c, int cw, int in_turn) {
+    const int nv = cw / 16;
+    int cols = 0;
+    for (int j = 0; j < in_turn; ++j) {
+        const int t = c + j * cw;
+        const int p0 = w.tile_col(n0, nr, t);
+        cols += second_apart(w, nv, p0, second_col(w, n0, nr, t, nv, p0))
+                ? 2 * cw
+                : cw;
+    }
+    return cols;
 }
 
 /// column_values of the columns p0 .. p0 + cols only (cols <= cw, the

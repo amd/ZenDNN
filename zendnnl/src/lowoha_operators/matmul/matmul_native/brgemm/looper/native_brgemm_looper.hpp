@@ -21,6 +21,7 @@
 #include <cstdint>
 
 #include "lowoha_operators/matmul/lowoha_common.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_planner.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/gemm_descriptor.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_weight_view.hpp"
 
@@ -62,6 +63,15 @@ status_t native_brgemm_execute_on_tiles(const GemmDescriptor &desc,
 status_t native_brgemm_check(const GemmDescriptor &desc,
         const native_weight_ref_t &weight, const void *src, void *dst,
         const void *bias, const matmul_params &params, const char **why);
+
+/// The plan the paired tiles of a gated call over [gate | up] halves run
+/// (native_weight_view_t) at width (native_paired_width): planned's, with
+/// tiles width wide when that is wider (paired_wider), and for BF16 the
+/// accumulators of a tile's rows.  Where the wider tiles leave the static
+/// deal fewer units than threads, row blocks of fewer rows give back the
+/// units the plan was balanced for.
+native_plan_t native_paired_plan(const native_plan_t &planned,
+        const native_problem_t &problem, int width);
 
 /// Block b of the widening of an f16 source of M rows into f32 rows ld
 /// apart in dst: element (m, k), src[m * lda + k] or with trans

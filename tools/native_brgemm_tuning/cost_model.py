@@ -37,17 +37,21 @@ MAX_DOMAINS = 64
 INT8_BYTES = 1.0
 INT8_STEP_K = 4
 INT4_BYTES = 0.5
-# Columns of one 2-vector BF16 kernel call of a wider tile.
-BF16_SLAB_COLS = 32
+# Columns of a slab of each kind's kernels, their widest call (native_slab_cols): a wider
+# tile runs it slab by slab.
+SLAB_COLS = {"bf16": 32, "int8": 32, "f32": 32, "int4": 32, "f16": 32, "f16_ph": 64}
+# The widest tile of every kind, whole slabs (kNativeMaxTileCols).
+MAX_SLAB_TILE_COLS = 128
 
 
 def ceil_div(a: int, b: int) -> int:
     return -(-a // b)
 
 
-def bf16_slab_cols(nr: int) -> int:
-    """native_bf16_slab_cols."""
-    return nr if nr < BF16_SLAB_COLS else BF16_SLAB_COLS
+def tile_slab_cols(kind: str, nr: int) -> int:
+    """native_tile_slab_cols: the columns of one kernel call of kind in a tile nr wide."""
+    slab = SLAB_COLS.get(kind, 32)
+    return nr if nr < slab else slab
 
 
 def int8_col_width(q: Any, remaining: int) -> int:
@@ -55,6 +59,13 @@ def int8_col_width(q: Any, remaining: int) -> int:
     if q.int8_cw_mask & 2 and remaining >= 32:
         return 32
     return 16
+
+
+def int8_pass_cols(q: Any) -> int:
+    """native_int8_pass_cols: the columns of one K pass of an INT8 tile, its call width or, for
+    a tile of several slabs, whose calls take each row call in turn, paired or not, the tile's,
+    unless the pairing widened the plan's tiles."""
+    return q.nr if q.nr > SLAB_COLS.get(q.kind, 32) and not q.paired_wider else int8_col_width(q, q.nr)
 
 
 def int8_call_rows(q: Any, nv: int) -> int:
@@ -166,6 +177,7 @@ class TileModel:
         f16_ph = q.kind == "f16_ph"
         if self.int8:
             self.slab_cols = int8_col_width(q, q.nr)
+            self.pass_cols = int8_pass_cols(q)
             self.mr = int8_call_rows(q, self.slab_cols // VECTOR_COLS)
             self.k_steps = float(ceil_div(p.k, INT8_STEP_K))
             self.wei_bytes = int4_weight_bytes(p) if self.int4 else INT8_BYTES
@@ -175,10 +187,10 @@ class TileModel:
             if self.int4:
                 gs = p.group if p.group > 0 else p.k
                 self.groups = ceil_div(p.k, max(1, gs))
-                self.l1_fit = ((self.slab_cols * self.wei_bytes + self.mr * INT8_BYTES) * p.k * 100
+                self.l1_fit = ((self.pass_cols * self.wei_bytes + self.mr * INT8_BYTES) * p.k * 100
                                <= float(self.l1_bytes))
         else:
-            self.slab_cols = q.nr if f16_ph else bf16_slab_cols(q.nr)
+            self.slab_cols = tile_slab_cols(q.kind, q.nr)
             self.mr = q.mr
             self.kc = min(max(1, q.kc), p.k)
             self.passes = ceil_div(p.k, self.kc)
@@ -222,9 +234,9 @@ class TileModel:
         passes, l1_fit = self.passes, self.l1_fit
         if self.int8 and not self.int4:
             k_quads = ceil_div(p.k, INT8_STEP_K)
-            pss = max(1, int8_pass_quads(q, k_quads, self.slab_cols, rows, self.mr))
+            pss = max(1, int8_pass_quads(q, k_quads, self.pass_cols, rows, self.mr))
             passes = ceil_div(k_quads, pss)
-            l1_fit = (self.slab_cols + self.mr) * pss * INT8_STEP_K * 100 <= self.l1_bytes
+            l1_fit = (self.pass_cols + self.mr) * pss * INT8_STEP_K * 100 <= self.l1_bytes
         full, rest = rows // self.mr, rows % self.mr
         calls = full + (1 if rest > 0 else 0)
         first = self.call(self.mr if full > 0 else rest, False)

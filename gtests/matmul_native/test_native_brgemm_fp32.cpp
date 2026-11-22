@@ -299,22 +299,25 @@ TEST(NativeBrgemmFp32Plan, RowsPerCallAndTheAliasRule) {
     EXPECT_EQ(nat::heuristic_plan(p, u, narrow).mr, narrow.tile_rows);
 }
 
-// An FP32 plan takes tiles of 16 or 32 columns, any K pass of at least one
-// and the FP32 kernels' rows; the BF16 tiles of 64 and 128 columns and odd K
-// passes stay BF16's.
+// An FP32 plan takes tiles of 16 or 32 columns and of 64 and 128 columns of
+// 32-column slabs, any K pass of at least one and the FP32 kernels' rows;
+// odd K passes stay BF16's.
 TEST(NativeBrgemmFp32Plan, ValidateTheFp32Tile) {
     SKIP_WITHOUT_FP32_ISA();
     const nat::UarchParams &u = nat::native_plan_uarch();
     const nat::native_problem_t f = problem(64, 256, 1000, 4, kF32);
     const nat::native_problem_t b = problem(64, 256, 1000, 4, kBf16);
     for (const char *text : {"nr=16", "nr=32", "kc=3", "kc=999", "mr=12",
-                 "nr=16,mr=12", "schedule=blocks,unit_tiles=3,kc=64"}) {
+                 "nr=16,mr=12", "schedule=blocks,unit_tiles=3,kc=64", "nr=64",
+                 "nr=128", "nr=128,mr=7,kc=3"}) {
         const nat::native_plan_t q
                 = nat::heuristic_plan(f, u, heuristic_of(text));
         EXPECT_EQ(nat::validate_native_plan(q, f), nullptr) << text;
     }
-    nat::native_plan_t q = nat::heuristic_plan(f, u, heuristic_of("nr=64"));
-    EXPECT_NE(nat::validate_native_plan(q, f), nullptr);
+    nat::native_plan_t q = nat::heuristic_plan(
+            problem(64, 288, 1000, 4, kF32), u, heuristic_of("nr=64"));
+    EXPECT_NE(nat::validate_native_plan(q, problem(64, 288, 1000, 4, kF32)),
+            nullptr);
     if (nat::detect_uarch().avx512bf16) {
         q = nat::heuristic_plan(b, u, heuristic_of("kc=3"));
         EXPECT_NE(nat::validate_native_plan(q, b), nullptr);

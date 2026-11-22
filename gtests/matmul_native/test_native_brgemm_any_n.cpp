@@ -39,6 +39,9 @@
 #include "lowoha_operators/common/omp_thread_control.hpp"
 #include "lowoha_operators/matmul/backends/reference/reference_kernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_brgemm_looper.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_int8_call.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_int8_tile_internal.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_planner.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_pack.hpp"
 #include "matmul_native/native_brgemm_test_utils.hpp"
 
@@ -330,9 +333,8 @@ nt::call_t make_call(const ncase_t &c, const operands_t &o) {
     return call;
 }
 
-/// The call through native_brgemm_execute with the descriptor and weight
-/// reference native_layout_matmul builds for it.
-status_t run_execute(const nt::call_t &c) {
+/// The descriptor native_layout_matmul builds for the call.
+nat::GemmDescriptor descriptor_of(const nt::call_t &c) {
     nat::GemmDescriptor d;
     d.M = c.M;
     d.N = c.N;
@@ -353,6 +355,13 @@ status_t run_execute(const nt::call_t &c) {
     d.num_threads = zendnnl::lowoha::resolve_num_threads(
             c.params.num_threads, zendnnl::lowoha::thread_guard::max_threads());
     d.gated_act = c.gated;
+    return d;
+}
+
+/// The call through native_brgemm_execute with the descriptor and weight
+/// reference native_layout_matmul builds for it.
+status_t run_execute(const nt::call_t &c) {
+    const nat::GemmDescriptor d = descriptor_of(c);
     nat::native_weight_ref_t ref;
     ref.weight = c.wei;
     ref.pack_nr = nat::kNativeLayoutPackNr;
@@ -934,5 +943,232 @@ INSTANTIATE_TEST_SUITE_P(RepeatPerCall, NativeBrgemmAnyN,
         [](const ::testing::TestParamInfo<ncase_t> &info) {
             return info.param.name;
         });
+
+/// Calls of N 250 and 1000 (padded to whole tiles of 64 and 128) of every
+/// data type, M 1 to 256, and gated calls of N 250 (staged rows) and 256
+/// (paired halves for BF16 and INT8).
+std::vector<ncase_t> wide_tile_cases() {
+    static const q_t kQs[] = {q_t::bf16, q_t::f32, q_t::st_s8, q_t::st_u8,
+            q_t::dyn_s8, q_t::dyn_u8, q_t::grp_s8, q_t::grp_u8};
+    static const data_type_t kBias[] = {kNone, kF32, kBf16};
+    static const gated_t kActs[] = {gated_t::silu_and_mul,
+            gated_t::gelu_and_mul, gated_t::swiglu_oai_mul};
+    std::vector<ncase_t> v;
+    int i = 0;
+    for (const q_t q : kQs)
+        for (const int N : {250, 1000})
+            for (const int M : {1, 5, 13, 64, 256}) {
+                ncase_t c;
+                c.q = q;
+                c.N = N;
+                c.M = q == q_t::dyn_u8 ? 1 : M;
+                c.K = c.groups() ? kGroup * (1 + i % 4) : kKs[i % 5];
+                c.transB = i % 2 == 1;
+                c.threads = i % 3 == 0 ? 1 : 0;
+                c.wc = i % 3;
+                c.pad = i % 3;
+                c.dst = pick_dst(q, i);
+                c.bias = kBias[i % 3];
+                pick_epilogue(c, i);
+                ++i;
+                v.push_back(c);
+            }
+    for (const q_t q : {q_t::bf16, q_t::f32, q_t::st_u8, q_t::dyn_s8,
+                 q_t::grp_s8, q_t::after})
+        for (const int N : {250, 256})
+            for (const int M : {1, 8, 33}) {
+                ncase_t c;
+                c.q = q;
+                c.N = N;
+                c.M = M;
+                c.K = c.groups() ? kGroup * (1 + i % 3) : kKs[i % 5];
+                c.threads = i % 2 == 0 ? 1 : 0;
+                c.dst = q == q_t::f32 ? kF32 : (i % 2 ? kBf16 : kF32);
+                c.gated = kActs[i % 3];
+                c.bias = i % 4 == 1 ? kF32 : kNone;
+                if (i % 5 == 2) c.beta = 0.5f;
+                ++i;
+                v.push_back(c);
+            }
+    return named(v);
+}
+
+// Tiles of 64 and 128 columns, each run slab by slab, give the reference's
+// results for every data type: tails of padded columns, M 1 to 1031, K
+// passes and M blocks, INT8 call widths and rows per call, the direct store
+// or not, bias, post-ops and the blocks schedule, and gated halves paired in
+// the tiles or staged.  Each pin runs in a child process on the cases whose
+// padded N is whole tiles of its width, which then take it.
+TEST(NativeBrgemmAnyNPlan, WideTilesMatchTheReference) {
+    const nat::UarchParams &u = nat::detect_uarch();
+    if (!nat::native_base_isa() || !u.avx512bf16 || !u.avx512vnni)
+        GTEST_SKIP() << "needs AVX512-BF16 and AVX512-VNNI";
+    const struct {
+        const char *pin;
+        int nr;
+    } pins[] = {{"nr=64", 64},
+            {"nr=128,int8_cw=16,int8_mr=5,mr=7,kc=64,int8_kc=64,mb=24", 128},
+            {"nr=128,schedule=blocks,nb=256,direct_store=0,bias_in_dequant=0",
+                    128}};
+    // And the cases of every_n_cases and gated_cases of a few N with tails
+    // of tiles of 64 or 128.
+    std::vector<ncase_t> cases = wide_tile_cases();
+    for (const std::vector<ncase_t> &more :
+            {every_n_cases(route_t::execute, 0), gated_cases(route_t::execute)})
+        for (const ncase_t &c : more)
+            if (c.N == 33 || c.N == 50 || c.N == 62 || c.N == 64 || c.N == 98
+                    || c.N == 100)
+                cases.push_back(c);
+    for (const auto &pin : pins) {
+        nt::expect_in_child(
+                {{"ZENDNNL_MATMUL_NATIVE_CONFIG", pin.pin},
+                        {"ZENDNNL_MATMUL_NATIVE_TUNING_FILE", nullptr}},
+                [&] {
+            int bad = 0, taken = 0;
+            for (const ncase_t &c : cases) {
+                const int padded
+                        = nat::native_padded_n(c.N, nat::kNativeLayoutPackNr);
+                if (padded % pin.nr != 0) continue;
+                const operands_t o = make_operands(c);
+                const buffer_t want = expected_of(c, o);
+                nt::call_t call = make_call(c, o);
+                const nat::GemmDescriptor d = descriptor_of(call);
+                const nat::native_plan_t plan = nat::native_planner().plan(
+                        nat::make_native_problem(d, call.params, call.bias,
+                                nat::kNativeLayoutPackNr,
+                                nat::decide_int8_call(
+                                        d, call.params, call.bias)));
+                buffer_t got = nt::make_buffer(o.init.bytes);
+                std::memcpy(got.get(), o.init.get(), o.init.bytes);
+                call.dst = got.get();
+                const status_t st = run_execute(call);
+                const ::testing::AssertionResult same = st == status_t::success
+                        ? matches(c, o, got.get(), want)
+                        : ::testing::AssertionFailure() << "not served";
+                if (plan.nr != pin.nr || !same) {
+                    std::fprintf(stderr, "%s under %s: plan nr %d, %s\n",
+                            c.name.c_str(), pin.pin, plan.nr, same.message());
+                    ++bad;
+                }
+                ++taken;
+                ::reset_grp_matmul_caches();
+            }
+            if (taken < 50) {
+                std::fprintf(stderr, "%s took %d cases\n", pin.pin, taken);
+                ++bad;
+            }
+            return bad + (::testing::Test::HasFailure() ? 1 : 0);
+        }, pin.pin);
+    }
+}
+
+// The calls of a gated call's paired INT8 tile that take each K pass and
+// row call in turn span the columns its plan sized that pass for
+// (native_int8_pass_cols): every call of a tile of 64 or 128 columns whose
+// plan was that wide, one call where the pairing widened the plan's tiles
+// (a plan of 32 columns pairs at 64), for each INT8 scheme and call width.
+TEST(NativeBrgemmAnyNPlan, PairedTilesTakeThePassTheirPlanSized) {
+    const nat::UarchParams &u = nat::detect_uarch();
+    if (!nat::native_base_isa() || !u.avx512vnni)
+        GTEST_SKIP() << "needs AVX512-VNNI";
+    const int K = 4096;
+    int wide = 0, widened = 0, apart = 0;
+    // s8 weights with per-channel (scheme 0) or per-group (1) scales, s4
+    // weights of groups of 128 (2), under a source quantized per token.
+    const auto check
+            = [&](const char *cfg, int N, int M, int threads, int scheme) {
+        SCOPED_TRACE(std::string(cfg) + " N=" + std::to_string(N) + " M="
+                + std::to_string(M) + " threads=" + std::to_string(threads)
+                + " scheme=" + std::to_string(scheme));
+        nat::native_config_t config;
+        std::string why;
+        ASSERT_TRUE(*cfg == '\0' || nat::parse_native_config(cfg, config, why))
+                << why;
+        nat::GemmDescriptor d;
+        d.M = M;
+        d.N = N;
+        d.K = K;
+        d.src_dt = kBf16;
+        d.wei_dt = scheme == 2 ? data_type_t::s4 : kS8;
+        d.dst_dt = kBf16;
+        d.num_threads = threads;
+        d.gated_act = gated_t::silu_and_mul;
+        mm::matmul_params params;
+        params.dynamic_quant = true;
+        nat::native_int8_decision_t decision;
+        decision.scheme = scheme == 0 ? nat::native_int8_scheme_t::per_channel
+                                      : nat::native_int8_scheme_t::per_group;
+        if (scheme == 2) {
+            decision.groups = K / 128;
+            params.quant_params.wei_scale.dt = kBf16;
+        }
+        const nat::native_problem_t p = nat::make_native_problem(
+                d, params, nullptr, nat::kNativeLayoutPackNr, decision);
+        const nat::native_plan_t planned = nat::heuristic_plan(
+                p, u, nat::apply_native_config({}, config));
+        ASSERT_EQ(nat::validate_native_plan(planned, p), nullptr);
+        ASSERT_GE(planned.nr, 32);
+        const nat::native_plan_t paired = nat::native_paired_plan(planned, p,
+                nat::native_paired_width(
+                        N, planned.nr, planned.m_blocks, planned.threads));
+        nat::native_weight_view_t w;
+        w.N = N;
+        w.pack_nr = nat::kNativeLayoutPackNr;
+        w.paired = true;
+        // The columns of the pass, or batch of groups, the tiles take, as
+        // they size it; a 32-column call of a tile paired at 32 reads its up
+        // run apart and counts twice.
+        const int cw = nat::native_int8_col_width(paired, paired.nr);
+        const int cols = scheme == 0
+                ? nat::native_int8_channel_pass_cols(w, 0, paired.nr, 0, cw,
+                          nat::native_int8_calls_in_turn(
+                                  paired, paired.nr, cw, false))
+                : nat::native_int8_turn_width(paired, paired.nr, cw, false);
+        const bool read_apart = scheme == 0 && paired.nr == 32 && cw == 32;
+        EXPECT_EQ(cols,
+                (read_apart ? 2 : 1) * nat::native_int8_pass_cols(planned));
+        EXPECT_EQ(nat::native_int8_pass_cols(paired),
+                nat::native_int8_pass_cols(planned));
+        wide += planned.nr > 32;
+        widened += paired.nr > planned.nr;
+        apart += read_apart;
+    };
+    for (const char *cfg :
+            {"", "nr=64", "nr=128", "int8_cw=16", "nr=128,int8_cw=16"})
+        for (const int N : {1024, 4096, 14336})
+            for (const int M : {8, 32, 64, 256})
+                for (const int threads : {1, 8, 32})
+                    for (const int scheme : {0, 1, 2})
+                        check(cfg, N, M, threads, scheme);
+    EXPECT_GT(wide, 0);
+    EXPECT_GT(widened, 0);
+    EXPECT_GT(apart, 0);
+}
+
+// The tail tile of a weight of padded columns (N 1000 in tiles of 128: 104
+// columns from 896, a tile of 112) takes its calls one at a time, each pass
+// or batch over one call's columns; a whole tile's calls take theirs over
+// its 128 columns.
+TEST(NativeBrgemmAnyNPlan, TailTilesTakeTheirPassesCallByCall) {
+    nat::native_plan_t plan;
+    plan.kind = nat::native_kernel_kind_t::int8;
+    plan.nr = 128;
+    nat::native_weight_view_t w;
+    w.N = 1000;
+    w.pack_nr = nat::kNativeLayoutPackNr;
+    EXPECT_EQ(nat::native_int8_channel_pass_cols(w, 0, 128, 0, 32,
+                      nat::native_int8_calls_in_turn(plan, 128, 32, false)),
+            128);
+    EXPECT_EQ(nat::native_int8_turn_width(plan, 128, 32, false), 128);
+    std::vector<int> tail;
+    for (int c = 0; c < 112;) {
+        const int cw = nat::native_int8_col_width(plan, 112 - c);
+        EXPECT_EQ(nat::native_int8_turn_width(plan, 112, cw, true), cw);
+        tail.push_back(nat::native_int8_channel_pass_cols(w, 896, 112, c, cw,
+                nat::native_int8_calls_in_turn(plan, 112, cw, true)));
+        c += cw;
+    }
+    EXPECT_EQ(tail, (std::vector<int> {32, 32, 32, 16}));
+}
 
 } // namespace

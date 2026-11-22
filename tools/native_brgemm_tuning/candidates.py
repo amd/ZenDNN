@@ -31,7 +31,7 @@ import itertools
 import random
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
-from .plan import Plan, bf16_wide_width, builtin_plan, ceil_div, effective_signature, mirrored, resolve
+from .plan import Plan, builtin_plan, ceil_div, effective_signature, mirrored, resolve, slab_tile_width
 from .problems import Problem
 from .schema import Schema
 
@@ -171,8 +171,9 @@ def _value_rule(key: str, p: Problem, schema: Schema) -> List[Any]:
     kind = schema.kind_of(p.dtype)
     t = p.threads
     if key == "nr":
+        # Tiles of slabs where the build has them (every kind, or BF16 only in an older one).
         return [w for w in schema.nr_widths(kind) if (w in (16, 32) and w <= p.pack_nr and p.pack_nr % w == 0)
-                or (p.bf16 and bf16_wide_width(w, p.pack_nr)) or (kind == "f16_ph" and w == 64 and p.pack_nr == 32)]
+                or slab_tile_width(kind, w, p.pack_nr) or (kind == "f16_ph" and w == 64 and p.pack_nr == 32)]
     if key == "mr":
         return [r for r in (2, 4, 6, 8, 12)
                 if p.int8 or any(schema.covers(kind, r, w) for w in schema.nr_widths(kind))]

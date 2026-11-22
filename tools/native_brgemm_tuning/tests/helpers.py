@@ -76,6 +76,14 @@ def without_nb(s: schema_mod.Schema) -> schema_mod.Schema:
     return schema_mod.Schema(dict(s.doc, keys=keys), s.source + " without nb")
 
 
+def with_bf16_slab_tiles_only(s: schema_mod.Schema) -> schema_mod.Schema:
+    """s as a build whose tiles of several slabs are BF16's only: no INT8, INT4, FP32 or F16 tile wider
+    than 32 columns and no F16_PH tile wider than its tile of two blocks."""
+    kernels = [k for k in s.doc["kernels"]
+               if k["kind"] == "bf16" or k["nr"] <= (64 if k["kind"] == "f16_ph" else 32)]
+    return schema_mod.Schema(dict(s.doc, kernels=kernels), s.source + " with BF16 tiles of slabs only")
+
+
 def with_newer_key(s: schema_mod.Schema) -> schema_mod.Schema:
     """s with newer_pct, a key of a newer build that the plan mirror does not read."""
     newer = {"name": "newer_pct", "type": "int", "default": 50, "min": 0, "max": 100, "applies": "both",
@@ -83,10 +91,11 @@ def with_newer_key(s: schema_mod.Schema) -> schema_mod.Schema:
     return schema_mod.Schema(dict(s.doc, keys=s.doc["keys"] + [newer]), s.source + " with a newer key")
 
 
-# The schemas of builds without those rules or nb, and of a newer build.
+# The schemas of builds without those rules, nb or the other types' tiles of slabs, and of a newer build.
 OLDER = without_bf16_rules(SCHEMA)
 NO_BLOCKS = without_blocks(SCHEMA)
 NO_NB = without_nb(SCHEMA)
+BF16_SLABS = with_bf16_slab_tiles_only(SCHEMA)
 NEWER = with_newer_key(SCHEMA)
 
 

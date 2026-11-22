@@ -380,6 +380,29 @@ class TestGatedLines(unittest.TestCase):
             self.assertEqual(cands[0].sig != cands[1].sig, differ, (n, epilogue))
             self.assertEqual(len(C.unique(cands, sp)), 2 if differ else 1, (n, epilogue))
 
+    def test_paired_int8_tiles_sign_the_pass_and_the_order_of_their_calls(self):
+        # Tiles the pairing widened (a plan of 32 columns pairs at 64 here) take one call at a time, with
+        # a K pass of its 32 columns: one pass under the 512 and the 256 KiB budget.  The paired tiles of
+        # a plan 128 columns wide take their four calls in turn over a pass of 128 columns: 512 against
+        # 342 quads.
+        base = {"mb": 32, "int8_mr": 6, "l1_pass": 0}
+        p = Problem("s8", 64, 4096, 4096, epilogue="gated")
+        sp = C.Space(p, SCHEMA, DOMAINS8)
+        for nr, width, differ in ((32, 64, False), (128, 128, True)):
+            cands = [sp.make(dict(base, nr=nr)), sp.make(dict(base, nr=nr, int8_l2_pct=25))]
+            self.assertEqual(PL.paired_width(cands[0].plan, p), width)
+            self.assertEqual(cands[0].sig != cands[1].sig, differ, nr)
+            self.assertEqual(len(C.unique(cands, sp)), 2 if differ else 1, nr)
+        # A plan of 64 columns runs the widened plan's tiles, but its two calls take each row call in
+        # turn: another order once a tile takes more than one row call (6 rows per call), the same one
+        # at M 8.
+        widened, wide = sp.make(dict(base, nr=32)), sp.make(dict(base, nr=64))
+        self.assertTrue(PL.paired_plan(widened.plan, p, 64).paired_wider)
+        self.assertNotEqual(widened.sig, wide.sig)
+        self.assertEqual(len(C.unique([widened, wide], sp)), 2)
+        d = C.Space(Problem("s8", 8, 4096, 4096, epilogue="gated"), SCHEMA, DOMAINS8)
+        self.assertEqual(d.make({}).sig, d.make({"nr": 64}).sig)
+
 
 if __name__ == "__main__":
     unittest.main()

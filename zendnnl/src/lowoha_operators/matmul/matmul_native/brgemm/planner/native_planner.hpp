@@ -119,9 +119,10 @@ struct native_config_entry_t;
 /// the INT8 tile read.  Legal for its problem (validate_native_plan).
 struct native_plan_t {
     // Tile grid and schedule.
-    /// Tile width: 16 or 32, dividing pack_nr; BF16 also 64 or 128:
-    /// 32-column slabs, each inside one pack block, of whole blocks or of
-    /// one block; F16_PH also 64, two pack blocks of 32.
+    /// Tile width: 16 or 32, dividing pack_nr; F16_PH also 64, two pack
+    /// blocks of 32; every kind also 64 or 128 of slabs of its widest call
+    /// (native_slab_cols): 32-column slabs, each inside one pack block, of
+    /// whole blocks or of one block, or the F16_PH slabs of 64.
     int nr = 0;
     /// BF16 and FP32 rows per call; rows of the row-split rounding
     int mr = 0;
@@ -144,6 +145,9 @@ struct native_plan_t {
     int row_unit = 12; ///< rows per unit of the row-group ranges
     native_traversal_t traversal = native_traversal_t::m_inner;
     size_t scratch_floats = 0; ///< accumulators per thread
+    /// The tiles pair a gated call's halves at a width above the plan's
+    /// (native_paired_plan): the plan's INT8 K pass is one call's.
+    bool paired_wider = false;
     // INT8 tile.
     int int8_rows_nv1 = 12; ///< rows per INT8 call at NR 16
     int int8_rows_nv2 = 12; ///< at NR 32
@@ -199,6 +203,15 @@ inline int native_int8_col_width(const native_plan_t &p, int remaining) {
 /// Rows per INT8 call at NR = 16 * nv, nv 1 or 2.
 inline int native_int8_call_rows(const native_plan_t &p, int nv) {
     return nv == 2 ? p.int8_rows_nv2 : p.int8_rows_nv1;
+}
+/// Columns of one K pass of an INT8 tile of p: its call width, or the
+/// tile's for a tile of several slabs, whose calls take each row call in
+/// turn, paired or not, unless the pairing widened the plan's tiles
+/// (paired_wider).
+inline int native_int8_pass_cols(const native_plan_t &p) {
+    return p.nr > native_slab_cols(p.kind) && !p.paired_wider
+            ? p.nr
+            : native_int8_col_width(p, p.nr);
 }
 /// Quads per K pass of a tile cw columns wide and rows tall, max_mr rows per
 /// call, with the pass budget of the plan.

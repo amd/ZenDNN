@@ -45,24 +45,41 @@ enum class native_kernel_kind_t : uint8_t {
     f16_ph
 };
 
-/// Columns of a slab: one 2-vector BF16 kernel call of a wider tile.
-inline constexpr int kNativeBf16SlabCols = 32;
+/// Columns of a slab of kind's kernels: their widest call, two vectors, which
+/// a wider tile runs slab by slab.
+constexpr int native_slab_cols(native_kernel_kind_t kind) {
+    switch (kind) {
+        case native_kernel_kind_t::bf16: return 32;
+        case native_kernel_kind_t::int8: return 32;
+        case native_kernel_kind_t::f32: return 32;
+        case native_kernel_kind_t::int4: return 32;
+        case native_kernel_kind_t::f16: return 32;
+        case native_kernel_kind_t::f16_ph: return 64;
+    }
+    return 0;
+}
 
-/// Widest BF16 tile: slabs of kNativeBf16SlabCols, at most this many columns.
-inline constexpr int kNativeBf16MaxTileCols = 128;
-static_assert(kNativeBf16MaxTileCols % kNativeBf16SlabCols == 0,
-        "the widest BF16 tile is whole slabs");
+/// Widest tile of every kind: whole slabs, at most this many columns.
+inline constexpr int kNativeMaxTileCols = 128;
+static_assert(
+        kNativeMaxTileCols % native_slab_cols(native_kernel_kind_t::bf16) == 0
+                && kNativeMaxTileCols
+                                % native_slab_cols(native_kernel_kind_t::f16_ph)
+                        == 0,
+        "the widest tile is whole slabs");
 
-/// Columns of one 2-vector BF16 kernel call in a tile nr wide: the tile, or
-/// a slab for a tile of several slabs.
-constexpr int native_bf16_slab_cols(int nr) {
-    return nr < kNativeBf16SlabCols ? nr : kNativeBf16SlabCols;
+/// Columns of one kernel call of kind in a tile nr wide: the tile, or a slab
+/// for a tile of several slabs.
+constexpr int native_tile_slab_cols(native_kernel_kind_t kind, int nr) {
+    return nr < native_slab_cols(kind) ? nr : native_slab_cols(kind);
 }
 
 /// What the micro-kernels of one dtype offer at one tile width.
 struct native_kernel_caps_t {
     native_kernel_kind_t kind = native_kernel_kind_t::bf16;
-    int nr = 0; ///< 16 * nv
+    /// 16 * nv, or a tile of several slabs (native_slab_cols) up to
+    /// kNativeMaxTileCols, which has the rows and schemes of its slab
+    int nr = 0;
     int max_mr = 0; ///< every row count 1 .. max_mr has a kernel
     /// INT8: the weight-scale schemes the kernel serves, a mask of
     /// native_int8_scheme_bit: the per-channel kernels serve per_channel, the
@@ -104,17 +121,15 @@ public:
         return covers(native_kernel_kind_t::int8, mr, nr, scheme);
     }
     /// BF16 kernels by row count (index 0 unused, size 13) of the calls of a
-    /// tile nr wide, native_bf16_slab_cols(nr) columns each; nullptr when
-    /// caps(bf16, nr) is nullptr.
+    /// tile nr wide, native_tile_slab_cols(bf16, nr) columns each; nullptr
+    /// when caps(bf16, nr) is nullptr.
     const bf16_brgemm_fn_t *bf16_table(int nr) const noexcept;
-    /// FP32 kernels by row count (index 0 unused, size 13) of a tile nr wide
-    /// (16 or 32); nullptr when caps(f32, nr) is nullptr.
+    /// The FP32 kernels as bf16_table, for caps(f32, nr).
     const native_fp32_ukernel_fn_t *f32_table(int nr) const noexcept;
-    /// F16 kernels by row count (index 0 unused, size 13) of a tile nr wide
-    /// (16 or 32); nullptr when caps(f16, nr) is nullptr.
+    /// The F16 kernels as bf16_table, for caps(f16, nr).
     const native_f16_ukernel_fn_t *f16_table(int nr) const noexcept;
-    /// The AVX512-FP16 kernels as f16_table, for caps(f16_ph, nr), nr 16, 32
-    /// or 64.
+    /// The AVX512-FP16 kernels as bf16_table, for caps(f16_ph, nr): calls of
+    /// 64 columns from nr 64.
     const native_f16_ph_ukernel_fn_t *f16_ph_table(int nr) const noexcept;
     /// The kernels of an f16 call: f16_ph when the registry has them, else
     /// f16.
@@ -142,8 +157,9 @@ private:
 /// select_native_int4_one_group_ukernel (both orders),
 /// select_native_fp32_ukernel and select_native_f16_ukernel (mr 1 .. 12 at
 /// nv 1 / 2), and select_native_f16_ph_ukernel (mr 1 .. 12 at nv 1 / 2 / 4).
-/// BF16 tiles of 64 and 128 columns take the row counts of nr 32.  A dtype is probed only
-/// when the CPU has its ISA (AVX512-BF16, AVX512-VNNI for INT8 and INT4,
+/// Tiles of several slabs (native_slab_cols), up to kNativeMaxTileCols
+/// columns, take the row counts and schemes of the slab.  A dtype is probed
+/// only when the CPU has its ISA (AVX512-BF16, AVX512-VNNI for INT8 and INT4,
 /// AVX-512 F for FP32 and F16, AVX512-FP16 for F16_PH); otherwise it has no
 /// entries.  F16_PH is probed only while ZENDNNL_MATMUL_NATIVE_F16_ACCUM,
 /// read here, is unset or f16; at f32 an f16 call takes the F16 kernels,

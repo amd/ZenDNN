@@ -40,6 +40,7 @@
 #include <map>
 #include <memory>
 #include <random>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -759,21 +760,35 @@ TEST_F(NativeTuningExec, SameBitsOverrideKeysKeepTheBits) {
     }, "the same-bits settings");
 }
 
-// BF16 tiles of several 32-column slabs (with odd K, K passes, row tails, a
+// Tiles of several 32-column slabs (with odd K, K passes, row tails, a
 // transposed source and a gated epilogue among the cases) keep the bits of
-// the built-in plan.  A setting runs on the BF16 cases it gives a legal plan,
-// as in SameBitsOverrideKeysKeepTheBits.
-TEST_F(NativeTuningExec, SameBitsBf16TileWidthsKeepTheBits) {
+// the built-in plan, for BF16, FP32 and the INT8 sources, and with the INT8
+// call widths, rows per call, K passes and store.  A setting runs on the
+// cases it gives a legal plan, as in SameBitsOverrideKeysKeepTheBits.
+TEST_F(NativeTuningExec, SameBitsTileWidthsKeepTheBits) {
     const char *const settings[] = {"nr=64", "nr=128", "nr=64,mr=4",
             "nr=128,mr=2", "nr=64,mr=1", "nr=64,kc=64", "nr=128,kc=1000",
             "nr=128,mr=3,kc=2", "nr=64,mb=7", "nr=128,schedule=row_groups",
             "nr=64,traversal=n_inner", "nr=64,schedule=blocks,unit_tiles=2",
-            "nr=128,schedule=blocks,unit_tiles=3,kc=1000"};
+            "nr=128,schedule=blocks,unit_tiles=3,kc=1000", "nr=128,int8_cw=16",
+            "nr=64,int8_mr=5,int8_kc=64",
+            "nr=128,int8_kc=32,mb=24,direct_store=0",
+            "nr=128,int8_cw=32/16,schedule=blocks,nb=256"};
     constexpr int kSettings = static_cast<int>(std::size(settings));
-    std::vector<case_t> cases;
-    for (const case_t &c : served(all_cases()))
-        if (c.src == src_t::bf16) cases.push_back(c);
-    if (cases.empty()) GTEST_SKIP() << "needs AVX512-BF16";
+    // And calls of padded columns, an s8 source of N 256 and a gated INT8
+    // call whose halves pair in the tiles.
+    std::vector<case_t> wide_cases = all_cases();
+    wide_cases.insert(wide_cases.end(),
+            {{"int8_s8_wide", src_t::st_s8, 13, 256, 200, kBf16, 4},
+                    {"bf16_padded_relu", src_t::bf16, 9, 250, 300, kF32, 4,
+                            false, kF32, post_op_type_t::relu},
+                    {"int8_u8_padded", src_t::st_u8, 33, 1000, 260, kF32, 8},
+                    {"f32_padded", src_t::f32, 70, 250, 129, kF32, 8},
+                    {"int8_dyn_gated_wide", src_t::dyn_s8, 16, 512, 256, kBf16,
+                            8, false, kNone, post_op_type_t::none,
+                            gated_t::silu_and_mul}});
+    const std::vector<case_t> cases = served(wide_cases);
+    if (cases.empty()) GTEST_SKIP() << "needs AVX512-BF16 or AVX512-VNNI";
     const auto k_of = [](const case_t &c, int j) { return c.K + 4 * j; };
     std::vector<operands_t> ops;
     for (const case_t &c : cases)
@@ -793,10 +808,13 @@ TEST_F(NativeTuningExec, SameBitsBf16TileWidthsKeepTheBits) {
     };
     std::string entries;
     std::vector<int> listed(kSettings, 0);
+    std::set<src_t> wide[2];
     for (size_t i = 0; i < cases.size(); ++i)
         for (int j = 0; j < kSettings; ++j) {
             if (!legal(i, j)) continue;
             ++listed[j];
+            wide[std::strncmp(settings[j], "nr=128", 6) == 0].insert(
+                    cases[i].src);
             nlohmann::json e;
             e["id"] = std::string(cases[i].name) + "/" + settings[j];
             e["match"]
@@ -806,8 +824,14 @@ TEST_F(NativeTuningExec, SameBitsBf16TileWidthsKeepTheBits) {
         }
     for (int j = 0; j < kSettings; ++j)
         EXPECT_GT(listed[j], 0) << "'" << settings[j] << "' serves no case";
+    // Each source the CPU serves takes both widths.
+    std::set<src_t> sources;
+    for (const case_t &c : cases)
+        sources.insert(c.src);
+    EXPECT_EQ(wide[0], sources);
+    EXPECT_EQ(wide[1], sources);
     const nt::temp_file_t file(
-            "same_bits_bf16.json", tuning_json("", entries, ""));
+            "same_bits_tile_widths.json", tuning_json("", entries, ""));
     nt::child_buffers_t shared;
     if (!nt::in_child()) {
         std::unique_ptr<nat::native_planner_t> planner;
@@ -858,7 +882,7 @@ TEST_F(NativeTuningExec, SameBitsBf16TileWidthsKeepTheBits) {
                             + settings[j] + "' differs from the built-in plan");
             }
         return report.failures();
-    }, "the BF16 tile widths");
+    }, "the tile widths");
 }
 
 /// Whether a plan with the BF16 aliasing rule (on) takes its rows per call,

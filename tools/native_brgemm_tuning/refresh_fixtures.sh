@@ -21,7 +21,10 @@
 # names alone the planner's test compares) rather than the dump machine's, and
 # fixtures/plan_check.json from its planner's plans for the cases of
 # tests/plan_cases.py, and fixtures/plan_check_nb.json for its nb cases
-# (--nb), which names the dump machine's kernel kinds. The plan fixtures are
+# (--nb) on the F16 kernels: the nb dump runs under
+# ZENDNNL_MATMUL_NATIVE_F16_ACCUM=f32 and its fixture names the schema's
+# kernel kinds but F16_PH, so that each f16 kernel family has a fixture
+# (NB_DUMP, made elsewhere, takes that setting too). The plan fixtures are
 # written only when plan.py gives the library's plan in every case; otherwise
 # the differences are listed and plan.py must follow the library first. The
 # kernel registry follows the ISA (an f16 call takes the F16_PH kernels only
@@ -48,6 +51,10 @@ T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 "$PY" "$HERE/tune.py" schema --extract "$LOG" --machine-of "$HERE/fixtures/schema_dump.json" -o "$T/schema.json"
 "$PY" "$HERE/tune.py" schema --schema "$T/schema.json" --compare "$HERE/fixtures/schema_dump.json" || true
+"$PY" -c 'import json, sys
+doc = json.load(open(sys.argv[1]))
+doc["kernels"] = [k for k in doc["kernels"] if k["kind"] != "f16_ph"]
+json.dump(doc, open(sys.argv[2], "w"), indent=1)' "$T/schema.json" "$T/nb_schema.json"
 if [ -n "${DUMP:-}" ]; then
     cp "$DUMP" "$T/dump.txt"
     [ -z "${NB_DUMP:-}" ] || cp "$NB_DUMP" "$T/nb_dump.txt"
@@ -56,11 +63,11 @@ else
     "$PY" "$HERE/tests/plan_cases.py" cases > "$T/cases.txt"
     "$T/plan_dump" < "$T/cases.txt" > "$T/dump.txt"
     "$PY" "$HERE/tests/plan_cases.py" cases --nb > "$T/nb_cases.txt"
-    "$T/plan_dump" < "$T/nb_cases.txt" > "$T/nb_dump.txt"
+    ZENDNNL_MATMUL_NATIVE_F16_ACCUM=f32 "$T/plan_dump" < "$T/nb_cases.txt" > "$T/nb_dump.txt"
 fi
 if ! "$PY" "$HERE/tests/plan_cases.py" compare "$T/dump.txt" --schema "$T/schema.json" \
     || { [ -f "$T/nb_dump.txt" ] \
-        && ! "$PY" "$HERE/tests/plan_cases.py" compare "$T/nb_dump.txt" --nb --schema "$T/schema.json"; }; then
+        && ! "$PY" "$HERE/tests/plan_cases.py" compare "$T/nb_dump.txt" --nb --schema "$T/nb_schema.json"; }; then
     echo "plan.py differs from the library: the fixtures are not rewritten" >&2
     exit 1
 fi
@@ -68,7 +75,7 @@ cp "$T/schema.json" "$HERE/fixtures/schema_dump.json"
 "$PY" "$HERE/tests/plan_cases.py" fixture "$T/dump.txt" --schema "$HERE/fixtures/schema_dump.json" \
     > "$HERE/fixtures/plan_check.json"
 if [ -f "$T/nb_dump.txt" ]; then
-    "$PY" "$HERE/tests/plan_cases.py" fixture "$T/nb_dump.txt" --nb --schema "$T/schema.json" \
+    "$PY" "$HERE/tests/plan_cases.py" fixture "$T/nb_dump.txt" --nb --schema "$T/nb_schema.json" \
         > "$HERE/fixtures/plan_check_nb.json"
 fi
 echo "fixtures refreshed from $WT ($(git -C "$WT" rev-parse --short=8 HEAD 2> /dev/null || echo "no git"))"

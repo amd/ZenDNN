@@ -172,6 +172,15 @@ void compute_group_tile(const native_plan_t &plan,
     assert(out == nullptr || !unit_scales);
     const size_t out_esz = out != nullptr && out->bf16 ? 2 : 4;
     alignas(64) float scale_buf[kScaleGroups * kMaxTileNr];
+    // The weight columns of each of the calls that take a row call in turn,
+    // their K group 0 and their weight scales of group 0.
+    struct call_t {
+        int p0, p1;
+        size_t b_second;
+        const int8_t *b0;
+        const char *scale0;
+    } turn[kMaxTileCalls];
+    const size_t scale_bytes = size_of(call.wei_scale_dt);
 
     native_int8_group_ukernel_args_t args;
     args.lda = call.lda;
@@ -189,35 +198,44 @@ void compute_group_tile(const native_plan_t &plan,
         args.dst_ldc = out->ldc;
         args.dst_bf16 = out->bf16;
     }
+    const int in_turn = native_int8_calls_in_turn(
+            plan, nr, native_int8_col_width(plan, nr), Tail);
     for (int c = 0; c < nr;) {
         const int cw = native_int8_col_width(plan, nr - c);
         assert(cw <= kMaxTileNr);
         const int nv = cw / 16;
         const int max_mr = native_int8_call_rows(plan, nv);
         assert(max_mr >= 1 && max_mr <= native_int8_group_ukernel_max_mr(nv));
-        // The weight columns of the call's first 16 columns, and of its
+        // The weight columns of each call's first 16 columns, and of its
         // second 16 (a paired tile's up run, or the next block).
-        const int p0 = w.tile_col(n0, nr, c);
-        const int p1 = second_col(w, n0, nr, c, nv, p0);
-        const bool apart = second_apart(w, nv, p0, p1);
-        args.b_second = apart ? w.column_distance(p0, p1) : 64;
+        for (int j = 0; j < in_turn; ++j) {
+            call_t &k = turn[j];
+            k.p0 = w.tile_col(n0, nr, c + j * cw);
+            k.p1 = second_col(w, n0, nr, c + j * cw, nv, k.p0);
+            k.b_second = second_apart(w, nv, k.p0, k.p1)
+                    ? w.column_distance(k.p0, k.p1)
+                    : 64;
+            k.b0 = reinterpret_cast<const int8_t *>(w.column(k.p0));
+            k.scale0 = static_cast<const char *>(call.wei_scale)
+                    + static_cast<size_t>(k.p0) * scale_bytes;
+        }
+        const int p0 = turn[0].p0;
         // Tail: the columns of this call below the weight's N; the weight
         // scales of a call of fewer are gathered, kScaleGroups groups at a
         // time.
         const int cols = Tail ? std::min(cw, w.N - (n0 + c)) : cw;
         const bool part = Tail && cols < cw;
-        assert(!(part && apart));
+        assert(!(part && second_apart(w, nv, p0, turn[0].p1)));
         const bool gather_part = part && !unit_scales;
         const int span = !gather_part
-                ? native_int8_group_span(
-                          plan, call.groups, call.group_quads, cw, mr, max_mr)
+                ? native_int8_group_span(plan, call.groups, call.group_quads,
+                          native_int8_turn_width(plan, nr, cw, Tail), mr,
+                          max_mr)
                 : kScaleGroups;
         for (int g0 = 0; g0 < call.groups; g0 += span) {
             args.batch = std::min(span, call.groups - g0);
             args.accumulate = g0 > 0;
             const bool last = g0 + args.batch == call.groups;
-            args.B = reinterpret_cast<const int8_t *>(w.column(p0))
-                    + g0 * args.b_step;
             args.scale_second = 16;
             if (unit_scales) {
                 args.wei_scale = kUnitScales.v;
@@ -230,12 +248,8 @@ void compute_group_tile(const native_plan_t &plan,
                 args.wei_scale_step = cw;
                 args.wei_scale_dt = data_type_t::f32;
             } else {
-                args.wei_scale = static_cast<const char *>(call.wei_scale)
-                        + (static_cast<size_t>(g0) * w.N + p0)
-                                * size_of(call.wei_scale_dt);
                 args.wei_scale_step = w.N;
                 args.wei_scale_dt = call.wei_scale_dt;
-                args.scale_second = p1 - p0;
             }
             // As few calls as max_mr allows, their rows within one of each
             // other.
@@ -248,20 +262,33 @@ void compute_group_tile(const native_plan_t &plan,
                                     : call.group_shift + row * call.groups + g0;
                 args.src_scale = call.src_scale + call.src_scale_stride * row
                         + static_cast<size_t>(call.src_scale_group_stride) * g0;
-                args.C = C + static_cast<size_t>(i) * ldc + c;
-                args.dst = last && out != nullptr
-                        ? static_cast<char *>(out->dst)
-                                + (row * out->ldc + n0 + c) * out_esz
-                        : nullptr;
-                select_native_int8_group_ukernel(
-                        rows, nv, src_u8, call.wide_zp)(args);
+                for (int j = 0; j < in_turn; ++j) {
+                    const call_t &t = turn[j];
+                    const int cj = c + j * cw;
+                    args.b_second = t.b_second;
+                    args.B = t.b0 + g0 * args.b_step;
+                    if (!unit_scales && !gather_part) {
+                        args.wei_scale = t.scale0
+                                + static_cast<size_t>(g0) * w.N * scale_bytes;
+                        args.scale_second = t.p1 - t.p0;
+                    }
+                    args.C = C + static_cast<size_t>(i) * ldc + cj;
+                    args.dst = last && out != nullptr
+                            ? static_cast<char *>(out->dst)
+                                    + (row * out->ldc + n0 + cj) * out_esz
+                            : nullptr;
+                    select_native_int8_group_ukernel(
+                            rows, nv, src_u8, call.wide_zp)(args);
+                }
                 i += rows;
             }
         }
         if (unit_scales)
-            finish_call_after_groups<Tail, false>(
-                    call, w, m0, mr, p0, p1, cw, cols, scale_buf, C + c, ldc);
-        c += cw;
+            for (int j = 0; j < in_turn; ++j)
+                finish_call_after_groups<Tail, false>(call, w, m0, mr,
+                        turn[j].p0, turn[j].p1, cw, cols, scale_buf,
+                        C + c + j * cw, ldc);
+        c += in_turn * cw;
     }
 }
 
@@ -321,6 +348,17 @@ void compute_int4_group_tile(const native_plan_t &plan,
     assert(!(one_group && src_groups));
     const size_t out_esz = out != nullptr && out->bf16 ? 2 : 4;
     alignas(64) float scale_buf[kScaleGroups * kMaxTileNr];
+    // The weight columns of each of the calls that take a row call in turn,
+    // their K octet 0, their weight scales of group 0 and the octets of one
+    // group their requests may reach.
+    struct call_t {
+        int p0, p1;
+        size_t b_second;
+        const uint8_t *b0;
+        const char *scale0;
+        int64_t reach;
+    } turn[kMaxTileCalls];
+    const size_t scale_bytes = size_of(call.wei_scale_dt);
 
     native_int4_group_ukernel_args_t args;
     args.lda = call.lda;
@@ -336,6 +374,8 @@ void compute_int4_group_tile(const native_plan_t &plan,
         args.dst_ldc = out->ldc;
         args.dst_bf16 = out->bf16;
     }
+    const int in_turn = native_int8_calls_in_turn(
+            plan, nr, native_int8_col_width(plan, nr), Tail);
     for (int c = 0; c < nr;) {
         const int cw = native_int8_col_width(plan, nr - c);
         assert(cw <= kMaxTileNr);
@@ -345,30 +385,41 @@ void compute_int4_group_tile(const native_plan_t &plan,
                 && max_mr <= (one_group
                                    ? native_int4_one_group_ukernel_max_mr(nv)
                                    : native_int4_group_ukernel_max_mr(nv)));
-        // The weight columns of the call's first 16 columns, and of its
+        // The weight columns of each call's first 16 columns, and of its
         // second 16 (a paired tile's up run, or the next block).
-        const int p0 = w.tile_col(n0, nr, c);
-        const int p1 = second_col(w, n0, nr, c, nv, p0);
-        const bool apart = second_apart(w, nv, p0, p1);
-        args.b_second = apart ? w.column_distance(p0, p1) : 64;
+        for (int j = 0; j < in_turn; ++j) {
+            call_t &k = turn[j];
+            k.p0 = w.tile_col(n0, nr, c + j * cw);
+            k.p1 = second_col(w, n0, nr, c + j * cw, nv, k.p0);
+            k.b_second = second_apart(w, nv, k.p0, k.p1)
+                    ? w.column_distance(k.p0, k.p1)
+                    : 64;
+            k.b0 = w.column(k.p0);
+            k.scale0 = static_cast<const char *>(call.wei_scale)
+                    + static_cast<size_t>(k.p0) * scale_bytes;
+            k.reach = one_group
+                    ? native_int4_request_octets(w, k.p0, nv, k.b_second)
+                    : 0;
+        }
+        const int p0 = turn[0].p0;
         // Tail: the columns of this call below the weight's N; the weight
         // scales of a call of fewer are gathered, kScaleGroups groups at a
         // time.
         const int cols = Tail ? std::min(cw, w.N - (n0 + c)) : cw;
         const bool part = Tail && cols < cw;
-        assert(!(part && apart));
+        assert(!(part && second_apart(w, nv, p0, turn[0].p1)));
         const bool gather_part = part && !unit_scales;
         // A K quad of a column of an s4 weight is 2 bytes.
         const int span = !gather_part
                 ? native_int8_group_span(plan, call.groups, call.group_quads,
-                          cw, mr, max_mr, 2)
+                          native_int8_turn_width(plan, nr, cw, Tail), mr,
+                          max_mr, 2)
                 : kScaleGroups;
         const int pass = one_group
-                ? native_int4_pass_quads(plan, call.group_quads, cw, mr, max_mr)
+                ? native_int4_pass_quads(plan, call.group_quads,
+                          native_int8_turn_width(plan, nr, cw, Tail), mr,
+                          max_mr)
                 : call.group_quads;
-        const int64_t reach = one_group
-                ? native_int4_request_octets(w, p0, nv, args.b_second)
-                : 0;
         for (int g0 = 0; g0 < call.groups; g0 += span) {
             args.batch = std::min(span, call.groups - g0);
             args.accumulate = g0 > 0;
@@ -385,12 +436,8 @@ void compute_int4_group_tile(const native_plan_t &plan,
                 args.wei_scale_step = cw;
                 args.wei_scale_dt = data_type_t::f32;
             } else {
-                args.wei_scale = static_cast<const char *>(call.wei_scale)
-                        + (static_cast<size_t>(g0) * w.N + p0)
-                                * size_of(call.wei_scale_dt);
                 args.wei_scale_step = w.N;
                 args.wei_scale_dt = call.wei_scale_dt;
-                args.scale_second = p1 - p0;
             }
             for (int k0 = 0; k0 < call.group_quads; k0 += pass) {
                 const bool whole = k0 + pass >= call.group_quads;
@@ -402,8 +449,6 @@ void compute_int4_group_tile(const native_plan_t &plan,
                 // octet.
                 const int64_t quad
                         = static_cast<int64_t>(g0) * call.group_quads + k0;
-                args.B = w.column(p0)
-                        + static_cast<size_t>(quad >> 1) * args.b_stride;
                 args.quad0 = static_cast<int>(quad & 1);
                 // As few calls as max_mr allows, their rows within one of
                 // each other.  The first reads the pass's slab from memory,
@@ -412,11 +457,6 @@ void compute_int4_group_tile(const native_plan_t &plan,
                 for (int k = 0, i = 0; k < calls; ++k) {
                     const int rows = mr / calls + (k < mr % calls ? 1 : 0);
                     const size_t row = static_cast<size_t>(m0 + i);
-                    args.request_limit_octets = one_group && k == 0
-                            ? static_cast<int>(
-                                      std::min<int64_t>(reach - (quad >> 1),
-                                              std::numeric_limits<int>::max()))
-                            : 0;
                     args.A = call.A + row * call.lda + g0 * args.a_step
                             + static_cast<size_t>(k0) * 4;
                     args.shift = call.group_shift + row * call.groups + g0;
@@ -426,23 +466,44 @@ void compute_int4_group_tile(const native_plan_t &plan,
                                     + static_cast<size_t>(
                                               call.src_scale_group_stride)
                                             * g0;
-                    args.C = C + static_cast<size_t>(i) * ldc + c;
-                    args.dst = last && whole && out != nullptr
-                            ? static_cast<char *>(out->dst)
-                                    + (row * out->ldc + n0 + c) * out_esz
-                            : nullptr;
-                    (one_group ? select_native_int4_one_group_ukernel(
-                                         rows, nv, call.order)
-                               : select_native_int4_group_ukernel(rows, nv,
-                                         call.order, src_groups))(args);
+                    for (int j = 0; j < in_turn; ++j) {
+                        const call_t &t = turn[j];
+                        const int cj = c + j * cw;
+                        args.b_second = t.b_second;
+                        args.B = t.b0
+                                + static_cast<size_t>(quad >> 1)
+                                        * args.b_stride;
+                        if (!unit_scales && !gather_part) {
+                            args.wei_scale = t.scale0
+                                    + static_cast<size_t>(g0) * w.N
+                                            * scale_bytes;
+                            args.scale_second = t.p1 - t.p0;
+                        }
+                        args.request_limit_octets = one_group && k == 0
+                                ? static_cast<int>(std::min<int64_t>(
+                                          t.reach - (quad >> 1),
+                                          std::numeric_limits<int>::max()))
+                                : 0;
+                        args.C = C + static_cast<size_t>(i) * ldc + cj;
+                        args.dst = last && whole && out != nullptr
+                                ? static_cast<char *>(out->dst)
+                                        + (row * out->ldc + n0 + cj) * out_esz
+                                : nullptr;
+                        (one_group ? select_native_int4_one_group_ukernel(
+                                             rows, nv, call.order)
+                                   : select_native_int4_group_ukernel(rows, nv,
+                                             call.order, src_groups))(args);
+                    }
                     i += rows;
                 }
             }
         }
         if (unit_scales)
-            finish_call_after_groups<Tail, true>(
-                    call, w, m0, mr, p0, p1, cw, cols, scale_buf, C + c, ldc);
-        c += cw;
+            for (int j = 0; j < in_turn; ++j)
+                finish_call_after_groups<Tail, true>(call, w, m0, mr,
+                        turn[j].p0, turn[j].p1, cw, cols, scale_buf,
+                        C + c + j * cw, ldc);
+        c += in_turn * cw;
     }
 }
 

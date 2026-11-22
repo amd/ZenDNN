@@ -72,7 +72,9 @@ constexpr int kInt8StepK = 4;
 constexpr double kInt4Bytes = 0.5;
 
 /// The kernel calls of a tile, priced per K step of the kernel: a BF16 pair
-/// of K over 32-column slabs, or an INT8 quad over the plan's call width.
+/// of K over the slabs of the kernels (native_tile_slab_cols), or an INT8
+/// quad over the plan's call width, in K passes of the tile's pass width
+/// (native_int8_pass_cols).
 /// An s4 weight's per-group tile takes INT8 quads of half a byte a weight
 /// over all of K, and per group the fused order's epilogue of one FMA per
 /// row and output vector on the same pipes.
@@ -86,6 +88,7 @@ public:
         l1_bytes_ = static_cast<int64_t>(uarch.l1d_bytes) * hp.l1_pct;
         if (int8_) {
             slab_cols_ = native_int8_col_width(q, q.nr);
+            pass_cols_ = native_int8_pass_cols(q);
             mr_ = native_int8_call_rows(q, slab_cols_ / kVectorCols);
             k_steps_ = static_cast<double>(ceil_div(p.K, kInt8StepK));
             wei_bytes_ = int4_ ? native_int4_weight_bytes(p) : kInt8Bytes;
@@ -96,15 +99,13 @@ public:
             if (int4_) {
                 const int gs = p.wei_group_size > 0 ? p.wei_group_size : p.K;
                 groups_ = ceil_div(p.K, std::max(1, gs));
-                l1_fit_ = (slab_cols_ * wei_bytes_ + mr_ * kInt8Bytes) * p.K
+                l1_fit_ = (pass_cols_ * wei_bytes_ + mr_ * kInt8Bytes) * p.K
                                 * 100
                         <= static_cast<double>(l1_bytes_);
             }
         } else {
-            // An F16_PH call covers its tile's columns, two blocks at 64.
-            slab_cols_ = q.kind == native_kernel_kind_t::f16_ph
-                    ? q.nr
-                    : native_bf16_slab_cols(q.nr);
+            // An F16_PH call covers up to 64 columns, two blocks.
+            slab_cols_ = native_tile_slab_cols(q.kind, q.nr);
             mr_ = q.mr;
             kc_ = std::min(std::max(1, q.kc), p.K);
             passes_ = ceil_div(p.K, kc_);
@@ -178,9 +179,9 @@ public:
         if (int8_ && !int4_) {
             const int k_quads = ceil_div(p_.K, kInt8StepK);
             const int pass = std::max(1,
-                    native_int8_pass_quads(q_, k_quads, slab_cols_, rows, mr_));
+                    native_int8_pass_quads(q_, k_quads, pass_cols_, rows, mr_));
             passes = ceil_div(k_quads, pass);
-            l1_fit = static_cast<int64_t>(slab_cols_ + mr_) * pass * kInt8StepK
+            l1_fit = static_cast<int64_t>(pass_cols_ + mr_) * pass * kInt8StepK
                             * 100
                     <= l1_bytes_;
         }
@@ -223,6 +224,7 @@ private:
     bool int8_ = false;
     bool int4_ = false;
     int slab_cols_ = 32;
+    int pass_cols_ = 32;
     int slabs_ = 1;
     int mr_ = 1;
     double vectors_ = 2;

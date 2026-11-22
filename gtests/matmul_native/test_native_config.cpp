@@ -738,9 +738,9 @@ TEST(NativeConfigValidate, RejectsEachRule) {
         const char *why = validate_native_plan(q, p);
         return why != nullptr && std::string(why).rfind("nr ", 0) == 0;
     };
-    // 1. nr is 16 or 32 and divides pack_nr; a BF16 tile of 64 or 128
-    // columns takes 32-column slabs inside its pack blocks: of 64- or
-    // 128-column blocks only.
+    // 1. nr is 16 or 32 and divides pack_nr; a tile of 64 or 128 columns
+    // takes 32-column slabs inside its pack blocks: of 64- or 128-column
+    // blocks only.
     native_plan_t n48 = b;
     n48.nr = 48;
     EXPECT_TRUE(width_rejects(n48, bp));
@@ -848,13 +848,18 @@ TEST(NativeConfigValidate, RejectsEachRule) {
     const native_plan_t i = heuristic_plan(ip, u, heuristic_params_t {});
     ASSERT_EQ(validate_native_plan(i, ip), nullptr);
     ASSERT_EQ(i.nr, 32);
-    // 64 columns are BF16 only: an INT8 plan of 64 columns, its grid and
-    // scratch made for them, breaks the width rule.
-    native_plan_t i64 = i;
-    i64.nr = 64;
-    i64.n_tiles = ip.N / 64;
-    i64.scratch_floats = native_plan_scratch_floats(i64, ip);
-    EXPECT_TRUE(width_rejects(i64, ip));
+    // An INT8 plan of 64 or 128 columns, its grid and scratch made for them,
+    // takes 32-column slabs; one of 256 columns breaks the width rule.
+    for (const int nr : {64, 128, 256}) {
+        native_plan_t wide = i;
+        wide.nr = nr;
+        wide.n_tiles = ip.N / nr;
+        wide.scratch_floats = native_plan_scratch_floats(wide, ip);
+        if (nr == 256)
+            EXPECT_TRUE(width_rejects(wide, ip));
+        else
+            EXPECT_EQ(validate_native_plan(wide, ip), nullptr) << nr;
+    }
     EXPECT_TRUE(rejects(
             ip, i, [](native_plan_t &q) { q.int8_cw_mask = kNativeInt8Cw32; }));
     EXPECT_TRUE(rejects(ip, i, [](native_plan_t &q) { q.int8_rows_nv1 = 13; }));
@@ -2179,25 +2184,24 @@ TEST(NativeConfigCache, ConcurrentHits) {
 
 namespace {
 
-/// Bit mr - 1 set for every row count kind has a kernel for at nr (INT8:
-/// for both sources).
+/// Bit mr - 1 set for every row count kind has a kernel for at nr, a tile
+/// of several slabs at its slab (INT8: for both sources).
 uint32_t kernel_rows(native_kernel_kind_t kind, int nr) {
+    const int nv = native_tile_slab_cols(kind, nr) / 16;
     uint32_t mask = 0;
     for (int mr = 1; mr <= 12; ++mr) {
         bool served = false;
         if (kind == native_kernel_kind_t::bf16)
-            served = select_bf16_brgemm_tall_kernel(
-                             mr, native_bf16_slab_cols(nr))
-                    != nullptr;
+            served = select_bf16_brgemm_tall_kernel(mr, 16 * nv) != nullptr;
         else if (kind == native_kernel_kind_t::f32)
-            served = select_native_fp32_ukernel(mr, nr / 16) != nullptr;
+            served = select_native_fp32_ukernel(mr, nv) != nullptr;
         else if (kind == native_kernel_kind_t::f16)
-            served = select_native_f16_ukernel(mr, nr / 16) != nullptr;
+            served = select_native_f16_ukernel(mr, nv) != nullptr;
         else if (kind == native_kernel_kind_t::f16_ph)
-            served = select_native_f16_ph_ukernel(mr, nr / 16) != nullptr;
+            served = select_native_f16_ph_ukernel(mr, nv) != nullptr;
         else
-            served = select_native_int8_ukernel(mr, nr / 16, false) != nullptr
-                    && select_native_int8_ukernel(mr, nr / 16, true) != nullptr;
+            served = select_native_int8_ukernel(mr, nv, false) != nullptr
+                    && select_native_int8_ukernel(mr, nv, true) != nullptr;
         if (served) mask |= 1u << (mr - 1);
     }
     return mask;
@@ -2227,8 +2231,9 @@ TEST(NativeConfigRegistry, MatchesTheSelectors) {
         ASSERT_NE(c, nullptr) << nr;
         for (int mr = 1; mr <= 12; ++mr)
             EXPECT_EQ(r.bf16_table(nr)[mr],
-                    select_bf16_brgemm_tall_kernel(
-                            mr, native_bf16_slab_cols(nr)))
+                    select_bf16_brgemm_tall_kernel(mr,
+                            native_tile_slab_cols(
+                                    native_kernel_kind_t::bf16, nr)))
                     << nr << " " << mr;
         const int max_mr
                 = full_rows(kernel_rows(native_kernel_kind_t::bf16, nr));
@@ -2237,7 +2242,10 @@ TEST(NativeConfigRegistry, MatchesTheSelectors) {
         EXPECT_FALSE(r.covers(native_kernel_kind_t::bf16, max_mr + 1, nr));
         EXPECT_EQ(c->int8_schemes, 0u);
     }
-    for (const int nr : {16, 32}) {
+    // The INT8, INT4 and FP32 tiles of 64 and 128 columns too, with the rows
+    // and the schemes of the slab.
+    for (const int nr : {16, 32, 64, 128}) {
+        const int nv = std::min(nr, 32) / 16;
         const native_kernel_caps_t *c = r.caps(native_kernel_kind_t::int8, nr);
         if (!u.avx512vnni) {
             EXPECT_EQ(c, nullptr);
@@ -2246,14 +2254,14 @@ TEST(NativeConfigRegistry, MatchesTheSelectors) {
         ASSERT_NE(c, nullptr) << nr;
         EXPECT_EQ(c->max_mr,
                 full_rows(kernel_rows(native_kernel_kind_t::int8, nr)));
-        EXPECT_EQ(c->max_mr, native_int8_ukernel_max_mr(nr / 16));
+        EXPECT_EQ(c->max_mr, native_int8_ukernel_max_mr(nv));
         // The per-channel kernels serve per-channel calls, the group kernels
         // per-group calls.
         const native_kernel_caps_t *g
                 = r.int8_caps(nr, native_int8_scheme_t::per_group);
         ASSERT_NE(g, nullptr) << nr;
         EXPECT_EQ(r.int8_caps(nr, native_int8_scheme_t::per_channel), c);
-        EXPECT_EQ(g->max_mr, native_int8_group_ukernel_max_mr(nr / 16));
+        EXPECT_EQ(g->max_mr, native_int8_group_ukernel_max_mr(nv));
         for (const native_kernel_caps_t *k : {c, g}) {
             const native_int8_scheme_t s = k == c
                     ? native_int8_scheme_t::per_channel
@@ -2268,18 +2276,19 @@ TEST(NativeConfigRegistry, MatchesTheSelectors) {
         }
     }
     // The s4 group kernels, both orders, serve per-group calls.
-    for (const int nr : {16, 32}) {
+    for (const int nr : {16, 32, 64, 128}) {
+        const int nv = std::min(nr, 32) / 16;
         const native_kernel_caps_t *c = r.caps(native_kernel_kind_t::int4, nr);
         if (!u.avx512vnni) {
             EXPECT_EQ(c, nullptr);
             continue;
         }
         ASSERT_NE(c, nullptr) << nr;
-        EXPECT_EQ(c->max_mr, native_int4_group_ukernel_max_mr(nr / 16));
+        EXPECT_EQ(c->max_mr, native_int4_group_ukernel_max_mr(nv));
         for (int mr = 1; mr <= c->max_mr; ++mr)
             for (const native_int8_order_t order : {native_int8_order_t::fused,
                          native_int8_order_t::reference})
-                EXPECT_NE(select_native_int4_group_ukernel(mr, nr / 16, order),
+                EXPECT_NE(select_native_int4_group_ukernel(mr, nv, order),
                         nullptr)
                         << nr << " " << mr;
         EXPECT_TRUE(c->serves(native_int8_scheme_t::per_group)) << nr;
@@ -2299,14 +2308,12 @@ TEST(NativeConfigRegistry, MatchesTheSelectors) {
         ASSERT_NE(one, nullptr) << nr;
         EXPECT_NE(one, c) << nr;
         EXPECT_EQ(one->kind, native_kernel_kind_t::int4) << nr;
-        EXPECT_EQ(one->max_mr, native_int4_one_group_ukernel_max_mr(nr / 16))
-                << nr;
+        EXPECT_EQ(one->max_mr, native_int4_one_group_ukernel_max_mr(nv)) << nr;
         EXPECT_EQ(one->max_mr, 12) << nr;
         for (int mr = 1; mr <= one->max_mr; ++mr)
             for (const native_int8_order_t order : {native_int8_order_t::fused,
                          native_int8_order_t::reference})
-                EXPECT_NE(select_native_int4_one_group_ukernel(
-                                  mr, nr / 16, order),
+                EXPECT_NE(select_native_int4_one_group_ukernel(mr, nv, order),
                         nullptr)
                         << nr << " " << mr;
         EXPECT_TRUE(one->serves(native_int8_scheme_t::per_channel)) << nr;
@@ -2327,8 +2334,10 @@ TEST(NativeConfigRegistry, MatchesTheSelectors) {
         EXPECT_NE(r.int8_caps(nr, native_int8_scheme_t::per_channel), one)
                 << nr;
     }
-    // FP32 tiles are 16 or 32 columns wide, every row count 1 .. 12.
-    for (const int nr : {16, 32}) {
+    // FP32 tiles of 16 or 32 columns, and of 32-column slabs, every row
+    // count 1 .. 12.
+    for (const int nr : {16, 32, 64, 128}) {
+        const int nv = std::min(nr, 32) / 16;
         const native_kernel_caps_t *c = r.caps(native_kernel_kind_t::f32, nr);
         if (!u.avx512f) {
             EXPECT_EQ(c, nullptr);
@@ -2337,12 +2346,11 @@ TEST(NativeConfigRegistry, MatchesTheSelectors) {
         }
         ASSERT_NE(c, nullptr) << nr;
         for (int mr = 1; mr <= 12; ++mr)
-            EXPECT_EQ(r.f32_table(nr)[mr],
-                    select_native_fp32_ukernel(mr, nr / 16))
+            EXPECT_EQ(r.f32_table(nr)[mr], select_native_fp32_ukernel(mr, nv))
                     << nr << " " << mr;
         EXPECT_EQ(c->max_mr,
                 full_rows(kernel_rows(native_kernel_kind_t::f32, nr)));
-        EXPECT_EQ(c->max_mr, native_fp32_ukernel_max_mr(nr / 16));
+        EXPECT_EQ(c->max_mr, native_fp32_ukernel_max_mr(nv));
         EXPECT_EQ(c->max_mr, 12);
         EXPECT_TRUE(r.covers(native_kernel_kind_t::f32, 12, nr));
         EXPECT_FALSE(r.covers(native_kernel_kind_t::f32, 13, nr));
@@ -2357,11 +2365,33 @@ TEST(NativeConfigRegistry, MatchesTheSelectors) {
         EXPECT_EQ(r.bf16_table(nr), nullptr) << nr;
         EXPECT_EQ(r.f32_table(nr), nullptr) << nr;
     }
-    for (const int nr : {64, 128}) {
-        EXPECT_EQ(r.caps(native_kernel_kind_t::int8, nr), nullptr) << nr;
-        EXPECT_EQ(r.caps(native_kernel_kind_t::int4, nr), nullptr) << nr;
-        EXPECT_EQ(r.caps(native_kernel_kind_t::f32, nr), nullptr) << nr;
-        EXPECT_EQ(r.f32_table(nr), nullptr) << nr;
+    // A tile of several slabs has the caps of its slab, and for INT8 and
+    // INT4 those of each scheme.
+    const auto same_caps = [](const native_kernel_caps_t *slab,
+                                   const native_kernel_caps_t *c, int nr) {
+        ASSERT_EQ(c == nullptr, slab == nullptr) << nr;
+        if (slab == nullptr) return;
+        EXPECT_EQ(c->nr, nr);
+        EXPECT_EQ(c->kind, slab->kind) << nr;
+        EXPECT_EQ(c->max_mr, slab->max_mr) << nr;
+        EXPECT_EQ(c->int8_schemes, slab->int8_schemes) << nr;
+    };
+    for (const native_kernel_kind_t kind :
+            {native_kernel_kind_t::bf16, native_kernel_kind_t::int8,
+                    native_kernel_kind_t::f32, native_kernel_kind_t::int4,
+                    native_kernel_kind_t::f16, native_kernel_kind_t::f16_ph}) {
+        const int slab = native_slab_cols(kind);
+        EXPECT_EQ(slab, kind == native_kernel_kind_t::f16_ph ? 64 : 32);
+        for (int nr = 2 * slab; nr <= kNativeMaxTileCols; nr *= 2) {
+            EXPECT_EQ(native_tile_slab_cols(kind, nr), slab);
+            same_caps(r.caps(kind, slab), r.caps(kind, nr), nr);
+            for (const native_int8_scheme_t scheme :
+                    {native_int8_scheme_t::per_channel,
+                            native_int8_scheme_t::per_group})
+                same_caps(r.caps(kind, slab, scheme), r.caps(kind, nr, scheme),
+                        nr);
+        }
+        EXPECT_EQ(native_tile_slab_cols(kind, 16), 16);
     }
     EXPECT_FALSE(r.covers(native_kernel_kind_t::int8, 0, 16));
     if (u.avx512bf16 && u.avx512vnni) {
@@ -2570,54 +2600,59 @@ nlohmann::ordered_json schema_json() {
                     {"k_unit", bf16 ? 2 : 4},
                     {"int8_schemes", scheme_names(c->int8_schemes)}});
         }
-    for (const int nr : {16, 32}) {
+    // The INT8 and INT4 kernels of a tile of several slabs are those of the
+    // slab.
+    for (const int nr : {16, 32, 64, 128}) {
+        const int nv = std::min(nr, 32) / 16;
         const native_kernel_caps_t *c
                 = r.int8_caps(nr, native_int8_scheme_t::per_group);
         if (c == nullptr) continue;
         uint32_t mask = 0;
         for (int mr = 1; mr <= 12; ++mr)
-            if (select_native_int8_group_ukernel(mr, nr / 16, false) != nullptr
-                    && select_native_int8_group_ukernel(mr, nr / 16, true)
+            if (select_native_int8_group_ukernel(mr, nv, false) != nullptr
+                    && select_native_int8_group_ukernel(mr, nv, true)
                             != nullptr)
                 mask |= 1u << (mr - 1);
         kernels.push_back({{"kind", "int8"}, {"nr", nr}, {"mr_mask", mask},
                 {"max_mr", c->max_mr}, {"k_unit", 4},
                 {"int8_schemes", scheme_names(c->int8_schemes)}});
     }
-    for (const int nr : {16, 32}) {
+    for (const int nr : {16, 32, 64, 128}) {
+        const int nv = std::min(nr, 32) / 16;
         const native_kernel_caps_t *c = r.caps(native_kernel_kind_t::int4, nr);
         if (c == nullptr) continue;
         uint32_t mask = 0;
         for (int mr = 1; mr <= 12; ++mr)
             if (select_native_int4_group_ukernel(
-                        mr, nr / 16, native_int8_order_t::fused)
+                        mr, nv, native_int8_order_t::fused)
                             != nullptr
                     && select_native_int4_group_ukernel(
-                               mr, nr / 16, native_int8_order_t::reference)
+                               mr, nv, native_int8_order_t::reference)
                             != nullptr)
                 mask |= 1u << (mr - 1);
         kernels.push_back({{"kind", "int4"}, {"nr", nr}, {"mr_mask", mask},
                 {"max_mr", c->max_mr}, {"k_unit", kNativeS4Octet},
                 {"int8_schemes", scheme_names(c->int8_schemes)}});
     }
-    for (const int nr : {16, 32}) {
+    for (const int nr : {16, 32, 64, 128}) {
+        const int nv = std::min(nr, 32) / 16;
         const native_kernel_caps_t *c = r.caps(native_kernel_kind_t::int4, nr,
                 native_int8_scheme_t::per_channel);
         if (c == nullptr) continue;
         uint32_t mask = 0;
         for (int mr = 1; mr <= 12; ++mr)
             if (select_native_int4_one_group_ukernel(
-                        mr, nr / 16, native_int8_order_t::fused)
+                        mr, nv, native_int8_order_t::fused)
                             != nullptr
                     && select_native_int4_one_group_ukernel(
-                               mr, nr / 16, native_int8_order_t::reference)
+                               mr, nv, native_int8_order_t::reference)
                             != nullptr)
                 mask |= 1u << (mr - 1);
         kernels.push_back({{"kind", "int4"}, {"nr", nr}, {"mr_mask", mask},
                 {"max_mr", c->max_mr}, {"k_unit", kNativeS4Octet},
                 {"int8_schemes", scheme_names(c->int8_schemes)}});
     }
-    for (const int nr : {16, 32}) {
+    for (const int nr : {16, 32, 64, 128}) {
         const native_kernel_caps_t *c = r.caps(native_kernel_kind_t::f32, nr);
         if (c == nullptr) continue;
         kernels.push_back({{"kind", "f32"}, {"nr", nr},
@@ -2630,7 +2665,7 @@ nlohmann::ordered_json schema_json() {
     for (const auto &[kind, name] :
             {std::pair {native_kernel_kind_t::f16, "f16"},
                     std::pair {native_kernel_kind_t::f16_ph, "f16_ph"}})
-        for (const int nr : {16, 32, 64}) {
+        for (const int nr : {16, 32, 64, 128}) {
             const native_kernel_caps_t *c = r.caps(kind, nr);
             if (c == nullptr) continue;
             kernels.push_back({{"kind", name}, {"nr", nr},
@@ -2899,17 +2934,18 @@ TEST(NativeConfigSchema, SchemaDump) {
         EXPECT_TRUE(
                 group || c.at("int8_schemes") == json::array({"per_channel"}));
     }
-    EXPECT_EQ(group_kernels, detect_uarch().avx512vnni ? 2u : 0u);
-    EXPECT_EQ(int4_kernels, detect_uarch().avx512vnni ? 2u : 0u);
-    EXPECT_EQ(int4_one_group_kernels, detect_uarch().avx512vnni ? 2u : 0u);
-    // The FP32 kernels: every row count 1 .. 12 at 16 and 32 columns, K in
-    // steps of one.
+    // At 16 and 32 columns, and tiles of 64 and 128.
+    EXPECT_EQ(group_kernels, detect_uarch().avx512vnni ? 4u : 0u);
+    EXPECT_EQ(int4_kernels, detect_uarch().avx512vnni ? 4u : 0u);
+    EXPECT_EQ(int4_one_group_kernels, detect_uarch().avx512vnni ? 4u : 0u);
+    // The FP32 kernels: every row count 1 .. 12 at 16 and 32 columns and
+    // tiles of 64 and 128, K in steps of one.
     std::vector<json> f32_kernels;
     for (const json &c : doc.at("kernels"))
         if (c.at("kind") == "f32") f32_kernels.push_back(c);
     if (detect_uarch().avx512f) {
-        ASSERT_EQ(f32_kernels.size(), 2u);
-        for (size_t i = 0; i < 2; ++i) {
+        ASSERT_EQ(f32_kernels.size(), 4u);
+        for (size_t i = 0; i < 4; ++i) {
             EXPECT_EQ(f32_kernels[i].at("nr"), 16 << i);
             EXPECT_EQ(f32_kernels[i].at("mr_mask"), 0xfff);
             EXPECT_EQ(f32_kernels[i].at("max_mr"), 12);
@@ -2918,8 +2954,9 @@ TEST(NativeConfigSchema, SchemaDump) {
     } else {
         EXPECT_TRUE(f32_kernels.empty());
     }
-    // The F16 kernels at 16 and 32 columns, with AVX-512 F; the F16_PH
-    // kernels, where the registry has them, also at 64 (two blocks).
+    // The F16 kernels at 16 and 32 columns and tiles of 64 and 128, with
+    // AVX-512 F; the F16_PH kernels, where the registry has them, at 16, 32
+    // and 64 (two blocks), and tiles of 128.
     std::vector<int> f16_widths, f16_ph_widths;
     for (const json &c : doc.at("kernels")) {
         if (c.at("kind") != "f16" && c.at("kind") != "f16_ph") continue;
@@ -2931,11 +2968,11 @@ TEST(NativeConfigSchema, SchemaDump) {
         EXPECT_EQ(c.at("int8_schemes"), json::array());
     }
     EXPECT_EQ(f16_widths,
-            detect_uarch().avx512f ? std::vector<int>({16, 32})
+            detect_uarch().avx512f ? std::vector<int>({16, 32, 64, 128})
                                    : std::vector<int>());
     EXPECT_EQ(f16_ph_widths,
             native_kernel_registry().f16_kind() == native_kernel_kind_t::f16_ph
-                    ? std::vector<int>({16, 32, 64})
+                    ? std::vector<int>({16, 32, 64, 128})
                     : std::vector<int>());
     // row_unit's auto value is the rules' unit: a set unit of another value
     // pins the unit of the cost model's row groups of short calls.

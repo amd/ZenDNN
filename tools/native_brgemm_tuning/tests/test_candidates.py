@@ -22,11 +22,11 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from helpers import DESIGN, NEWER, NO_BLOCKS, NO_NB, OLDER, RULES_OFF, SCHEMA, UARCH  # noqa: E402
+from helpers import BF16_SLABS, DESIGN, NEWER, NO_BLOCKS, NO_NB, OLDER, RULES_OFF, SCHEMA, UARCH  # noqa: E402
 
 from native_brgemm_tuning import candidates as C  # noqa: E402
 from native_brgemm_tuning import plan as PL  # noqa: E402
-from native_brgemm_tuning.plan import bf16_wide_width, validate_plan  # noqa: E402
+from native_brgemm_tuning.plan import slab_tile_width, validate_plan  # noqa: E402
 from native_brgemm_tuning.problems import Problem  # noqa: E402
 
 PROBLEMS = [Problem("bf16", 1, 4096, 4096), Problem("bf16", 16, 6144, 4096), Problem("bf16", 2048, 3840, 4096),
@@ -92,8 +92,9 @@ class TestSpace(unittest.TestCase):
     def test_every_candidate_is_legal(self):
         for p in PROBLEMS:
             sp = C.Space(p, SCHEMA, UARCH)
-            self.assertTrue(all(w <= p.pack_nr or (p.bf16 and bf16_wide_width(w, p.pack_nr))
-                                for w in sp.choices["nr"]))
+            kind = SCHEMA.kind_of(p.dtype)
+            self.assertTrue(all(w <= p.pack_nr or slab_tile_width(kind, w, p.pack_nr)
+                                or (kind == "f16_ph" and w == 64) for w in sp.choices["nr"]))
             self.assertTrue(all(1 <= v <= p.m for v in sp.choices["mb"]))
             for c in itertools.islice(sp.iter_grid(2), 600):
                 self.assertIsNone(C.check_config(c.config, SCHEMA), c)
@@ -104,7 +105,8 @@ class TestSpace(unittest.TestCase):
     def test_illegal_configs_are_dropped(self):
         b = C.Space(Problem("bf16", 8, 256, 4096), SCHEMA, UARCH)  # nr narrows to 16: 6-row kernels only
         self.assertIsNone(b.make({"tile_rows": 8}))
-        self.assertIsNone(C.Space(Problem("s8", 8, 256, 4096), SCHEMA, UARCH).make({"nr": 64}))  # BF16 only
+        self.assertIsNone(C.Space(Problem("s8", 8, 192, 4096), SCHEMA, UARCH).make({"nr": 128}))  # N 1.5 tiles
+        self.assertIsNotNone(C.Space(Problem("s8", 8, 256, 4096), SCHEMA, UARCH).make({"nr": 128}))
         narrow = C.Space(Problem("bf16", 8, 256, 4096, pack_nr=16), SCHEMA, UARCH)
         self.assertIsNone(narrow.make({"nr": 32}))  # wider than pack_nr
         self.assertIsNone(b.make({"schedule": "slice", "col_groups": 2}))
@@ -224,7 +226,16 @@ class TestBf16RuleSpace(unittest.TestCase):
         b, s = Problem("bf16", 4096, 4096, 4096), Problem("s8", 4096, 4096, 4096)
         self.assertEqual(C.value_choices("nr", b, SCHEMA), [16, 32, 64, 128])
         self.assertEqual(C.value_choices("nr", b, OLDER), [16, 32])
-        self.assertEqual(C.value_choices("nr", s, SCHEMA), [16, 32])
+        # Every type searches tiles of 64 and 128 columns where the build has them; a build with BF16's
+        # only gives the others 16 and 32 (F16_PH also its tile of 64).
+        for p in (s, Problem("s8", 64, 4096, 4096, int8_scheme="per_group"),
+                  Problem("s4", 8, 4096, 4096, group=128, scale_bytes=2), Problem("f32", 64, 4096, 4096),
+                  Problem("f16", 64, 4096, 4096)):
+            self.assertEqual(C.value_choices("nr", p, SCHEMA), [16, 32, 64, 128], p.dtype)
+            narrow = [16, 32, 64] if SCHEMA.kind_of(p.dtype) == "f16_ph" else [16, 32]
+            self.assertEqual(C.value_choices("nr", p, BF16_SLABS), narrow, p.dtype)
+            sp = C.Space(p, SCHEMA, UARCH, ["nr"])
+            self.assertTrue({64, 128} <= {c.plan.nr for c in sp.iter_grid(1)}, p.dtype)
         self.assertEqual(C.value_choices("nr", Problem("bf16", 64, 4096, 4096, pack_nr=64), SCHEMA),
                          [16, 32, 64, 128])
         # Slabs of a wide tile lie inside pack blocks: none on 16-column blocks.

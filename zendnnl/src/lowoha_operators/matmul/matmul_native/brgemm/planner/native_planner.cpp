@@ -90,12 +90,16 @@ constexpr native_plan_source_t kLayers[] = {native_plan_source_t::rules,
         native_plan_source_t::table, native_plan_source_t::override};
 constexpr int kLayerCount = 3;
 
-/// A BF16 tile of 64 or 128 columns: 32-column slabs, each inside one pack
-/// block (the kernel reads a slab with the block's stride), of whole blocks
-/// or of one block.
-bool bf16_wide_width(int nr, int pack_nr) {
-    return (nr == 64 || nr == kNativeBf16MaxTileCols) && pack_nr > 0
-            && pack_nr % native_bf16_slab_cols(nr) == 0
+/// A tile of 64 or 128 columns of several slabs of kind's kernels
+/// (native_slab_cols): 32-column slabs, each inside one pack block (the
+/// kernel reads a slab with the block's stride), of whole blocks or of one
+/// block; F16_PH slabs of 64 columns, each two pack blocks of 32 as the
+/// F16_PH tile of 64.
+bool slab_tile_width(native_kernel_kind_t kind, int nr, int pack_nr) {
+    const int slab = native_slab_cols(kind);
+    if ((nr != 64 && nr != kNativeMaxTileCols) || nr <= slab) return false;
+    if (kind == native_kernel_kind_t::f16_ph) return pack_nr == kMaxTileCols;
+    return pack_nr > 0 && pack_nr % slab == 0
             && (nr % pack_nr == 0 || pack_nr % nr == 0);
 }
 
@@ -763,13 +767,14 @@ native_plan_t rules_plan(const native_problem_t &p, const UarchParams &uarch,
                 static_cast<int64_t>(uarch.l1d_bytes) * hp.int4_l1_pct / 100);
     q.int8_pass_quads
             = hp.int8_kc > 0 ? std::min(hp.int8_kc / 4, ceil_div(K, 4)) : 0;
-    // The INT8 form of the L1 pass, at the tile's call width and rows per
+    // The INT8 form of the L1 pass, at the tile's pass width and rows per
     // call; equal passes in whole quads.  Only the per-channel tile reads it.
     if (int8 && !group_kernel && hp.int8_kc == 0 && on.l1_pass && q.nr > 0) {
         const int cw = native_int8_col_width(q, q.nr);
         const int rows = native_int8_call_rows(q, cw / 16);
         if (rows > 0 && 2 * rows <= q.mb && q.mb <= hp.l1_pass_max_mb) {
-            const int64_t per_k = static_cast<int64_t>(cw) + rows;
+            const int64_t per_k
+                    = static_cast<int64_t>(native_int8_pass_cols(q)) + rows;
             const int64_t l1 = static_cast<int64_t>(uarch.l1d_bytes) * hp.l1_pct
                     / 100 / per_k;
             const int64_t pass
@@ -807,9 +812,10 @@ native_plan_t rules_plan(const native_problem_t &p, const UarchParams &uarch,
         const int64_t most
                 = work + work * std::clamp(hp.min_gain_pct, 0, 100) / 100;
         heuristic_params_t wide = hp;
-        for (int nr = kNativeBf16MaxTileCols; nr > q.nr; nr /= 2) {
+        for (int nr = kNativeMaxTileCols; nr > q.nr; nr /= 2) {
             if (N % nr != 0 || N / nr >= team_domains
-                    || !bf16_wide_width(nr, p.pack_nr))
+                    || !slab_tile_width(
+                            native_kernel_kind_t::bf16, nr, p.pack_nr))
                 continue;
             wide.nr = nr;
             const native_plan_t w = rules_plan(p, uarch, wide);
@@ -1079,7 +1085,7 @@ native_plan_t int4_model_plan(const native_problem_t &p,
 
 /// The cost model's pass budget for the s4 plan q of one group over K whose
 /// row blocks take K passes at its budget (the int4_l1_pct share of L1,
-/// native_int4_pass_quads at the widest call): the int8_l2_pct share of L2,
+/// native_int4_pass_quads at its pass width): the int8_l2_pct share of L2,
 /// one pass where the group's slab fits it.  Passes of the L1 share add row
 /// calls that cost more than they save once the weight is in cache, which
 /// the model cannot tell from a weight streamed from memory.
@@ -1090,7 +1096,10 @@ native_plan_t int4_group_passes(const native_problem_t &p,
     const int cw = native_int8_col_width(q, q.nr);
     const int rows = native_int8_call_rows(q, cw / 16);
     const int quads = ceil_div(p.K, 4);
-    if (rows < 1 || native_int4_pass_quads(q, quads, cw, q.mb, rows) >= quads)
+    if (rows < 1
+            || native_int4_pass_quads(
+                       q, quads, native_int8_pass_cols(q), q.mb, rows)
+                    >= quads)
         return q;
     native_plan_t one = q;
     one.int8_pass_budget = std::max(q.int8_pass_budget,
@@ -1119,9 +1128,9 @@ const char *validate_native_plan(
             && p.pack_nr % q.nr == 0;
     const bool f16_ph_wide = q.kind == native_kernel_kind_t::f16_ph
             && p.pack_nr == kMaxTileCols && q.nr == 2 * kMaxTileCols;
-    if (!narrow && !(bf16 && bf16_wide_width(q.nr, p.pack_nr)) && !f16_ph_wide)
-        return "nr is not 16 or 32 dividing pack_nr, or for BF16 64 or 128, "
-               "or for F16_PH two blocks";
+    if (!narrow && !f16_ph_wide && !slab_tile_width(q.kind, q.nr, p.pack_nr))
+        return "nr is not 16 or 32 dividing pack_nr, for F16_PH two blocks, "
+               "or 64 or 128 of slabs of the kernels' widest call";
     if (q.mb < 1 || q.mb > p.M || q.m_blocks != ceil_div(p.M, q.mb)
             || q.n_tiles < 1 || p.N % q.nr != 0 || q.n_tiles != p.N / q.nr)
         return "the tile grid does not match M, N, mb and nr";
