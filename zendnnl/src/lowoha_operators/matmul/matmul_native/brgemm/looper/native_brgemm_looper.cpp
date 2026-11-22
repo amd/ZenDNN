@@ -1288,10 +1288,11 @@ void log_plan_line(const execute_call_t &c, const native_plan_t &p,
                     + (p.kind == native_kernel_kind_t::f16_ph ? "f16_ph"
                                                               : "f16")
                                             : std::string();
-    // The blocks schedule names the two fields its deal reads: the unit
-    // width and the threads of a domain.
+    // The blocks schedule names the fields its deal reads: the unit width,
+    // in tiles and in columns, and the threads of a domain.
     const std::string blocks_field = p.unit_tiles > 0
             ? " unit_tiles=" + std::to_string(p.unit_tiles)
+                    + " nb=" + std::to_string(p.nr * p.unit_tiles)
                     + " domain_threads=" + std::to_string(p.domain_threads)
             : "";
     std::string int8_fields;

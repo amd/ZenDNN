@@ -443,11 +443,14 @@ jobs:
           exit 1
         fi
 
-        # This build's plans of the tuner's check cases against the tuner's plan model, on this build's schema
+        # This build's plans of the tuner's check cases, and of its N block's cases (--nb: every case sets nb),
+        # against the tuner's plan model, on this build's schema
         T=$WORKSPACE/tools/native_brgemm_tuning
         bash $T/plan_dump/build.sh $WORKSPACE $WORKSPACE/native_plan_dump $WORKSPACE/build
         python $T/tests/plan_cases.py cases | $WORKSPACE/native_plan_dump > $WORKSPACE/native_plans.txt
-        if ! python $T/tests/plan_cases.py compare $WORKSPACE/native_plans.txt --schema $WORKSPACE/native_tuner_gtest.log; then
+        python $T/tests/plan_cases.py cases --nb | $WORKSPACE/native_plan_dump > $WORKSPACE/native_plans_nb.txt
+        if ! python $T/tests/plan_cases.py compare $WORKSPACE/native_plans.txt --schema $WORKSPACE/native_tuner_gtest.log \
+            || ! python $T/tests/plan_cases.py compare $WORKSPACE/native_plans_nb.txt --nb --schema $WORKSPACE/native_tuner_gtest.log; then
           echo "The native BRGEMM planner plans otherwise than tools/native_brgemm_tuning/plan.py!"
           exit 1
         fi

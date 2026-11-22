@@ -45,7 +45,7 @@ from .problems import Problem
 # heuristic_params_t{}: every key of the planner at its built-in value; a pin at 0
 # (-1 for col_groups) is auto, a rule switch at 0 leaves its rule out.
 BUILTIN_PARAMS: Dict[str, Any] = {
-    "nr": 0, "mr": 0, "mb": 0, "kc": 0, "col_groups": -1,
+    "nr": 0, "mr": 0, "mb": 0, "nb": 0, "kc": 0, "col_groups": -1,
     "schedule": "auto", "traversal": "m_inner", "unit_tiles": 0, "threads_cap": 0,
     "min_tiles_per_thread": 1, "row_unit": 12, "tile_rows": 6, "tall_rows": 12,
     "block_rows": 192, "min_tile_cols": 16, "row_split": True, "min_pass_k": 256,
@@ -64,7 +64,7 @@ BUILTIN_PARAMS: Dict[str, Any] = {
     "cm_group_skew_pct": 110, "cm_group_rows_pct": 115, "cm_drift_kib": 4096, "cm_pass_kib": 128,
     "cm_pass_calls": 4, "cm_block_kib": 16384, "cm_block_k": 2048, "cm_int8_l1_pct": 0, "cm_int4_min_m": 48,
 }
-AUTO_PINS = ("nr", "mr", "mb", "kc", "col_groups", "unit_tiles", "threads_cap", "domain_threads", "int8_kc")
+AUTO_PINS = ("nr", "mr", "mb", "nb", "kc", "col_groups", "unit_tiles", "threads_cap", "domain_threads", "int8_kc")
 # Keys whose built-in value a rule or the hardware decides (an auto value in the schema).
 AUTO_KEYS = AUTO_PINS + ("row_unit", "cm_fma_pipes", "cm_tall_pct", "cm_mem_cycles")
 RULE_SWITCHES = ("makespan", "l1_pass", "traffic_groups", "bf16_alias", "bf16_narrow_n", "blocks", "cost_model")
@@ -501,7 +501,11 @@ def rules_plan(p: Problem, uarch: Any, hp: Dict[str, Any], schema: Any) -> Plan:
 
     def take_blocks() -> None:
         q.col_groups = 0
-        q.unit_tiles = min(max(1, q.n_tiles), hp["unit_tiles"] if hp["unit_tiles"] > 0 else BLOCKS_TILES)
+        if hp["nb"] > 0:
+            tiles = max(1, hp["nb"] // max(1, q.nr))
+        else:
+            tiles = hp["unit_tiles"] if hp["unit_tiles"] > 0 else BLOCKS_TILES
+        q.unit_tiles = min(max(1, q.n_tiles), tiles)
         # Non-INT8 K passes keep the accumulators of every tile of a unit in the worker's
         # scratch: at most the tiles whose accumulators fit the bf16_l2_pct share of L2
         # that sizes the K pass, and at least one.
@@ -691,6 +695,7 @@ def model_plan(p: Problem, uarch: Any, hp: Dict[str, Any], q: Plan, schema: Any)
         if best.unit_tiles > 0:
             r["schedule"] = "blocks"
             r["unit_tiles"] = best.unit_tiles
+            r["nb"] = 0
         else:
             r["col_groups"] = best.col_groups
         if drift and c.core > c.stream and c.stream_kib > hp["cm_drift_kib"]:
@@ -1021,17 +1026,17 @@ def plan_features(q: Plan, p: Problem) -> Dict[str, float]:
 
 # The fields of the [MATMUL.NATIVE_BRGEMM] line the tuner compares with its plan: the
 # plan's, and the GEMV kernels of the call (gemv).
-LOG_PLAN_FIELDS = ("nr", "mb", "kc", "kernels", "tiles", "threads", "col_groups", "unit_tiles", "domain_threads",
-                   "gemv", "mr", "row_unit", "traversal", "int8_rows", "int8_cw", "int8_scheme", "gs", "int8_pass",
-                   "pass_budget", "copy_block")
+LOG_PLAN_FIELDS = ("nr", "mb", "kc", "kernels", "tiles", "threads", "col_groups", "unit_tiles", "nb",
+                   "domain_threads", "gemv", "mr", "row_unit", "traversal", "int8_rows", "int8_cw", "int8_scheme",
+                   "gs", "int8_pass", "pass_budget", "copy_block")
 # Fields the line prints only for some plans, and their value when it does not.
 LOG_OPTIONAL_FIELDS = {"unit_tiles": "0"}
 # Every field the line prints: the call, the plan, the call's choices that are not
 # plan fields (gemv, direct, dequant_bias, wei, order, team, padded_n, pairing),
 # its provenance (source, cfg) and transA.
 LOG_LINE_FIELDS = ("M", "N", "K", "pack_nr", "nr", "mb", "kc", "kernels", "tiles", "threads", "col_groups",
-                   "unit_tiles", "domain_threads", "transA", "gemv", "mr", "row_unit", "traversal", "int8_rows",
-                   "int8_cw", "int8_scheme", "direct", "wei", "gs", "order", "pass_budget", "int8_pass",
+                   "unit_tiles", "nb", "domain_threads", "transA", "gemv", "mr", "row_unit", "traversal",
+                   "int8_rows", "int8_cw", "int8_scheme", "direct", "wei", "gs", "order", "pass_budget", "int8_pass",
                    "dequant_bias", "copy_block", "source", "cfg", "team", "padded_n", "pairing")
 # The values of the line's gemv field: the GEMV kernels an M = 1 call runs on, by its
 # weight type, INT8 scheme and kernels, and none for a call on the tiles.
@@ -1066,9 +1071,11 @@ def plan_log_fields(q: Plan, p: Problem) -> Dict[str, str]:
         out["kc"] = str(q.kc)
     if p.f16:
         out["kernels"] = "f16_ph" if q.kind == "f16_ph" else "f16"
-    # The blocks schedule names the two fields its deal reads.
+    # The blocks schedule names the fields its deal reads: the unit width, in tiles and in
+    # columns, and the threads of a domain.
     if q.unit_tiles > 0:
         out["unit_tiles"] = str(q.unit_tiles)
+        out["nb"] = str(q.nr * q.unit_tiles)
         out["domain_threads"] = str(q.domain_threads)
     if p.int8:
         out["int8_rows"] = "%d/%d" % (q.int8_rows_nv1, q.int8_rows_nv2)

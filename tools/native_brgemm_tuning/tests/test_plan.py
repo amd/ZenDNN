@@ -475,6 +475,32 @@ class TestBlocks(unittest.TestCase):
         self.assertEqual(self.plan("schedule=blocks,unit_tiles=4096", 4096, 4096, 4096).unit_tiles, 128)
         self.assertEqual(self.plan("schedule=blocks,unit_tiles=4096", 4096, 4096, 14336, "s8").unit_tiles, 128)
 
+    def test_nb_sizes_the_unit_in_columns(self):
+        # nb / nr column tiles, at least one: 256 columns at tiles of 16, 32 and 64 columns, one tile
+        # below nr; set with unit_tiles, nb replaces it.
+        for nr in (16, 32, 64):
+            for nb in (16, 48, 256):
+                text = "schedule=blocks,nr=%d,nb=%d" % (nr, nb)
+                q = self.plan(text, 64, 4096, 4096)
+                self.assertEqual((q.nr, q.unit_tiles), (nr, max(1, nb // nr)), text)
+                self.assertEqual(self.plan(text + ",unit_tiles=3", 64, 4096, 4096), q, text)
+            self.assertEqual(self.plan("schedule=blocks,nr=%d,nb=256" % nr, 64, 4096, 4096).unit_tiles * nr, 256)
+        self.assertEqual(self.plan("schedule=blocks,nr=16,nb=256", 64, 4096, 4096, "s8").unit_tiles, 16)
+        # The bounds of unit_tiles: n_tiles, and under BF16 K passes the 21 tiles whose accumulators fit
+        # half of L2.
+        self.assertEqual(self.plan("schedule=blocks,nb=1048576", 4096, 4096, 4096).unit_tiles, 128)
+        self.assertEqual(self.plan("schedule=blocks,nb=4096", 4096, 4096, 14336).unit_tiles, 21)
+        self.assertEqual(self.plan("schedule=blocks,nb=4096", 4096, 4096, 14336, "s8").unit_tiles, 128)
+        # A pin of the schedule only; where the rule takes the call, its unit is nb wide.
+        self.assertEqual(self.plan("nb=256", 64, 4096, 4096).unit_tiles, 0)
+        self.assertEqual(self.plan("nb=256", 64, 4096, 4096), self.plan("", 64, 4096, 4096))
+        b = self.plan("nb=128", 4096, 4096, 14336)
+        self.assertEqual((b.nr, b.unit_tiles), (32, 4))
+        # The cost model's plans of a unit nb wide and of its tiles are one plan.
+        for dtype, m, k in (("bf16", 4096, 14336), ("bf16", 1024, 14336), ("s8", 4096, 4096)):
+            q = self.plan("nb=256", m, 4096, k, dtype)
+            self.assertEqual(self.plan("unit_tiles=%d" % (256 // q.nr), m, 4096, k, dtype), q, (dtype, m, k))
+
     def test_rule_changes_only_the_schedule(self):
         changed = 0
         for uarch in (SMALL, LARGE):
@@ -498,10 +524,20 @@ class TestBlocks(unittest.TestCase):
         self.assertEqual(PL.effective_signature(self.plan("traversal=n_inner", 4096, 4096, 14336), p), sig)
         log = PL.plan_log_fields(b, p)
         self.assertEqual(log["unit_tiles"], "1")
+        self.assertEqual(log["nb"], str(b.nr))
         self.assertEqual(log["domain_threads"], str(b.domain_threads))
-        self.assertNotIn("unit_tiles", PL.plan_log_fields(sliced, p))
-        self.assertNotIn("domain_threads", PL.plan_log_fields(sliced, p))
+        for field in ("unit_tiles", "nb", "domain_threads"):
+            self.assertNotIn(field, PL.plan_log_fields(sliced, p))
         self.assertEqual(PL.compare_with_log(b, p, log), [])
+        # The line of a build without nb compares on the unit's tiles.
+        self.assertEqual(PL.compare_with_log(b, p, {k: v for k, v in log.items() if k != "nb"}), [])
+        self.assertEqual(PL.compare_with_log(b, p, dict(log, nb="64")), ["nb: model 32, log 64"])
+        # The paired tiles of a gated call keep the unit's columns.
+        g = Problem("bf16", 4096, 4096, 14336, epilogue="gated")
+        q = plan_of("nb=128", g, SMALL, SCHEMA)
+        paired = PL.plan_log_fields(PL.paired_plan(q, g, 64), g)
+        self.assertEqual((q.unit_tiles, paired["unit_tiles"], paired["nb"]), (4, "2", "128"))
+        self.assertEqual(PL.compare_with_log(q, g, dict(paired, pairing="64")), [])
         # The deal reads the domain size too: a blocks plan of another domain prints another line.
         other = dict(log, domain_threads=str(b.domain_threads * 2))
         self.assertEqual(PL.compare_with_log(b, p, other),
@@ -672,17 +708,31 @@ class TestOneGroupS4(unittest.TestCase):
 class TestLibraryPlans(unittest.TestCase):
     """plan.py against the library's plans for plan_cases.py's random problems, machines and configs."""
 
+    def check_digests(self, fx, lines, flag=""):
+        got = plan_cases.digests(lines, fx["chunk"])
+        bad = [i for i, (a, b) in enumerate(zip(got, fx["sha256"])) if a != b]
+        self.assertEqual((len(got), bad), (len(fx["sha256"]), []),
+                         "cases %s differ from the library (plan_cases.py compare%s <dump> shows the fields)" % (
+                             ", ".join("%d-%d" % (i * fx["chunk"], (i + 1) * fx["chunk"] - 1) for i in bad), flag))
+
     def test_plans_match_the_library(self):
         fx = plan_cases.load_fixture()
         cs = plan_cases.cases(fx["seed"], fx["count"])
         self.assertEqual(plan_cases.case_counts(cs), fx["cases"])
         # Every kind of case, and every weight type, is a sizable share of the cases.
         self.assertGreater(min(fx["cases"].values()), 1000)
-        got = plan_cases.digests([plan_cases.tuner_line(c, SCHEMA) for c in cs], fx["chunk"])
-        bad = [i for i, (a, b) in enumerate(zip(got, fx["sha256"])) if a != b]
-        self.assertEqual((len(got), bad), (len(fx["sha256"]), []),
-                         "cases %s differ from the library (plan_cases.py compare <dump> shows the fields)" % (
-                             ", ".join("%d-%d" % (i * fx["chunk"], (i + 1) * fx["chunk"] - 1) for i in bad)))
+        self.check_digests(fx, [plan_cases.tuner_line(c, SCHEMA) for c in cs])
+
+    def test_nb_plans_match_the_library(self):
+        fx = plan_cases.load_fixture(plan_cases.NB_FIXTURE)
+        cs = plan_cases.cases(fx["seed"], fx["count"], nb=True)
+        self.assertEqual(plan_cases.case_counts(cs), fx["cases"])
+        self.assertTrue(all("nb" in c.settings() for c in cs))
+        # The kernels of an f16 call follow the ISA: plan with the kinds of the machine that made the fixture.
+        schema = Schema(dict(SCHEMA.doc, kernels=[k for k in SCHEMA.doc["kernels"] if k["kind"] in fx["kernels"]]))
+        lines = [plan_cases.tuner_line(c, schema) for c in cs]
+        self.assertGreater(sum(" unit_tiles=0 " not in x and x != "BADCFG" for x in lines), len(cs) // 4)
+        self.check_digests(fx, lines, " --nb")
 
 
 class TestSignature(unittest.TestCase):

@@ -23,7 +23,7 @@ import unittest
 import unittest.mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from helpers import DESIGN, HAVE_NUMPY, HW, OLDER, SCHEMA, UARCH, session_records, strict_json  # noqa: E402
+from helpers import DESIGN, HAVE_NUMPY, HW, NO_NB, OLDER, SCHEMA, UARCH, session_records, strict_json  # noqa: E402
 
 from native_brgemm_tuning import candidates as C  # noqa: E402
 from native_brgemm_tuning import export as E  # noqa: E402
@@ -105,7 +105,7 @@ class TestEntries(unittest.TestCase):
         self.assertEqual(E.resolve_config(doc, PROBLEMS[0].with_m(100), SCHEMA, UARCH), ({}, []))
 
     def test_full_config_reproduces_the_measured_plan(self):
-        for schema, auto in ((SCHEMA, {"mb", "kc", "unit_tiles"}), (DESIGN, {"mb"})):
+        for schema, auto in ((SCHEMA, {"mb", "kc", "nb"}), (DESIGN, {"mb"})):
             fx = Fixture(schema=schema)
             w = [x for x in fx.winners() if x.entry_id() == "bf16-n4096-k4096-m2-16-t32"][0]
             full = E.full_config(w, fx.spaces, schema, UARCH)
@@ -114,22 +114,61 @@ class TestEntries(unittest.TestCase):
                 self.assertEqual(sp.make(full).sig, sp.from_text(w.text).sig)
                 self.assertEqual(set(sp.keys) - set(full), auto, schema.source)
             # An auto pin whose plan value differs across the class's Ms stays auto: kc of the L1 pass at
-            # M=16 only; unit_tiles of plans without the blocks schedule.
+            # M=16 only; nb of plans without the blocks schedule.
             kcs = [fx.spaces[p.key()].from_text(w.text).plan.kc for p in w.problems]
             self.assertEqual((kcs, full.get("kc")), ([4096, 1024], None) if "kc" in auto else ([4096] * 2, 4096))
 
     def test_full_config_pins_the_unit_width_of_a_blocks_plan(self):
-        # BF16 K = 14336 at M 2048 and 4096: the blocks rule takes both built-in plans.
+        # BF16 K = 14336 at M 2048 and 4096: the blocks rule takes both built-in plans, of 32-column
+        # tiles.  A blocks plan pins its unit as nb, its columns; on a schema without nb, as unit_tiles;
+        # a winner's unit_tiles stays its unit alone.
         probs = [Problem("bf16", m, 4096, 14336) for m in (2048, 4096)]
         classes = parse_m_classes("1025-4096:2048/4096")
-        for text, units, schedule in (("unit_tiles=2", 2, "auto"), ("kc=4096", 1, "auto"),
-                                      ("schedule=slice", None, "slice")):
-            fx = Fixture(probs, texts=(text,), ratio=lambda p, c: 0.9 if c.text else 1.0)
+        for schema, text, nb, units, schedule in ((SCHEMA, "nb=128", 128, None, "auto"),
+                                                 (SCHEMA, "unit_tiles=2", None, 2, "auto"),
+                                                 (SCHEMA, "kc=4096", 32, None, "auto"),
+                                                 (SCHEMA, "schedule=slice", None, None, "slice"),
+                                                 (NO_NB, "unit_tiles=2", None, 2, "auto"),
+                                                 (NO_NB, "kc=4096", None, 1, "auto")):
+            fx = Fixture(probs, texts=(text,), ratio=lambda p, c: 0.9 if c.text else 1.0, schema=schema)
             self.assertEqual([fx.spaces[p.key()].default.plan.unit_tiles for p in probs], [1, 1])
             w = [x for x in fx.winners(classes) if x.text]
             self.assertEqual([x.text for x in w], [text])
-            full = E.full_config(w[0], fx.spaces, SCHEMA, UARCH)
-            self.assertEqual((full.get("unit_tiles"), full["schedule"]), (units, schedule), text)
+            full = E.full_config(w[0], fx.spaces, schema, UARCH)
+            self.assertEqual((full.get("nb"), full.get("unit_tiles"), full["schedule"]), (nb, units, schedule),
+                             (schema.source, text))
+        # The unit is pinned as the key the search took: unit_tiles for --keys naming it but not nb.
+        fx = Fixture(probs, texts=("kc=4096",), ratio=lambda p, c: 0.9 if c.text else 1.0, schema=SCHEMA)
+        w = [x for x in fx.winners(classes) if x.text]
+        for keys, nb, units in ((["schedule", "unit_tiles", "kc"], None, 1), (["schedule", "nb", "kc"], 32, None),
+                                (["schedule", "nb", "unit_tiles", "kc"], 32, None), (["schedule", "kc"], None, None)):
+            spaces = {k: C.Space(p, SCHEMA, UARCH, keys) for k, p in fx.problems.items()}
+            full = E.full_config(w[0], spaces, SCHEMA, UARCH)
+            self.assertEqual((full.get("nb"), full.get("unit_tiles"), full["kc"]), (nb, units, 4096), keys)
+
+    def test_full_config_keeps_the_unit_key_the_winner_sets(self):
+        # F16 calls take the F16_PH tiles of 64 columns at M 256 and 512, of 32 at M 129 to 191
+        # (f16_wide_min_m).  With nb and unit_tiles searched and nr not, an nb pin of 128 beside a
+        # winning unit_tiles=2 would take 4 tiles at M 129: the entry keeps the winner's unit key
+        # alone, and its unit is the winner's at every M of the class.
+        probs = [Problem("f16", m, 4096, 4096) for m in (256, 512)]
+        classes = parse_m_classes("129-512:256/512")
+        keys = ["schedule", "nb", "unit_tiles", "kc"]
+        for text, nb, units in (("schedule=blocks,unit_tiles=2", None, 2), ("nb=128,schedule=blocks", 128, None)):
+            fx = Fixture(probs, texts=(text,), ratio=lambda p, c: 0.9 if c.text else 1.0)
+            w = [x for x in fx.winners(classes) if x.text]
+            self.assertEqual([x.text for x in w], [text])
+            spaces = {k: C.Space(p, SCHEMA, UARCH, keys) for k, p in fx.problems.items()}
+            full = E.full_config(w[0], spaces, SCHEMA, UARCH)
+            self.assertEqual((full.get("nb"), full.get("unit_tiles"), full["schedule"]), (nb, units, "blocks"), text)
+            won = C.parse_settings(text, SCHEMA)
+            tiles = {}
+            for m in E.class_ms(classes[0]):
+                p = probs[0].with_m(m)
+                entry, winner = (PL.resolve(p, cfg, UARCH, SCHEMA).plan for cfg in (full, won))
+                self.assertEqual((entry.nr, entry.unit_tiles), (winner.nr, winner.unit_tiles), (text, m))
+                tiles[entry.nr] = entry.unit_tiles
+            self.assertEqual(tiles, {32: 2, 64: 2} if units else {32: 4, 64: 2}, text)
 
     def check_rule_entries(self, schema):
         """Entries of a class won by the L1 pass off and of one won by nr=16 under the built-in rules."""
@@ -421,7 +460,7 @@ class TestValidator(unittest.TestCase):
         doc["hardware"]["model"] = 3
         self.assertEqual(E.resolve_config(doc, p, SCHEMA, UARCH), (None, []))
 
-    def test_schedule_and_col_groups_merge_together(self):
+    def test_paired_keys_merge_together(self):
         p = Problem("bf16", 4096, 4096, 4096)
 
         def doc(rule, entry):
@@ -429,10 +468,14 @@ class TestValidator(unittest.TestCase):
                     "entries": [{"id": "e", "match": {"n": 4096}, "config": entry}],
                     "rules": {"kind": "ordered", "list": [{"when": [], "config": rule}]}}
 
-        # A layer that sets either key replaces both, as merge_native_config does.
+        # A layer that sets either key of a pair (schedule and col_groups; nb and unit_tiles)
+        # replaces both, as merge_native_config does.
         cases = (({"schedule": "row_groups", "nr": 16}, {"col_groups": 0}, {"nr": 16, "col_groups": 0}),
                  ({"col_groups": 4}, {"schedule": "slice"}, {"schedule": "slice"}),
-                 ({"schedule": "row_groups"}, {"mb": 96}, {"schedule": "row_groups", "mb": 96}))
+                 ({"schedule": "row_groups"}, {"mb": 96}, {"schedule": "row_groups", "mb": 96}),
+                 ({"unit_tiles": 4, "nr": 16}, {"nb": 128}, {"nr": 16, "nb": 128}),
+                 ({"nb": 128}, {"unit_tiles": 2}, {"unit_tiles": 2}),
+                 ({"nb": 64}, {"mb": 96}, {"nb": 64, "mb": 96}))
         for rule, entry, merged in cases:
             cfg, layers = E.resolve_config(doc(rule, entry), p, SCHEMA, UARCH)
             self.assertEqual((cfg, layers), (merged, ["rules", "table:e"]), (rule, entry))

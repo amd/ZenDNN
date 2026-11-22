@@ -85,6 +85,7 @@ constexpr native_config_key_t kKeys[] = {
         {"nr", key_type::int32, 16, 128, 1, true},
         {"mr", key_type::int32, 1, 12, 1, false},
         {"mb", key_type::int32, 1, 8192, 1, false},
+        {"nb", key_type::int32, 16, kBig20, 16, false},
         {"kc", key_type::int32, 2, kBig30, 1, false},
         {"col_groups", key_type::int32, 0, 1024, 1, false},
         {"schedule", key_type::schedule, 0, 0, 1, false},
@@ -197,6 +198,7 @@ const field_t *fields() {
             bind(&c::nr, &p::nr),
             bind(&c::mr, &p::mr),
             bind(&c::mb, &p::mb),
+            bind(&c::nb, &p::nb),
             bind(&c::kc, &p::kc),
             bind(&c::col_groups, &p::col_groups),
             bind(&c::schedule, &p::schedule),
@@ -517,6 +519,10 @@ void merge_native_config(
     if (overlay.schedule || overlay.col_groups) {
         base.schedule = overlay.schedule;
         base.col_groups = overlay.col_groups;
+    }
+    if (overlay.nb || overlay.unit_tiles) {
+        base.nb = overlay.nb;
+        base.unit_tiles = overlay.unit_tiles;
     }
 }
 

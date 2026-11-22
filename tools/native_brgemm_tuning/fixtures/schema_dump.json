@@ -47,6 +47,7 @@
     {"name": "nr", "type": "int", "default": "auto", "auto": 0, "values": [16, 32, 64, 128], "applies": "both", "int8_schemes": ["per_channel", "per_group"], "bits": "same", "kind": "pin"},
     {"name": "mr", "type": "int", "default": "auto", "auto": 0, "min": 1, "max": 12, "applies": "both", "int8_schemes": ["per_channel", "per_group"], "bits": "same", "kind": "pin"},
     {"name": "mb", "type": "int", "default": "auto", "auto": 0, "min": 1, "max": 8192, "applies": "both", "int8_schemes": ["per_channel", "per_group"], "bits": "same", "kind": "pin"},
+    {"name": "nb", "type": "int", "default": "auto", "auto": 0, "min": 16, "max": 1048576, "multiple_of": 16, "applies": "both", "int8_schemes": ["per_channel", "per_group"], "bits": "same", "kind": "pin"},
     {"name": "kc", "type": "int", "default": "auto", "auto": 0, "min": 2, "max": 1073741824, "applies": "bf16", "int8_schemes": [], "bits": "same", "kind": "pin"},
     {"name": "col_groups", "type": "int", "default": "auto", "auto": -1, "min": 0, "max": 1024, "applies": "both", "int8_schemes": ["per_channel", "per_group"], "bits": "same", "kind": "pin"},
     {"name": "schedule", "type": "enum", "default": "auto", "values": ["auto", "slice", "row_groups", "blocks"], "applies": "both", "int8_schemes": ["per_channel", "per_group"], "bits": "same", "kind": "pin"},
@@ -169,7 +170,7 @@
     "isa": ["avx512f", "avx512bf16", "avx512vnni"]
   },
   "plan_line": [
-    "M", "N", "K", "pack_nr", "nr", "mb", "kc", "kernels", "tiles", "threads", "col_groups", "unit_tiles",
+    "M", "N", "K", "pack_nr", "nr", "mb", "kc", "kernels", "tiles", "threads", "col_groups", "unit_tiles", "nb",
     "domain_threads", "transA", "gemv", "mr", "row_unit", "traversal", "int8_rows", "int8_cw", "int8_scheme",
     "direct", "wei", "gs", "order", "pass_budget", "int8_pass", "dequant_bias", "copy_block", "source", "cfg",
     "team", "padded_n", "pairing"

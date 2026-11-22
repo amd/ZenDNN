@@ -35,8 +35,10 @@ one (the rule switches among them, so no lower layer turns a measured rule on
 or off); threads_cap = the problem's threads and domain_threads = the plan's L3
 domain (l3_domain_cores, else family_l3_cores; equal to "none" / auto); and an
 auto pin's resolved value where it is legal for every M of the class and
-reproduces the measured plan (nr, mr, kc, unit_tiles of a blocks plan;
-col_groups only when 0; mb only for a single-M class).
+reproduces the measured plan (nr, mr, kc; the unit of a blocks plan as the key
+of nb and unit_tiles the winner sets, else as nb, nr times its unit tiles, or
+as unit_tiles where the search took unit_tiles and not nb; col_groups only
+when 0; mb only for a single-M class).
 
 The file is version 2: its hardware block matches CPU fields (the vendor,
 family and model, the ISA, the caches and the plan's L3 domain of the
@@ -454,6 +456,9 @@ def full_config(w: Winner, spaces: Dict[str, Space], schema: Schema, uarch: Any)
     base = dict(cands[0].config)
     cfg = dict(base)
     single_m = w.mclass.hi == w.mclass.lo
+    # nb replaces unit_tiles: an nb pin beside a winner's unit_tiles would take other tiles
+    # at an M of the class where nr differs from the measured Ms.
+    unit_key = next((k for k in ("nb", "unit_tiles") if k in base), "nb" if "nb" in sps[0].keys else "unit_tiles")
     for key in sps[0].keys:
         if key in cfg:
             continue
@@ -464,8 +469,8 @@ def full_config(w: Winner, spaces: Dict[str, Space], schema: Schema, uarch: Any)
             cfg[key] = w.problems[0].threads
         elif key == "domain_threads" and uarch.plan_domain:
             cfg[key] = uarch.plan_domain
-        elif key in ("nr", "mr", "kc", "col_groups", "mb", "unit_tiles"):
-            vals = {getattr(c.plan, key) for c in cands}
+        elif key in ("nr", "mr", "kc", "col_groups", "mb", unit_key):
+            vals = {c.plan.nr * c.plan.unit_tiles if key == "nb" else getattr(c.plan, key) for c in cands}
             if len(vals) != 1:
                 continue
             v = vals.pop()
@@ -918,11 +923,13 @@ def match_entry(match: Dict[str, Any], p: Problem) -> bool:
 
 def merge_config(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]:
     """merge_native_config: the keys overlay sets replace base's; schedule and col_groups choose one
-    schedule together, so an overlay that sets either replaces both."""
+    schedule together, and nb and unit_tiles one unit width, so an overlay that sets either key of a
+    pair replaces both."""
     out = dict(base)
-    if "schedule" in overlay or "col_groups" in overlay:
-        out.pop("schedule", None)
-        out.pop("col_groups", None)
+    for pair in (("schedule", "col_groups"), ("nb", "unit_tiles")):
+        if any(k in overlay for k in pair):
+            for k in pair:
+                out.pop(k, None)
     out.update(overlay)
     return out
 

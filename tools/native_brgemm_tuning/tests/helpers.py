@@ -64,10 +64,16 @@ def without_bf16_rules(s: schema_mod.Schema) -> schema_mod.Schema:
 
 
 def without_blocks(s: schema_mod.Schema) -> schema_mod.Schema:
-    """s as a build without the blocks schedule, its unit_tiles pin and its rule."""
+    """s as a build without the blocks schedule, its nb and unit_tiles pins and its rule."""
     keys = [dict(k, values=[v for v in k["values"] if v != "blocks"]) if k["name"] == "schedule" else k
-            for k in s.doc["keys"] if k["name"] not in ("unit_tiles",) + BLOCKS_RULE_KEYS]
+            for k in s.doc["keys"] if k["name"] not in ("nb", "unit_tiles") + BLOCKS_RULE_KEYS]
     return schema_mod.Schema(dict(s.doc, keys=keys), s.source + " without the blocks schedule")
+
+
+def without_nb(s: schema_mod.Schema) -> schema_mod.Schema:
+    """s as a build whose blocks schedule takes its unit in tiles only (unit_tiles), without nb."""
+    keys = [k for k in s.doc["keys"] if k["name"] != "nb"]
+    return schema_mod.Schema(dict(s.doc, keys=keys), s.source + " without nb")
 
 
 def with_newer_key(s: schema_mod.Schema) -> schema_mod.Schema:
@@ -77,9 +83,10 @@ def with_newer_key(s: schema_mod.Schema) -> schema_mod.Schema:
     return schema_mod.Schema(dict(s.doc, keys=s.doc["keys"] + [newer]), s.source + " with a newer key")
 
 
-# The schemas of builds without those rules, and of a newer build.
+# The schemas of builds without those rules or nb, and of a newer build.
 OLDER = without_bf16_rules(SCHEMA)
 NO_BLOCKS = without_blocks(SCHEMA)
+NO_NB = without_nb(SCHEMA)
 NEWER = with_newer_key(SCHEMA)
 
 

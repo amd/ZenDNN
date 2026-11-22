@@ -149,9 +149,13 @@ def search_keys(schema: Schema, dtype: str, allow_bit_changing: bool = False,
                 include: Optional[Iterable[str]] = None, exclude: Iterable[str] = ()) -> List[str]:
     """Keys searched for dtype: those that apply to it and keep its bits
     (decision 6).  By default only the keys the plan mirror reads: a candidate
-    of any other key resolves as dropped."""
+    of any other key resolves as dropped; and the unit of the blocks schedule
+    as nb, its columns whatever nr the plan takes, where the schema has nb,
+    not as unit_tiles."""
     names = list(include) if include is not None else [k.name for k in schema.keys if mirrored(k.name)]
     skip = set(exclude)
+    if include is None and "nb" in schema.key_map:
+        skip.add("unit_tiles")
     out = []
     for n in names:
         spec = schema.key(n)
@@ -192,6 +196,7 @@ def _value_rule(key: str, p: Problem, schema: Schema) -> List[Any]:
         # Only the side of M it falls on counts: multiply-adds at every M, or bytes up to this one.
         return [0, p.m]
     fixed = {
+        "nb": [64, 128, 256],
         "schedule": ["slice", "row_groups", "blocks"], "traversal": ["n_inner"], "unit_tiles": [2, 4],
         "min_tiles_per_thread": [2, 4], "row_unit": [6, 24, 48], "tile_rows": [4, 8, 12],
         "tall_rows": [6, 8], "block_rows": [96, 384, 768], "min_tile_cols": [32],

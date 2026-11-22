@@ -242,6 +242,7 @@ const key_doc_t kKeyDocs[] = {
         {"nr", "both", true, true, "auto", &field_value<int, &hp_t::nr>},
         {"mr", "both", true, true, "auto", &field_value<int, &hp_t::mr>},
         {"mb", "both", true, true, "auto", &field_value<int, &hp_t::mb>},
+        {"nb", "both", true, true, "auto", &field_value<int, &hp_t::nb>},
         {"kc", "bf16", true, true, "auto", &field_value<int, &hp_t::kc>},
         {"col_groups", "both", true, true, "auto",
                 &field_value<int, &hp_t::col_groups>},
@@ -508,7 +509,8 @@ TEST(NativeConfigText, RejectsBadTokensAndRanges) {
                  "bf16_alias_mr=13", "bf16_narrow_n=2", "bf16_narrow_n=-1",
                  "bf16_narrow_n_min_m=0", "bf16_narrow_n_min_m=1073741825",
                  "f16_wide_min_m=0", "f16_wide_min_m=1073741825",
-                 "unit_tiles=0", "unit_tiles=4097", "blocks=2", "blocks=-1",
+                 "unit_tiles=0", "unit_tiles=4097", "nb=0", "nb=8", "nb=24",
+                 "nb=-16", "nb=1048592", "blocks=2", "blocks=-1",
                  "bf16_blocks_min_m=0", "int8_blocks_min_m=1073741825"}) {
         EXPECT_FALSE(parses(bad)) << bad;
     }
@@ -552,6 +554,43 @@ TEST(NativeConfigText, CrossFieldRules) {
     EXPECT_FALSE(check_native_config(c, why));
     c.col_groups = 0;
     EXPECT_TRUE(check_native_config(c, why));
+}
+
+// nb, the unit of the blocks schedule in columns, sets together with
+// unit_tiles, the unit in tiles, and replaces it: the unit takes nb / nr
+// tiles.  Like schedule and col_groups, the two choose one unit width: a
+// layer that sets either replaces both of the layers under it.
+TEST(NativeConfigText, NbReplacesUnitTiles) {
+    for (const char *good : {"nb=16", "nb=48", "nb=1048576", " NB = 256 "})
+        EXPECT_TRUE(parses(good)) << good;
+    const native_config_t both = config("unit_tiles=4,schedule=blocks,nb=128");
+    EXPECT_EQ(
+            format_native_config(both), "nb=128,schedule=blocks,unit_tiles=4");
+    native_config_t layered = config("schedule=blocks,unit_tiles=4,mb=24");
+    merge_native_config(layered, config("nb=128"));
+    EXPECT_EQ(format_native_config(layered), "mb=24,nb=128,schedule=blocks");
+    merge_native_config(layered, config("unit_tiles=2"));
+    EXPECT_EQ(format_native_config(layered),
+            "mb=24,schedule=blocks,unit_tiles=2");
+    merge_native_config(layered, both);
+    EXPECT_TRUE(layered == config(format_native_config(both) + ",mb=24"));
+    const heuristic_params_t hp
+            = apply_native_config(heuristic_params_t {}, both);
+    EXPECT_EQ(hp.nb, 128);
+    EXPECT_EQ(hp.unit_tiles, 4);
+    const native_problem_t p = problem(1024, 4096, 1024);
+    for (const int nr : {16, 32}) {
+        heuristic_params_t pinned = hp;
+        pinned.nr = nr;
+        // One pass over K: no bound on the tiles of a unit.
+        pinned.kc = p.K;
+        const native_plan_t q = heuristic_plan(p, detect_uarch(), pinned);
+        EXPECT_EQ(q.unit_tiles, 128 / nr) << nr;
+        if (has_isa()) { EXPECT_EQ(validate_native_plan(q, p), nullptr) << nr; }
+        pinned.nb = 0;
+        EXPECT_EQ(heuristic_plan(p, detect_uarch(), pinned).unit_tiles, 4)
+                << nr;
+    }
 }
 
 TEST(NativeConfigText, KeysAndValuesIgnoreCaseAndSpaces) {
@@ -1814,6 +1853,32 @@ TEST(NativeConfigPlanner, PrecedenceAndFieldMerge) {
     EXPECT_EQ(validate_native_plan(q, p), nullptr);
 }
 
+// The override's unit width replaces the table's, whichever of nb and
+// unit_tiles each sets.
+TEST(NativeConfigPlanner, UnitWidthOfTheHighestLayer) {
+    if (!has_isa()) GTEST_SKIP() << "the CPU lacks AVX512-BF16 or AVX512-VNNI";
+    const UarchParams &u = detect_uarch();
+    const native_problem_t p = problem(256, 4096, 1024, true, 64);
+    {
+        native_planner_t planner(u, one_entry("unit_tiles=2", "o"),
+                one_entry("schedule=blocks,nr=32,kc=1024,nb=128", "t"),
+                nullptr);
+        const native_plan_t q = planner.plan(p);
+        EXPECT_EQ(q.unit_tiles, 2);
+        EXPECT_EQ(native_plan_config_text(q),
+                "nr=32,kc=1024,schedule=blocks,unit_tiles=2");
+    }
+    {
+        native_planner_t planner(u, one_entry("nb=128", "o"),
+                one_entry("schedule=blocks,nr=32,kc=1024,unit_tiles=2", "t"),
+                nullptr);
+        const native_plan_t q = planner.plan(p);
+        EXPECT_EQ(q.unit_tiles, 4);
+        EXPECT_EQ(native_plan_config_text(q),
+                "nr=32,nb=128,kc=1024,schedule=blocks");
+    }
+}
+
 TEST(NativeConfigPlanner, IncrementalFallbackWarnsOncePerEntry) {
     if (!has_isa()) GTEST_SKIP() << "the CPU lacks AVX512-BF16 or AVX512-VNNI";
     const UarchParams &u = detect_uarch();
@@ -2418,7 +2483,7 @@ nlohmann::ordered_json key_json(const native_config_key_t &k) {
 /// direct, dequant_bias, wei, order, team, padded_n, pairing) and the
 /// plan's provenance (source, cfg).
 const char *const kPlanLineFields[] = {"M", "N", "K", "pack_nr", "nr", "mb",
-        "kc", "kernels", "tiles", "threads", "col_groups", "unit_tiles",
+        "kc", "kernels", "tiles", "threads", "col_groups", "unit_tiles", "nb",
         "domain_threads", "transA", "gemv", "mr", "row_unit", "traversal",
         "int8_rows", "int8_cw", "int8_scheme", "direct", "wei", "gs", "order",
         "pass_budget", "int8_pass", "dequant_bias", "copy_block", "source",
@@ -2714,6 +2779,9 @@ TEST(NativeConfigSchema, SchemaDump) {
     EXPECT_EQ(key("schedule").value("values", json()),
             json::array({"auto", "slice", "row_groups", "blocks"}));
     EXPECT_EQ(key("unit_tiles").value("auto", json()), 0);
+    EXPECT_EQ(key("nb").value("auto", json()), 0);
+    EXPECT_EQ(key("nb").value("multiple_of", json()), 16);
+    EXPECT_EQ(key("nb").value("applies", json()), "both");
     EXPECT_EQ(key("row_split").value("default", json()), true);
     EXPECT_EQ(key("min_pass_k").value("multiple_of", json()), 2);
     EXPECT_EQ(key("min_pass_k").value("applies", json()), "both");
@@ -2952,6 +3020,22 @@ TEST(NativeConfigSchema, PlanLineFields) {
                             stderr, "%s: gemv=%s\n", l.what, value.c_str());
                     ++bad;
                 }
+            }
+            // A blocks plan names its unit in columns: nr times its tiles.
+            const auto field = [&](const char *name) {
+                for (const auto &[f, value] : lines[0])
+                    if (f == name) return value;
+                return std::string();
+            };
+            const std::string tiles = field("unit_tiles");
+            if (!tiles.empty()
+                    && field("nb")
+                            != std::to_string(std::stoi(field("nr"))
+                                    * std::stoi(tiles))) {
+                std::fprintf(stderr, "%s: nb=%s at nr=%s and unit_tiles=%s\n",
+                        l.what, field("nb").c_str(), field("nr").c_str(),
+                        tiles.c_str());
+                ++bad;
             }
         }
         for (const char *f : kPlanLineFields) {

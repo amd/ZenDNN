@@ -118,11 +118,11 @@ class TestApiLog(unittest.TestCase):
         self.assertEqual(list(common.parse_apilog("x\n" + LINE + "\n" + LINE)), [(8, 6144, 4096)])
 
     def test_blocks_line(self):
-        # A blocks plan names its unit width and the threads of a domain; lines that differ
-        # only in the domain size are not one plan.
-        blocks = LINE.replace(" col_groups=0 ", " col_groups=0 unit_tiles=1 domain_threads=8 ")
+        # A blocks plan names its unit width, in tiles and in columns, and the threads of a domain;
+        # lines that differ only in the domain size are not one plan.
+        blocks = LINE.replace(" col_groups=0 ", " col_groups=0 unit_tiles=1 nb=32 domain_threads=8 ")
         f = common.parse_apilog_line(blocks)
-        self.assertEqual((f["unit_tiles"], f["domain_threads"]), ("1", "8"))
+        self.assertEqual((f["unit_tiles"], f["nb"], f["domain_threads"]), ("1", "32", "8"))
         self.assertEqual(common.consistent([f, dict(f)]), f)
         self.assertIsNone(common.consistent([f, dict(f, domain_threads="4")]))
 

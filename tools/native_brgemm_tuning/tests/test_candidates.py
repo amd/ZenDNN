@@ -22,7 +22,7 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from helpers import DESIGN, NEWER, NO_BLOCKS, OLDER, RULES_OFF, SCHEMA, UARCH  # noqa: E402
+from helpers import DESIGN, NEWER, NO_BLOCKS, NO_NB, OLDER, RULES_OFF, SCHEMA, UARCH  # noqa: E402
 
 from native_brgemm_tuning import candidates as C  # noqa: E402
 from native_brgemm_tuning import plan as PL  # noqa: E402
@@ -246,7 +246,16 @@ class TestBlocksSpace(unittest.TestCase):
         b, s = Problem("bf16", 4096, 4096, 14336), Problem("s8", 4096, 4096, 4096)
         self.assertEqual(C.value_choices("schedule", b, SCHEMA), ["slice", "row_groups", "blocks"])
         self.assertEqual(C.value_choices("schedule", b, NO_BLOCKS), ["slice", "row_groups"])
-        self.assertEqual([C.value_choices(k, b, SCHEMA) for k in ("unit_tiles", "blocks")], [[2, 4], [0]])
+        self.assertEqual([C.value_choices(k, b, SCHEMA) for k in ("nb", "unit_tiles", "blocks")],
+                         [[64, 128, 256], [2, 4], [0]])
+        # The search takes the unit as nb, its columns, where the schema has nb, else as unit_tiles;
+        # unit_tiles only when asked for.
+        for dtype in ("bf16", "s8"):
+            self.assertIn("nb", C.search_keys(SCHEMA, dtype))
+            self.assertNotIn("unit_tiles", C.search_keys(SCHEMA, dtype))
+            self.assertEqual(C.search_keys(SCHEMA, dtype, include=["unit_tiles"]), ["unit_tiles"])
+            self.assertIn("unit_tiles", C.search_keys(NO_NB, dtype))
+            self.assertFalse({"nb", "unit_tiles"} & set(C.search_keys(NO_BLOCKS, dtype)))
         for key, dtype, other in (("bf16_blocks_min_m", "bf16", "s8"), ("int8_blocks_min_m", "s8", "bf16")):
             self.assertEqual(C.value_choices(key, b if dtype == "bf16" else s, SCHEMA), [1], key)
             self.assertIn(key, C.search_keys(SCHEMA, dtype))
@@ -260,10 +269,15 @@ class TestBlocksSpace(unittest.TestCase):
             got = [(c.text, c.plan.unit_tiles) for c in C.unique(sp.iter_grid(2), sp)]
             self.assertEqual(got, [("schedule=slice", 0), ("schedule=row_groups", 0), ("unit_tiles=2", 2),
                                    ("unit_tiles=4", 4)], p)
+            # Units of 64, 128 and 256 columns at the plan's 32-column tiles.
+            sp = C.Space(p, SCHEMA, UARCH, ["schedule", "nb", "blocks"])
+            got = [(c.text, c.plan.unit_tiles) for c in C.unique(sp.iter_grid(2), sp)]
+            self.assertEqual(got, [("schedule=slice", 0), ("schedule=row_groups", 0), ("nb=64", 2), ("nb=128", 4),
+                                   ("nb=256", 8)], p)
 
     def test_every_candidate_is_legal(self):
-        keys = ["schedule", "unit_tiles", "blocks", "bf16_blocks_min_m", "int8_blocks_min_m", "col_groups", "nr",
-                "mb", "domain_threads"]
+        keys = ["schedule", "nb", "unit_tiles", "blocks", "bf16_blocks_min_m", "int8_blocks_min_m", "col_groups",
+                "nr", "mb", "domain_threads"]
         for p in PROBLEMS + [Problem("bf16", 4096, 4096, 14336), Problem("bf16", 1024, 64, 9216)]:
             sp = C.Space(p, SCHEMA, UARCH, [k for k in keys if SCHEMA.key(k).applies_to(p.dtype)])
             blocks = 0

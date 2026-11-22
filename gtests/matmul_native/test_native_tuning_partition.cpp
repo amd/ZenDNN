@@ -221,7 +221,10 @@ const char *const kPlanVariants[] = {"", "traversal=n_inner", "schedule=slice",
         "schedule=blocks,unit_tiles=1", "schedule=blocks,unit_tiles=3,mb=40",
         "schedule=blocks,unit_tiles=4096,domain_threads=2",
         "schedule=blocks,unit_tiles=5,mb=7,domain_threads=3",
-        "schedule=blocks,nr=16,unit_tiles=2,domain_threads=1"};
+        "schedule=blocks,nr=16,unit_tiles=2,domain_threads=1",
+        "schedule=blocks,nb=64", "schedule=blocks,nb=16,mb=40",
+        "schedule=blocks,nr=16,nb=48,domain_threads=1",
+        "schedule=blocks,unit_tiles=5,nb=96,domain_threads=3"};
 
 nat::heuristic_params_t params_of(const char *settings) {
     nat::native_config_t cfg;
@@ -455,6 +458,42 @@ TEST(NativeTuningPartition, BlocksDealsEveryTileOnce) {
             }
     report.finish();
     EXPECT_GT(exercised, 0) << "no blocks plan exercised";
+}
+
+// nb sizes the units of the blocks deal in columns: nb / nr whole tiles, at
+// least one, so a unit of 128 columns spans 128 columns at tiles of 16, 32
+// and 64 columns, and an nb below nr gives units of one tile; only the last
+// unit of a range is narrower.
+TEST(NativeTuningPartition, BlocksUnitsAreNbColumnsWide) {
+    constexpr int kK = 64;
+    const nat::native_problem_t pr = bf16_problem(300, 1024, kK, 8);
+    for (const int nr : {16, 32, 64})
+        for (const int nb : {16, 48, 128}) {
+            const std::string settings = "schedule=blocks,nr="
+                    + std::to_string(nr) + ",nb=" + std::to_string(nb);
+            SCOPED_TRACE(settings);
+            const nat::native_plan_t p = nat::heuristic_plan(
+                    pr, nat::detect_uarch(), params_of(settings.c_str()));
+            ASSERT_TRUE(partition_legal(p, pr)) << text(p);
+            const int width = std::max(1, nb / nr) * nr;
+            ASSERT_EQ(p.unit_tiles * nr, width);
+            if (nb % nr == 0) { EXPECT_EQ(width, nb); }
+            for (const auto &range : column_ranges(p.n_tiles)) {
+                const int c0 = range.first, c1 = range.second;
+                const nat::native_partition_t part(p, pr.M, c0, c1);
+                nat::native_unit_deal_t deal;
+                part.deal(1, deal);
+                std::vector<unit_t> units;
+                part.for_each(0, 1,
+                        [&](const unit_t &u) { units.push_back(u); }, &deal);
+                EXPECT_TRUE(covers_once(units, p, pr.M, c0, c1));
+                for (const unit_t &u : units)
+                    EXPECT_TRUE(u.tiles * nr == width
+                            || u.n0 + u.tiles * nr == c1 * nr)
+                            << text(u) << " of tiles [" << c0 << ", " << c1
+                            << ")";
+            }
+        }
 }
 
 /// Records the units a CPU team runs and the scratch each thread gets.

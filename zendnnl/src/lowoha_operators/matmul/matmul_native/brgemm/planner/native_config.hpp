@@ -55,6 +55,11 @@ struct heuristic_params_t {
     /// tile_rows
     int mr = 0;
     int mb = 0; ///< pin, no row split; 0: block_rows, then the row split
+    /// pin, blocks schedule: columns per unit (the N block); the unit takes
+    /// nb / nr column tiles, at least one, under the bounds of unit_tiles,
+    /// so its width holds whatever nr the plan takes; set, it replaces
+    /// unit_tiles; 0: unit_tiles
+    int nb = 0;
     int kc = 0; ///< pin, BF16; 0: the L2 rule
     int col_groups = -1; ///< pin; -1: schedule; 0: slice; > 0: row groups
     native_schedule_t schedule = native_schedule_t::automatic;
@@ -281,7 +286,7 @@ struct heuristic_params_t {
 /// A partial heuristic_params_t: what one source sets.  Fields mirror
 /// heuristic_params_t one to one.
 struct native_config_t {
-    std::optional<int> nr, mr, mb, kc, col_groups;
+    std::optional<int> nr, mr, mb, nb, kc, col_groups;
     std::optional<native_schedule_t> schedule;
     std::optional<native_traversal_t> traversal;
     std::optional<int> unit_tiles;
@@ -329,7 +334,8 @@ bool parse_native_config(
 std::string format_native_config(const native_config_t &cfg);
 
 /// Fields set in overlay replace those of base; schedule and col_groups
-/// choose one schedule together, so an overlay setting either replaces both.
+/// choose one schedule together, and nb and unit_tiles one unit width, so an
+/// overlay setting either key of a pair replaces both.
 void merge_native_config(native_config_t &base, const native_config_t &overlay);
 
 /// The key ranges and the cross-field rules; nothing that depends on the

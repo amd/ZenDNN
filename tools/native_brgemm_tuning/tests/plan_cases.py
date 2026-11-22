@@ -33,10 +33,16 @@ follow the registry, so the dump and the schema come from machines of one ISA.
 fixtures/plan_check.json holds the SHA-256 of each chunk of those lines and the
 counts of the kinds of case; tuner_line() is the same line from plan.py.
 
-  plan_cases.py cases   [--seed S] [--count N] [--machine M]            the dump's input
-  plan_cases.py compare DUMP [--seed S] [--count N] [--machine M] [--schema]
+--nb draws the N block's cases instead (their own seed and count): every case
+sets nb, half of them the blocks schedule, a quarter unit_tiles too (nb
+replaces it). fixtures/plan_check_nb.json holds their digests and the kernel
+kinds of the schema given (--schema: the dump machine's), which the test plans
+with, so a machine without every kernel kind can make it.
+
+  plan_cases.py cases   [--nb] [--seed S] [--count N] [--machine M]       the dump's input
+  plan_cases.py compare DUMP [--nb] [--seed S] [--count N] [--machine M] [--schema]
                                                     plan.py against a dump, field by field
-  plan_cases.py fixture DUMP [--seed S] [--count N] [--schema]          the digest fixture of a dump
+  plan_cases.py fixture DUMP [--nb] [--seed S] [--count N] [--schema]     the digest fixture of a dump
 """
 
 from __future__ import annotations
@@ -59,6 +65,9 @@ from native_brgemm_tuning.problems import Problem  # noqa: E402
 FIXTURE = os.path.join(os.path.dirname(schema_mod.FIXTURE), "plan_check.json")
 SEED = 20261023
 COUNT = 50000
+NB_FIXTURE = os.path.join(os.path.dirname(schema_mod.FIXTURE), "plan_check_nb.json")
+NB_SEED = 20261121
+NB_COUNT = 20000
 CHUNK = 1000
 MASK64 = (1 << 64) - 1
 
@@ -106,6 +115,7 @@ PINS = (
     ("int8_cw", ["16", "32/16"]), ("int8_l2_pct", ["1", "50", "1000"]),
     ("int8_kc", ["4", "64", "1024"]), ("unit_tiles", ["1", "2", "3", "8", "4096"]),
 )
+NB_VALUES = ["16", "48", "64", "128", "256", "4096"]
 # Weight types of the drawn cases and their percent shares; s4 group sizes (0: one group over K).
 DTYPE_SHARES = (("bf16", 34), ("s8", 26), ("s4", 22), ("f16", 12), ("f32", 6))
 S4_GROUPS = (0, 0, 32, 64, 128, 128, 256)
@@ -188,9 +198,9 @@ class Case(NamedTuple):
                                 family_l3_cores=self.family_l3, l3_domain_cores=self.dom)
 
 
-def random_config(rng: Rng, m: int) -> str:
+def random_config(rng: Rng, m: int, nb: bool = False) -> str:
     roll = rng.below(100)
-    if roll < 15:
+    if roll < 15 and not nb:
         return "-"
     cfg: Dict[str, str] = {}
     if roll < 45:
@@ -207,6 +217,13 @@ def random_config(rng: Rng, m: int) -> str:
     for key, values in PINS:
         if rng.percent(5):
             cfg[key] = rng.choice(values)
+    if nb:
+        cfg["nb"] = rng.choice(NB_VALUES)
+        if rng.percent(25):
+            cfg["unit_tiles"] = rng.choice(dict(PINS)["unit_tiles"])
+        if rng.percent(50):
+            cfg["schedule"] = "blocks"
+            cfg.pop("col_groups", None)
     if "col_groups" in cfg and rng.percent(50):
         cfg["schedule"] = "row_groups" if cfg["col_groups"] != "0" else "slice"
     elif rng.percent(6):
@@ -224,7 +241,7 @@ def random_dtype(rng: Rng) -> str:
     return DTYPE_SHARES[0][0]
 
 
-def random_case(rng: Rng, machine: Optional[Tuple[int, int, int, int, int]] = None) -> Case:
+def random_case(rng: Rng, machine: Optional[Tuple[int, int, int, int, int]] = None, nb: bool = False) -> Case:
     if rng.percent(30):
         n, k = rng.choice(LAYERS)
         m = rng.choice(LAYER_MS) if rng.percent(70) else rng.randint(1, 4096)
@@ -257,14 +274,14 @@ def random_case(rng: Rng, machine: Optional[Tuple[int, int, int, int, int]] = No
     dom = rng.choice([0, 8, 16, 32])
     if machine is not None:
         l1d, l2, l3, family_l3, dom = machine
-    return Case(random_config(rng, m), l1d, l2, l3, family_l3, dom, dtype, scheme, n, k, m, threads, pack,
+    return Case(random_config(rng, m, nb), l1d, l2, l3, family_l3, dom, dtype, scheme, n, k, m, threads, pack,
                 group, scale_bytes)
 
 
 def cases(seed: int = SEED, count: int = COUNT,
-          machine: Optional[Tuple[int, int, int, int, int]] = None) -> List[Case]:
+          machine: Optional[Tuple[int, int, int, int, int]] = None, nb: bool = False) -> List[Case]:
     rng = Rng(seed)
-    return [random_case(rng, machine) for _ in range(count)]
+    return [random_case(rng, machine, nb) for _ in range(count)]
 
 
 def parse_machine(text: str) -> Tuple[int, int, int, int, int]:
@@ -352,15 +369,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("command", choices=("cases", "compare", "fixture"))
     ap.add_argument("dump", nargs="?", help="the plan dump's output for the cases")
-    ap.add_argument("--seed", type=int, default=SEED)
-    ap.add_argument("--count", type=int, default=COUNT)
+    ap.add_argument("--nb", action="store_true", help="the N block's cases")
+    ap.add_argument("--seed", type=int, help="default %d, %d with --nb" % (SEED, NB_SEED))
+    ap.add_argument("--count", type=int, help="default %d, %d with --nb" % (COUNT, NB_COUNT))
     ap.add_argument("--chunk", type=int, default=CHUNK)
     ap.add_argument("--schema", help="schema of the library (default: the fixture)")
     ap.add_argument("--machine", help="l1d,l2,l3,family_l3,dom of every case (default: drawn per case)")
     a = ap.parse_args(argv)
     if a.machine and a.command == "fixture":
         ap.error("the fixture's cases draw their machines")
-    cs = cases(a.seed, a.count, parse_machine(a.machine) if a.machine else None)
+    seed = a.seed if a.seed is not None else (NB_SEED if a.nb else SEED)
+    count = a.count if a.count is not None else (NB_COUNT if a.nb else COUNT)
+    cs = cases(seed, count, parse_machine(a.machine) if a.machine else None, a.nb)
     if a.command == "cases":
         sys.stdout.write("".join(c.line() + "\n" for c in cs))
         return 0
@@ -378,8 +398,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("cases %d: %d without a config, %d with every rule off, %d plans of the blocks schedule; "
               "mismatches %d" % (len(cs), counts["no_config"], counts["rules_off"], blocks, bad))
         return 1 if bad else 0
-    doc = {"origin": "plans of the library's planner for the cases of plan_cases.py",
-           "seed": a.seed, "count": a.count, "chunk": a.chunk, "cases": counts, "sha256": digests(dump, a.chunk)}
+    doc = {"origin": "plans of the library's planner for the %scases of plan_cases.py" % ("nb " if a.nb else ""),
+           "seed": seed, "count": count, "chunk": a.chunk, "cases": counts}
+    if a.nb:
+        doc["kernels"] = sorted({k["kind"] for k in schema.doc["kernels"]})
+    doc["sha256"] = digests(dump, a.chunk)
     sys.stdout.write(json.dumps(doc, indent=1) + "\n")
     return 0
 

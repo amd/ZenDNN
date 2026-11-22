@@ -283,11 +283,86 @@ TEST(NativeTuningPlan, RulesOffWorkedExamples) {
     EXPECT_EQ(nat::native_int8_pass_quads(i, 3584, 32, 192, 12), 1792);
 }
 
+// nb sizes the unit of the blocks schedule in columns: nb / nr column
+// tiles, at least one, so a unit of 256 columns keeps its width at tiles of
+// 16, 32 and 64 columns.  It replaces unit_tiles under the same bounds (at
+// most n_tiles; under BF16 K passes the tiles whose accumulators fit the
+// bf16_l2_pct share of L2) and takes no call to the blocks schedule; where
+// the blocks rule takes one, the unit is nb wide.  1 MiB of L2 and 32 MiB
+// of L3 per 8 cores, at 32 threads.
+TEST(NativeTuningPlan, NbSizesTheBlocksUnit) {
+    nat::UarchParams u = nat::detect_uarch();
+    u.l1d_bytes = 48 << 10;
+    u.l2_bytes = 1 << 20;
+    u.l3_domain_bytes = 32 << 20;
+    u.family_l3_cores = 1;
+    u.l3_domain_cores = 8;
+    const nat::UarchParams &host = nat::detect_uarch();
+    for (const bool bf16 : {true, false}) {
+        SCOPED_TRACE(bf16 ? "bf16" : "int8");
+        const nat::native_problem_t p = make_problem(
+                1024, 4096, 4096, nat::kNativeLayoutPackNr, 32, bf16, 0);
+        const bool isa = bf16 ? host.avx512bf16 : host.avx512vnni;
+        nat::heuristic_params_t hp = rules_off();
+        hp.schedule = nat::native_schedule_t::blocks;
+        hp.kc = p.K;
+        for (const int nr : {16, 32, 64}) {
+            if (!bf16 && nr == 64) continue;
+            hp.nr = nr;
+            for (const int nb : {16, 48, 256, 1 << 20}) {
+                SCOPED_TRACE("nr " + std::to_string(nr) + " nb "
+                        + std::to_string(nb));
+                hp.nb = nb;
+                hp.unit_tiles = 0;
+                const nat::native_plan_t q = nat::heuristic_plan(p, u, hp);
+                EXPECT_EQ(q.unit_tiles,
+                        std::min(std::max(1, nb / nr), q.n_tiles));
+                if (isa) {
+                    EXPECT_EQ(nat::validate_native_plan(q, p), nullptr);
+                }
+                hp.unit_tiles = 3;
+                EXPECT_EQ(plan_diff(nat::heuristic_plan(p, u, hp), q), nullptr);
+            }
+            hp.nb = 256;
+            hp.unit_tiles = 0;
+            EXPECT_EQ(nr * nat::heuristic_plan(p, u, hp).unit_tiles, 256) << nr;
+        }
+        // A unit of every column: under BF16 K passes of 1024, the tiles
+        // whose accumulators fit half of L2.
+        hp.nr = 32;
+        hp.nb = p.N;
+        hp.kc = bf16 ? 1024 : 0;
+        const nat::native_plan_t k = nat::heuristic_plan(p, u, hp);
+        const int64_t fit = static_cast<int64_t>(u.l2_bytes) / 2
+                / (static_cast<int64_t>(k.mb) * k.nr * sizeof(float));
+        EXPECT_EQ(k.unit_tiles,
+                bf16 ? std::clamp<int64_t>(fit, 1, k.n_tiles) : k.n_tiles);
+        if (bf16) { EXPECT_LT(k.unit_tiles, k.n_tiles); }
+        const nat::heuristic_params_t none = rules_off();
+        nat::heuristic_params_t wide = none;
+        wide.nb = 256;
+        EXPECT_EQ(plan_diff(nat::heuristic_plan(p, u, wide),
+                          nat::heuristic_plan(p, u, none)),
+                nullptr);
+    }
+    // A BF16 B slab over K = 14336 exceeds half of L2 and a domain's share
+    // of the source fits its L3: the blocks rule takes the call.
+    nat::heuristic_params_t rule = rules_off();
+    rule.blocks = 1;
+    const nat::native_problem_t r = make_problem(
+            4096, 4096, 14336, nat::kNativeLayoutPackNr, 32, true, 0);
+    ASSERT_EQ(nat::heuristic_plan(r, u, rule).unit_tiles, 1);
+    rule.nb = 128;
+    const nat::native_plan_t b = nat::heuristic_plan(r, u, rule);
+    EXPECT_EQ(b.unit_tiles, 128 / b.nr);
+}
+
 TEST(NativeTuningPlan, DefaultParamsAreTheBuiltInConstants) {
     const nat::heuristic_params_t hp;
     EXPECT_EQ(hp.nr, 0);
     EXPECT_EQ(hp.mr, 0);
     EXPECT_EQ(hp.mb, 0);
+    EXPECT_EQ(hp.nb, 0);
     EXPECT_EQ(hp.kc, 0);
     EXPECT_EQ(hp.col_groups, -1);
     EXPECT_EQ(hp.schedule, nat::native_schedule_t::automatic);

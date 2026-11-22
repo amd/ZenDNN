@@ -44,10 +44,10 @@ COST_KEYS = ["cost_model", "cm_gain_pct", "cm_short_rows", "cm_fma_pipes", "cm_f
              "cm_reuse_pct", "cm_stream_cycles", "cm_sync_tiles", "cm_group_slab_pct", "cm_group_l3_pct",
              "cm_group_skew_pct", "cm_group_rows_pct", "cm_drift_kib", "cm_pass_kib", "cm_pass_calls",
              "cm_block_kib", "cm_block_k", "cm_int8_l1_pct", "cm_int4_min_m"]
-# The keys of the planner's schema, in its order: the design's, unit_tiles after traversal,
-# int4_l1_pct after int8_kc, f16_wide_min_m after the narrow-N rule, then the cost model's.
-SCHEMA_KEYS = (DESIGN_KEYS[:7] + ["unit_tiles"] + DESIGN_KEYS[7:24] + ["int4_l1_pct"] + DESIGN_KEYS[24:]
-               + RULE_KEYS[:12] + ["f16_wide_min_m"] + RULE_KEYS[12:] + COST_KEYS)
+# The keys of the planner's schema, in its order: the design's, nb after mb, unit_tiles after
+# traversal, int4_l1_pct after int8_kc, f16_wide_min_m after the narrow-N rule, then the cost model's.
+SCHEMA_KEYS = (DESIGN_KEYS[:3] + ["nb"] + DESIGN_KEYS[3:7] + ["unit_tiles"] + DESIGN_KEYS[7:24] + ["int4_l1_pct"]
+               + DESIGN_KEYS[24:] + RULE_KEYS[:12] + ["f16_wide_min_m"] + RULE_KEYS[12:] + COST_KEYS)
 DESIGN_FIXTURE = os.path.join(os.path.dirname(S.FIXTURE), "schema_design.json")
 
 
@@ -59,7 +59,8 @@ class TestFixture(unittest.TestCase):
         self.assertEqual(S.schema_text(json.loads(text)), text)
 
     def test_keys_in_design_order(self):
-        # unit_tiles, the blocks schedule's pin, follows traversal.
+        # The blocks schedule's pins: nb, its unit in columns, follows mb; unit_tiles, its unit in
+        # tiles, follows traversal.
         self.assertEqual([k.name for k in SCHEMA.keys], SCHEMA_KEYS)
         self.assertEqual([k.name for k in DESIGN.keys], DESIGN_KEYS)
         self.assertEqual(SCHEMA.key("schedule").values, ["auto", "slice", "row_groups", "blocks"])
@@ -85,7 +86,10 @@ class TestFixture(unittest.TestCase):
                          [(1, 0, 1)] * len(RULE_SWITCHES))
         # row_unit's auto value is the rules' unit of 12 rows, a legal setting: setting it pins nothing.
         self.assertEqual((SCHEMA.key("row_unit").default, SCHEMA.key("row_unit").auto), (None, 12))
-        self.assertEqual([builtin_params(SCHEMA)[k] for k in ("unit_tiles",) + BLOCKS_RULE_KEYS], [0, 1, 1024, 3072])
+        self.assertEqual([builtin_params(SCHEMA)[k] for k in ("nb", "unit_tiles") + BLOCKS_RULE_KEYS],
+                         [0, 0, 1, 1024, 3072])
+        self.assertEqual((SCHEMA.key("nb").min, SCHEMA.key("nb").max, SCHEMA.key("nb").check(24) is None),
+                         (16, 1 << 20, False))
 
     def test_bits_columns(self):
         changing = [k.name for k in SCHEMA.keys if not k.same_bits("s8")]
@@ -94,7 +98,8 @@ class TestFixture(unittest.TestCase):
         self.assertFalse(SCHEMA.key("kc").applies_to("s8"))
         self.assertFalse(SCHEMA.key("int8_cw").applies_to("bf16"))
         bf16_only = list(BF16_RULE_KEYS) + ["bf16_blocks_min_m"]
-        for name in [k for k in RULE_KEYS if k not in bf16_only + ["int8_blocks_min_m"]] + ["min_pass_k", "unit_tiles"]:
+        both = [k for k in RULE_KEYS if k not in bf16_only + ["int8_blocks_min_m"]]
+        for name in both + ["min_pass_k", "nb", "unit_tiles"]:
             self.assertTrue(SCHEMA.key(name).applies_to("s8") and SCHEMA.key(name).applies_to("bf16"), name)
         for name in bf16_only:
             self.assertTrue(SCHEMA.key(name).applies_to("bf16") and not SCHEMA.key(name).applies_to("s8"), name)

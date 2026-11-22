@@ -649,8 +649,10 @@ native_plan_t rules_plan(const native_problem_t &p, const UarchParams &uarch,
     q.row_unit = hp.row_unit;
     const auto take_blocks = [&]() {
         q.col_groups = 0;
-        q.unit_tiles = std::min(std::max(1, q.n_tiles),
-                hp.unit_tiles > 0 ? hp.unit_tiles : kBlocksTiles);
+        const int tiles = hp.nb > 0 ? std::max(1, hp.nb / std::max(1, q.nr))
+                : hp.unit_tiles > 0 ? hp.unit_tiles
+                                    : kBlocksTiles;
+        q.unit_tiles = std::min(std::max(1, q.n_tiles), tiles);
         // BF16 and FP32 K passes keep the accumulators of every tile of a
         // unit, in the worker's scratch, which is kept for the thread's
         // lifetime: the unit takes at most the tiles whose accumulators fit
@@ -952,6 +954,7 @@ native_plan_t model_plan(const native_problem_t &p, const UarchParams &uarch,
         if (best.unit_tiles > 0) {
             r.schedule = native_schedule_t::blocks;
             r.unit_tiles = best.unit_tiles;
+            r.nb = 0;
         } else {
             r.col_groups = best.col_groups;
         }

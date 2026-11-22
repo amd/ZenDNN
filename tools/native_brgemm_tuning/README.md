@@ -105,10 +105,14 @@ run time, gradient-boosted trees when present, numpy models otherwise).
    `bf16_narrow_n_min_m`, `bf16_blocks_min_m` and `int8_blocks_min_m` at 1,
    the rule from the first row) are searched too; BF16 problems also take
    tiles of 64 and 128 columns (`nr`), and the schedules take
-   `schedule=blocks` and units of 2 and 4 column tiles (`unit_tiles`, a pin
-   of that schedule). A constant of a rule that is off changes no plan and
-   is merged away, so with the rules off the constants count together with a
-   switch (`--keys` searches the rules alone, see Usage).
+   `schedule=blocks` and units of 64, 128 and 256 columns (`nb`, the N
+   block, a pin of that schedule: the unit takes `nb` / `nr` column tiles,
+   at least one, whatever `nr` the plan takes, and replaces `unit_tiles`,
+   the unit in tiles, which is searched only when `--keys` names it or on
+   the schema of a build without `nb`). A constant of a rule that is off
+   changes no plan and is merged away, so with the rules off the constants
+   count together with a switch (`--keys` searches the rules alone, see
+   Usage).
 4. **Sessions.** A round hands its candidates to the backend. For the pod
    backends, `backends/jobs.py` writes one session directory per pod claim
    (up to `--parallel` per round) and starts `--launcher` on it, for example
@@ -176,9 +180,13 @@ run time, gradient-boosted trees when present, numpy models otherwise).
    key, the rule switches among
    them (1 unless the winner sets one to 0), equivalent explicit values for
    `threads_cap` / `domain_threads`, and auto pins that reproduce the
-   measured plan over the whole class, `unit_tiles` of a blocks plan among
-   them), so learned rules only fill what an entry leaves open. `hardware`
-   (version 2) matches CPU
+   measured plan over the whole class, `nb` of a blocks plan among them,
+   `nr` times its unit tiles, or `unit_tiles` where the search took it and
+   not `nb` (`--keys`, or the schema of a build without `nb`); a winner that
+   sets `nb` or `unit_tiles` keeps its unit as that key alone, since `nb`
+   replaces `unit_tiles`), so learned rules only fill what an entry leaves
+   open.
+   `hardware` (version 2) matches CPU
    fields, each a value, a list or a `{"min", "max"}` range: by default the
    machine's `vendor`, `family`, `model`, `isa` (the features the CPU must all
    have), `l1d_kib`, `l2_kib`, `l3_kib` and `l3_cores` (the plan's L3 domain),
@@ -455,8 +463,9 @@ default of the planner, so the CI runs both with
 `NativeConfigText.KeyDocsMatchTheKeyTable` (the key table the dump takes
 enum defaults from, against the planner's defaults), then the plan
 comparison below on the build (`plan_cases.py compare` of the build's plan
-dump on the build's schema: the f16 kernel kind and the plans come from
-one machine, so it holds on any), then these tests on the build's dump.
+dump on the build's schema, for the cases and for the N block's cases,
+`--nb`: the f16 kernel kind and the plans come from one machine, so it
+holds on any), then these tests on the build's dump.
 `test_cost_model.py` checks the cost model's mirror and choices against the
 library's NativeCostModel cases. `test_tunings.py` checks the files of
 `tunings/`: each is valid, and the plans `plan.py` gives its entries on its
@@ -488,8 +497,8 @@ AVX512-FP16. The planner's test compares only the field names of its `hw`,
 field the planner adds needs an example value in the fixture first:
 
     tools/native_brgemm_tuning/refresh_fixtures.sh <worktree> <SchemaDump gtest log> [build dir]
-    # or with the plan dump made on that machine
-    DUMP=<dump> tools/native_brgemm_tuning/refresh_fixtures.sh <worktree> <SchemaDump gtest log>
+    # or with the plan dumps made on that machine
+    DUMP=<dump> NB_DUMP=<nb dump> tools/native_brgemm_tuning/refresh_fixtures.sh <worktree> <SchemaDump gtest log>
 
 It builds `plan_dump/plan_dump.cpp` against the worktree's planner headers
 (they are not installed) and the build's static archive
@@ -511,6 +520,17 @@ description (`--machine l1d,l2,l3,family_l3,dom`):
     python3 $P cases --seed 11 --count 200000 --machine $M | /tmp/plan_dump > /tmp/dump.txt
     python3 $P compare /tmp/dump.txt --seed 11 --count 200000 --machine $M --schema schema.json
 
+The N block's cases (`--nb`: every case sets `nb`, half of them the blocks
+schedule, a quarter `unit_tiles` too) have their own fixture,
+`fixtures/plan_check_nb.json`, which the refresh writes too. It names the
+kernel kinds of the machine its plans came from, and the test plans with
+those, so a machine without every kernel kind can remake it alone:
+
+    python3 $P cases --nb | /tmp/plan_dump > /tmp/nb_dump.txt
+    python3 $P compare /tmp/nb_dump.txt --nb --schema <SchemaDump gtest log>
+    python3 $P fixture /tmp/nb_dump.txt --nb --schema <SchemaDump gtest log> \
+        > tools/native_brgemm_tuning/fixtures/plan_check_nb.json
+
 ## Keeping the tuner in sync with the planner
 
 The tuner mirrors the planner, so a change to the native planner
@@ -526,7 +546,8 @@ change:
    those, compare the build's plans with `plan.py` on the build's schema:
    `plan_dump/build.sh`, `plan_cases.py cases` through the plan dump, and
    `plan_cases.py compare <its output> --schema <that gtest log>` names
-   each case the mirror plans otherwise, field by field. The CI runs both.
+   each case the mirror plans otherwise, field by field (the same with
+   `--nb` for the N block's cases). The CI runs both.
 2. Make the tuner follow: a key is mirrored in `plan.py` (`BUILTIN_PARAMS`,
    and the rule that reads it) and gets search values in `candidates.py`; a
    rule or a cost-model input is mirrored in `plan.py` / `cost_model.py`; a
