@@ -31,9 +31,13 @@
 // the DA8W8 call with wei s4 packed [N, K / 2] (two values a byte, the even
 // k in the low nibble, two's complement), ldb = K in values, and wei_scale
 // {buf, scale_dt, {K / gs, N}} (--group gs; -1: one group over K, {1, N}).
+// --gated silu_and_mul (the plugin's gated linear, any weight type above but
+// f16): the same call over a [gate | up] weight of N = 2I rows with the gated
+// activation, writing act(gate) * up into an M x I output (ldc = N / 2).
 // --check 1: after the timed passes of an M, one more call per shape (layer 0)
-// and a 64-bit FNV-1a hash of its M x N output (CHECK line), to compare builds
-// or plans bit for bit.
+// and a 64-bit FNV-1a hash of its M x N output buffer (CHECK line; a gated
+// call's M x I output and the zeros after it), to compare builds or plans bit
+// for bit.
 // Weights and activations are drawn in parallel 1 Mi blocks, each from its own
 // seeded generator (bf16 and f16 weights k / 1280 and activations k / 64 for
 // small integers k, s8 weights in [-127, 127], s4 weights in [-8, 7], u8
@@ -50,7 +54,7 @@
 //               [--iters 30] [--warmup 2] [--scale-dt bf16|f32|f16]
 //               [--bias none|bf16|f32] [--budget-ms 1500] [--src bf16|u8|s8]
 //               [--wei s8|bf16|s4|f16] [--group gs] [--dst bf16|f16|f32]
-//               [--check 0|1]
+//               [--gated none|silu_and_mul] [--check 0|1]
 // Prints one RESULT line per shape and M (per-call median / mean / min / p90
 // in ms) and a TOTAL per M.
 #include <omp.h>
@@ -211,6 +215,15 @@ int main(int argc, char **argv) {
             = dt_of(arg(argc, argv, "--dst", wei_f16 ? "f16" : "bf16"));
     const int group = std::atoi(arg(argc, argv, "--group", "128"));
     const bool check = std::atoi(arg(argc, argv, "--check", "0")) != 0;
+    const std::string gated_mode = arg(argc, argv, "--gated", "none");
+    mm::matmul_gated_act_params gated;
+    if (gated_mode == "silu_and_mul") {
+        gated.act = mm::matmul_gated_act_t::silu_and_mul;
+    } else if (gated_mode != "none") {
+        std::fprintf(stderr, "--gated takes none or silu_and_mul\n");
+        return 2;
+    }
+    const bool is_gated = gated.act != mm::matmul_gated_act_t::none;
     const int m_max = *std::max_element(ms.begin(), ms.end());
     const char *algo = std::getenv("ZENDNNL_MATMUL_ALGO");
     if (out_dt == data_type_t::none || scale_dt == data_type_t::none) {
@@ -219,12 +232,13 @@ int main(int argc, char **argv) {
     }
     std::printf(
             "CONFIG algo=%s threads=%d layers=%d iters_max=%d warmup=%d "
-            "scale_dt=%s bias=%s src=%s wei=%s group=%d dst=%s\n",
+            "scale_dt=%s bias=%s src=%s wei=%s group=%d dst=%s gated=%s\n",
             algo ? algo : "unset", omp_get_max_threads(), layers, iters_max,
             warmup, arg(argc, argv, "--scale-dt", "bf16"),
             arg(argc, argv, "--bias", "none"), src_mode.c_str(),
             wei_mode.c_str(), wei_s4 ? group : 0,
-            arg(argc, argv, "--dst", wei_f16 ? "f16" : "bf16"));
+            arg(argc, argv, "--dst", wei_f16 ? "f16" : "bf16"),
+            gated_mode.c_str());
     // --group -1: one group over K ({1, N} weight scales).
     for (const auto &sh : shapes) {
         if (wei_s4
@@ -233,6 +247,16 @@ int main(int argc, char **argv) {
                                 && (group <= 0 || sh.K % group != 0)))) {
             std::fprintf(
                     stderr, "group %d does not divide K=%d\n", group, sh.K);
+            return 2;
+        }
+    }
+    if (is_gated && wei_f16) {
+        std::fprintf(stderr, "--gated takes bf16, s8 or s4 weights\n");
+        return 2;
+    }
+    for (const auto &sh : shapes) {
+        if (is_gated && sh.N % 2 != 0) {
+            std::fprintf(stderr, "--gated needs an even N, not N=%d\n", sh.N);
             return 2;
         }
     }
@@ -326,6 +350,9 @@ int main(int argc, char **argv) {
 
     auto call = [&](size_t s, int l, int M) {
         const int N = shapes[s].N, K = shapes[s].K;
+        const int ldc = is_gated ? N / 2 : N;
+        const mm::matmul_gated_act_params *gated_act
+                = is_gated ? &gated : nullptr;
         static const float kStaticSrcScale = 0.02f;
         mm::matmul_params p;
         p.dtypes.src = src_dt;
@@ -339,8 +366,8 @@ int main(int argc, char **argv) {
             p.dtypes.compute = data_type_t::none;
             p.plugin_op = kLinearOp;
             return mm::matmul_direct('r', false, true, M, N, K, 1.0f, buf[s].a,
-                    K, buf[s].w[l], K, buf[s].bias[l], 0.0f, buf[s].c, N, true,
-                    bp, p);
+                    K, buf[s].w[l], K, buf[s].bias[l], 0.0f, buf[s].c, ldc,
+                    true, bp, p, gated_act);
         }
         if (src_dt == data_type_t::bf16) {
             p.dtypes.compute = data_type_t::s8;
@@ -358,7 +385,8 @@ int main(int argc, char **argv) {
         p.quant_params.wei_scale.dt = scale_dt;
         p.quant_params.wei_scale.dims = {groups_of(K), N};
         return mm::matmul_direct('r', false, true, M, N, K, 1.0f, buf[s].a, K,
-                buf[s].w[l], K, buf[s].bias[l], 0.0f, buf[s].c, N, true, bp, p);
+                buf[s].w[l], K, buf[s].bias[l], 0.0f, buf[s].c, ldc, true, bp,
+                p, gated_act);
     };
 
     for (int M : ms) {

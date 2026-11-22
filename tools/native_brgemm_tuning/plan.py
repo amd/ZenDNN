@@ -893,6 +893,44 @@ def paired_plan(planned: Plan, p: Problem, width: int) -> Plan:
     return q
 
 
+def paired_width(q: Plan, p: Problem) -> int:
+    """native_paired_width: the width at which the BF16 and INT8 tiles of a gated call pair its
+    [gate | up] halves, from the plan's tiles, row blocks and team; 0 for another call, or for one
+    that stages its rows instead (N not whole 32-column blocks)."""
+    if p.epilogue != "gated" or p.f16 or p.f32 or q.nr <= 0 or q.nr % 16 or p.n % 32:
+        return 0
+    if q.nr >= 64:
+        return q.nr
+    if p.n % 64 == 0:
+        team = max(1, q.threads)
+        tiles = p.n // 64 * q.m_blocks
+        if tiles % team == 0 or tiles >= 8 * team:
+            return 64
+    return 32
+
+
+def paired_log_fields(planned: Plan, p: Problem) -> Dict[str, Dict[str, str]]:
+    """A gated call's log fields at the width its tiles pair its halves at (the line's pairing=<width>)
+    when that is wider than the plan's; {} for other calls."""
+    w = paired_width(planned, p)
+    return {str(w): plan_log_fields(paired_plan(planned, p, w), p)} if w > planned.nr else {}
+
+
+def log_pairing(planned: Plan, p: Problem) -> Optional[str]:
+    """The pairing= of a gated call's line: the width its tiles pair its halves at, or staged where they
+    stage its rows; None for another call, whose line names none."""
+    if p.epilogue != "gated":
+        return None
+    w = paired_width(planned, p)
+    return str(w) if w > 0 else "staged"
+
+
+def compare_pairing(want: Optional[str], logged: Dict[str, str]) -> List[str]:
+    """The line's pairing= against the expected one (log_pairing); a side without one is not compared."""
+    got = logged.get("pairing")
+    return ["pairing: model %s, log %s" % (want, got)] if want and got and got != want else []
+
+
 @dataclass
 class Resolution:
     plan: Plan
@@ -950,7 +988,10 @@ def int8_widths(q: Plan) -> List[int]:
 
 
 def effective_signature(q: Plan, p: Problem) -> Tuple:
-    """What the call executes under q: equal signatures run the same work.
+    """What the call executes under q (a gated call: the plan its tiles pair its halves at): equal
+    signatures run the same work.  A per-channel INT8 call of 32 columns of tiles paired at 32 reads
+    its second 16 columns from the up run, and its K pass takes the cache sets of twice its width
+    (native_int8_channel_tile).
 
     Fields the call cannot observe for p are left out (traversal of a one-row or
     one-column grid or of the blocks schedule, row_unit of a slice or blocks
@@ -959,6 +1000,9 @@ def effective_signature(q: Plan, p: Problem) -> Tuple:
     single-call tiles).  Unknown cases keep the raw field, so two different
     plans are never merged.
     """
+    width = paired_width(q, p)
+    if width > q.nr:
+        q = paired_plan(q, p, width)
     row_groups = q.col_groups > 0
     sig: List[Any] = [q.kind, q.nr, q.mb, q.threads]
     if q.unit_tiles > 0:
@@ -986,7 +1030,8 @@ def effective_signature(q: Plan, p: Problem) -> Tuple:
         else:
             last = p.m - (q.m_blocks - 1) * q.mb
             sig.append(("passes",) + tuple(
-                int8_pass_quads(q, k_quads, w, r, q.rows(w // 16)) for w in used for r in sorted({q.mb, last})))
+                int8_pass_quads(q, k_quads, 2 * w if width == 32 and w == 32 else w, r, q.rows(w // 16))
+                for w in used for r in sorted({q.mb, last})))
     else:
         # The group tiles batch their groups by the pass budget only past one row call.
         sig.append(("budget", q.int8_pass_budget) if multi_call else ("whole",))
@@ -1105,8 +1150,9 @@ def compare_fields(want: Dict[str, str], logged: Dict[str, str], bf16: bool = Fa
 
 def compare_with_log(q: Plan, p: Problem, logged: Dict[str, str]) -> List[str]:
     """Fields where the library's logged plan differs from this model's plan.  A gated call
-    whose tiles paired its halves logs the paired plan (pairing=<width>)."""
+    whose tiles paired its halves logs the paired plan (pairing=<width>), at the model's width."""
+    out = compare_pairing(log_pairing(q, p), logged)
     pairing = logged.get("pairing")
     if pairing is not None and pairing.isdigit():
         q = paired_plan(q, p, int(pairing))
-    return compare_fields(plan_log_fields(q, p), logged)
+    return out + compare_fields(plan_log_fields(q, p), logged)

@@ -551,9 +551,10 @@ def entry_plans(entries: List[Dict[str, Any]], problems: Sequence[Problem], sche
     """The plan the file names for each problem an entry matches, and with rules for each other
     problem a rule gives a config: the [MATMUL.NATIVE_BRGEMM] fields the library logs for it
     under the file (source= the layers applied, cfg= their config as the call applies it, the
-    plan's fields), and whether that is the built-in plan."""
+    plan's fields, and for a gated call its pairing= and, where its tiles pair wider, the fields of
+    the paired plan, paired), and whether that is the built-in plan."""
     from .candidates import format_settings
-    from .plan import builtin_plan, plan_log_fields
+    from .plan import builtin_plan, log_pairing, paired_log_fields, plan_log_fields
 
     def rule_config(p: Problem) -> Dict[str, Any]:
         r = eval_rules(rules, rule_features(p, uarch, schema.hw)) if rules else None
@@ -567,6 +568,12 @@ def entry_plans(entries: List[Dict[str, Any]], problems: Sequence[Problem], sche
         out.append({"id": rid, "problem": p.key(), "source": source,
                     "cfg": (format_settings(cfg, schema) or "-") if source != "heuristic" else "-",
                     "plan": fields, "builtin": fields == plan_log_fields(builtin_plan(p, uarch, schema), p)})
+        paired = paired_log_fields(plan, p)
+        if paired:
+            out[-1]["paired"] = paired
+        pairing = log_pairing(plan, p)
+        if pairing:
+            out[-1]["pairing"] = pairing
 
     named = set()
     for e in entries:
@@ -914,8 +921,10 @@ def hardware_mismatch(hw_block: Dict[str, Any], schema: Schema) -> Optional[str]
 
 
 def match_entry(match: Dict[str, Any], p: Problem) -> bool:
+    """True when the entry's match block holds for p; its n is the width the library matches, the
+    padded width of a weight not whole 32-column blocks (plan_n), as match_block writes it."""
     for k, val in match.items():
-        x = getattr(p, k) if k != "dynamic" else bool(p.dynamic)
+        x = p.plan_n if k == "n" else bool(p.dynamic) if k == "dynamic" else getattr(p, k)
         if not _in(val, x):
             return False
     return True

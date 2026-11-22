@@ -22,7 +22,7 @@ run time, gradient-boosted trees when present, numpy models otherwise).
 |---|---|
 | `schema.py` | Loads the planner's schema: config keys (type, range, default or auto value, dtype, INT8 schemes, bits), match keys, rule features and comparisons, kernel registry (BF16, FP32, an INT8 kernel family per scheme it serves, the INT4 group kernels and the INT4 kernels of one group over K, F16 and F16_PH, each with its tile widths and rows per call), hardware, uarch, the machine's value of every version 2 hardware key (`hw_match`), the fields of the `[MATMUL.NATIVE_BRGEMM]` line (`plan_line`) and the values of its `gemv` field (`plan_line_gemv`). Reads the JSON the `SchemaDump` gtest prints between `BEGIN NATIVE TUNING SCHEMA` and `END NATIVE TUNING SCHEMA` (raw or inside a gtest log), else `fixtures/schema_dump.json`, that gtest's output. `fixtures/schema_design.json`, written from the design, is the schema of an older build, without the rule keys, the blocks schedule and `hw_match`. |
 | `problems.py` | Problems (the planner's problem, `native_problem_t`: the weight type bf16, s8, f32, s4 or f16, a weight of N not a multiple of 32 planned and matched at N rounded up to whole 32-column blocks, `plan_n`, an s8 problem's INT8 scheme, an s4 problem's group size and scale bytes, the epilogue class), shape lists (TSV), M classes, the rule features as the loader computes them. |
-| `plan.py` | The built-in planner (`native_planner.cpp`) line for line: the rules' plan (the tile grid, the rules behind the switches `makespan`, `l1_pass`, `traffic_groups`, `bf16_alias`, `bf16_narrow_n` and `blocks`, the L3 rules only with an L3, BF16 tiles of 64 and 128 columns, the blocks schedule, the tiles of per-group INT8 and of s4 calls with their pass budget (12 rows per call at both widths for an s4 weight of one group over K), the F16_PH tiles of two blocks and K passes of whole blocks), then with `cost_model` the model's choice among the rules' variants (rows per call and row groups for BF16 and F16, the long K pass and short M blocks of long weight streams (where one core streams slower than its share of the link, the M blocks of a BF16 team that fills its L3 domains only over a K above `cm_block_k`), INT8 row groups and blocks of three calls, s4 M blocks (weighed at the group kernel's rows per call) and the K passes of one group); plan validation, single-override resolution, plan signature, the plan fields of the log line (and of a gated call's paired tiles). The built-in plan has each key at the schema's default; a rule whose switch or bound the schema lacks is one its build does not have. |
+| `plan.py` | The built-in planner (`native_planner.cpp`) line for line: the rules' plan (the tile grid, the rules behind the switches `makespan`, `l1_pass`, `traffic_groups`, `bf16_alias`, `bf16_narrow_n` and `blocks`, the L3 rules only with an L3, BF16 tiles of 64 and 128 columns, the blocks schedule, the tiles of per-group INT8 and of s4 calls with their pass budget (12 rows per call at both widths for an s4 weight of one group over K), the F16_PH tiles of two blocks and K passes of whole blocks), then with `cost_model` the model's choice among the rules' variants (rows per call and row groups for BF16 and F16, the long K pass and short M blocks of long weight streams (where one core streams slower than its share of the link, the M blocks of a BF16 team that fills its L3 domains only over a K above `cm_block_k`), INT8 row groups and blocks of three calls, s4 M blocks (weighed at the group kernel's rows per call) and the K passes of one group); plan validation, single-override resolution, plan signature, the plan fields of the log line (a gated call's of the tiles it runs: the width they pair its halves at, `native_paired_width`, and their plan). The built-in plan has each key at the schema's default; a rule whose switch or bound the schema lacks is one its build does not have. |
 | `cost_model.py` | The planner's cost model (`native_cost_model.cpp`) line for line: the modeled cycles of a plan's busiest worker, with every floating-point expression in the library's order. |
 | `candidates.py` | Override text (format, parse, clauses), static checks, the default search space, per-problem candidate spaces, de-duplication. |
 | `results.py` | Results store (JSONL) and the statistics: per-session ratios, noise, significance. |
@@ -33,7 +33,7 @@ run time, gradient-boosted trees when present, numpy models otherwise).
 | `export.py`, `rules.py` | Class winners, confirmation, the tuning file and its validation; the learned rules. |
 | `op_perf.py`, `calibration.py` | The machine's ceilings in a campaign (`tools/op_perf_utility`): the machine check, each problem's bound and efficiency, `meta.op_perf`; the cost model's inputs from the ceilings, their A/B and their rules (see Machine ceilings, headroom and calibration). |
 | `tune.py` | Command line. |
-| `tunings/` | The tuning files of the CI shapes, one per machine type (see Tuning files). |
+| `tunings/` | The tuning files of the CI shapes, one per machine type, and those of single models in `models/` (see Tuning files). |
 | `tests/` | Host unit tests, the sync with the planner's schema among them (`test_sync.py`). |
 
 ## How a table is produced
@@ -131,7 +131,9 @@ run time, gradient-boosted trees when present, numpy models otherwise).
    `tiles`, `threads`, the schedule, `mr`, `row_unit`, `traversal`, the INT8
    rows, widths and K pass, an s4 call's `int8_scheme`, `gs` and
    `pass_budget`; a gated call over halves names the width its tiles paired
-   them at, `pairing=`, and runs the paired plan). A call on the tiles logs
+   them at, `pairing=` (or `staged`), and runs the paired plan: the check
+   expects that width to be the one the model pairs them at, and the paired
+   plan's fields at it). A call on the tiles logs
    `gemv=none`. Every M = 1 call runs on the GEMV kernels of its type
    instead, which take all of K for each block of columns and none of the
    plan's tiles, M blocks or K passes: its line names them (`gemv=bf16`,
@@ -149,7 +151,11 @@ run time, gradient-boosted trees when present, numpy models otherwise).
    when 1 - ratio exceeds max(min_gain, noise) in every session. Candidates
    whose probe was dropped, mismatched, unlogged, ran on the GEMV kernels,
    changed the output hash (replay `--check 1`) or ran another plan than the
-   plan model's (an entry names the model's plan) are excluded. A probe
+   plan model's (an entry names the model's plan) are excluded. So are all
+   candidates of a problem whose built-in run mismatched, for example a
+   gated call paired at another width than the model's: the model's built-in
+   plan, against which candidates are de-duplicated, is not the library's,
+   and the search gives that problem no more candidates. A probe
    whose run left no output (`failed`, as `collect --force` records a session
    that did not run) counts only until another probe of the candidate
    answers, so the next search round runs the candidate again and its
@@ -301,12 +307,12 @@ What each weight type gets:
 The bound counts bias, gated outputs, binary post-op tensors and a quantized
 source's copy, prices stores at the write bandwidth, and uses the threads a
 call can use (one per 16 columns of a row) on the cores they take; the
-problems of the epilogue classes other than `store` (and benchdnn's `bias`)
-are not timed. A type no backend times is bounded and rated (`report` on
-benchdnn's output) but not tuned. A per-group s8 problem may give its group
-(`group=`, with `scale_bytes=`, 4 by default) for the bound's scale bytes;
-the planner reads no s8 group, so the plan, the rule features and the match
-stay those of the problem without it.
+problems of the epilogue classes other than `store` (and replay's `gated`,
+benchdnn's `bias`) are not timed. A type no backend times is bounded and
+rated (`report` on benchdnn's output) but not tuned. A per-group s8 problem
+may give its group (`group=`, with `scale_bytes=`, 4 by default) for the
+bound's scale bytes; the planner reads no s8 group, so the plan, the rule
+features and the match stay those of the problem without it.
 
 On the 8-core-domain machine type of `tunings/` (32 threads, replay backend,
 the CI shapes in bf16 and s8 at M 4, 16, 128 and 2048):
@@ -343,9 +349,11 @@ after a search with skip and stop.
 - **replay**: `replay/replay.cpp` makes the framework plugin's exact
   `matmul_direct` calls (a bf16 source over bf16 weights, or over s8 weights
   or s4 weights in groups along K (`--group`, -1 for one group) whose source
-  it quantizes per token; an f16 source over f16 weights into an f16 dst),
-  one weight type (and one s4 group size) a process, with `--layers` weight
-  sets per shape
+  it quantizes per token; an f16 source over f16 weights into an f16 dst;
+  with `--gated silu_and_mul`, the gated calls of all but f16 weights, over a
+  [gate | up] weight of N = 2I into an M x I dst, as the `gated` problems),
+  one weight type (one s4 group size, one epilogue) a process, with
+  `--layers` weight sets per shape
   visited in layer order so every weight is cold when it comes back, as in a
   model. A process whose shapes are small takes more layers, so that it
   cycles through at least `--cold-mb` of distinct weights (by default eight
@@ -426,9 +434,11 @@ file names, and the result is validated against the schema.
   with the plan lines and the output hashes logged, and checks that the
   library reads the file and gives the plans it names: every problem the file
   names (an entry, or the rules alone) logs the layers, `cfg=` and plan of
-  `meta.plans`, every other problem keeps the built-in plan, and every output
-  keeps the built-in plan's bits (the replay backend's `--check 1` hashes; the
-  benchdnn backend prints none). `verify_report.json` lists each problem.
+  `meta.plans` (a gated call's `pairing=`, `pairing`, and its paired plan,
+  `paired`, at the width its tiles pair at), every other problem keeps the
+  built-in plan, and every output keeps the built-in plan's bits (the replay
+  backend's `--check 1` hashes; the benchdnn backend prints none).
+  `verify_report.json` lists each problem.
 - `tune.py check tuning.json --workdir <campaign>` validates the file against
   the schema and shows, per problem, which layers the loader would apply, the
   merged config, and whether the resolved plan is legal; when the hardware
@@ -468,9 +478,9 @@ dump on the build's schema, for the cases and for the N block's cases,
 holds on any), then these tests on the build's dump.
 `test_cost_model.py` checks the cost model's mirror and choices against the
 library's NativeCostModel cases. `test_tunings.py` checks the files of
-`tunings/`: each is valid, and the plans `plan.py` gives its entries on its
-machine (the hardware block's caches and L3 domain) are its `meta.plans`,
-so a planner change that moves an entry's plan fails it.
+`tunings/` and `tunings/models/`: each is valid, and the plans `plan.py`
+gives its entries on its machine (the hardware block's caches and L3 domain)
+are its `meta.plans`, so a planner change that moves an entry's plan fails it.
 
 `test_plan.py` checks `plan.py` against the library's plans:
 `fixtures/plan_check.json` holds the SHA-256 of the library's plan lines for
@@ -605,3 +615,22 @@ iterations).
 Its entries start at M 5: decode sizes up to M 4 keep the built-in plan. A hardware block cannot name
 AVX512-FP16: a file made on a machine with it also loads on one of the same caches without it, where an
 f16 entry of 64-column tiles is illegal for the F16 kernels and dropped for that call, with a warning.
+
+`tunings/models/<model>/` holds the files of single models, made the same way
+from the model's own calls (a campaign per phase, the gated gate_up_proj
+again in one of its own) and named by machine type as above. The library
+never loads one by itself: a run names it, with the native BRGEMM selected:
+
+    ZENDNNL_MATMUL_ALGO=10 \
+    ZENDNNL_MATMUL_NATIVE_TUNING_FILE=tools/native_brgemm_tuning/tunings/models/<model>/l3_domain_8_cores_32mib.json \
+        <the model's run>
+
+The entries of both are for 32 threads, at decode M 5-8 and 17-32 and prefill
+M 513-2048 and from 2049 (timed at 8, 32, 1024, 3077 and 4096, with cold
+weights). Every other call keeps the built-in plan, the gated gate_up_proj
+among them.
+
+| Folder | Checkpoint | Shapes (N x K) | Entries |
+|---|---|---|---|
+| `llama-3.1-8b-instruct-w4a8-g128` | Llama-3.1-8B-Instruct in W4A8: int4 symmetric weights in groups of 128 along K, int8 activations quantized per token in the call; `lm_head` in bf16 | s4: qkv_proj 6144 x 4096, o_proj 4096 x 4096, gate_up_proj 28672 x 4096 (gated), down_proj 4096 x 14336; bf16: lm_head 128256 x 4096 (decode) | 4: o_proj at M 5-8 and 17-32, qkv_proj at M 17-32, down_proj from M 2049 |
+| `qwen3.5-9b-w8a8` | `RedHatAI/Qwen3.5-9B-quantized.w8a8`: int8 weights with per-channel scales, int8 activations quantized per token in the call; the linear attention and `lm_head` in bf16 | s8: the full attention's qkv_proj 10240 x 4096 and o_proj 4096 x 4096, gate_up_proj 24576 x 4096 (gated), down_proj 4096 x 12288; bf16: the linear attention's in_proj_qkvz 12288 x 4096, in_proj_ba 64 x 4096 and out_proj 4096 x 4096, lm_head 248320 x 4096 (decode) | 4: in_proj_ba at M 5-8, 17-32, 513-2048 and from 2049 |

@@ -47,7 +47,7 @@ import subprocess
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..candidates import Candidate, format_override, problem_filters
-from ..plan import compare_fields, plan_log_fields
+from ..plan import compare_fields, compare_pairing, log_pairing, paired_log_fields, plan_log_fields
 from ..problems import Problem
 from ..results import utc_now
 from .common import Backend, applied_status, parse_warnings
@@ -103,9 +103,10 @@ class Session:
         return all(self.schema.key(k).same_bits(p.dtype) for k in cand.config)
 
     def build(self) -> Dict[str, Any]:
-        """The manifest: slots, cfg values, expected log fields and the run order.  Alone, slot j
-        of a group holds its j-th (problem, candidate) pair only, and every run of the group
-        times all its problems (the process of slot 0) but records those of its slot."""
+        """The manifest: slots, cfg values, expected log fields (a gated call's also at the wider
+        width its tiles pair at, and its pairing=) and the run order.  Alone, slot j of a group
+        holds its j-th (problem, candidate) pair only, and every run of the group times all its
+        problems (the process of slot 0) but records those of its slot."""
         slots: Dict[str, List[Dict[str, Any]]] = {}
         cfgs: Dict[str, str] = {}
         for gid, probs in enumerate(self.groups):
@@ -113,7 +114,11 @@ class Session:
             gslots: List[Dict[str, Any]] = [{
                 p.key(): {"text": "", "bits_same": True,
                           "expect": plan_log_fields(self.defaults[p.key()].plan, p)
-                          if p.key() in self.defaults else {}}
+                          if p.key() in self.defaults else {},
+                          "expect_paired": paired_log_fields(self.defaults[p.key()].plan, p)
+                          if p.key() in self.defaults else {},
+                          "expect_pairing": log_pairing(self.defaults[p.key()].plan, p)
+                          if p.key() in self.defaults else None}
                 for p in probs}]
             if self.alone:
                 for p in probs:
@@ -122,7 +127,9 @@ class Session:
                             cfgs["cfg/g%d_s%d.cfg" % (gid, len(gslots))] = format_override(
                                 [(problem_filters(p), c.text)])
                             gslots.append({p.key(): {"text": c.text, "bits_same": self._bits_same(p, c),
-                                                     "expect": plan_log_fields(c.plan, p)}})
+                                                     "expect": plan_log_fields(c.plan, p),
+                                                     "expect_paired": paired_log_fields(c.plan, p),
+                                                     "expect_pairing": log_pairing(c.plan, p)}})
                 n = 0
             for j in range(n):
                 slot: Dict[str, Any] = {}
@@ -132,7 +139,9 @@ class Session:
                     if j < len(cands) and cands[j].text:
                         c = cands[j]
                         slot[p.key()] = {"text": c.text, "bits_same": self._bits_same(p, c),
-                                         "expect": plan_log_fields(c.plan, p)}
+                                         "expect": plan_log_fields(c.plan, p),
+                                         "expect_paired": paired_log_fields(c.plan, p),
+                                         "expect_pairing": log_pairing(c.plan, p)}
                         clauses.append((problem_filters(p), c.text))
                 if not clauses:
                     continue
@@ -286,7 +295,9 @@ def collect(sdir: str, backend: Optional[Backend] = None) -> List[Dict[str, Any]
                         why = reasons.get((p.m, p.plan_n, p.k), why)
                     if i.get("inconsistent"):
                         st, why = "mismatch", "the calls of this problem logged different plans"
-                diff = compare_fields(s.get("expect", {}), logged, p.bf16) if logged and st == "applied" else []
+                want = s.get("expect_paired", {}).get((logged or {}).get("pairing", ""), s.get("expect", {}))
+                diff = (compare_pairing(s.get("expect_pairing"), logged) + compare_fields(want, logged, p.bf16)
+                        if logged and st == "applied" else [])
                 hashes[(k, r["group"], r["slot"])] = i.get("hash")
                 records.append(dict(base, kind="probe", pkey=k, problem=p.to_dict(), text=s["text"],
                                     status=st, reason=why, logged=logged, model_diff=diff,
@@ -522,10 +533,10 @@ def write_verify(sdir: str, backend: Backend, problems: Sequence[Problem], tunin
 
 def collect_verify(sdir: str, plans: Sequence[Dict[str, Any]], backend: Optional[Backend] = None) -> Dict[str, Any]:
     """Per problem: the logged plan and output hash with the built-in plan and with the file, and the
-    checks: the file's line names the layers, config and plan the file names for it (plans: the
-    export's meta.plans, for the problems of its entries and those its rules alone give a config),
-    a problem it names nothing for keeps the built-in plan, and the output bits are the built-in
-    plan's."""
+    checks: the file's line names the layers, config and plan (and a gated call's pairing=) the file
+    names for it (plans: the export's meta.plans, for the problems of its entries and those its rules
+    alone give a config), a problem it names nothing for keeps the built-in plan, and the output bits
+    are the built-in plan's."""
     with open(os.path.join(sdir, VERIFY_MANIFEST), encoding="utf-8") as f:
         man = json.load(f)
     backend = backend or make_backend(man["backend"])
@@ -555,7 +566,8 @@ def collect_verify(sdir: str, plans: Sequence[Dict[str, Any]], backend: Optional
                                                   or lf.get("cfg") != want["cfg"]):
                 why.append("source=%s cfg=%s, the file names source=%s cfg=%s" % (
                     lf.get("source"), lf.get("cfg"), want["source"], want["cfg"]))
-            why += compare_fields(want["plan"], lf)
+            why += compare_pairing(want.get("pairing"), lf)
+            why += compare_fields(want.get("paired", {}).get(lf.get("pairing", ""), want["plan"]), lf)
         else:
             if lf.get("source") != lb.get("source") or lf.get("cfg") != lb.get("cfg"):
                 why.append("no entry names it, yet source=%s cfg=%s" % (lf.get("source"), lf.get("cfg")))

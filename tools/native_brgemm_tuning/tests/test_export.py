@@ -509,6 +509,17 @@ class TestHardware(unittest.TestCase):
         p = Problem("s8", 8, 4113, 4096)
         self.assertEqual(E.match_block(p, 1, 16)["n"], 4128)
         self.assertEqual(E.match_block(Problem("s8", 8, 4096, 4096), 1, 16)["n"], 4096)
+        # The library matches n at the padded width: the entry holds for every N padded to 4128, and the
+        # file's plans and loader simulation name those problems.
+        entry = {"id": "e", "match": E.match_block(p, 1, 16), "config": {"mb": 4}}
+        doc = {"format": E.FORMAT, "version": 2, "entries": [entry]}
+        for n, named in ((4113, True), (4100, True), (4128, True), (4096, False), (4160, False)):
+            q = Problem("s8", 8, n, 4096)
+            self.assertEqual(E.match_entry(entry["match"], q), named, n)
+            self.assertEqual(E.resolve_config(doc, q, SCHEMA, UARCH),
+                             ({"mb": 4}, ["table:e"]) if named else ({}, []), n)
+            plans = E.entry_plans([entry], [q], SCHEMA, UARCH)
+            self.assertEqual([r["problem"] for r in plans], [q.key()] if named else [], n)
 
     def test_match_modes(self):
         self.assertEqual(E.hardware_block(SCHEMA, "none"), {})

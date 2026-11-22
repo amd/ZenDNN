@@ -49,7 +49,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tupl
 from .candidates import Candidate, Deduper, Space
 from .plan import plan_features
 from .problems import Problem
-from .results import ResultsDB, measured_texts, summarize
+from .results import ResultsDB, measured_texts, probe_status, summarize
 
 Evaluator = Callable[[int, str, Dict[str, List[Candidate]]], List[Dict[str, Any]]]
 
@@ -150,8 +150,13 @@ class Searcher:
         with prioritize, budget x problems is split by headroom (calls x best time x
         (1 - efficiency)), each problem between a quarter and four times the budget.  A
         round still gives a problem at most batch candidates: a session's slots, each a
-        process of its group, follow the largest batch of the group, whatever the others."""
+        process of its group, follow the largest batch of the group, whatever the others.
+        A problem whose built-in run is a mismatch gets none, headroom or not: its
+        candidates are not judged (results.summarize)."""
         self.limits, self.held = {}, {}
+        for (k, text), (st, why) in probe_status(self.db.load()).items():
+            if not text and st == "mismatch" and k in self.problems:
+                self.held[k] = "its built-in run: %s" % why
         if not self.s.headroom:
             return
         att = self.s.attainable or {}
@@ -160,7 +165,7 @@ class Searcher:
         head: Dict[str, float] = {}
         for k in self.problems:
             a = att.get(k)
-            if not a:
+            if not a or k in self.held:
                 continue
             ps = summ.get(k)
             if ps is None or not ps.default_ms > 0:

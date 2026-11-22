@@ -355,6 +355,27 @@ class TestReplay(unittest.TestCase):
         with self.assertRaises(ValueError):
             be.command(0, [probs[0], probs[2]], False)
 
+    def test_gated_commands(self):
+        # The plugin's gated linear over a [gate | up] weight, in processes of its own.
+        be = ReplayBackend()
+        gated = [Problem(d, 8, 24576, 4096, epilogue="gated", group=128 if d == "s4" else 0)
+                 for d in ("bf16", "s8", "s4")]
+        for p in gated:
+            self.assertIsNone(be.supports(p), p.dtype)
+        self.assertIn("gated", be.supports(Problem("f16", 8, 24576, 4096, epilogue="gated")))
+        self.assertIn("gated", be.supports(Problem("bf16", 8, 4097, 4096, epilogue="gated")))
+        self.assertIsNotNone(be.supports(Problem("bf16", 8, 4096, 4096, epilogue="postops")))
+        # A store problem of another shape, which would share the weight type's process.
+        store = [Problem(p.dtype, 8, 4096, 4096, group=p.group) for p in gated]
+        groups = be.groups(gated + store)
+        self.assertEqual(sorted((g[0].dtype, g[0].epilogue, len(g)) for g in groups),
+                         sorted((p.dtype, p.epilogue, 1) for p in gated + store))
+        for g in groups:
+            for probe in (False, True):
+                self.assertEqual("--gated silu_and_mul" in be.command(0, g, probe), g[0].epilogue == "gated")
+        with self.assertRaises(ValueError):
+            be.command(0, [gated[1], store[1]], False)
+
 
 class TestReplayBuild(unittest.TestCase):
     """replay/build.sh (and plan_dump/build.sh) link the dependency archives the build installed."""
@@ -430,9 +451,9 @@ class TestSession(unittest.TestCase):
                        for p in self.probs}
         self.defaults = {k: s.default for k, s in self.spaces.items()}
 
-    def session(self, backend, sub="s"):
+    def session(self, backend, sub="s", alone=False):
         return jobs.Session(os.path.join(self.tmp, sub), backend, self.probs, self.assign, "s001_0", repeats=2,
-                            defaults=self.defaults, schema=SCHEMA)
+                            defaults=self.defaults, schema=SCHEMA, alone=alone)
 
     def test_order_and_clauses(self):
         s = self.session(ReplayBackend(binary="/opt/replay"))
@@ -579,6 +600,112 @@ class TestSession(unittest.TestCase):
         self.assertAlmostEqual(summ[p2.key()].cands["nr=16"].ratio, 0.8)
         self.assertAlmostEqual(summ[p1.key()].cands["threads_cap=16"].ratio, 0.9)
 
+    def test_a_gated_probe_is_compared_at_its_pairing(self):
+        # A gated call logs the plan its tiles ran: paired wider (pairing=64 for tiles of 16 or 32
+        # columns), or the plan's own when it staged its rows (N not whole 32-column blocks).
+        from native_brgemm_tuning import plan as PL
+
+        self.probs = [Problem("s8", 8, n, 4096, epilogue="gated") for n in (24576, 28672, 4112)]
+        self.spaces = {p.key(): C.Space(p, SCHEMA, UARCH) for p in self.probs}
+        self.assign = {p.key(): [self.spaces[p.key()].make({"mb": 4})] for p in self.probs}
+        self.defaults = {k: sp.default for k, sp in self.spaces.items()}
+        paired, other, staged = self.probs
+
+        def collect(pairing, alone=False):
+            """The records of a session (alone: a slot per candidate, as confirm --alone runs) whose
+            library pairs the halves of the first problem at pairing."""
+            s = self.session(ReplayBackend(binary="/opt/replay"), "pairing_%s_%s" % (pairing, alone), alone)
+            s.write()
+
+            def library_line(j, p, line):
+                q = self.defaults[p.key()].plan if j == 0 else self.assign[p.key()][0].plan
+                w = pairing if p is paired else "staged" if p is staged else "64"
+                if w == "staged":
+                    line["fields"]["pairing"] = "staged"
+                    return
+                line["fields"] = dict(PL.plan_log_fields(PL.paired_plan(q, p, int(w)), p), pairing=w)
+                if j > 0 and p is other:
+                    line["fields"]["tiles"] = "1"
+
+            self.outputs(s, {j: 0.8 if j else 1.0 for j in range(4)}, library_line)
+            return jobs.collect(s.dir)
+
+        recs = collect("64")
+        probes = {(r["pkey"], r["text"]): r for r in recs if r["kind"] == "probe"}
+        for p in self.probs:
+            self.assertEqual(probes[(p.key(), "")]["model_diff"], [], p.n)
+        probe = probes[(paired.key(), "mb=4")]
+        self.assertEqual(probe["model_diff"], [])
+        planned = PL.plan_log_fields(self.assign[paired.key()][0].plan, paired)
+        self.assertIn("nr: model 32, log 64", PL.compare_fields(planned, probe["logged"]))
+        self.assertTrue(probes[(other.key(), "mb=4")]["model_diff"])
+        self.assertEqual(probes[(staged.key(), "mb=4")]["model_diff"], [])
+        summ = R.summarize(recs)
+        self.assertAlmostEqual(summ[paired.key()].cands["mb=4"].ratio, 0.8)
+        self.assertAlmostEqual(summ[staged.key()].cands["mb=4"].ratio, 0.8)
+        self.assertNotIn("mb=4", summ[other.key()].cands)
+        # The model pairs the first problem's tiles at 64: a library that pairs them at 32, or stages
+        # its rows, logs the plan as planned, which the fields alone would take for the model's.  So
+        # does a slot of its own (confirm --alone).
+        for pairing in ("32", "staged"):
+            for alone in (False, True):
+                recs = collect(pairing, alone)
+                probes = {(r["pkey"], r["text"]): r for r in recs if r["kind"] == "probe"}
+                for text in ("", "mb=4"):
+                    self.assertEqual(probes[(paired.key(), text)]["model_diff"],
+                                     ["pairing: model 64, log %s" % pairing], (pairing, alone, text))
+                self.assertEqual(probes[(staged.key(), "mb=4")]["model_diff"], [], (pairing, alone))
+                self.assertEqual(R.probe_status(recs)[(paired.key(), "mb=4")][0], "mismatch", (pairing, alone))
+                self.assertNotIn("mb=4", R.summarize(recs)[paired.key()].cands, (pairing, alone))
+
+    def test_a_built_in_run_at_another_plan_than_the_models_stops_its_problem(self):
+        # The library pairs the built-in tiles of the first problem at 32 where the model pairs them at
+        # 64, while the candidate's line is the model's.  The model's built-in plan, against which the
+        # search de-duplicates, is not what the library runs: the problem's candidates are not judged,
+        # and the search gives it no more.
+        from native_brgemm_tuning import plan as PL
+        from native_brgemm_tuning.search import Searcher, SearchSettings
+
+        self.probs = [Problem("s8", 8, n, 4096, epilogue="gated") for n in (24576, 4112)]
+        self.spaces = {p.key(): C.Space(p, SCHEMA, UARCH) for p in self.probs}
+        self.assign = {p.key(): [self.spaces[p.key()].make({"mb": 4})] for p in self.probs}
+        self.defaults = {k: sp.default for k, sp in self.spaces.items()}
+        paired, staged = self.probs
+        s = self.session(ReplayBackend(binary="/opt/replay"))
+        s.write()
+
+        def library_line(j, p, line):
+            if p is staged:
+                line["fields"]["pairing"] = "staged"
+            elif j == 0:
+                line["fields"]["pairing"] = "32"
+            else:
+                q = self.assign[p.key()][0].plan
+                line["fields"] = dict(PL.plan_log_fields(PL.paired_plan(q, p, 64), p), pairing="64")
+
+        self.outputs(s, {0: 1.0, 1: 0.8}, library_line)
+        recs = jobs.collect(s.dir)
+        probes = {(r["pkey"], r["text"]): r for r in recs if r["kind"] == "probe"}
+        self.assertEqual(probes[(paired.key(), "")]["model_diff"], ["pairing: model 64, log 32"])
+        self.assertEqual(probes[(paired.key(), "mb=4")]["model_diff"], [])
+        status = R.probe_status(recs)
+        self.assertEqual(status[(paired.key(), "")],
+                         ("mismatch", "the library ran another plan than the plan model's: pairing: model 64, log 32"))
+        self.assertEqual(status[(paired.key(), "mb=4")][0], "applied")
+        summ = R.summarize(recs)
+        self.assertEqual(summ[paired.key()].cands, {})
+        self.assertEqual(summ[paired.key()].excluded["mb=4"],
+                         "mismatch: the built-in run: the library ran another plan than the plan model's: "
+                         "pairing: model 64, log 32")
+        self.assertAlmostEqual(summ[staged.key()].cands["mb=4"].ratio, 0.8)
+        db = R.ResultsDB(os.path.join(self.tmp, "results.jsonl"))
+        db.append(recs)
+        searcher = Searcher(self.probs, self.spaces, None, db, SearchSettings(strategy="grid"), log=lambda m: None)
+        searcher.plan_round()
+        self.assertEqual(sorted(searcher.held), [paired.key()])
+        self.assertEqual(searcher.want(paired.key()), 0)
+        self.assertGreater(searcher.want(staged.key()), 0)
+
     def test_a_probe_without_output_is_retried(self):
         # A session that left no output (collect --force records its probes as failed) is
         # proposed again; the second session's results count, in either order of the records.
@@ -700,16 +827,25 @@ if __name__ == "__main__":
 class TestVerify(unittest.TestCase):
     """tune.py verify: a tuning file's plans and output bits against the built-in plan."""
 
-    def run_verify(self, file_line):
+    def run_verify(self, file_line, epilogue="store", paired=True, config=None, pairing=None, n=4096):
+        """collect_verify of a file with one entry (config, nr=16 by default) for M 8 of a weight of N
+        n; a gated call's lines pair as the model pairs them (at 64, or staged for n not whole 32-column
+        blocks), the M 8 line under the file at pairing when given (a width, or staged)."""
         from native_brgemm_tuning import export as E
         from native_brgemm_tuning import plan as PL
 
         be = ReplayBackend()
-        probs = [Problem("bf16", 8, 4096, 4096), Problem("bf16", 16, 4096, 4096)]
-        entries = [{"id": "e", "match": E.match_block(probs[0], 8, 8), "config": {"nr": 16}}]
+        probs = [Problem("bf16", 8, n, 4096, epilogue=epilogue), Problem("bf16", 16, n, 4096, epilogue=epilogue)]
+        config = config or {"nr": 16}
+        entries = [{"id": "e", "match": E.match_block(probs[0], 8, 8), "config": config}]
         plans = E.entry_plans(entries, probs, SCHEMA, UARCH)
         self.assertEqual([(r["problem"], r["source"], r["cfg"], r["builtin"]) for r in plans],
-                         [(probs[0].key(), "table", "nr=16", False)])
+                         [(probs[0].key(), "table", C.format_settings(config, SCHEMA), False)])
+        model = None if epilogue != "gated" else "staged" if n % 32 else "64"
+        self.assertEqual(sorted(plans[0].get("paired", {})), ["64"] if model == "64" else [])
+        self.assertEqual(plans[0].get("pairing"), model)
+        if not paired:
+            plans = [{k: v for k, v in r.items() if k != "paired"} for r in plans]
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d)
         jobs.write_verify(d, be, probs, os.path.join(d, "t.json"))
@@ -726,7 +862,12 @@ class TestVerify(unittest.TestCase):
                 source, cfg, digest = "heuristic", "-", "ab%d" % p.m
                 if r["kind"] == "file":
                     source, cfg, q, digest = file_line(p, q, digest)
-                lines.append(log_line(p, PL.plan_log_fields(q, p), source, cfg))
+                fields = PL.plan_log_fields(q, p)
+                if p.epilogue == "gated":
+                    w = pairing if pairing and r["kind"] == "file" and p.m == 8 else PL.log_pairing(q, p)
+                    ran = q if w == "staged" else PL.paired_plan(q, p, int(w))
+                    fields = dict(PL.plan_log_fields(ran, p), pairing=w)
+                lines.append(log_line(p, fields, source, cfg))
                 lines.append("CHECK shape=x N=%d K=%d M=%d hash=%s" % (p.n, p.k, p.m, digest))
             with open(os.path.join(d, "out", r["id"] + ".txt"), "w") as f:
                 f.write("\n".join(lines) + "\n")
@@ -747,6 +888,47 @@ class TestVerify(unittest.TestCase):
 
         rep = self.run_verify(named)
         self.assertEqual((rep["problems"], rep["named"], rep["failed"]), (2, 1, 0))
+        # A gated call logs the plan its tiles ran after pairing its halves at 64 columns: the
+        # file names it (paired), and the plan as planned would fail on nr and tiles.
+        rep = self.run_verify(named, "gated")
+        self.assertEqual((rep["problems"], rep["named"], rep["failed"]), (2, 1, 0))
+        rep = self.run_verify(named, "gated", paired=False)
+        self.assertEqual(rep["failed"], 1)
+        self.assertIn("nr: model 16, log 64", [r for r in rep["rows"] if not r["ok"]][0]["why"])
+
+    def test_a_gated_line_at_another_pairing_fails(self):
+        # The file's plans for the gated call at M 8 (tiles of 16 columns, or of 32 in M blocks of 4)
+        # pair at 64.  A line that stages its rows, or pairs the tiles of 32 at 32, logs the plan as
+        # planned: its fields alone would pass.
+        from native_brgemm_tuning import plan as PL
+
+        for config, pairings in (({"nr": 16}, ("staged",)), ({"mb": 4}, ("32", "staged"))):
+            text = C.format_settings(config, SCHEMA)
+
+            def named(p, q, digest, config=config, text=text):
+                if p.m != 8:
+                    return "heuristic", "-", q, digest
+                return "table", text, PL.resolve(p, config, UARCH, SCHEMA).plan, digest
+
+            self.assertEqual(self.run_verify(named, "gated", config=config)["failed"], 0, text)
+            for pairing in pairings:
+                rep = self.run_verify(named, "gated", config=config, pairing=pairing)
+                self.assertEqual([r["why"] for r in rep["rows"] if not r["ok"]],
+                                 [["pairing: model 64, log %s" % pairing]], (text, pairing))
+
+    def test_an_entry_of_a_padded_width_names_its_calls(self):
+        # N 4112 is planned and matched at 4128, which the entry's match holds: the file names the M 8
+        # call, a store call and a gated one, which stages its rows (pairing=staged).
+        from native_brgemm_tuning import plan as PL
+
+        def named(p, q, digest):
+            if p.m != 8:
+                return "heuristic", "-", q, digest
+            return "table", "mb=4", PL.resolve(p, {"mb": 4}, UARCH, SCHEMA).plan, digest
+
+        for epilogue in ("store", "gated"):
+            rep = self.run_verify(named, epilogue, config={"mb": 4}, n=4112)
+            self.assertEqual((rep["problems"], rep["named"], rep["failed"]), (2, 1, 0), epilogue)
 
     def test_failures(self):
         from native_brgemm_tuning import plan as PL

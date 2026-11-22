@@ -167,9 +167,10 @@ class ResultsDB:
 def probe_verdict(r: Dict[str, Any]) -> Tuple[str, str]:
     """(status, reason) of one probe record.  A candidate the library applied with another
     plan than the plan model's (model_diff) is a mismatch: an entry would name the model's
-    plan, which is not the plan that was timed."""
+    plan, which is not the plan that was timed.  So is a built-in run's: the model's built-in
+    plan, against which the search de-duplicates candidates, is not the one the library runs."""
     st, why = r.get("status", "no_log"), r.get("reason", "")
-    if st == APPLIED and r.get("text") and r.get("model_diff"):
+    if st == APPLIED and r.get("model_diff"):
         return "mismatch", "the library ran another plan than the plan model's: " + "; ".join(r["model_diff"])
     return st, why
 
@@ -192,7 +193,9 @@ def probe_status(records: Iterable[Dict[str, Any]]) -> Dict[Tuple[str, str], Tup
 
 def summarize(records: List[Dict[str, Any]], phases: Optional[Iterable[str]] = None,
               z: float = 2.0) -> Dict[str, ProblemSummary]:
-    """Per problem: built-in time and noise, and every applied candidate's ratios."""
+    """Per problem: built-in time and noise, and every applied candidate's ratios.  The candidates
+    of a problem whose built-in run is a mismatch are excluded: neither its baseline nor its
+    plan model is the library's."""
     want = set(phases) if phases else None
     status = probe_status(records)
     by: Dict[str, Dict[str, Dict[str, List[float]]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
@@ -208,6 +211,7 @@ def summarize(records: List[Dict[str, Any]], phases: Optional[Iterable[str]] = N
     out: Dict[str, ProblemSummary] = {}
     for pkey, sessions in by.items():
         ps = ProblemSummary(pkey, problems[pkey])
+        builtin = status.get((pkey, ""), (APPLIED, ""))
         defaults = []
         for sid, texts in sessions.items():
             if "" not in texts:
@@ -218,6 +222,8 @@ def summarize(records: List[Dict[str, Any]], phases: Optional[Iterable[str]] = N
                 if not text:
                     continue
                 st, why = status.get((pkey, text), (APPLIED, ""))
+                if st == APPLIED and builtin[0] == "mismatch":
+                    st, why = builtin[0], "the built-in run: " + builtin[1]
                 if st != APPLIED:
                     ps.excluded[text] = "%s%s" % (st, ": " + why if why else "")
                     continue

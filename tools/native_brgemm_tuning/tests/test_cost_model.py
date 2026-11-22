@@ -16,6 +16,7 @@
 """The cost model's mirror and the model's choices, as the library's NativeCostModel tests
 state them; the F16_PH tiles and the s4 rules of the planner."""
 
+import dataclasses
 import math
 import os
 import sys
@@ -293,6 +294,91 @@ class TestGatedLines(unittest.TestCase):
         self.assertEqual(PL.compare_with_log(q, p, logged), [])
         logged["pairing"] = "staged"
         self.assertNotEqual(PL.compare_with_log(q, p, logged), [])
+        # The tiles of 32 columns pair at 64 here: a line paired at 32 differs on its pairing= alone.
+        at32 = dict(PL.plan_log_fields(PL.paired_plan(q, p, 32), p), pairing="32")
+        self.assertEqual(PL.compare_with_log(q, p, at32), ["pairing: model 64, log 32"])
+
+    def test_log_pairing(self):
+        # The line's pairing=: the width the tiles pair the halves at, or staged where they stage its
+        # rows (N not whole 32-column blocks, and f16 and f32 calls); none for a call that is not gated.
+        for dtype, n, want in (("bf16", 4096, "64"), ("s8", 24576, "64"), ("bf16", 4128, "32"),
+                               ("bf16", 4112, "staged"), ("f32", 4096, "staged")):
+            p = Problem(dtype, 8, n, 4096, epilogue="gated")
+            q = PL.builtin_plan(p, DOMAINS8, SCHEMA)
+            self.assertEqual(PL.log_pairing(q, p), want, (dtype, n))
+            self.assertEqual(PL.compare_pairing(want, {"pairing": want}), [])
+        store = Problem("bf16", 8, 4096, 4096)
+        self.assertIsNone(PL.log_pairing(PL.builtin_plan(store, DOMAINS8, SCHEMA), store))
+        self.assertEqual(PL.compare_pairing("64", {"pairing": "staged"}), ["pairing: model 64, log staged"])
+        # A side without pairing= is not compared: a store call, or a line of a build before the field.
+        self.assertEqual(PL.compare_pairing(None, {"pairing": "64"}), [])
+        self.assertEqual(PL.compare_pairing("64", {}), [])
+
+    def test_paired_width(self):
+        # native_paired_width: tiles of 64 columns or more keep their width; narrower ones pair at 64 where
+        # the 64-column tiles deal out evenly over the team or number 8 per thread, else at 32.  The
+        # library's values, at both bounds: 224 tiles of 64 columns over 48 threads (under 8 a thread,
+        # uneven) pair at 32, and tiles of 64 over a team they do not deal out evenly keep their width.
+        q = PL.builtin_plan(Problem("bf16", 8, 4096, 4096, epilogue="gated"), DOMAINS8, SCHEMA)
+        for dtype, n, nr, m_blocks, threads, want in (
+                ("bf16", 4096, 16, 1, 32, 64), ("s8", 4096, 32, 1, 48, 32), ("s8", 26624, 32, 1, 48, 64),
+                ("s4", 4096, 16, 3, 48, 64), ("bf16", 4128, 32, 1, 32, 32), ("bf16", 4096, 64, 1, 32, 64),
+                ("s8", 4096, 128, 1, 32, 128), ("bf16", 4112, 32, 1, 32, 0), ("f16", 4096, 32, 1, 32, 0),
+                ("f32", 4096, 32, 1, 32, 0), ("bf16", 4096, 24, 1, 32, 0), ("s8", 14336, 32, 1, 48, 32),
+                ("bf16", 4096, 64, 1, 48, 64)):
+            p = Problem(dtype, 8, n, 4096, epilogue="gated", group=128 if dtype == "s4" else 0)
+            r = dataclasses.replace(q, nr=nr, m_blocks=m_blocks, threads=threads)
+            self.assertEqual(PL.paired_width(r, p), want, (dtype, n, nr, m_blocks, threads))
+        self.assertEqual(PL.paired_width(q, Problem("bf16", 8, 4096, 4096)), 0)
+
+    def test_paired_log_fields(self):
+        # The line at the width the tiles pair at, when wider than the plan's; none for a store call.
+        p = Problem("bf16", 8, 4096, 4096, epilogue="gated")
+        for nr, widths in ((16, ["64"]), (32, ["64"]), (64, [])):
+            r = PL.resolve(p, {"nr": nr}, DOMAINS8, SCHEMA)
+            self.assertTrue(r.applied, nr)
+            paired = PL.paired_log_fields(r.plan, p)
+            self.assertEqual(sorted(paired), widths, nr)
+            for w, fields in paired.items():
+                self.assertEqual(fields, PL.plan_log_fields(PL.paired_plan(r.plan, p, int(w)), p))
+                self.assertEqual(PL.compare_with_log(r.plan, p, dict(fields, pairing=w)), [])
+        # The session looks a line up at its pairing=: one paired at another width than the tiles pair
+        # at falls back to the plan as planned, and differs.
+        q = PL.resolve(p, {"nr": 16}, DOMAINS8, SCHEMA).plan
+        at32 = dict(PL.plan_log_fields(PL.paired_plan(q, p, 32), p), pairing="32")
+        self.assertTrue(PL.compare_fields(PL.paired_log_fields(q, p).get("32", PL.plan_log_fields(q, p)), at32))
+        store = Problem("bf16", 8, 4096, 4096)
+        self.assertEqual(PL.paired_log_fields(PL.builtin_plan(store, DOMAINS8, SCHEMA), store), {})
+
+    def test_a_gated_call_signs_its_paired_plan(self):
+        # The built-in tiles of 32 columns and tiles of 16 both pair at 64 here: one plan runs, so the
+        # search does not time nr=16 again. A store call, and a gated call that stages its rows, run
+        # the plan as planned.
+        def sig(p, **cfg):
+            return PL.effective_signature(PL.resolve(p, cfg, DOMAINS8, SCHEMA).plan, p)
+
+        gated = Problem("s8", 8, 24576, 4096, epilogue="gated")
+        self.assertEqual(PL.paired_width(PL.builtin_plan(gated, DOMAINS8, SCHEMA), gated), 64)
+        self.assertEqual(sig(gated, nr=16), sig(gated))
+        self.assertNotEqual(sig(gated, mb=4), sig(gated))
+        for p in (Problem("s8", 8, 24576, 4096), Problem("s8", 8, 4112, 4096, epilogue="gated")):
+            self.assertNotEqual(sig(p, nr=16), sig(p), p.key())
+        sp = C.Space(gated, SCHEMA, DOMAINS8)
+        self.assertEqual([c.text for c in C.unique([sp.make({"nr": 16}), sp.make({"mb": 4})], sp)], ["mb=4"])
+
+    def test_a_call_reading_the_up_run_signs_its_k_pass_at_twice_its_width(self):
+        # N 4128 pairs the s8 tiles of 32 columns at 32: a call reads its second 16 columns from the up
+        # run and sizes its K pass at 64 columns, so a 256 KiB budget (int8_l2_pct=25) takes two passes
+        # where the built-in 512 KiB takes one.  A store call, and tiles paired at 64 (N 4096), take one
+        # pass under either budget.
+        base = {"mb": 32, "int8_mr": 6, "l1_pass": 0}
+        for n, epilogue, differ in ((4128, "gated", True), (4128, "store", False), (4096, "gated", False)):
+            p = Problem("s8", 64, n, 4096, epilogue=epilogue)
+            sp = C.Space(p, SCHEMA, DOMAINS8)
+            cands = [sp.make(base), sp.make(dict(base, int8_l2_pct=25))]
+            self.assertEqual([c.plan.int8_pass_budget for c in cands], [512 << 10, 256 << 10])
+            self.assertEqual(cands[0].sig != cands[1].sig, differ, (n, epilogue))
+            self.assertEqual(len(C.unique(cands, sp)), 2 if differ else 1, (n, epilogue))
 
 
 if __name__ == "__main__":

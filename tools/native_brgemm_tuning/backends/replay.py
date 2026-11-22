@@ -17,7 +17,8 @@
 
 The driver makes the framework plugin's matmul_direct calls (a bf16 source
 over bf16 weights, or over s8 or s4 weights whose source it quantizes per
-token, s4 in groups along K; an f16 source over f16 weights) and visits
+token, s4 in groups along K; an f16 source over f16 weights; the gated calls,
+silu_and_mul over a [gate | up] weight, of all but f16 weights) and visits
 --layers weight sets per shape in layer order, so every weight is cold when it
 comes back, as in a model.  A process whose shapes are small takes more
 layers, so that it cycles through at least cold_mb of distinct weights
@@ -90,8 +91,10 @@ class ReplayBackend(Backend):
         own = "f16" if p.f16 else "bf16"
         if p.f32 or p.int8_scheme != ("per_group" if p.int4 else "per_channel"):
             return "the driver makes bf16, s8 (per-channel scales), s4 and f16 calls"
-        if p.src != own or p.dst != own or p.trans_a or p.has_bias or p.epilogue != "store":
+        if p.src != own or p.dst != own or p.trans_a or p.has_bias or p.epilogue not in ("store", "gated"):
             return "the driver makes %s -> %s calls without trans_a, bias or post-ops" % (own, own)
+        if p.epilogue == "gated" and (p.f16 or p.n % 2):
+            return "the driver makes gated (silu_and_mul) calls of non-f16 weights of even N"
         if p.int8 and not p.dynamic:
             return "the driver quantizes the s8 and s4 problems' source per token (dynamic)"
         if p.int4 and (p.scale_bytes == 4) != (self.scale_dt == "f32"):
@@ -158,10 +161,10 @@ class ReplayBackend(Backend):
 
     def _clause_groups(self, problems: Sequence[Problem]) -> List[List[Problem]]:
         out: List[List[Problem]] = []
-        # One process takes one weight type, and one --group of s4 weights.
-        by: Dict[Tuple[str, int], Dict[int, List[Problem]]] = defaultdict(lambda: defaultdict(list))
+        # One process takes one weight type, one --group of s4 weights and one epilogue (--gated).
+        by: Dict[Tuple[str, int, str], Dict[int, List[Problem]]] = defaultdict(lambda: defaultdict(list))
         for p in problems:
-            by[(p.dtype, replay_group(p))][p.m].append(p)
+            by[(p.dtype, replay_group(p), p.epilogue)][p.m].append(p)
         for dtype in sorted(by):
             cur: List[Problem] = []
             cur_shapes: Optional[Tuple] = None
@@ -203,16 +206,18 @@ class ReplayBackend(Backend):
         ]
 
     def command(self, gid: int, problems: Sequence[Problem], probe: bool) -> str:
-        kinds = {(p.dtype, replay_group(p)) for p in problems}
+        kinds = {(p.dtype, replay_group(p), p.epilogue) for p in problems}
         if len(kinds) != 1:
-            raise ValueError("one replay process takes one weight type (and one s4 --group)")
-        dtype, group = kinds.pop()
+            raise ValueError("one replay process takes one weight type (and one s4 --group, one epilogue)")
+        dtype, group, epilogue = kinds.pop()
         shapes = sorted({(p.n, p.k) for p in problems})
         ms = sorted({p.m for p in problems})
         args = ["--wei", dtype, "--shapes", ",".join("n%dk%d:%d:%d" % (n, k, n, k) for n, k in shapes),
                 "--ms", ",".join(map(str, ms)), "--scale-dt", self.scale_dt]
         if dtype == "s4":
             args += ["--group", str(group)]
+        if epilogue == "gated":
+            args += ["--gated", "silu_and_mul"]
         if probe:
             args += ["--layers", "1", "--iters", "1", "--warmup", "0", "--budget-ms", "0", "--check", "1"]
         else:

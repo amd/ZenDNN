@@ -31,6 +31,11 @@ from native_brgemm_tuning.problems import Problem  # noqa: E402
 TUNINGS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tunings")
 
 
+def tuning_files():
+    """The files of the machine types and of the models (tunings/models/<model>/)."""
+    return sorted(glob.glob(os.path.join(TUNINGS, "**", "*.json"), recursive=True))
+
+
 def machine_of(doc):
     """(schema, uarch) of the machine a file's plans are for: the fixture's keys and kernels, with the
     caches and L3 domain of the file's hardware block, and the F16_PH kernels only where the file's plans
@@ -45,8 +50,16 @@ def machine_of(doc):
 
 
 class TestTuningFiles(unittest.TestCase):
+    def test_the_files_of_every_model_are_checked(self):
+        models = os.path.join(TUNINGS, "models")
+        names = sorted(d for d in os.listdir(models) if os.path.isdir(os.path.join(models, d)))
+        self.assertTrue(names)
+        checked = {os.path.relpath(path, models).split(os.sep)[0] for path in tuning_files()
+                   if path.startswith(models + os.sep)}
+        self.assertEqual(sorted(checked), names)
+
     def test_every_file_is_valid_and_names_its_plans(self):
-        files = sorted(glob.glob(os.path.join(TUNINGS, "*.json")))
+        files = tuning_files()
         self.assertTrue(files)
         for path in files:
             with open(path, encoding="utf-8") as f:
@@ -63,7 +76,7 @@ class TestTuningFiles(unittest.TestCase):
     def test_every_entry_names_the_plan_of_the_planner(self):
         # The CI holds plan.py to the library's planner: a planner change that moves an entry's plan
         # fails here until the file is tuned again.
-        for path in sorted(glob.glob(os.path.join(TUNINGS, "*.json"))):
+        for path in tuning_files():
             with open(path, encoding="utf-8") as f:
                 doc = json.load(f)
             schema, uarch = machine_of(doc)
@@ -77,6 +90,10 @@ class TestTuningFiles(unittest.TestCase):
                 # A field the record lacks, of a line before it, is not compared.
                 self.assertEqual(({k: g["plan"].get(k) for k in r["plan"]}, g["source"], g["cfg"], g["builtin"]),
                                  (r["plan"], r["source"], r["cfg"], r["builtin"]), (path, r["id"], r["problem"]))
+                for w, fields in r.get("paired", {}).items():
+                    self.assertEqual({k: g["paired"][w].get(k) for k in fields}, fields, (path, r["id"], w))
+                if "pairing" in r:
+                    self.assertEqual(g.get("pairing"), r["pairing"], (path, r["id"], r["problem"]))
 
 
 if __name__ == "__main__":
