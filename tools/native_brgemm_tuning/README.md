@@ -28,6 +28,7 @@ run time, gradient-boosted trees when present, numpy models otherwise).
 | `results.py` | Results store (JSONL) and the statistics: per-session ratios, noise, significance. |
 | `backends/` | `jobs.py` (pod sessions), `benchdnn.py`, `replay.py`, `synthetic.py`, `common.py` (API-log line). |
 | `replay/` | The cold-weight replay driver (`replay.cpp`), its build script and a pod-side A/B runner. |
+| `ab/` | The A/B gate of a library change: a corpus of calls, layouts and layout rule verdicts (`ab_corpus.cpp`, its build script) and `ab.py`, which compares two builds on it, their code size and their prepack time (see Comparing two builds). |
 | `plan_dump/`, `refresh_fixtures.sh` | The library's plans for the cases of `tests/plan_cases.py` (`plan_dump.cpp` and its build script), and the refresh of both fixtures from a build (see Tests). |
 | `search.py`, `surrogate.py` | Grid, random and model-guided search; surrogate models. |
 | `export.py`, `rules.py` | Class winners, confirmation, the tuning file and its validation; the learned rules. |
@@ -458,10 +459,71 @@ file names, and the result is validated against the schema.
   and `cfg=` show the applied layers; a file that loads logs one line with
   its entry and rules counts.
 
+## Comparing two builds
+
+A change to the native BRGEMM that should not change what it computes (a refactor of its layout,
+packing, kernels or planner) is checked against the build it starts from on a fixed corpus:
+
+    tools/native_brgemm_tuning/ab/build.sh <worktree of A> /tmp/ab_a <build dir of A>
+    tools/native_brgemm_tuning/ab/build.sh <worktree of B> /tmp/ab_b <build dir of B>
+    python3 tools/native_brgemm_tuning/ab/ab.py run /tmp/ab_a /tmp/ab_b --out /tmp/ab
+    python3 tools/native_brgemm_tuning/ab/ab.py size <build dir of A> <build dir of B> --budget 0.1 --same-kernels
+
+Each binary holds its build's library (the static archive), so a binary built once keeps
+standing for its build. `run` runs both on the machine it runs on (the kernels follow its
+instruction sets), under `ZENDNNL_MATMUL_ALGO=10` and `ZENDNNL_API_LOG_LEVEL=4` with the
+same thread count, and compares, case by case:
+
+- `calls`: about 2400 calls through `matmul_direct` on every route (bf16, f32, f16, s8 per
+  channel and per group, s4 in groups and of one group over K) over M 1 to 13, 64 and 1024, N
+  tails, long K, bias, every post-op the native epilogue applies and a chain of two, a bf16
+  binary operand, gated activations, alpha and beta, dst types, an s8 or u8 dst requantized by
+  a dst scale and zero point, transA, transB, a padded ldb and ldc, u8 (with a zero point), s8
+  and quantized sources and their scales, a weight scale of one value, weight cache modes 0, 1
+  and 2, a weight buffer that states a capacity larger than the weight (the in-place image of a
+  layout larger than the weight) and thread counts. A few calls leave `lowoha_algo` none, so
+  that `ZENDNNL_MATMUL_ALGO=10` alone selects the native BRGEMM: one it serves, one it hands
+  back to the default route, one whose error it keeps. Each case runs twice (the second call
+  reads the layout the first cached or wrote in place); the status of each call, the bytes of
+  dst after each call (its rows, their padding up to ldc and 64 bytes after the last row), of
+  the weight buffer after both (up to its capacity and 64 nonzero bytes after it) and of a
+  quantized source's scales and zero point after each call (which a dynamic quantization
+  writes), the `[MATMUL.NATIVE_BRGEMM]` lines and every other log line of the case with its
+  module and level (times and pointers masked) must be equal.
+- `layout`: the bytes `native_pack_weight` writes for every weight type over K and N tails,
+  transB, padded ldb and thread counts (the tiles of a long K, the rows of a transposed weight,
+  the element path of s4, the column sums of s8), and the bytes the unpack of a bf16 or f16
+  layout writes back, each with the 64 bytes after the buffer.
+- `rules`: the native BRGEMM's verdict (`native_layout_check`: served, or the status and reason
+  of its refusal) on about 14000 calls over source, weight and dst types, static and dynamic
+  quantization, weight scale groups, the K bounds of the int32 sums and ldb, each with
+  `lowoha_algo` native_brgemm and with `lowoha_algo` none (`/algo10`, where a refusal may hand
+  the call back to the default route: `taken=0`); `--filter` selects verdicts by these names.
+
+It prints one line per mode and the first differences (`--show`), and exits with status 1 when
+any differs, 2 when a mode compares nothing (an empty `--modes`, or a `--filter` that leaves
+the A run of a mode without a case). Inputs come from generators seeded by the case names, so
+`--filter` reruns a few cases with the same data. `size` compares the text of the static
+archive (the gate, `--budget` percent), the text of its matmul_native objects and the
+functions of the kernel objects (the archive's members, found in the build tree by name, size
+and bytes: not the shared library's copies, nor the objects of sources removed or moved since),
+and lists the kernel functions of one build only; `--same-kernels` fails when there are any. It
+exits with status 2 when a build tree lacks an object of its archive or its kernel objects
+define no function. `pack` times `native_pack_weight` on weights of model size, the two
+binaries in turn (`--rounds`), for the prepack time of a packing change; a pack that fails ends
+the run, and every round of both binaries has to time the cases of the first round of A (exit
+status 2 otherwise, or when there are none). The op-level time of the calls is
+`replay/run_replay.sh` with the two builds' replay binaries. `layout` and `pack` exit with
+status 2 on a CPU without the native BRGEMM's base instruction sets (`native_base_isa`).
+
 ## Tests
 
 `python3 -m unittest discover -s tools/native_brgemm_tuning/tests -t tools`
 (host only: no pod, no library). Tests that need numpy are skipped without it.
+With `ZENDNNL_NATIVE_REPLAY=<replay binary>` `test_backends.py` also runs that binary on a
+small shape (a float weight's call does not depend on `--src`), and with
+`ZENDNNL_AB_CORPUS=<ab_corpus binary>` `test_ab.py` runs that binary on a few cases (the
+verdicts a filter selects, weight scale groups that do not split K, the fields of a case).
 `test_op_perf.py` covers the probe jobs, the machine check, the efficiencies,
 the search by headroom and the calibration, on the op performance utility's
 synthetic machine. `test_sync.py` checks the tuner against the planner's schema: every key is
@@ -482,7 +544,10 @@ dump on the build's schema, for the cases and for the N block's cases,
 `--nb`: the f16 kernel kind and the plans come from one machine, so it
 holds on any), then these tests on the build's dump.
 `test_cost_model.py` checks the cost model's mirror and choices against the
-library's NativeCostModel cases. `test_tunings.py` checks the files of
+library's NativeCostModel cases. `test_ab.py` checks the A/B gate's comparison
+on corpus outputs (equal runs pass; a changed byte, line, layout or verdict and
+a missing case are named), the size report on scratch build trees and the
+prepack timing on stand-in binaries. `test_tunings.py` checks the files of
 `tunings/` and `tunings/models/`: each is valid, and the plans `plan.py`
 gives its entries on its machine (the hardware block's caches and L3 domain)
 are its `meta.plans`, so a planner change that moves an entry's plan fails it.

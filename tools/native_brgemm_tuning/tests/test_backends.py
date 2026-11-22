@@ -441,6 +441,28 @@ class TestReplayBuild(unittest.TestCase):
         self.assertNotIn("-Iparlooper/include", args)
 
 
+@unittest.skipUnless(os.environ.get("ZENDNNL_NATIVE_REPLAY"), "ZENDNNL_NATIVE_REPLAY names no replay binary")
+class TestReplayRun(unittest.TestCase):
+    """The replay binary that ZENDNNL_NATIVE_REPLAY names, on a small shape."""
+
+    def check_hash(self, *args):
+        """The CHECK hash of one call of the shape."""
+        env = {k: v for k, v in os.environ.items() if not k.startswith("ZENDNNL_")}
+        env.update({"ZENDNNL_MATMUL_ALGO": "10", "OMP_NUM_THREADS": "4"})
+        out = subprocess.run([os.environ["ZENDNNL_NATIVE_REPLAY"], "--shapes", "t:64:256", "--ms", "4",
+                              "--layers", "1", "--iters", "3", "--warmup", "1", "--check", "1", *args],
+                             env=env, stdout=subprocess.PIPE, check=True, universal_newlines=True).stdout
+        return [line.split("hash=")[1] for line in out.splitlines() if line.startswith("CHECK ")]
+
+    def test_a_float_call_fills_its_source_whatever_src(self):
+        # A float weight sets the source type of the call, so --src changes nothing.
+        for wei in ("bf16", "f16", "f32"):
+            ref = self.check_hash("--wei", wei)
+            self.assertEqual(len(ref), 1)
+            for src in ("u8", "s8"):
+                self.assertEqual(self.check_hash("--wei", wei, "--src", src), ref, (wei, src))
+
+
 class TestSession(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="nbt_test_")

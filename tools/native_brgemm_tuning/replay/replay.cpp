@@ -27,19 +27,20 @@
 // [N, K] weight is packed in place by its first call (weight cache 2).
 // F16 (--wei f16): the BF16 call with an f16 source and weight and an f16
 // dst (--dst f32 or bf16 for another dst).
+// F32 (--wei f32): the BF16 call with an f32 source, weight and dst.
 // DA8W4 (--wei s4, the plugin's dynamic quantized linear over int4 weights):
 // the DA8W8 call with wei s4 packed [N, K / 2] (two values a byte, the even
 // k in the low nibble, two's complement), ldb = K in values, and wei_scale
 // {buf, scale_dt, {K / gs, N}} (--group gs; -1: one group over K, {1, N}).
-// --gated silu_and_mul (the plugin's gated linear, any weight type above but
-// f16): the same call over a [gate | up] weight of N = 2I rows with the gated
+// --gated silu_and_mul (the plugin's gated linear, bf16, s8 or s4 weights):
+// the same call over a [gate | up] weight of N = 2I rows with the gated
 // activation, writing act(gate) * up into an M x I output (ldc = N / 2).
 // --check 1: after the timed passes of an M, one more call per shape (layer 0)
 // and a 64-bit FNV-1a hash of its M x N output buffer (CHECK line; a gated
 // call's M x I output and the zeros after it), to compare builds or plans bit
 // for bit.
 // Weights and activations are drawn in parallel 1 Mi blocks, each from its own
-// seeded generator (bf16 and f16 weights k / 1280 and activations k / 64 for
+// seeded generator (float weights k / 1280 and activations k / 64 for
 // small integers k, s8 weights in [-127, 127], s4 weights in [-8, 7], u8
 // sources in [0, 255]). Every seed comes from the shape's N and K, so a shape
 // gets the same data in any run.
@@ -53,7 +54,7 @@
 // Usage: replay --shapes name:N:K[,..] --ms 1,8,32,4096 [--layers 4]
 //               [--iters 30] [--warmup 2] [--scale-dt bf16|f32|f16]
 //               [--bias none|bf16|f32] [--budget-ms 1500] [--src bf16|u8|s8]
-//               [--wei s8|bf16|s4|f16] [--group gs] [--dst bf16|f16|f32]
+//               [--wei s8|bf16|s4|f16|f32] [--group gs] [--dst bf16|f16|f32]
 //               [--gated none|silu_and_mul] [--check 0|1]
 // Prints one RESULT line per shape and M (per-call median / mean / min / p90
 // in ms) and a TOTAL per M.
@@ -202,17 +203,21 @@ int main(int argc, char **argv) {
                                                 : data_type_t::bf16;
     const std::string wei_mode = arg(argc, argv, "--wei", "s8");
     const bool wei_f16 = wei_mode == "f16";
+    const bool wei_f32 = wei_mode == "f32";
     const bool wei_s4 = wei_mode == "s4";
-    // An f16 call is a float call as a bf16 one, over f16 operands.
-    const bool wei_float = wei_mode == "bf16" || wei_f16;
+    // An f16 or f32 call is a float call as a bf16 one, over operands of its
+    // type.
+    const bool wei_float = wei_mode == "bf16" || wei_f16 || wei_f32;
     if (!wei_float && !wei_s4 && wei_mode != "s8") {
-        std::fprintf(
-                stderr, "bad --wei %s (s8, bf16, s4, f16)\n", wei_mode.c_str());
+        std::fprintf(stderr, "bad --wei %s (s8, bf16, s4, f16, f32)\n",
+                wei_mode.c_str());
         return 2;
     }
-    const data_type_t float_dt = wei_f16 ? data_type_t::f16 : data_type_t::bf16;
-    const data_type_t out_dt
-            = dt_of(arg(argc, argv, "--dst", wei_f16 ? "f16" : "bf16"));
+    const data_type_t float_dt = wei_f16 ? data_type_t::f16
+            : wei_f32                    ? data_type_t::f32
+                                         : data_type_t::bf16;
+    const char *dst_default = wei_f16 ? "f16" : wei_f32 ? "f32" : "bf16";
+    const data_type_t out_dt = dt_of(arg(argc, argv, "--dst", dst_default));
     const int group = std::atoi(arg(argc, argv, "--group", "128"));
     const bool check = std::atoi(arg(argc, argv, "--check", "0")) != 0;
     const std::string gated_mode = arg(argc, argv, "--gated", "none");
@@ -237,8 +242,7 @@ int main(int argc, char **argv) {
             warmup, arg(argc, argv, "--scale-dt", "bf16"),
             arg(argc, argv, "--bias", "none"), src_mode.c_str(),
             wei_mode.c_str(), wei_s4 ? group : 0,
-            arg(argc, argv, "--dst", wei_f16 ? "f16" : "bf16"),
-            gated_mode.c_str());
+            arg(argc, argv, "--dst", dst_default), gated_mode.c_str());
     // --group -1: one group over K ({1, N} weight scales).
     for (const auto &sh : shapes) {
         if (wei_s4
@@ -250,7 +254,7 @@ int main(int argc, char **argv) {
             return 2;
         }
     }
-    if (is_gated && wei_f16) {
+    if (is_gated && (wei_f16 || wei_f32)) {
         std::fprintf(stderr, "--gated takes bf16, s8 or s4 weights\n");
         return 2;
     }
@@ -276,9 +280,9 @@ int main(int argc, char **argv) {
         const int N = shapes[s].N, K = shapes[s].K;
         const int G = groups_of(K);
         for (int l = 0; l < layers; ++l) {
-            const size_t w_bytes = wei_s4
-                    ? static_cast<size_t>(N) * K / 2
-                    : static_cast<size_t>(N) * K * (wei_float ? 2 : 1);
+            const size_t w_bytes = wei_s4 ? static_cast<size_t>(N) * K / 2
+                                          : static_cast<size_t>(N) * K
+                            * (wei_float ? dt_bytes(float_dt) : 1);
             auto *w = static_cast<int8_t *>(alloc64(w_bytes));
             auto *sc = static_cast<uint8_t *>(
                     alloc64(static_cast<size_t>(G) * N * s_es));
@@ -325,12 +329,11 @@ int main(int argc, char **argv) {
             }
             buf[s].bias.push_back(b);
         }
-        void *a = alloc64(static_cast<size_t>(m_max) * K * 2);
+        void *a = alloc64(static_cast<size_t>(m_max) * K * (wei_f32 ? 4 : 2));
         buf[s].c = alloc64(static_cast<size_t>(m_max) * N * o_es);
         const uint32_t aseed = shape_seed(N, K, 63);
-        if (src_dt == data_type_t::bf16 || wei_f16) {
-            const data_type_t a_dt
-                    = wei_f16 ? data_type_t::f16 : data_type_t::bf16;
+        if (src_dt == data_type_t::bf16 || wei_float) {
+            const data_type_t a_dt = wei_float ? float_dt : data_type_t::bf16;
             par_fill(static_cast<size_t>(m_max) * K, aseed,
                     [a, a_dt](size_t i, std::mt19937 &g) {
                 store(a, a_dt, i,
