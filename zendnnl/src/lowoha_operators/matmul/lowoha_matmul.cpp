@@ -919,6 +919,16 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
                 "standard single-matmul path");
     }
 
+    // Q4_K's offset is applied only by the grouped s4 kernel.  Scalar AOCL
+    // would return success and drop that term.
+    if (exec_params.packing.ggml_type == 1) {
+        if (is_profile) { profiler.tbp_stop(); }
+        log_error(
+                "matmul_direct: Q4_K requires the grouped s4 kernel; "
+                "refusing the scalar path");
+        return status_t::failure;
+    }
+
     if (is_foreign_prepacked_weight(exec_params)) {
         log_error(
                 "matmul_direct: pre-reordered weight has unsupported backend "

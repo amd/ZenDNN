@@ -81,11 +81,15 @@ enum class S4OutputKind : uint8_t { kBf16 = 0, kF32 = 1 };
 ///   * `wei_scale_grp_stride` — the CALLER'S FULL N, not the tile
 ///     width: an N-tile slices columns out of a `{G, N}` scale buffer
 ///     without repacking it.
+///   * `act_group_sum` — optional `{MR, G}` signed activation sums,
+///     index `m * G + g`. Non-null only with a Q4_K offset. The caller
+///     computes them once and every output-column tile reuses them.
 using w4a8_ukernel_fn_t = void (*)(const uint8_t *A, int lda,
         const int8_t *Bpacked, const void *src_scale, const void *wei_scale,
         ScaleKind scale_kind, const void *bias, BiasKind bias_kind, void *Cout,
         int ldc, void *Cout_tight, int ldc_tight, int K, int group_size,
-        int wei_scale_grp_stride);
+        int wei_scale_grp_stride, const void *wei_zp,
+        const float *act_group_sum);
 
 /// Maximum MR under the 32-zmm budget: the K-loop holds `2*MR*NV`
 /// accumulators (f32 and s32 per group) plus 8 working registers.
@@ -95,12 +99,15 @@ inline int max_mr_for_nv_s4(int NV) {
 
 /// Returns the specialization for `(MR ∈ 1..max_mr_for_nv_s4(NV),
 /// NV ∈ {2, 4}, Act, source, output)`, or nullptr when not instantiated.
+/// `has_offset` selects the Q4_K epilogue. The false specialization is the
+/// Q4_0 / DA8W4 kernel and does not read `wei_zp`.
 /// Gated activations intentionally support BF16 output only.
 w4a8_ukernel_fn_t select_w4a8_ukernel(int MR, int NV, ActivationKind act,
         S4SourceKind source = S4SourceKind::kS8,
         S4OutputKind output = S4OutputKind::kBf16,
         S4SrcScaleGranularity src_scale_granularity
-        = S4SrcScaleGranularity::kPerToken);
+        = S4SrcScaleGranularity::kPerToken,
+        bool has_offset = false);
 
 /// Writes the weights of `K` rows (a multiple of 8) of one `pack_nr == 32`
 /// block (`[K/8][32][4]` biased nibbles) to `dst` as signed bytes in the

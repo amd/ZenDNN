@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include "common/op_config.hpp"
@@ -195,16 +196,25 @@ struct matmul_batch_params_t {
  *                     unpack path widens to s8 before the sym-quant reorder).
  *
  * Q4_0 defaults to plain block_q4_0.  Set is_superblock to select the 8-row
- * interleaved block_q4_0x8 repack.  Superblock Q4_0 requires an s4 weight and
- * an output-channel count (N) divisible by 8.  Its nibbles are already signed;
- * the plain Q4_0 path is the one that removes GGML's +8 bias.
+ * interleaved repack: block_q4_0x8 for Q4_0, block_q4_Kx8 for Q4_K
+ * (ggml_type 1).  Either superblock requires an s4 weight and an
+ * output-channel count (N) divisible by 8.  Q4_0x8 nibbles are already
+ * signed; the plain Q4_0 path is the one that removes GGML's +8 bias.
+ * Q4_Kx8 nibbles stay unsigned, so that path still stores q-8.
+ *
+ * ggml_type 0 keeps the dtype inference above.  1 selects Q4_K on an s4
+ * weight.  After unpack, ggml_type stays 1 and quant_params.wei_zp holds the
+ * f32 per-group offset.  A filled wei_zp with ggml_type == 0 keeps its
+ * existing zero-point meaning.
  */
 struct pack_format {
     int pack_format_b; ///< 0 = unpacked (default), 1 = GGML packed weights
-    /// Q4_0 only.  false = block_q4_0; true = 8-row block_q4_0x8.
+    /// false = plain block.  true = 8-row interleave (Q4_0x8 or Q4_Kx8).
     bool is_superblock;
+    /// 0 = infer Q8_0/Q4_0 from the weight dtype.  1 = Q4_K.
+    uint8_t ggml_type;
 
-    pack_format() : pack_format_b(0), is_superblock(false) {}
+    pack_format() : pack_format_b(0), is_superblock(false), ggml_type(0) {}
 };
 
 /**

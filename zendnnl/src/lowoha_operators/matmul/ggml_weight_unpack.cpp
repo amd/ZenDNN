@@ -20,6 +20,7 @@
  */
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
@@ -53,6 +54,63 @@ struct block_q4_0x8 {
     uint16_t d[8];
     uint8_t qs[128];
 };
+// GGML block_q4_K: 256 weights, 8 sub-blocks of 32.  144 bytes, no padding.
+struct block_q4_K {
+    uint16_t d;
+    uint16_t dmin;
+    uint8_t scales[12];
+    uint8_t qs[128];
+};
+static_assert(sizeof(block_q4_K) == 144, "block_q4_K size");
+static_assert(offsetof(block_q4_K, qs) == 16, "block_q4_K qs offset");
+
+// GGML block_q4_Kx8: the x86 CPU_REPACK of 8 consecutive Q4_K rows.
+// d and dmin are per row. scales[sb * 12 .. +11] is sub-block sb of all
+// 8 rows, in the same 6-bit packing as block_q4_K. qs interleaves the 8
+// rows 8 bytes at a time. The repack does not XOR the nibbles.
+struct block_q4_Kx8 {
+    uint16_t d[8];
+    uint16_t dmin[8];
+    uint8_t scales[96];
+    uint8_t qs[1024];
+};
+static_assert(
+        sizeof(block_q4_Kx8) == 8 * sizeof(block_q4_K), "block_q4_Kx8 size");
+static_assert(
+        offsetof(block_q4_Kx8, scales) == 32, "block_q4_Kx8 scales offset");
+static_assert(offsetof(block_q4_Kx8, qs) == 128, "block_q4_Kx8 qs offset");
+
+// Internal block ids passed to the unpackers.  The public selector is
+// pack_format.ggml_type (0 = infer, 1 = Q4_K).
+constexpr int kGgmlBlockQ4_0 = 2;
+constexpr int kGgmlBlockQ8_0 = 8;
+constexpr int kGgmlBlockQ4_K = 12;
+
+inline void q4k_scale_min(const uint8_t *sc, int sb, int &sc6, int &mn6) {
+    if (sb < 4) {
+        sc6 = sc[sb] & 63;
+        mn6 = sc[sb + 4] & 63;
+        return;
+    }
+    sc6 = (sc[sb + 4] & 0x0F) | ((sc[sb - 4] >> 6) << 4);
+    mn6 = (sc[sb + 4] >> 4) | ((sc[sb] >> 6) << 4);
+}
+
+// Same signed-nibble byte order as the Q4_0 unpack: dst[0..7] pairs the
+// low half, dst[8..15] pairs the high half, each nibble already minus 8.
+inline void store_signed_q4_group(int8_t *dst, const uint8_t q[32]) {
+    for (int i = 0; i < 8; ++i) {
+        const auto nib = [](uint8_t code) {
+            return static_cast<uint8_t>((code - 8) & 0x0F);
+        };
+        const uint8_t lo0 = nib(q[2 * i]);
+        const uint8_t lo1 = nib(q[2 * i + 1]);
+        const uint8_t hi0 = nib(q[16 + 2 * i]);
+        const uint8_t hi1 = nib(q[17 + 2 * i]);
+        dst[i] = static_cast<int8_t>(lo0 | (lo1 << 4));
+        dst[8 + i] = static_cast<int8_t>(hi0 | (hi1 << 4));
+    }
+}
 
 inline uint32_t fp32_to_bits(float f) {
     uint32_t bits;
@@ -244,16 +302,24 @@ static size_t ggml_layout_hash(int ggml_type, bool is_superblock) {
 static status_t ggml_unpack_to_s8_buffer(const void *weight, int64_t N,
         int64_t K, int ggml_type, bool is_superblock, void **owned_buffer,
         int8_t **out_s8, void **out_scales, size_t *out_weight_capacity) {
-    if (is_superblock && ggml_type != 2) {
-        log_error("GGML superblock unpack is only valid for Q4_0");
+    if (is_superblock && ggml_type != kGgmlBlockQ4_0
+            && ggml_type != kGgmlBlockQ4_K) {
+        log_error("GGML superblock unpack is only valid for Q4_0 and Q4_K");
         return status_t::failure;
     }
+    const bool q4k = ggml_type == kGgmlBlockQ4_K;
     const size_t weight_bytes = static_cast<size_t>(N) * static_cast<size_t>(K);
-    const size_t scale_bytes = ggml_scale_bytes(N, K, /*use_bf16_scales=*/true);
-    const size_t weight_capacity = (ggml_type == 2)
+    // Q4_K stores S as f32, the same value used to form M' = M-8*S.
+    // A bf16 scale would make the kernel multiply a rounded S against an
+    // offset built from the original S.
+    const size_t scale_bytes = ggml_scale_bytes(N, K, /*use_bf16_scales=*/!q4k);
+    // Q4_K stores a second {K/32, N} table, the per-group offset, as f32.
+    const size_t min_bytes = q4k ? ggml_scale_bytes(N, K, false) : 0;
+    const size_t meta_bytes = scale_bytes + min_bytes;
+    const size_t weight_capacity = (ggml_type == kGgmlBlockQ4_0 || q4k)
             ? ggml_s4_sym_quant_weight_capacity(N, K)
             : ggml_sym_quant_weight_capacity(N, K);
-    const size_t canon_size = align_up(weight_capacity + scale_bytes);
+    const size_t canon_size = align_up(weight_capacity + meta_bytes);
 
     void *canon = zendnnl_aligned_alloc(64, canon_size);
     if (!canon) {
@@ -275,7 +341,7 @@ static status_t ggml_unpack_to_s8_buffer(const void *weight, int64_t N,
         }
         if (weight_capacity != weight_bytes) {
             std::memmove(static_cast<uint8_t *>(canon) + weight_capacity,
-                    static_cast<uint8_t *>(canon) + weight_bytes, scale_bytes);
+                    static_cast<uint8_t *>(canon) + weight_bytes, meta_bytes);
         }
         *out_s8 = static_cast<int8_t *>(canon);
         *out_scales = static_cast<uint8_t *>(canon) + weight_capacity;
@@ -284,27 +350,35 @@ static status_t ggml_unpack_to_s8_buffer(const void *weight, int64_t N,
         return status_t::success;
     }
 
-    // Q4_0: unpack packed signed nibbles straight into the resident buffer.
-    // Scales are written immediately after the packed bytes; slide them past
-    // the reorder capacity so an in-place s8×s4 reorder cannot clobber them.
+    // Q4_0 / Q4_K: unpack packed signed nibbles straight into the resident
+    // buffer.  Scales (and the Q4_K offset) are written immediately after
+    // the packed bytes; slide them past the reorder capacity so an in-place
+    // s8×s4 reorder cannot clobber them.
+    if (ggml_type != kGgmlBlockQ4_0 && ggml_type != kGgmlBlockQ4_K) {
+        zendnnl_aligned_free(canon);
+        log_error("GGML unpack failed: unsupported block type ", ggml_type);
+        return status_t::failure;
+    }
     int8_t *packed_s4 = nullptr;
     void *tmp_scales = nullptr;
-    if (ggml_unpack_weight_buffer(weight, 2, /*use_bf16_scales=*/true, N, K,
-                &packed_s4, &tmp_scales, canon, is_superblock)
+    if (ggml_unpack_weight_buffer(weight, ggml_type, /*use_bf16_scales=*/!q4k,
+                N, K, &packed_s4, &tmp_scales, canon, is_superblock)
             != 0) {
         zendnnl_aligned_free(canon);
-        log_error("GGML Q4_0 unpack failed");
+        log_error(q4k ? "GGML Q4_K unpack failed" : "GGML Q4_0 unpack failed");
         return status_t::failure;
     }
     const size_t packed_bytes
             = static_cast<size_t>(N) * static_cast<size_t>(K / 2);
     if (weight_capacity != packed_bytes) {
         std::memmove(static_cast<uint8_t *>(canon) + weight_capacity,
-                static_cast<uint8_t *>(canon) + packed_bytes, scale_bytes);
+                static_cast<uint8_t *>(canon) + packed_bytes, meta_bytes);
     }
 
-    apilog_info("GGML Q4_0 unpack: kept packed s4 N=", N, ", K=", K,
-            " packed_bytes=", packed_bytes, " capacity=", weight_capacity);
+    apilog_info(q4k ? "GGML Q4_K unpack: kept packed s4 N="
+                    : "GGML Q4_0 unpack: kept packed s4 N=",
+            N, ", K=", K, " packed_bytes=", packed_bytes,
+            " capacity=", weight_capacity);
 
     *out_s8 = static_cast<int8_t *>(canon);
     *out_scales = static_cast<uint8_t *>(canon) + weight_capacity;
@@ -397,8 +471,13 @@ int64_t ggml_unpack_weight_buffer_size(
     if (N <= 0 || K <= 0 || K % 32 != 0) return -1;
     int64_t ng = K / 32;
     int64_t scale_bytes = N * ng * (use_bf16_scales ? 2 : 4);
-    if (ggml_type == 8) return N * K + scale_bytes;
-    if (ggml_type == 2) return N * (K / 2) + scale_bytes;
+    if (ggml_type == kGgmlBlockQ8_0) return N * K + scale_bytes;
+    if (ggml_type == kGgmlBlockQ4_0) return N * (K / 2) + scale_bytes;
+    if (ggml_type == kGgmlBlockQ4_K) {
+        // S and M' are both f32.  use_bf16_scales is ignored for this type.
+        const int64_t f32_scale_bytes = static_cast<int64_t>(N) * ng * 4;
+        return N * (K / 2) + f32_scale_bytes + f32_scale_bytes;
+    }
     return -1;
 }
 
@@ -407,8 +486,18 @@ int ggml_unpack_weight_buffer(const void *weight_data, int ggml_type,
         void **scl_ptr, void *unpack_buffer, bool is_superblock) {
     if (!weight_data || !wei_ptr || !scl_ptr) return -1;
     if (N <= 0 || K <= 0 || K % 32 != 0) return -1;
-    // block_q4_0x8 interleaves 8 rows.  It is a Q4_0 layout only.
-    if (is_superblock && (ggml_type != 2 || N % 8 != 0)) return -1;
+    // block_q4_0x8 and block_q4_Kx8 both interleave 8 rows.
+    if (is_superblock
+            && (ggml_type != kGgmlBlockQ4_0 && ggml_type != kGgmlBlockQ4_K))
+        return -1;
+    if (is_superblock && N % 8 != 0) return -1;
+    if (ggml_type == kGgmlBlockQ4_K && K % 256 != 0) return -1;
+    // Q4_K's unpacked image is the nibble bytes plus two scale tables, which
+    // is larger than the 144-byte source block.  Writing that into the source
+    // overruns it.  Q4_0 and Q8_0 still allow the legacy in-place form.
+    if (ggml_type == kGgmlBlockQ4_K && unpack_buffer == nullptr) return -1;
+    // Q4_K keeps S in f32 so M' = M-8*S uses the scale the kernel multiplies.
+    if (ggml_type == kGgmlBlockQ4_K) use_bf16_scales = false;
 
     // If no destination is supplied, preserve the legacy inplace behavior.
     // A supplied destination lets callers keep packed GGML bytes immutable.
@@ -417,12 +506,13 @@ int ggml_unpack_weight_buffer(const void *weight_data, int ggml_type,
     const int64_t ng = K / 32;
     const int64_t num_blocks = N * ng;
 
-    const int64_t weight_bytes = (ggml_type == 8) ? N * K : N * (K / 2);
+    const int64_t weight_bytes
+            = (ggml_type == kGgmlBlockQ8_0) ? N * K : N * (K / 2);
     *wei_ptr = static_cast<int8_t *>(buf);
     *scl_ptr = static_cast<void *>(static_cast<int8_t *>(buf) + weight_bytes);
 
     // Q8_0: copy int8 weights directly, one scale per group.
-    if (ggml_type == 8) {
+    if (ggml_type == kGgmlBlockQ8_0) {
         auto *blocks = static_cast<const block_q8_0 *>(weight_data);
 
         std::unique_ptr<int8_t[]> tmp_weights(new int8_t[N * K]);
@@ -474,7 +564,7 @@ int ggml_unpack_weight_buffer(const void *weight_data, int ggml_type,
     // Q4_0 superblock (block_q4_0x8): 8 rows interleaved.  Nibbles are already
     // signed, so unlike plain Q4_0 this path does not subtract the +8 bias.
     // The s4 GEMM sign-extends those nibbles.
-    if (ggml_type == 2 && is_superblock) {
+    if (ggml_type == kGgmlBlockQ4_0 && is_superblock) {
         const int64_t weight_q4_bytes = N * (K / 2);
         const size_t scale_bytes = num_blocks
                 * (use_bf16_scales ? sizeof(uint16_t) : sizeof(float));
@@ -522,10 +612,136 @@ int ggml_unpack_weight_buffer(const void *weight_data, int ggml_type,
         return 0;
     }
 
+    // Q4_K superblock (block_q4_Kx8).  Same signed nibble and M-8*S offset
+    // as plain Q4_K.  Only the location of each value differs, and unlike
+    // Q4_0x8 the quants are still unsigned.
+    if (ggml_type == kGgmlBlockQ4_K && is_superblock) {
+        const int64_t weight_q4_bytes = N * (K / 2);
+        const size_t scale_bytes = static_cast<size_t>(num_blocks)
+                * (use_bf16_scales ? sizeof(uint16_t) : sizeof(float));
+        const size_t min_bytes
+                = static_cast<size_t>(num_blocks) * sizeof(float);
+        std::unique_ptr<int8_t[]> weight_tmp(new int8_t[weight_q4_bytes]);
+        std::unique_ptr<uint8_t[]> scale_tmp(new uint8_t[scale_bytes]);
+        std::unique_ptr<uint8_t[]> min_tmp(new uint8_t[min_bytes]);
+        auto *blocks = static_cast<const block_q4_Kx8 *>(weight_data);
+        const int64_t blocks_per_row = K / 256;
+
+#pragma omp parallel for schedule(static)
+        for (int64_t r8 = 0; r8 < N / 8; r8++) {
+            for (int64_t b = 0; b < blocks_per_row; b++) {
+                block_q4_Kx8 local;
+                std::memcpy(&local, &blocks[r8 * blocks_per_row + b],
+                        sizeof(local));
+                for (int ri = 0; ri < 8; ri++) {
+                    const int64_t row = r8 * 8 + ri;
+                    const float d = fp16_to_fp32(local.d[ri]);
+                    const float dmin = fp16_to_fp32(local.dmin[ri]);
+                    for (int sb = 0; sb < 8; sb++) {
+                        int sc6 = 0;
+                        int mn6 = 0;
+                        q4k_scale_min(&local.scales[sb * 12], ri, sc6, mn6);
+                        const float scale = d * static_cast<float>(sc6);
+                        const float min = dmin * static_cast<float>(mn6);
+                        const float min_signed = min - 8.0f * scale;
+                        const int64_t g = b * 8 + sb;
+                        write_scale(scale_tmp.get(), use_bf16_scales,
+                                g * N + row, scale);
+                        static_cast<float *>(
+                                static_cast<void *>(min_tmp.get()))[g * N + row]
+                                = min_signed;
+
+                        uint8_t q[32];
+                        const int chunk = sb / 2;
+                        const bool high = (sb & 1) != 0;
+                        for (int l = 0; l < 32; l++) {
+                            // Row ri, qs byte p, 8-byte interleave.
+                            const int p = 32 * chunk + l;
+                            const uint8_t byte
+                                    = local.qs[(p / 8) * 64 + ri * 8 + p % 8];
+                            q[l] = high ? static_cast<uint8_t>(byte >> 4)
+                                        : static_cast<uint8_t>(byte & 0x0F);
+                        }
+                        store_signed_q4_group(
+                                &weight_tmp[(row * K + g * 32) / 2], q);
+                    }
+                }
+            }
+        }
+
+        uint8_t *raw_buf = static_cast<uint8_t *>(buf);
+        std::memcpy(raw_buf, weight_tmp.get(),
+                static_cast<size_t>(weight_q4_bytes));
+        std::memcpy(raw_buf + weight_q4_bytes, scale_tmp.get(), scale_bytes);
+        std::memcpy(raw_buf + weight_q4_bytes + scale_bytes, min_tmp.get(),
+                min_bytes);
+        return 0;
+    }
+
+    // Q4_K (block_q4_K): unsigned nibbles.  Store q-8 and the f32 offset
+    // M-8*S.  The s4 GEMM sign-extends the stored nibble.
+    if (ggml_type == kGgmlBlockQ4_K) {
+        const int64_t weight_q4_bytes = N * (K / 2);
+        const size_t scale_bytes = static_cast<size_t>(num_blocks)
+                * (use_bf16_scales ? sizeof(uint16_t) : sizeof(float));
+        std::unique_ptr<int8_t[]> weight_tmp(new int8_t[weight_q4_bytes]);
+        std::unique_ptr<uint8_t[]> scale_tmp(new uint8_t[scale_bytes]);
+        const size_t min_bytes
+                = static_cast<size_t>(num_blocks) * sizeof(float);
+        std::unique_ptr<uint8_t[]> min_tmp(new uint8_t[min_bytes]);
+        auto *blocks = static_cast<const block_q4_K *>(weight_data);
+        const int64_t blocks_per_row = K / 256;
+
+#pragma omp parallel for schedule(static)
+        for (int64_t row = 0; row < N; row++) {
+            for (int64_t b = 0; b < blocks_per_row; b++) {
+                block_q4_K local;
+                std::memcpy(&local, &blocks[row * blocks_per_row + b],
+                        sizeof(local));
+                const float d = fp16_to_fp32(local.d);
+                const float dmin = fp16_to_fp32(local.dmin);
+                for (int sb = 0; sb < 8; sb++) {
+                    int sc6 = 0;
+                    int mn6 = 0;
+                    q4k_scale_min(local.scales, sb, sc6, mn6);
+                    const float scale = d * static_cast<float>(sc6);
+                    const float min = dmin * static_cast<float>(mn6);
+                    // Signed nibble is q-8, so the remaining offset is M-8*S.
+                    const float min_signed = min - 8.0f * scale;
+                    const int64_t g = b * 8 + sb;
+                    write_scale(scale_tmp.get(), use_bf16_scales, g * N + row,
+                            scale);
+                    static_cast<float *>(
+                            static_cast<void *>(min_tmp.get()))[g * N + row]
+                            = min_signed;
+
+                    uint8_t q[32];
+                    const int chunk = sb / 2;
+                    const bool high = (sb & 1) != 0;
+                    for (int l = 0; l < 32; l++) {
+                        const uint8_t byte = local.qs[32 * chunk + l];
+                        q[l] = high ? static_cast<uint8_t>(byte >> 4)
+                                    : static_cast<uint8_t>(byte & 0x0F);
+                    }
+                    store_signed_q4_group(
+                            &weight_tmp[(row * K + g * 32) / 2], q);
+                }
+            }
+        }
+
+        uint8_t *raw_buf = static_cast<uint8_t *>(buf);
+        std::memcpy(raw_buf, weight_tmp.get(),
+                static_cast<size_t>(weight_q4_bytes));
+        std::memcpy(raw_buf + weight_q4_bytes, scale_tmp.get(), scale_bytes);
+        std::memcpy(raw_buf + weight_q4_bytes + scale_bytes, min_tmp.get(),
+                min_bytes);
+        return 0;
+    }
+
     // Q4_0: unsigned nibbles 0-15, subtract 8 to convert to signed S4.  The
     // s4 GEMM sign-extends, so the bias MUST come off here or every code
     // lands 8 away from its true value.
-    if (ggml_type == 2) {
+    if (ggml_type == kGgmlBlockQ4_0) {
         const int64_t weight_q4_bytes = N * (K / 2);
         const size_t scale_bytes = num_blocks
                 * (use_bf16_scales ? sizeof(uint16_t) : sizeof(float));
@@ -586,7 +802,9 @@ static status_t unpack_ggml_raw_s8_and_cache(const void *&weight, int N, int K,
     // Deterministic from (N, K, ggml type): recomputed on cache hit so scale
     // offsets and wei_buffer_capacity_bytes stay consistent without storing
     // them in the key.  Q4_0 sizes the s8×s4 blocked image; Q8_0 sizes s8.
-    const bool keep_packed_s4 = ggml_type == 2;
+    const bool keep_packed_s4
+            = ggml_type == kGgmlBlockQ4_0 || ggml_type == kGgmlBlockQ4_K;
+    const bool q4k = ggml_type == kGgmlBlockQ4_K;
     const size_t weight_capacity = keep_packed_s4
             ? ggml_s4_sym_quant_weight_capacity(N, K)
             : ggml_sym_quant_weight_capacity(N, K);
@@ -655,6 +873,20 @@ static status_t unpack_ggml_raw_s8_and_cache(const void *&weight, int N, int K,
     params.packing.pack_format_b = 0;
     params.packing.is_superblock = false;
     params.dtypes.wei = keep_packed_s4 ? data_type_t::s4 : data_type_t::s8;
+    // Q4_K must stay identifiable after the packed flag is cleared: the s4
+    // kernel reads wei_zp as the per-group offset only while ggml_type is 1.
+    if (q4k) {
+        params.packing.ggml_type = 1;
+        const size_t scale_bytes
+                = ggml_scale_bytes(N, K, /*use_bf16_scales=*/false);
+        params.quant_params.wei_zp.buff
+                = static_cast<const uint8_t *>(cached_buffer) + weight_capacity
+                + scale_bytes;
+        params.quant_params.wei_zp.dt = data_type_t::f32;
+    } else {
+        params.packing.ggml_type = 0;
+        params.quant_params.wei_zp = {};
+    }
     // This function runs only for pack_format_b == 1 (GGML int4/int8). The
     // caller's packed buffer stays read-only; this new buffer is writable and
     // sized for the AOCL blocked image, so the reorder may use it in place.
@@ -663,9 +895,13 @@ static status_t unpack_ggml_raw_s8_and_cache(const void *&weight, int N, int K,
     params.wei_buffer_capacity_bytes = weight_capacity;
     params.quant_params.wei_scale.buff = static_cast<const void *>(
             static_cast<const uint8_t *>(cached_buffer) + weight_capacity);
-    params.quant_params.wei_scale.dt = data_type_t::bf16;
+    params.quant_params.wei_scale.dt
+            = q4k ? data_type_t::f32 : data_type_t::bf16;
     const int64_t ng = static_cast<int64_t>(K) / 32;
     params.quant_params.wei_scale.dims = {ng, static_cast<int64_t>(N)};
+    if (q4k) {
+        params.quant_params.wei_zp.dims = {ng, static_cast<int64_t>(N)};
+    }
     // Symmetric-int8 compute discriminator.  Q8_0 is a plain per-group s8
     // matrix; Q4_0 is packed s4 with the same per-group scales.  This is the
     // field the AOCL DLP sym-quant PREPACK gate keys on (wei s8 or s4,
@@ -678,7 +914,8 @@ static status_t unpack_ggml_raw_s8_and_cache(const void *&weight, int N, int K,
 
     apilog_info("GGML raw unpack output: weight_capacity=", weight_capacity,
             ", scale_groups=", ng, ", wei=", (keep_packed_s4 ? "s4" : "s8"),
-            ", scale_dt=bf16, mem_format=n, weight_cache_type=2");
+            ", scale_dt=", (q4k ? "f32" : "bf16"),
+            ", mem_format=n, weight_cache_type=2");
     return status_t::success;
 }
 
@@ -705,15 +942,40 @@ status_t unpack_ggml_weights_and_cache(const void *&weight, int N, int K,
                 dtype_info(params.dtypes.wei));
         return status_t::failure;
     }
-    const int ggml_type = (params.dtypes.wei == data_type_t::s4) ? 2 : 8;
+    int ggml_type = (params.dtypes.wei == data_type_t::s4) ? kGgmlBlockQ4_0
+                                                           : kGgmlBlockQ8_0;
     const bool is_superblock = params.packing.is_superblock;
+    if (params.packing.ggml_type == 1) {
+        if (params.dtypes.wei != data_type_t::s4
+                && params.dtypes.wei != data_type_t::none) {
+            log_error("GGML Q4_K requires an s4 weight, got ",
+                    dtype_info(params.dtypes.wei));
+            return status_t::failure;
+        }
+        if (K % 256 != 0) {
+            log_error("GGML Q4_K requires K divisible by 256, got K=", K);
+            return status_t::failure;
+        }
+        // The unpack writes N rows of K, element (n, k) at n*K + k.  The s4
+        // packer reaches that element only for a transposed weight with
+        // ldb == K.  Any other trans or ldb reads a different element, or
+        // past the allocation when ldb is larger than K.
+        if (trans != 't' || ldb != K) {
+            log_error(
+                    "GGML Q4_K requires a transposed weight with ldb=K, got "
+                    "trans=",
+                    trans, ", ldb=", ldb, ", K=", K);
+            return status_t::failure;
+        }
+        ggml_type = kGgmlBlockQ4_K;
+    }
     if (is_superblock && params.dtypes.wei != data_type_t::s4) {
-        log_error("GGML is_superblock requires an s4 (Q4_0) weight, got ",
+        log_error("GGML is_superblock requires an s4 weight, got ",
                 dtype_info(params.dtypes.wei));
         return status_t::failure;
     }
     if (is_superblock && (N % 8) != 0) {
-        log_error("GGML Q4_0 superblock requires N divisible by 8, got N=", N);
+        log_error("GGML superblock requires N divisible by 8, got N=", N);
         return status_t::failure;
     }
 

@@ -1350,7 +1350,7 @@ status_t execute_w4(
                                 C + mo * N, static_cast<int>(N),
                                 static_cast<int>(K),
                                 static_cast<int>(p.gate_up_group_size),
-                                static_cast<int>(gate_up_oc));
+                                static_cast<int>(gate_up_oc), nullptr, nullptr);
                         fn(A + mo * K, static_cast<int>(K), B1,
                                 As_tile + mo * gate_src_groups, Bs1,
                                 custom_kernel::ScaleKind::kF32, nullptr,
@@ -1358,7 +1358,7 @@ status_t execute_w4(
                                 C + mo * N + compact_cols_per_gate_block,
                                 static_cast<int>(N), static_cast<int>(K),
                                 static_cast<int>(p.gate_up_group_size),
-                                static_cast<int>(gate_up_oc));
+                                static_cast<int>(gate_up_oc), nullptr, nullptr);
                         mo += mr;
                     }
                 });
@@ -1399,7 +1399,8 @@ status_t execute_w4(
                     custom_kernel::ScaleKind::kF32, nullptr,
                     custom_kernel::BiasKind::none, C + mo * block_n,
                     static_cast<int>(block_n), nullptr, 0, static_cast<int>(N),
-                    static_cast<int>(p.down_group_size), static_cast<int>(K));
+                    static_cast<int>(p.down_group_size), static_cast<int>(K),
+                    nullptr, nullptr);
             mo += mr;
         }
     };

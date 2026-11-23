@@ -49,7 +49,8 @@ int64_t ggml_unpack_weight_buffer_size(
  * If @p unpack_buffer is null, the caller's @p weight_data buffer is
  * reinterpreted as both the source of packed blocks and the destination of the
  * unpacked layout. Otherwise, @p unpack_buffer receives the unpacked layout and
- * @p weight_data remains unchanged.
+ * @p weight_data remains unchanged.  Q4_K (ggml_type 12) rejects a null
+ * destination: its unpacked image is larger than the packed block.
  *
  * On success:
  *   *wei_ptr  -> start of the buffer (int8 weight bytes)
@@ -58,8 +59,9 @@ int64_t ggml_unpack_weight_buffer_size(
  * Plain Q4_0 weights are emitted as packed SIGNED nibbles: the GGML +8 bias
  * is removed here so the s4 GEMM sign-extends the true code.  Superblock
  * Q4_0 (block_q4_0x8, @p is_superblock) already stores signed nibbles, so
- * that bias is left in place.  Superblock requires ggml_type 2 and N
- * divisible by 8.
+ * that bias is left in place.  Superblock Q4_K (block_q4_Kx8, ggml_type 12
+ * and @p is_superblock) keeps unsigned nibbles and stores q-8, with the
+ * same f32 offset as plain Q4_K.  Superblock requires N divisible by 8.
  *
  * @return 0 on success, -1 on error.
  */
@@ -114,8 +116,9 @@ status_t validate_ggml_packed_inputs(const matmul_params &params,
  * carried by the fused-MoE Op2 scratch params) selects Q8_0, which unpacks
  * straight to s8, and s4 selects Q4_0, which stays packed signed s4 (two
  * nibbles per byte).  Any other weight dtype is rejected.
- * params.packing.is_superblock selects the 8-row block_q4_0x8 layout for an
- * s4 weight; it is rejected for every other dtype.
+ * params.packing.is_superblock selects the 8-row interleaved layout for an
+ * s4 weight: block_q4_0x8, or block_q4_Kx8 when ggml_type is 1.  It is
+ * rejected for every other dtype, and when N is not divisible by 8.
  *
  * This function never reorders.  On success @p weight points at a freshly
  * allocated raw matrix — s8 [N, K] for Q8_0, packed s4 [N, K/2] for Q4_0 —

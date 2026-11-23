@@ -487,6 +487,24 @@ int group_matmul_algo_select(const std::vector<char> &layout,
                                      /*allow_prepacked_b=*/true)
             && n_tile_supported(M, N, params, num_ops_eff, fused_act);
 
+    // Q4_K's offset is applied only by the s4 kernel on ALGO 3.  Pin that
+    // route so AUTO cannot send the call to an executor that drops it.
+    for (int i = 0; i < num_ops_eff && i < static_cast<int>(params.size());
+            ++i) {
+        if (i < static_cast<int>(M.size()) && M[static_cast<size_t>(i)] > 0
+                && params[static_cast<size_t>(i)].packing.ggml_type == 1) {
+            if (!n_tile_safe) {
+                log_error(
+                        "group_matmul: Q4_K requires the N-tile s4 kernel, "
+                        "and this call is outside that shape");
+                // Not 3: the dispatcher rejects any Q4_K call that is not
+                // ALGO 3, instead of running a kernel with the wrong layout.
+                return 0;
+            }
+            return 3;
+        }
+    }
+
     // Manual generic override: ZENDNNL_GRP_MATMUL_ALGO={1,2,3,5,6}.
     //   ALGO 2 (M-tile): needs m_tile_safe (row-major, uniform dtypes).
     //   ALGO 3 (N-tile): needs n_tile_safe (+ unpacked B and slice-safe

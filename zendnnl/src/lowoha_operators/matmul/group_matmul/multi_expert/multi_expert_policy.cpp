@@ -47,8 +47,8 @@ bool grp_matmul_auto_algo3_quant_expert(const matmul_params &p, int K, int N) {
     if (K <= 0 || N <= 0 || !get_grp_matmul_custom_kernel()
             || !p.postop_.empty() || p.dtypes.src == data_type_t::u8
             || p.dtypes.compute != data_type_t::s8 || q.src_zp.buff != nullptr
-            || q.wei_zp.buff != nullptr || q.dst_scale.buff != nullptr
-            || q.dst_zp.buff != nullptr) {
+            || (q.wei_zp.buff != nullptr && !is_q4k_offset(p))
+            || q.dst_scale.buff != nullptr || q.dst_zp.buff != nullptr) {
         return false;
     }
     const auto v = grp_matmul_ck_weight_variant(p.dtypes.src, p.dtypes.wei,

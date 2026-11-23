@@ -171,14 +171,15 @@ static inline __m512 load_bias_f32_s4(
 // Act ∈ {none, swiglu_oai_mul, silu_and_mul, gelu_and_mul}.  `noinline`
 // keeps each specialization reachable through a function pointer.
 template <int MR, int NV, ActivationKind Act, S4SourceKind Source,
-        S4OutputKind Output, S4SrcScaleGranularity SrcScale>
+        S4OutputKind Output, S4SrcScaleGranularity SrcScale, bool HasOffset>
 ZENDNNL_TARGET_NOINLINE("avx512f,avx512vnni,avx512bw,avx512vl,avx512dq,fma")
 static void ukernel_impl_s4(const uint8_t *__restrict A, int lda,
         const int8_t *__restrict Bpacked, const void *__restrict src_scale,
         const void *__restrict wei_scale, ScaleKind scale_kind,
         const void *__restrict bias, BiasKind bias_kind,
         void *__restrict Cout_void, int ldc, void *__restrict Cout_tight_void,
-        int ldc_tight, int K, int group_size, int wei_scale_grp_stride) {
+        int ldc_tight, int K, int group_size, int wei_scale_grp_stride,
+        const void *__restrict wei_zp, const float *__restrict act_group_sum) {
 
     static_assert(NV == 2 || NV == 4, "NV must be 2 or 4");
     static_assert(Act == ActivationKind::none || (NV % 2 == 0),
@@ -326,17 +327,73 @@ static void ukernel_impl_s4(const uint8_t *__restrict A, int lda,
             if constexpr (SrcScale == S4SrcScaleGranularity::kPerGroup) {
                 ssc = _mm512_set1_ps(src_scale_at(m * G + g));
             }
+            if constexpr (!HasOffset) {
+                // Q4_0 / DA8W4. Same accumulate as before the Q4_K offset:
+                // one fmadd of the dot and the weight scale. The offset
+                // arguments are not read.
+                (void)wei_zp;
+                (void)act_group_sum;
 #pragma GCC unroll 4
-            for (int v = 0; v < NV; ++v) {
-                __m512 f = _mm512_cvtepi32_ps(sacc[m][v]);
-                __m512 scale = wscale_v[v];
-                if constexpr (SrcScale == S4SrcScaleGranularity::kPerGroup) {
-                    scale = _mm512_maskz_mul_ps(
-                            _mm512_cmpneq_epi32_mask(
-                                    sacc[m][v], _mm512_setzero_si512()),
-                            ssc, scale);
+                for (int v = 0; v < NV; ++v) {
+                    __m512 f = _mm512_cvtepi32_ps(sacc[m][v]);
+                    __m512 scale = wscale_v[v];
+                    if constexpr (SrcScale
+                            == S4SrcScaleGranularity::kPerGroup) {
+                        scale = _mm512_maskz_mul_ps(
+                                _mm512_cmpneq_epi32_mask(
+                                        sacc[m][v], _mm512_setzero_si512()),
+                                ssc, scale);
+                    }
+                    facc[m][v] = _mm512_fmadd_ps(f, scale, facc[m][v]);
                 }
-                facc[m][v] = _mm512_fmadd_ps(f, scale, facc[m][v]);
+            } else {
+                // Q4_K: weight = S*(q-8) - M'. Subtract M' * sum(a) before
+                // the source scale. A zero activation sum skips that product.
+                float act_sum = 0.0f;
+                if (act_group_sum != nullptr) {
+                    act_sum = act_group_sum[static_cast<size_t>(m) * G + g];
+                } else {
+                    const uint8_t *arow = A + static_cast<size_t>(m) * lda
+                            + static_cast<size_t>(g) * group_size;
+                    int sum = 0;
+                    for (int kk = 0; kk < group_size; ++kk) {
+                        if constexpr (Source == S4SourceKind::kS8) {
+                            sum += static_cast<int8_t>(arow[kk]);
+                        } else {
+                            sum += static_cast<int>(arow[kk]) - 128;
+                        }
+                    }
+                    act_sum = static_cast<float>(sum);
+                }
+                const bool apply_offset = act_sum != 0.0f;
+                const __m512 act_sum_v = _mm512_set1_ps(act_sum);
+#pragma GCC unroll 4
+                for (int v = 0; v < NV; ++v) {
+                    __m512 f = _mm512_cvtepi32_ps(sacc[m][v]);
+                    __m512 term;
+                    if constexpr (SrcScale
+                            == S4SrcScaleGranularity::kPerGroup) {
+                        const __mmask16 dot_nz = _mm512_cmpneq_epi32_mask(
+                                sacc[m][v], _mm512_setzero_si512());
+                        term = _mm512_maskz_mul_ps(dot_nz, f, wscale_v[v]);
+                    } else {
+                        term = _mm512_mul_ps(f, wscale_v[v]);
+                    }
+                    if (apply_offset) {
+                        __m512 min_v = load_scale16_s4(wei_zp,
+                                static_cast<size_t>(g) * wei_scale_grp_stride
+                                        + static_cast<size_t>(v) * 16,
+                                scale_kind);
+                        term = _mm512_fnmadd_ps(min_v, act_sum_v, term);
+                    }
+                    if constexpr (SrcScale
+                            == S4SrcScaleGranularity::kPerGroup) {
+                        const __mmask16 term_nz = _mm512_cmp_ps_mask(
+                                term, _mm512_setzero_ps(), _CMP_NEQ_OQ);
+                        term = _mm512_maskz_mul_ps(term_nz, ssc, term);
+                    }
+                    facc[m][v] = _mm512_add_ps(facc[m][v], term);
+                }
             }
         }
     }
@@ -566,110 +623,134 @@ static void w4a8_unpacked_store_impl(int MR, const float *facc,
 // adds the U8/BF16 set plus U8/F32 for act=none; gated F32 is never emitted.
 
 template <ActivationKind Act, S4SourceKind Source, S4OutputKind Output,
-        S4SrcScaleGranularity SrcScale>
+        S4SrcScaleGranularity SrcScale, bool HasOffset>
 static w4a8_ukernel_fn_t select_s4_nv2(int MR) {
     switch (MR) {
-        case 1: return ukernel_impl_s4<1, 2, Act, Source, Output, SrcScale>;
-        case 2: return ukernel_impl_s4<2, 2, Act, Source, Output, SrcScale>;
-        case 3: return ukernel_impl_s4<3, 2, Act, Source, Output, SrcScale>;
-        case 4: return ukernel_impl_s4<4, 2, Act, Source, Output, SrcScale>;
-        case 5: return ukernel_impl_s4<5, 2, Act, Source, Output, SrcScale>;
-        case 6: return ukernel_impl_s4<6, 2, Act, Source, Output, SrcScale>;
+        case 1:
+            return ukernel_impl_s4<1, 2, Act, Source, Output, SrcScale,
+                    HasOffset>;
+        case 2:
+            return ukernel_impl_s4<2, 2, Act, Source, Output, SrcScale,
+                    HasOffset>;
+        case 3:
+            return ukernel_impl_s4<3, 2, Act, Source, Output, SrcScale,
+                    HasOffset>;
+        case 4:
+            return ukernel_impl_s4<4, 2, Act, Source, Output, SrcScale,
+                    HasOffset>;
+        case 5:
+            return ukernel_impl_s4<5, 2, Act, Source, Output, SrcScale,
+                    HasOffset>;
+        case 6:
+            return ukernel_impl_s4<6, 2, Act, Source, Output, SrcScale,
+                    HasOffset>;
         default: return nullptr;
     }
 }
 
 template <ActivationKind Act, S4SourceKind Source, S4OutputKind Output,
-        S4SrcScaleGranularity SrcScale>
+        S4SrcScaleGranularity SrcScale, bool HasOffset>
 static w4a8_ukernel_fn_t select_s4_nv4(int MR) {
     switch (MR) {
-        case 1: return ukernel_impl_s4<1, 4, Act, Source, Output, SrcScale>;
-        case 2: return ukernel_impl_s4<2, 4, Act, Source, Output, SrcScale>;
-        case 3: return ukernel_impl_s4<3, 4, Act, Source, Output, SrcScale>;
+        case 1:
+            return ukernel_impl_s4<1, 4, Act, Source, Output, SrcScale,
+                    HasOffset>;
+        case 2:
+            return ukernel_impl_s4<2, 4, Act, Source, Output, SrcScale,
+                    HasOffset>;
+        case 3:
+            return ukernel_impl_s4<3, 4, Act, Source, Output, SrcScale,
+                    HasOffset>;
         default: return nullptr;
     }
 }
 
 template <S4SourceKind Source, S4OutputKind Output,
-        S4SrcScaleGranularity SrcScale>
+        S4SrcScaleGranularity SrcScale, bool HasOffset>
 static w4a8_ukernel_fn_t select_s4_for_mode(
         int MR, int NV, ActivationKind act) {
     if (NV != 2 && NV != 4) { return nullptr; }
     if (MR < 1 || MR > max_mr_for_nv_s4(NV)) { return nullptr; }
     if constexpr (Output == S4OutputKind::kF32) {
         if (act != ActivationKind::none) { return nullptr; }
-        return NV == 2
-                ? select_s4_nv2<ActivationKind::none, Source, Output, SrcScale>(
-                          MR)
-                : select_s4_nv4<ActivationKind::none, Source, Output, SrcScale>(
-                          MR);
+        return NV == 2 ? select_s4_nv2<ActivationKind::none, Source, Output,
+                                 SrcScale, HasOffset>(MR)
+                       : select_s4_nv4<ActivationKind::none, Source, Output,
+                                 SrcScale, HasOffset>(MR);
     } else if (NV == 2) {
         switch (act) {
             case ActivationKind::none:
                 return select_s4_nv2<ActivationKind::none, Source, Output,
-                        SrcScale>(MR);
+                        SrcScale, HasOffset>(MR);
             case ActivationKind::swiglu_oai_mul:
                 return select_s4_nv2<ActivationKind::swiglu_oai_mul, Source,
-                        Output, SrcScale>(MR);
+                        Output, SrcScale, HasOffset>(MR);
             case ActivationKind::silu_and_mul:
                 return select_s4_nv2<ActivationKind::silu_and_mul, Source,
-                        Output, SrcScale>(MR);
+                        Output, SrcScale, HasOffset>(MR);
             case ActivationKind::gelu_and_mul:
                 return select_s4_nv2<ActivationKind::gelu_and_mul, Source,
-                        Output, SrcScale>(MR);
+                        Output, SrcScale, HasOffset>(MR);
             default: return nullptr;
         }
     } else {
         switch (act) {
             case ActivationKind::none:
                 return select_s4_nv4<ActivationKind::none, Source, Output,
-                        SrcScale>(MR);
+                        SrcScale, HasOffset>(MR);
             case ActivationKind::swiglu_oai_mul:
                 return select_s4_nv4<ActivationKind::swiglu_oai_mul, Source,
-                        Output, SrcScale>(MR);
+                        Output, SrcScale, HasOffset>(MR);
             case ActivationKind::silu_and_mul:
                 return select_s4_nv4<ActivationKind::silu_and_mul, Source,
-                        Output, SrcScale>(MR);
+                        Output, SrcScale, HasOffset>(MR);
             case ActivationKind::gelu_and_mul:
                 return select_s4_nv4<ActivationKind::gelu_and_mul, Source,
-                        Output, SrcScale>(MR);
+                        Output, SrcScale, HasOffset>(MR);
             default: return nullptr;
         }
     }
 }
 
-w4a8_ukernel_fn_t select_w4a8_ukernel(int MR, int NV, ActivationKind act,
-        S4SourceKind source, S4OutputKind output,
+template <bool HasOffset>
+static w4a8_ukernel_fn_t select_w4a8_ukernel_impl(int MR, int NV,
+        ActivationKind act, S4SourceKind source, S4OutputKind output,
         S4SrcScaleGranularity src_scale_granularity) {
     if (source == S4SourceKind::kS8 && output == S4OutputKind::kBf16) {
         return src_scale_granularity == S4SrcScaleGranularity::kPerGroup
                 ? select_s4_for_mode<S4SourceKind::kS8, S4OutputKind::kBf16,
-                          S4SrcScaleGranularity::kPerGroup>(MR, NV, act)
+                          S4SrcScaleGranularity::kPerGroup, HasOffset>(
+                          MR, NV, act)
                 : select_s4_for_mode<S4SourceKind::kS8, S4OutputKind::kBf16,
-                          S4SrcScaleGranularity::kPerToken>(MR, NV, act);
+                          S4SrcScaleGranularity::kPerToken, HasOffset>(
+                          MR, NV, act);
     }
     if (source == S4SourceKind::kU8Zp128 && output == S4OutputKind::kBf16) {
         return src_scale_granularity == S4SrcScaleGranularity::kPerGroup
                 ? select_s4_for_mode<S4SourceKind::kU8Zp128,
-                          S4OutputKind::kBf16,
-                          S4SrcScaleGranularity::kPerGroup>(MR, NV, act)
+                          S4OutputKind::kBf16, S4SrcScaleGranularity::kPerGroup,
+                          HasOffset>(MR, NV, act)
                 : select_s4_for_mode<S4SourceKind::kU8Zp128,
-                          S4OutputKind::kBf16,
-                          S4SrcScaleGranularity::kPerToken>(MR, NV, act);
+                          S4OutputKind::kBf16, S4SrcScaleGranularity::kPerToken,
+                          HasOffset>(MR, NV, act);
     }
     if (source == S4SourceKind::kU8Zp128 && output == S4OutputKind::kF32) {
         return src_scale_granularity == S4SrcScaleGranularity::kPerGroup
                 ? select_s4_for_mode<S4SourceKind::kU8Zp128, S4OutputKind::kF32,
-                          S4SrcScaleGranularity::kPerGroup>(MR, NV, act)
+                          S4SrcScaleGranularity::kPerGroup, HasOffset>(
+                          MR, NV, act)
                 : select_s4_for_mode<S4SourceKind::kU8Zp128, S4OutputKind::kF32,
-                          S4SrcScaleGranularity::kPerToken>(MR, NV, act);
+                          S4SrcScaleGranularity::kPerToken, HasOffset>(
+                          MR, NV, act);
     }
     if (source == S4SourceKind::kS8 && output == S4OutputKind::kF32) {
         return src_scale_granularity == S4SrcScaleGranularity::kPerGroup
                 ? select_s4_for_mode<S4SourceKind::kS8, S4OutputKind::kF32,
-                          S4SrcScaleGranularity::kPerGroup>(MR, NV, act)
+                          S4SrcScaleGranularity::kPerGroup, HasOffset>(
+                          MR, NV, act)
                 : select_s4_for_mode<S4SourceKind::kS8, S4OutputKind::kF32,
-                          S4SrcScaleGranularity::kPerToken>(MR, NV, act);
+                          S4SrcScaleGranularity::kPerToken, HasOffset>(
+                          MR, NV, act);
     }
     return nullptr;
 }
@@ -750,6 +831,15 @@ w4a8_unpacked_store_fn_t select_w4a8_unpacked_store(ActivationKind act,
                                S4SrcScaleGranularity::kPerGroup>(act)
                      : select_store_for_act<S4OutputKind::kBf16,
                                S4SrcScaleGranularity::kPerToken>(act);
+}
+
+w4a8_ukernel_fn_t select_w4a8_ukernel(int MR, int NV, ActivationKind act,
+        S4SourceKind source, S4OutputKind output,
+        S4SrcScaleGranularity src_scale_granularity, bool has_offset) {
+    return has_offset ? select_w4a8_ukernel_impl<true>(MR, NV, act, source,
+                                output, src_scale_granularity)
+                      : select_w4a8_ukernel_impl<false>(MR, NV, act, source,
+                                output, src_scale_granularity);
 }
 
 } // namespace custom_kernel

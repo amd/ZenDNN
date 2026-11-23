@@ -165,6 +165,8 @@ void CallContext::reset() {
             fn = nullptr;
     for (auto &fn : kernel_table_s4)
         fn = nullptr;
+    for (auto &fn : kernel_table_s4_offset)
+        fn = nullptr;
     for (auto &fn : kernel_table_mxfp4)
         fn = nullptr;
     // A stale `group_size` across a CallContext reuse would make the s4
@@ -470,6 +472,7 @@ status_t fill_kernel_table_f16_kblock(
 status_t fill_kernel_table_s4(int NV, ActivationKind act_kind,
         int src_scale_groups, OutputType dst_dt,
         w4a8_ukernel_fn_t (&kernel_table)[kMaxMR + 1],
+        w4a8_ukernel_fn_t (&kernel_table_offset)[kMaxMR + 1],
         S4SourceKind source = S4SourceKind::kS8) {
     const int max_mr = max_mr_for_nv_s4(NV);
     const S4SrcScaleGranularity granularity = src_scale_groups > 1
@@ -479,9 +482,15 @@ status_t fill_kernel_table_s4(int NV, ActivationKind act_kind,
             ? S4OutputKind::kF32
             : S4OutputKind::kBf16;
     for (int mr = 1; mr <= max_mr; ++mr) {
-        kernel_table[mr] = select_w4a8_ukernel(
-                mr, NV, act_kind, source, output, granularity);
-        if (kernel_table[mr] == nullptr) return status_t::failure;
+        kernel_table[mr] = select_w4a8_ukernel(mr, NV, act_kind, source, output,
+                granularity,
+                /*has_offset=*/false);
+        kernel_table_offset[mr] = select_w4a8_ukernel(mr, NV, act_kind, source,
+                output, granularity,
+                /*has_offset=*/true);
+        if (kernel_table[mr] == nullptr || kernel_table_offset[mr] == nullptr) {
+            return status_t::failure;
+        }
     }
     return status_t::success;
 }
@@ -1102,7 +1111,8 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
         }
     } else if (is_w4a8_variant(out.variant)) {
         if (fill_kernel_table_s4(out.NV, out.act_kind, out.src_scale_groups,
-                    dst_dt_for_variant(out.variant), out.kernel_table_s4)
+                    dst_dt_for_variant(out.variant), out.kernel_table_s4,
+                    out.kernel_table_s4_offset)
                 != status_t::success) {
             return refuse_w4a8("kernel_table_s4_fill_failed",
                     "no W4A8 microkernel for this (NV, act_kind) tuple");
@@ -2068,7 +2078,7 @@ inline void dispatch_tile_w4(const CallContext &ctx, int expert_idx, int M,
         int K, int n_tile, int col_start, const void *src, int lda,
         const void *bias, void *tight_dst, int tight_ldc,
         const void *src_scale_full, const void *wei_scale_full,
-        const int32_t *src_group_sums_full) {
+        const int32_t *src_group_sums_full, const void *wei_zp_full) {
 
     const W4Format fmt = w4_format_for_variant(ctx.variant);
     // A format whose pack holds its scales never reads the caller's.
@@ -2118,9 +2128,13 @@ inline void dispatch_tile_w4(const CallContext &ctx, int expert_idx, int M,
             || (ctx.act_kind == ActivationKind::silu_and_mul)
             || (ctx.act_kind == ActivationKind::gelu_and_mul);
 
-    if (dispatch_tile_s4_unpacked(ctx, M, K, n_tile, col_start, A_bytes, lda,
-                bias, Tight_bytes, tight_ldc, src_scale_full, wei_scale_full,
-                Bpacked_full, o_blk_stride_bytes, subtile_cols, is_gated_act))
+    // The unpacked s4 path has no per-group offset. Q4_K stays on the
+    // kernel below, which subtracts wei_zp.
+    if (wei_zp_full == nullptr
+            && dispatch_tile_s4_unpacked(ctx, M, K, n_tile, col_start, A_bytes,
+                    lda, bias, Tight_bytes, tight_ldc, src_scale_full,
+                    wei_scale_full, Bpacked_full, o_blk_stride_bytes,
+                    subtile_cols, is_gated_act))
         return;
 
     for (int sub_off = 0; sub_off < n_tile; sub_off += subtile_cols) {
@@ -2139,11 +2153,21 @@ inline void dispatch_tile_w4(const CallContext &ctx, int expert_idx, int M,
                 ? static_cast<const char *>(wei_scale_full)
                         + static_cast<size_t>(sub_col_base) * scale_elem_bytes
                 : nullptr;
+        const char *wei_zp_blk_base = wei_zp_full != nullptr
+                ? static_cast<const char *>(wei_zp_full)
+                        + static_cast<size_t>(sub_col_base) * scale_elem_bytes
+                : nullptr;
 
         int m_off = 0;
+        // One {MR, G} activation sum per row chunk. Every column block of
+        // this tile multiplies the same source, so the Q4_K offset reuses it.
+        static thread_local std::vector<float> act_group_sums;
         for (int c = 0; c < n_calls; ++c) {
             const int mr_now = (c < n_big) ? mr_base + 1 : mr_base;
-            const w4a8_ukernel_fn_t kfn = ctx.kernel_table_s4[mr_now];
+            const w4a8_ukernel_fn_t *table = wei_zp_full != nullptr
+                    ? ctx.kernel_table_s4_offset
+                    : ctx.kernel_table_s4;
+            const w4a8_ukernel_fn_t kfn = table[mr_now];
             const mxfp4_ukernel_fn_t mxfp4_kfn = ctx.kernel_table_mxfp4[mr_now];
 
             const uint8_t *A_chunk = A_bytes + static_cast<size_t>(m_off) * lda;
@@ -2169,6 +2193,27 @@ inline void dispatch_tile_w4(const CallContext &ctx, int expert_idx, int M,
                                               : sub_col_base))
                             * dst_elem_bytes_w4;
 
+            const float *act_group_sum = nullptr;
+            if (wei_zp_full != nullptr) {
+                const size_t nsum
+                        = static_cast<size_t>(mr_now) * static_cast<size_t>(G);
+                if (act_group_sums.size() < nsum) act_group_sums.resize(nsum);
+                for (int m = 0; m < mr_now; ++m) {
+                    const uint8_t *row = A_chunk + static_cast<size_t>(m) * lda;
+                    for (int g = 0; g < G; ++g) {
+                        const uint8_t *p
+                                = row + static_cast<size_t>(g) * ctx.group_size;
+                        int sum = 0;
+                        for (int kk = 0; kk < ctx.group_size; ++kk) {
+                            sum += static_cast<int8_t>(p[kk]);
+                        }
+                        act_group_sums[static_cast<size_t>(m) * G + g]
+                                = static_cast<float>(sum);
+                    }
+                }
+                act_group_sum = act_group_sums.data();
+            }
+
             for (int b = 0; b < n_blocks; ++b) {
                 const int8_t *Bpacked_blk = Bpacked_blk_base
                         + static_cast<size_t>(b) * o_blk_stride_bytes;
@@ -2179,6 +2224,11 @@ inline void dispatch_tile_w4(const CallContext &ctx, int expert_idx, int M,
                         : nullptr;
                 const void *wei_scale_blk = (wei_scale_blk_base != nullptr)
                         ? static_cast<const void *>(wei_scale_blk_base
+                                  + static_cast<size_t>(b) * ctx.pack_nr
+                                          * scale_elem_bytes)
+                        : nullptr;
+                const void *wei_zp_blk = wei_zp_blk_base != nullptr
+                        ? static_cast<const void *>(wei_zp_blk_base
                                   + static_cast<size_t>(b) * ctx.pack_nr
                                           * scale_elem_bytes)
                         : nullptr;
@@ -2207,13 +2257,15 @@ inline void dispatch_tile_w4(const CallContext &ctx, int expert_idx, int M,
                             wei_scale_blk, ctx.scale_kind, bias_blk,
                             ctx.bias_kind, /*Cout=*/nullptr, /*ldc=*/0, Row,
                             tight_ldc, K, ctx.group_size,
-                            ctx.wei_scale_grp_stride);
+                            ctx.wei_scale_grp_stride, wei_zp_blk,
+                            act_group_sum);
                 } else {
                     kfn(A_chunk, lda, Bpacked_blk, src_scale_chunk,
                             wei_scale_blk, ctx.scale_kind, bias_blk,
                             ctx.bias_kind, Row, tight_ldc,
                             /*Cout_tight=*/nullptr, /*ldc_tight=*/0, K,
-                            ctx.group_size, ctx.wei_scale_grp_stride);
+                            ctx.group_size, ctx.wei_scale_grp_stride,
+                            wei_zp_blk, act_group_sum);
                 }
             }
             m_off += mr_now;
@@ -2806,13 +2858,16 @@ bool fill_src_tables(CallContext &ctx, bool src_u8) {
     const OutputType dst_dt = dst_dt_for_variant(ctx.variant);
     if (is_w4a8_variant(ctx.variant)) {
         w4a8_ukernel_fn_t table[kMaxMR + 1] = {};
+        w4a8_ukernel_fn_t table_offset[kMaxMR + 1] = {};
         if (fill_kernel_table_s4(ctx.NV, ctx.act_kind, ctx.src_scale_groups,
-                    dst_dt, table,
+                    dst_dt, table, table_offset,
                     src_u8 ? S4SourceKind::kU8Zp128 : S4SourceKind::kS8)
                 != status_t::success)
             return false;
         std::copy(std::begin(table), std::end(table),
                 std::begin(ctx.kernel_table_s4));
+        std::copy(std::begin(table_offset), std::end(table_offset),
+                std::begin(ctx.kernel_table_s4_offset));
     } else {
         int8_ukernel_fn_t table[kMaxMR + 1] = {};
         if (fill_kernel_table_int8(ctx.NV, ctx.compute_int, ctx.act_kind,
@@ -2870,8 +2925,8 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
         int n_tile, int col_start, const void *src, int lda, const void *bias,
         void *tight_dst, int tight_ldc, const void *src_scale,
         const int32_t *src_zp, const void *wei_scale,
-        const Int8EpilogueConfig &int8_epilogue,
-        const int32_t *src_group_sums) {
+        const Int8EpilogueConfig &int8_epilogue, const int32_t *src_group_sums,
+        const void *wei_zp) {
 
     // ── Per-tile contract assertions (debug-only) ────────────────────
     //
@@ -2967,7 +3022,7 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
     if (is_w4a8_variant(ctx.variant)) {
         dispatch_tile_w4(ctx, expert_idx, M, K, n_tile, col_start, src, lda,
                 bias, tight_dst, tight_ldc, src_scale, wei_scale,
-                src_group_sums);
+                src_group_sums, wei_zp);
         return;
     }
     // FP16 fast path — native AVX-512-FP16.  Non-quant like the bf16

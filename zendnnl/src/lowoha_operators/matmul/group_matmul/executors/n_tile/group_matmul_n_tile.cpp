@@ -208,6 +208,9 @@ enum NTileAbort : int {
     // odd N, or a tight dst), so no expert was activated and dst still
     // holds raw (gate, up) GEMM output.
     kNTileAbortActRefused = 8,
+    // Q4_K's offset is applied only by the s4 custom kernel.  Falling
+    // through to AOCL would drop that term.
+    kNTileAbortQ4KNoCk = 9,
 };
 
 /// Human-readable reason for `apilog_error`, indexed by `NTileAbort`.
@@ -246,6 +249,9 @@ inline const char *ntile_abort_reason(int code) {
                    "no expert was activated and the destination still holds "
                    "raw (gate, up) GEMM output; check N parity, the dst "
                    "dtype, and that ldc >= N on every active expert";
+        case kNTileAbortQ4KNoCk:
+            return "Q4_K requires the s4 custom kernel so the per-group "
+                   "offset is applied; the call was not run on that kernel";
         default: return "unspecified N-tile abort";
     }
 }
@@ -292,10 +298,15 @@ struct HoistedSrcQuant {
     // means "cannot serve" and `execute_tile` falls back to AOCL.
     std::vector<float> src_scale_f32_owned;
     std::vector<float> wei_scale_f32_owned;
+    std::vector<float> wei_zp_f32_owned;
     float src_scale_f32_scalar = 0.0f;
     float wei_scale_f32_scalar = 0.0f;
     const void *src_scale_view = nullptr;
     const void *wei_scale_view = nullptr;
+    // Q4_K offset view.  Same dtype and column layout as wei_scale_view.
+    // Null unless packing.ggml_type == 1.
+    const void *wei_zp_view = nullptr;
+    bool q4k_offset = false;
     custom_kernel::Int8EpilogueConfig epilogue;
 
     // `s8_group_sums` of every row of `src_ptr`, for a format whose kernel
@@ -325,7 +336,7 @@ inline bool ck_int8_tile_dispatches(
     const bool asym_zp_ok = compute_int != custom_kernel::IntCompute::kU8_Asym
             || (h.src_zp.buff != nullptr && h.src_zp.dt == data_type_t::s32);
     return h.valid && h.src_scale_view != nullptr && h.wei_scale_view != nullptr
-            && asym_zp_ok;
+            && (!h.q4k_offset || h.wei_zp_view != nullptr) && asym_zp_ok;
 }
 
 // Return an f32 view of a quant-scale buffer of `count` elements.
@@ -687,6 +698,12 @@ struct GroupNTileContext {
     // L3 domains.
     bool split_team_over_experts = false;
 
+    // Q4_K wide swiglu: the s4 kernel writes the full matmul, and the
+    // existing activation pass folds it.  The in-register epilogue would
+    // leave the caller's upper half untouched, and refusing the kernel
+    // drops the weight offset.
+    bool defer_fused_act = false;
+
     // Substitute the column-sliced plain-s8 buffer.  Caller then sets
     // wei=s8 and runs aocl_dlp_blocked so run_dlp hits the per-tile
     // sym-quant LRU that ALGO 3 W4A8 prepack warms.
@@ -899,6 +916,7 @@ inline void GroupNTileContext::execute_tile(const GroupNTilePlan &plan, int e,
         const int32_t *src_zp_ptr = nullptr;
         const void *wei_scale_ptr = nullptr;
         const int32_t *src_group_sums_ptr = nullptr;
+        const void *wei_zp_ptr = nullptr;
         const custom_kernel::Int8EpilogueConfig default_int8_epilogue {};
         custom_kernel::Int8EpilogueConfig tile_epi = default_int8_epilogue;
         const custom_kernel::Int8EpilogueConfig *int8_epilogue = &tile_epi;
@@ -954,6 +972,7 @@ inline void GroupNTileContext::execute_tile(const GroupNTilePlan &plan, int e,
                 ck_src_ptr = h.src_ptr;
                 ck_src_lda = h.lda;
                 wei_scale_ptr = h.wei_scale_view;
+                wei_zp_ptr = h.wei_zp_view;
                 tile_epi = h.epilogue;
                 if (kctx->group_size == 32) {
                     tile_epi.group_k = 32;
@@ -1007,7 +1026,11 @@ inline void GroupNTileContext::execute_tile(const GroupNTilePlan &plan, int e,
             custom_kernel::dispatch_tile(*kctx, e, M[e], K[e], n_tile,
                     col_start, ck_src_ptr, ck_src_lda, bias[e], dst[e], ldc[e],
                     src_scale_ptr, src_zp_ptr, wei_scale_ptr, *int8_epilogue,
-                    src_group_sums_ptr);
+                    src_group_sums_ptr, wei_zp_ptr);
+            return;
+        }
+        if (params[e].packing.ggml_type == 1) {
+            signal_abort(kNTileAbortQ4KNoCk);
             return;
         }
         // Fall through to AOCL path — supported only for a NON-fused call.
@@ -1015,6 +1038,11 @@ inline void GroupNTileContext::execute_tile(const GroupNTilePlan &plan, int e,
         // `[CK INT8 BAD HOIST]` apilog warn for observability, so per-tile
         // logging here is unnecessary (and far too noisy inside the OMP
         // region).
+    }
+
+    if (params[e].packing.ggml_type == 1) {
+        signal_abort(kNTileAbortQ4KNoCk);
+        return;
     }
 
     // Weight: slice columns of op(B).  Shared by both the wide path
@@ -3520,7 +3548,7 @@ inline void execute_decode_d(
             // Every thread evaluated the same team-wide condition above, so
             // the whole team is inside this branch and the barrier below
             // cannot deadlock against a thread that took the abort arm.
-            if (plan.fused_epilogue && !ctx.use_custom
+            if (plan.fused_epilogue && (!ctx.use_custom || ctx.defer_fused_act)
                     && !plan.tight_fused_epilogue) {
 #pragma omp barrier
                 if (owns_tile) {
@@ -3588,7 +3616,8 @@ inline void execute_decode_dynamic(
     // threads), so every thread takes the same branch and reaches the
     // barrier together — no divergence/deadlock.  Mirrors the exact
     // condition StaticExpertTeams / Rounds use for their post-pass.
-    const bool needs_activation_pass = plan.fused_epilogue && !ctx.use_custom
+    const bool needs_activation_pass = plan.fused_epilogue
+            && (!ctx.use_custom || ctx.defer_fused_act)
             && !plan.tight_fused_epilogue;
 
     // Active experts, M-descending.  Heaviest-first + round-robin onto
@@ -3868,7 +3897,7 @@ inline void execute_rounds(const GroupNTilePlan &plan, GroupNTileContext &ctx) {
             // execute_decode_d for the detailed reasoning):
             //   * `ctx.use_custom` — in-register fused.
             //   * `plan.tight_fused_epilogue` — per-thread scratch + OOP.
-            if (plan.fused_epilogue && !ctx.use_custom
+            if (plan.fused_epilogue && (!ctx.use_custom || ctx.defer_fused_act)
                     && !plan.tight_fused_epilogue) {
 #pragma omp barrier
                 if (e >= 0) {
@@ -4511,8 +4540,20 @@ void n_tile_execute(const std::vector<char> &layout,
     // path, with the tight split-halves fallback above forcing
     // Sequential routing for silu/gelu so the activation is applied
     // correctly.
+    bool q4k_call = false;
+    for (int i = 0; i < num_ops && i < static_cast<int>(params.size()); ++i) {
+        if (M[i] > 0 && params[i].packing.ggml_type == 1) { q4k_call = true; }
+    }
+    // Wide swiglu keeps the s4 GEMM (the offset has nowhere else to go)
+    // and applies the activation afterwards, instead of the in-register
+    // epilogue that only fills the first half of a wide destination.
+    const bool q4k_wide_swiglu = q4k_call && fused_epilogue
+            && !tight_fused_epilogue
+            && fused_act == grp_matmul_gated_act_t::swiglu_oai_mul;
     const grp_matmul_gated_act_t custom_act
-            = fused_epilogue ? fused_act : grp_matmul_gated_act_t::none;
+            = (fused_epilogue && !q4k_wide_swiglu)
+            ? fused_act
+            : grp_matmul_gated_act_t::none;
     // DQ-INT8 discriminators derived from the call's params:
     //
     //   * `ck_dynamic_quant`     — taken from `params[0].dynamic_quant`.
@@ -4605,6 +4646,7 @@ void n_tile_execute(const std::vector<char> &layout,
             static_cast<size_t>(num_ops), false);
     bool any_ck_prepacked_b = false;
     bool any_aocl_prepacked_b = false;
+    bool any_q4k = false;
     bool any_unsupported_prepacked_b = false;
     for (int i = 0; i < num_ops; ++i) {
         if (M[i] <= 0 || static_cast<size_t>(i) >= params.size()
@@ -4873,6 +4915,14 @@ void n_tile_execute(const std::vector<char> &layout,
             uniform_raw_scale_dt = quant_scale_dtype_supported(expert_sdt)
                     && (ck_wei_scale_in_pack || expert_sdt == expert_wdt)
                     && expert_sdt == sdt;
+            // The s4 kernel reads wei_scale and the Q4_K offset with one
+            // scale kind.  A raw view is safe only when the offset table
+            // has that same dtype; otherwise both are widened to f32.
+            if (uniform_raw_scale_dt && params[e].packing.ggml_type == 1
+                    && params[e].quant_params.wei_zp.buff != nullptr
+                    && params[e].quant_params.wei_zp.dt != sdt) {
+                uniform_raw_scale_dt = false;
+            }
         }
         // DA8W8 weights are constant and their per-channel scale is weight-tied.
         // When a framework stores that scale as BF16, convert/cache it once as
@@ -4963,7 +5013,8 @@ void n_tile_execute(const std::vector<char> &layout,
     // Not const: a fused DQ-INT8 call may drop the whole call off the
     // custom kernel below if any active expert's int8 src hoist is not
     // CK-servable (see the fused-fallback guard before the OMP region).
-    bool use_custom = kctx.enabled && (!fused_epilogue || tight_fused_epilogue)
+    bool use_custom = kctx.enabled
+            && (!fused_epilogue || tight_fused_epilogue || q4k_wide_swiglu)
             && !ck_per_group;
 
     // Log the two distinct "kctx.enabled but use_custom=false" paths so
@@ -5304,6 +5355,19 @@ void n_tile_execute(const std::vector<char> &layout,
                     hoisted[e].wei_scale_view = ck_converted_wei_scale_view(e);
                 }
             }
+            hoisted[e].q4k_offset = params[e].packing.ggml_type == 1;
+            if (hoisted[e].q4k_offset) {
+                const auto &zp = params[e].quant_params.wei_zp;
+                hoisted[e].wei_zp_view = ck_scales_raw
+                        ? zp.buff
+                        : materialise_f32_wei_scale_cached(weight[e], zp.buff,
+                                  zp.dt, N[e], ck_scales_interleave,
+                                  is_weights_const[e],
+                                  effective_weight_cache_type(
+                                          params[e].weight_cache_type),
+                                  hoisted[e].wei_zp_f32_owned,
+                                  ck_wei_scale_groups(e));
+            }
             continue;
         }
 
@@ -5384,6 +5448,19 @@ void n_tile_execute(const std::vector<char> &layout,
                             hoisted[e].src_scale_f32_owned);
                     hoisted[e].wei_scale_view = ck_converted_wei_scale_view(e);
                 }
+            }
+            hoisted[e].q4k_offset = params[e].packing.ggml_type == 1;
+            if (hoisted[e].q4k_offset) {
+                const auto &zp = params[e].quant_params.wei_zp;
+                hoisted[e].wei_zp_view = ck_scales_raw
+                        ? zp.buff
+                        : materialise_f32_wei_scale_cached(weight[e], zp.buff,
+                                  zp.dt, N[e], ck_scales_interleave,
+                                  is_weights_const[e],
+                                  effective_weight_cache_type(
+                                          params[e].weight_cache_type),
+                                  hoisted[e].wei_zp_f32_owned,
+                                  ck_wei_scale_groups(e));
             }
         }
     }
@@ -5536,6 +5613,21 @@ void n_tile_execute(const std::vector<char> &layout,
         use_custom = false;
         force_aocl_prepacked_fallback = true;
     }
+    for (int e = 0; e < num_ops; ++e) {
+        if (M[e] > 0 && params[e].packing.ggml_type == 1) {
+            any_q4k = true;
+            break;
+        }
+    }
+    if (any_q4k && !use_custom) {
+        apilog_error(
+                "n_tile_execute: Q4_K requires the s4 custom kernel; "
+                "refusing the AOCL path because it drops the offset");
+        if (execution_path_out != nullptr) {
+            *execution_path_out = kGrpNTileErrUndefinedDst;
+        }
+        return;
+    }
 
     const bool w4a8_native_layout
             = resolve_w4a8_backend(/*group_schedule=*/3, algo)
@@ -5567,6 +5659,7 @@ void n_tile_execute(const std::vector<char> &layout,
             use_custom ? &kctx : nullptr, qwen_bf16_route, &abort_code,
             any_hoist ? &hoisted : nullptr, w4a8_s8_weights_in,
             w4a8_native_layout};
+    ctx.defer_fused_act = q4k_wide_swiglu && use_custom;
     ctx.split_team_over_experts = use_custom && auto_algo3_moe;
 
     // `is_int8` drives the planner's int8-variant per-thread N floor
@@ -5593,7 +5686,7 @@ void n_tile_execute(const std::vector<char> &layout,
     // demotions: an ALGO-3 MoE call, or weights only the kernel can read.
     const bool ck_required = use_custom
             && (auto_algo3_moe || any_ck_prepacked_b || any_in_place_b
-                    || mxfp4_ck_only);
+                    || any_q4k || mxfp4_ck_only);
     GroupNTilePlan plan = plan_group_n_tile(topo, algo, nr_align,
             fused_epilogue, use_custom, /*ck_int8_at_plan_time=*/is_int8_call,
             ck_required, M, N, K);
@@ -5815,6 +5908,12 @@ void n_tile_execute(const std::vector<char> &layout,
     bool run_prompt_tile
             = prompt_tile::should_execute_prompt_tile(kctx, use_custom,
                     rounds_strategy, prompt_phase, M, N, single_expert_prompt);
+    for (int e = 0; e < num_ops && run_prompt_tile; ++e) {
+        // The prompt-tile dispatcher does not carry the Q4_K offset.
+        if (M[e] > 0 && params[e].packing.ggml_type == 1) {
+            run_prompt_tile = false;
+        }
+    }
     // INT8 and W4A8 tiles read the hoisted A and its CK scale views; an
     // expert that `execute_tile` would send to AOCL, or a static U8xS8 one (its
     // per-tensor epilogue is not tiled), keeps the call on rounds.
@@ -6034,14 +6133,21 @@ void n_tile_execute(const std::vector<char> &layout,
                             "split. "
                             "Sequential CK wiring is a planned follow-up.");
                 }
-                if (any_ck_prepacked_b || any_in_place_b || mxfp4_ck_only) {
-                    apilog_error(
-                            "n_tile_execute: the plan routes a call whose "
-                            "weights only the custom kernel can read to the "
-                            "Sequential strategy, which reads them raw.  "
-                            "Failing the call.");
+                if (any_q4k || any_ck_prepacked_b || any_in_place_b
+                        || mxfp4_ck_only) {
+                    apilog_error(any_q4k
+                                    ? "n_tile_execute: Sequential drops the "
+                                      "Q4_K offset; failing the call"
+                                    : "n_tile_execute: the plan routes a call "
+                                      "whose "
+                                      "weights only the custom kernel can read "
+                                      "to the "
+                                      "Sequential strategy, which reads them "
+                                      "raw.  "
+                                      "Failing the call.");
                     if (execution_path_out != nullptr) {
-                        *execution_path_out = any_ck_prepacked_b
+                        *execution_path_out = any_q4k ? kGrpNTileErrUndefinedDst
+                                : any_ck_prepacked_b
                                 ? kGrpMatmulErrPrepackedNoCk
                                 : any_in_place_b
                                 ? kGrpMatmulErrPackedInPlaceNoCk

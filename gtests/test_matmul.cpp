@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <vector>
@@ -30,6 +31,7 @@
 #include "lowoha_operators/matmul/backends/aocl/aocl_postop.hpp"
 #endif
 #include "lowoha_operators/matmul/ggml_weight_unpack.hpp"
+#include "lowoha_operators/matmul/group_matmul/group_matmul_direct.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/native_kernel_registry.hpp"
 #include "matmul_native/native_brgemm_test_utils.hpp"
@@ -2055,6 +2057,553 @@ TEST(GgmlWeightUnpackQ4_0, PackedS4BitExactAllNibbleCodes) {
                     << " (K=" << K << ")";
         }
     }
+}
+
+// fp16 bits for a power of two.  exp_bias 15, so 2^e is exponent e+15.
+uint16_t fp16_pow2(int exp) {
+    return static_cast<uint16_t>((exp + 15) << 10);
+}
+
+/** @brief Q4_K unpack keeps S, the signed nibble, and the offset M' = M-8*S.
+ *  matmul_direct and a two-expert group_matmul_direct both match
+ *  weight = S*q - M against a pre-quantized s8 source.
+ */
+TEST(GgmlWeightUnpackQ4_K, OffsetMatchesAffineReference) {
+    using zendnnl::lowoha::matmul::ggml_unpack_weight_buffer;
+    constexpr int M = 2;
+    constexpr int N = 32;
+    constexpr int K = 512;
+    constexpr int nblocks = K / 256;
+    constexpr int ng = K / 32;
+    // Two superblocks.  Sub-blocks 4..7 use codes above 15 so the packed
+    // high 2 bits are not zero, and the second block is not a copy of the first.
+    const uint8_t sc6[nblocks][8]
+            = {{1, 2, 3, 4, 17, 33, 48, 63}, {9, 11, 13, 15, 21, 37, 52, 61}};
+    const uint8_t mn6[nblocks][8]
+            = {{5, 6, 7, 8, 19, 35, 50, 60}, {4, 10, 14, 18, 23, 39, 47, 58}};
+    const float d_b[nblocks] = {0.125f, 0.25f};
+    const float dmin_b[nblocks] = {0.25f, 0.5f};
+    auto group_S = [&](int g) {
+        return d_b[g / 8] * static_cast<float>(sc6[g / 8][g % 8]);
+    };
+    auto group_M = [&](int g) {
+        return dmin_b[g / 8] * static_cast<float>(mn6[g / 8][g % 8]);
+    };
+
+    struct block_q4_K {
+        uint16_t d;
+        uint16_t dmin;
+        uint8_t scales[12];
+        uint8_t qs[128];
+    };
+    std::vector<block_q4_K> blocks(static_cast<size_t>(N) * nblocks);
+    std::vector<int> qcode(static_cast<size_t>(N) * K);
+    for (int row = 0; row < N; ++row) {
+        for (int b = 0; b < nblocks; ++b) {
+            block_q4_K &blk = blocks[static_cast<size_t>(row) * nblocks + b];
+            blk.d = fp16_pow2(b == 0 ? -3 : -2);
+            blk.dmin = fp16_pow2(b == 0 ? -2 : -1);
+            for (int j = 0; j < 4; ++j) {
+                blk.scales[j] = static_cast<uint8_t>(
+                        (sc6[b][j] & 63) | ((sc6[b][j + 4] >> 4) << 6));
+                blk.scales[j + 4] = static_cast<uint8_t>(
+                        (mn6[b][j] & 63) | ((mn6[b][j + 4] >> 4) << 6));
+                blk.scales[j + 8] = static_cast<uint8_t>(
+                        (sc6[b][j + 4] & 0x0F) | ((mn6[b][j + 4] & 0x0F) << 4));
+            }
+            for (int l = 0; l < 256; ++l) {
+                qcode[row * K + b * 256 + l]
+                        = (row + (b * 256 + l) * 3 + b) & 15;
+            }
+            for (int c = 0; c < 4; ++c) {
+                for (int l = 0; l < 32; ++l) {
+                    const int lo = qcode[row * K + b * 256 + 64 * c + l];
+                    const int hi = qcode[row * K + b * 256 + 64 * c + 32 + l];
+                    blk.qs[32 * c + l] = static_cast<uint8_t>(lo | (hi << 4));
+                }
+            }
+        }
+    }
+
+    const int64_t bufsz
+            = zendnnl::lowoha::matmul::ggml_unpack_weight_buffer_size(
+                    /*ggml_type=*/12, true, N, K);
+    ASSERT_GT(bufsz, 0);
+    std::vector<uint8_t> ubuf(static_cast<size_t>(bufsz));
+    int8_t *packed_s4 = nullptr;
+    void *scales_out = nullptr;
+    ASSERT_EQ(ggml_unpack_weight_buffer(blocks.data(), 12, true, N, K,
+                      &packed_s4, &scales_out, ubuf.data()),
+            0);
+    const auto *nibbles = reinterpret_cast<const uint8_t *>(packed_s4);
+    for (int i = 0; i < N * K; ++i) {
+        const int signed_q = qcode[i] - 8;
+        ASSERT_EQ(packed_s4_code(nibbles, i), signed_q) << "index " << i;
+    }
+    const auto *f_scale = static_cast<const float *>(scales_out);
+    const auto *f_min = f_scale + static_cast<size_t>(ng) * N;
+    for (int g = 0; g < ng; ++g) {
+        for (int row = 0; row < N; ++row) {
+            EXPECT_FLOAT_EQ(f_scale[g * N + row], group_S(g))
+                    << "scale g=" << g;
+            EXPECT_FLOAT_EQ(f_min[g * N + row], group_M(g) - 8.0f * group_S(g))
+                    << "offset g=" << g;
+        }
+    }
+
+    // Q4_K's unpacked image is larger than the packed block, so a null
+    // destination must be refused before any byte of the source is written.
+    std::vector<uint8_t> packed_snapshot(
+            reinterpret_cast<const uint8_t *>(blocks.data()),
+            reinterpret_cast<const uint8_t *>(blocks.data())
+                    + sizeof(block_q4_K) * blocks.size());
+    int8_t *ignored_w = nullptr;
+    void *ignored_s = nullptr;
+    EXPECT_EQ(ggml_unpack_weight_buffer(blocks.data(), 12, true, N, K,
+                      &ignored_w, &ignored_s, nullptr),
+            -1);
+    EXPECT_EQ(0,
+            std::memcmp(blocks.data(), packed_snapshot.data(),
+                    packed_snapshot.size()));
+
+    if (!zendnnl::common::zendnnl_platform_info().get_avx512_vnni_status()) {
+        GTEST_SKIP() << "Q4_K matmul requires AVX-512 VNNI";
+    }
+
+    std::vector<int8_t> src(static_cast<size_t>(M) * K);
+    std::vector<uint16_t> src_scale(static_cast<size_t>(M) * ng);
+    for (int m = 0; m < M; ++m) {
+        for (int k = 0; k < K; ++k) {
+            src[m * K + k] = static_cast<int8_t>((m * 5 + k * 3) % 17 - 8);
+        }
+        for (int g = 0; g < ng; ++g) {
+            src_scale[m * ng + g] = static_cast<uint16_t>(
+                    zendnnl::common::bfloat16_t::f32_to_bf16_val(0.5f));
+        }
+    }
+    auto reference = [&]() {
+        std::vector<float> out(static_cast<size_t>(M) * N, 0.f);
+        for (int m = 0; m < M; ++m) {
+            for (int n = 0; n < N; ++n) {
+                float acc = 0.f;
+                for (int k = 0; k < K; ++k) {
+                    const int g = k / 32;
+                    const float a = 0.5f * static_cast<float>(src[m * K + k]);
+                    const float w
+                            = group_S(g) * static_cast<float>(qcode[n * K + k])
+                            - group_M(g);
+                    acc += a * w;
+                }
+                out[m * N + n] = acc;
+            }
+        }
+        return out;
+    };
+    const std::vector<float> want = reference();
+
+    auto make_params = [&]() {
+        matmul_params params;
+        params.dtypes.src = data_type_t::s8;
+        params.dtypes.wei = data_type_t::s4;
+        params.dtypes.dst = data_type_t::f32;
+        params.dtypes.compute = data_type_t::s8;
+        params.quant_params.src_scale.buff = src_scale.data();
+        params.quant_params.src_scale.dt = data_type_t::bf16;
+        params.quant_params.src_scale.dims
+                = {static_cast<int64_t>(M), static_cast<int64_t>(ng)};
+        params.packing.pack_format_b = 1;
+        params.packing.ggml_type = 1;
+        params.num_threads = 4;
+        return params;
+    };
+
+    clear_ggml_weight_unpack_cache();
+    clear_matmul_test_caches();
+    std::vector<float> dst(static_cast<size_t>(M) * N, 0.f);
+    matmul_params params = make_params();
+    matmul_batch_params_t batch;
+    const status_t st = run_matmul_direct('r', false, true, M, N, K, 1.f,
+            src.data(), K, blocks.data(), K, nullptr, 0.f, dst.data(), N, true,
+            batch, params);
+    if (!native_refusal_verified()) {
+        ASSERT_EQ(st, status_t::success);
+        for (int i = 0; i < M * N; ++i) {
+            EXPECT_NEAR(dst[i], want[i], 1e-3f) << "matmul index " << i;
+        }
+    }
+
+    clear_ggml_weight_unpack_cache();
+    clear_matmul_test_caches();
+    std::vector<float> d0(static_cast<size_t>(M) * N, 0.f);
+    std::vector<float> d1(static_cast<size_t>(M) * N, 0.f);
+    std::vector<matmul_params> gparams {make_params(), make_params()};
+    const std::vector<char> layout(2, 'r');
+    const std::vector<bool> trans_a(2, false), trans_b(2, true),
+            consts(2, true);
+    const std::vector<int> ms(2, M), ns(2, N), ks(2, K), lda(2, K), ldb(2, K),
+            ldc(2, N);
+    const std::vector<float> alpha(2, 1.f), beta(2, 0.f);
+    const std::vector<const void *> gsrc {src.data(), src.data()};
+    const std::vector<const void *> gwei {blocks.data(), blocks.data()};
+    const std::vector<const void *> gbias(2, nullptr);
+    const std::vector<void *> gdst {d0.data(), d1.data()};
+    const status_t gst = zendnnl::lowoha::matmul::group_matmul_direct(layout,
+            trans_a, trans_b, ms, ns, ks, alpha, gsrc, lda, gwei, ldb, gbias,
+            beta, gdst, ldc, consts, gparams);
+    if (!native_refusal_verified()) {
+        ASSERT_EQ(gst, status_t::success);
+        for (int i = 0; i < M * N; ++i) {
+            EXPECT_NEAR(d0[i], want[i], 1e-3f) << "expert0 " << i;
+            EXPECT_NEAR(d1[i], want[i], 1e-3f) << "expert1 " << i;
+        }
+    }
+    clear_ggml_weight_unpack_cache();
+    clear_matmul_test_caches();
+}
+
+// S=1, M=1/256.  M' = 1/256 - 8.  bf16 rounds that to -8 and the
+// reconstructed q=0 weight becomes 0 instead of -1/256.
+TEST(GgmlWeightUnpackQ4_K, SmallMinimumSurvivesF32Offset) {
+    using zendnnl::lowoha::matmul::ggml_unpack_weight_buffer;
+    constexpr int N = 32;
+    constexpr int K = 256;
+    struct block_q4_K {
+        uint16_t d;
+        uint16_t dmin;
+        uint8_t scales[12];
+        uint8_t qs[128];
+    };
+    std::vector<block_q4_K> blocks(N);
+    for (auto &b : blocks) {
+        b.d = fp16_pow2(0);
+        b.dmin = fp16_pow2(-8);
+        std::memset(b.scales, 0, sizeof(b.scales));
+        b.scales[0] = 1;
+        b.scales[4] = 1;
+        std::memset(b.qs, 0, sizeof(b.qs));
+    }
+    const int64_t bufsz
+            = zendnnl::lowoha::matmul::ggml_unpack_weight_buffer_size(
+                    12, true, N, K);
+    std::vector<uint8_t> ubuf(static_cast<size_t>(bufsz));
+    int8_t *packed = nullptr;
+    void *scales = nullptr;
+    ASSERT_EQ(ggml_unpack_weight_buffer(blocks.data(), 12, true, N, K, &packed,
+                      &scales, ubuf.data()),
+            0);
+    const auto *f_scale = static_cast<const float *>(scales);
+    const auto *f_min = f_scale + static_cast<size_t>(N) * (K / 32);
+    const float expect_min = (1.0f / 256.0f) - 8.0f;
+    EXPECT_FLOAT_EQ(f_scale[0], 1.0f);
+    EXPECT_FLOAT_EQ(f_min[0], expect_min);
+    const uint16_t rounded = static_cast<uint16_t>(
+            zendnnl::common::bfloat16_t::f32_to_bf16_val(expect_min));
+    const uint16_t minus_eight = static_cast<uint16_t>(
+            zendnnl::common::bfloat16_t::f32_to_bf16_val(-8.0f));
+    EXPECT_EQ(rounded, minus_eight);
+
+    if (!zendnnl::common::zendnnl_platform_info().get_avx512_vnni_status()) {
+        GTEST_SKIP() << "Q4_K matmul requires AVX-512 VNNI";
+    }
+    std::vector<int8_t> src(K, 1);
+    std::vector<uint16_t> src_scale(K / 32);
+    for (auto &s : src_scale) {
+        s = static_cast<uint16_t>(
+                zendnnl::common::bfloat16_t::f32_to_bf16_val(1.0f));
+    }
+    matmul_params params;
+    params.dtypes.src = data_type_t::s8;
+    params.dtypes.wei = data_type_t::s4;
+    params.dtypes.dst = data_type_t::f32;
+    params.dtypes.compute = data_type_t::s8;
+    params.quant_params.src_scale.buff = src_scale.data();
+    params.quant_params.src_scale.dt = data_type_t::bf16;
+    params.quant_params.src_scale.dims = {1, K / 32};
+    params.packing.pack_format_b = 1;
+    params.packing.ggml_type = 1;
+    params.num_threads = 1;
+    clear_ggml_weight_unpack_cache();
+    clear_matmul_test_caches();
+    std::vector<float> dst(N, 0.f);
+    matmul_batch_params_t batch;
+    const status_t st = run_matmul_direct('r', false, true, 1, N, K, 1.f,
+            src.data(), K, blocks.data(), K, nullptr, 0.f, dst.data(), N, true,
+            batch, params);
+    if (!native_refusal_verified()) {
+        ASSERT_EQ(st, status_t::success);
+        // q=0, a=1, src scale 1: each of 32 weights contributes -M.
+        EXPECT_NEAR(dst[0], 32.0f * (-1.0f / 256.0f), 1e-4f);
+    }
+    clear_ggml_weight_unpack_cache();
+}
+
+TEST(GgmlWeightUnpackQ4_K, PaddedStrideIsRejected) {
+    constexpr int N = 32;
+    constexpr int K = 256;
+    std::vector<uint8_t> packed(static_cast<size_t>(N) * (K / 256) * 144, 0);
+    matmul_params params;
+    params.dtypes.src = data_type_t::s8;
+    params.dtypes.wei = data_type_t::s4;
+    params.dtypes.dst = data_type_t::f32;
+    params.dtypes.compute = data_type_t::s8;
+    params.packing.pack_format_b = 1;
+    params.packing.ggml_type = 1;
+    params.quant_params.src_scale.dims = {1, K / 32};
+    const void *weight = packed.data();
+    const status_t padded
+            = zendnnl::lowoha::matmul::unpack_ggml_weights_and_cache(
+                    weight, N, K, K + 32, 't', params, true);
+    EXPECT_EQ(padded, status_t::failure);
+    const status_t row_major
+            = zendnnl::lowoha::matmul::unpack_ggml_weights_and_cache(
+                    weight, N, K, N, 'n', params, true);
+    EXPECT_EQ(row_major, status_t::failure);
+}
+
+// x86 CPU_REPACK of Q4_K: block_q4_Kx8, 8 rows, 8-byte qs interleave.
+// The unpacked signed nibbles, scales, and M-8*S offsets match plain Q4_K.
+TEST(GgmlWeightUnpackQ4_K, SuperblockMatchesPlain) {
+    using zendnnl::lowoha::matmul::ggml_unpack_weight_buffer;
+    using zendnnl::lowoha::matmul::ggml_unpack_weight_buffer_size;
+    constexpr int N = 16;
+    constexpr int K = 512;
+    constexpr int nblocks = K / 256;
+
+    struct block_q4_K {
+        uint16_t d;
+        uint16_t dmin;
+        uint8_t scales[12];
+        uint8_t qs[128];
+    };
+    struct block_q4_Kx8 {
+        uint16_t d[8];
+        uint16_t dmin[8];
+        uint8_t scales[96];
+        uint8_t qs[1024];
+    };
+
+    std::vector<block_q4_K> plain(static_cast<size_t>(N) * nblocks);
+    for (int row = 0; row < N; ++row) {
+        for (int b = 0; b < nblocks; ++b) {
+            block_q4_K &blk = plain[static_cast<size_t>(row) * nblocks + b];
+            blk.d = fp16_pow2((row + b) % 4 - 3);
+            blk.dmin = fp16_pow2((row + 2 * b) % 3 - 2);
+            uint8_t sc6[8], mn6[8];
+            for (int sb = 0; sb < 8; ++sb) {
+                sc6[sb] = static_cast<uint8_t>(
+                        (1 + row * 3 + b * 5 + sb * 7) & 63);
+                mn6[sb] = static_cast<uint8_t>((2 + row + b * 9 + sb * 3) & 63);
+                if (sc6[sb] == 0) sc6[sb] = 1;
+                if (mn6[sb] == 0) mn6[sb] = 1;
+            }
+            for (int j = 0; j < 4; ++j) {
+                blk.scales[j] = static_cast<uint8_t>(
+                        (sc6[j] & 63) | ((sc6[j + 4] >> 4) << 6));
+                blk.scales[j + 4] = static_cast<uint8_t>(
+                        (mn6[j] & 63) | ((mn6[j + 4] >> 4) << 6));
+                blk.scales[j + 8] = static_cast<uint8_t>(
+                        (sc6[j + 4] & 0x0F) | ((mn6[j + 4] & 0x0F) << 4));
+            }
+            for (int c = 0; c < 4; ++c) {
+                for (int l = 0; l < 32; ++l) {
+                    const int lo = (row + b * 13 + 64 * c + l) & 15;
+                    const int hi = (row * 2 + b + 64 * c + 32 + l) & 15;
+                    blk.qs[32 * c + l] = static_cast<uint8_t>(lo | (hi << 4));
+                }
+            }
+        }
+    }
+
+    auto make_kx8 = [](const block_q4_K in[8], block_q4_Kx8 &out) {
+        for (int i = 0; i < 8; ++i) {
+            out.d[i] = in[i].d;
+            out.dmin[i] = in[i].dmin;
+        }
+        constexpr int interleave = 8;
+        constexpr int end = 256 * 4 / interleave;
+        for (int i = 0; i < end; ++i) {
+            const int src_id = i % 8;
+            const int src_offset = (i / 8) * interleave;
+            const int dst_offset = i * interleave;
+            std::memcpy(&out.qs[dst_offset], &in[src_id].qs[src_offset],
+                    interleave);
+        }
+        uint8_t s[8], m[8];
+        for (int i = 0; i < 4; ++i) {
+            for (int j = 0; j < 8; ++j) {
+                s[j] = in[j].scales[i] & 63;
+                m[j] = in[j].scales[i + 4] & 63;
+            }
+            out.scales[i * 12]
+                    = static_cast<uint8_t>((s[0] & 63) + ((s[4] & 48) << 2));
+            out.scales[i * 12 + 1]
+                    = static_cast<uint8_t>((s[1] & 63) + ((s[5] & 48) << 2));
+            out.scales[i * 12 + 2]
+                    = static_cast<uint8_t>((s[2] & 63) + ((s[6] & 48) << 2));
+            out.scales[i * 12 + 3]
+                    = static_cast<uint8_t>((s[3] & 63) + ((s[7] & 48) << 2));
+            out.scales[i * 12 + 4]
+                    = static_cast<uint8_t>((m[0] & 63) + ((m[4] & 48) << 2));
+            out.scales[i * 12 + 5]
+                    = static_cast<uint8_t>((m[1] & 63) + ((m[5] & 48) << 2));
+            out.scales[i * 12 + 6]
+                    = static_cast<uint8_t>((m[2] & 63) + ((m[6] & 48) << 2));
+            out.scales[i * 12 + 7]
+                    = static_cast<uint8_t>((m[3] & 63) + ((m[7] & 48) << 2));
+            out.scales[i * 12 + 8]
+                    = static_cast<uint8_t>((s[4] & 15) + ((m[4] & 15) << 4));
+            out.scales[i * 12 + 9]
+                    = static_cast<uint8_t>((s[5] & 15) + ((m[5] & 15) << 4));
+            out.scales[i * 12 + 10]
+                    = static_cast<uint8_t>((s[6] & 15) + ((m[6] & 15) << 4));
+            out.scales[i * 12 + 11]
+                    = static_cast<uint8_t>((s[7] & 15) + ((m[7] & 15) << 4));
+        }
+        for (int i = 0; i < 4; ++i) {
+            for (int j = 0; j < 8; ++j) {
+                s[j] = static_cast<uint8_t>(((in[j].scales[i] & 192) >> 2)
+                        | (in[j].scales[i + 8] & 15));
+                m[j] = static_cast<uint8_t>(((in[j].scales[i + 4] & 192) >> 2)
+                        | ((in[j].scales[i + 8] & 240) >> 4));
+            }
+            out.scales[i * 12 + 48]
+                    = static_cast<uint8_t>((s[0] & 63) + ((s[4] & 48) << 2));
+            out.scales[i * 12 + 49]
+                    = static_cast<uint8_t>((s[1] & 63) + ((s[5] & 48) << 2));
+            out.scales[i * 12 + 50]
+                    = static_cast<uint8_t>((s[2] & 63) + ((s[6] & 48) << 2));
+            out.scales[i * 12 + 51]
+                    = static_cast<uint8_t>((s[3] & 63) + ((s[7] & 48) << 2));
+            out.scales[i * 12 + 52]
+                    = static_cast<uint8_t>((m[0] & 63) + ((m[4] & 48) << 2));
+            out.scales[i * 12 + 53]
+                    = static_cast<uint8_t>((m[1] & 63) + ((m[5] & 48) << 2));
+            out.scales[i * 12 + 54]
+                    = static_cast<uint8_t>((m[2] & 63) + ((m[6] & 48) << 2));
+            out.scales[i * 12 + 55]
+                    = static_cast<uint8_t>((m[3] & 63) + ((m[7] & 48) << 2));
+            out.scales[i * 12 + 56]
+                    = static_cast<uint8_t>((s[4] & 15) + ((m[4] & 15) << 4));
+            out.scales[i * 12 + 57]
+                    = static_cast<uint8_t>((s[5] & 15) + ((m[5] & 15) << 4));
+            out.scales[i * 12 + 58]
+                    = static_cast<uint8_t>((s[6] & 15) + ((m[6] & 15) << 4));
+            out.scales[i * 12 + 59]
+                    = static_cast<uint8_t>((s[7] & 15) + ((m[7] & 15) << 4));
+        }
+    };
+
+    std::vector<block_q4_Kx8> repacked(static_cast<size_t>(N / 8) * nblocks);
+    for (int r8 = 0; r8 < N / 8; ++r8) {
+        for (int b = 0; b < nblocks; ++b) {
+            block_q4_K in[8];
+            for (int ri = 0; ri < 8; ++ri) {
+                in[ri] = plain[static_cast<size_t>(r8 * 8 + ri) * nblocks + b];
+            }
+            make_kx8(in, repacked[static_cast<size_t>(r8) * nblocks + b]);
+        }
+    }
+
+    const int64_t bufsz = ggml_unpack_weight_buffer_size(12, true, N, K);
+    ASSERT_GT(bufsz, 0);
+    std::vector<uint8_t> plain_out(static_cast<size_t>(bufsz));
+    std::vector<uint8_t> super_out(static_cast<size_t>(bufsz));
+    int8_t *w = nullptr;
+    void *s = nullptr;
+    ASSERT_EQ(ggml_unpack_weight_buffer(plain.data(), 12, true, N, K, &w, &s,
+                      plain_out.data(), false),
+            0);
+    ASSERT_EQ(ggml_unpack_weight_buffer(repacked.data(), 12, true, N, K, &w, &s,
+                      super_out.data(), true),
+            0);
+    EXPECT_EQ(0,
+            std::memcmp(plain_out.data(), super_out.data(), plain_out.size()));
+
+    int8_t *ignored_w = nullptr;
+    void *ignored_s = nullptr;
+    EXPECT_EQ(ggml_unpack_weight_buffer(repacked.data(), 12, true, /*N=*/4, K,
+                      &ignored_w, &ignored_s, super_out.data(), true),
+            -1);
+
+    clear_ggml_weight_unpack_cache();
+    matmul_params params;
+    params.dtypes.wei = data_type_t::s4;
+    params.packing.pack_format_b = 1;
+    params.packing.ggml_type = 1;
+    params.packing.is_superblock = true;
+    const void *weight = repacked.data();
+    ASSERT_EQ(zendnnl::lowoha::matmul::unpack_ggml_weights_and_cache(
+                      weight, N, K, K, 't', params, true),
+            status_t::success);
+    EXPECT_EQ(params.packing.ggml_type, 1);
+    EXPECT_FALSE(params.packing.is_superblock);
+    EXPECT_EQ(params.dtypes.wei, data_type_t::s4);
+    ASSERT_NE(params.quant_params.wei_scale.buff, nullptr);
+    ASSERT_NE(params.quant_params.wei_zp.buff, nullptr);
+    EXPECT_EQ(params.quant_params.wei_zp.dt, data_type_t::f32);
+    EXPECT_EQ(params.quant_params.wei_scale.dt, data_type_t::f32);
+    const size_t packed_bytes = static_cast<size_t>(N) * (K / 2);
+    EXPECT_EQ(0, std::memcmp(weight, plain_out.data(), packed_bytes));
+    const size_t scale_bytes
+            = static_cast<size_t>(N) * (K / 32) * sizeof(float);
+    const size_t min_bytes = static_cast<size_t>(N) * (K / 32) * sizeof(float);
+    EXPECT_EQ(0,
+            std::memcmp(params.quant_params.wei_scale.buff,
+                    plain_out.data() + packed_bytes, scale_bytes));
+    EXPECT_EQ(0,
+            std::memcmp(params.quant_params.wei_zp.buff,
+                    plain_out.data() + packed_bytes + scale_bytes, min_bytes));
+
+    matmul_params odd;
+    odd.dtypes.wei = data_type_t::s4;
+    odd.packing.pack_format_b = 1;
+    odd.packing.ggml_type = 1;
+    odd.packing.is_superblock = true;
+    const void *odd_weight = repacked.data();
+    EXPECT_EQ(zendnnl::lowoha::matmul::unpack_ggml_weights_and_cache(
+                      odd_weight, /*N=*/4, K, K, 't', odd, true),
+            status_t::failure);
+    clear_ggml_weight_unpack_cache();
+}
+
+// A multi-op chain (one source, several operations) executes through AOCL
+// and never applies the Q4_K offset.  The call has to fail before that.
+TEST(GgmlWeightUnpackQ4_K, SequentialChainIsRejected) {
+    constexpr int M = 1;
+    constexpr int N = 32;
+    constexpr int K = 256;
+    std::vector<float> src(static_cast<size_t>(M) * K, 1.f);
+    std::vector<uint8_t> w0(144, 0), w1(144, 0);
+    std::vector<float> d0(static_cast<size_t>(M) * N, 0.f);
+    std::vector<float> d1(static_cast<size_t>(M) * N, 0.f);
+    auto params_of = [K]() {
+        matmul_params params;
+        params.dtypes.src = data_type_t::f32;
+        params.dtypes.wei = data_type_t::s4;
+        params.dtypes.dst = data_type_t::f32;
+        params.dtypes.compute = data_type_t::s8;
+        params.dynamic_quant = true;
+        params.quant_params.src_scale.dt = data_type_t::bf16;
+        params.quant_params.src_scale.dims = {1, static_cast<int64_t>(K / 32)};
+        params.packing.pack_format_b = 1;
+        params.packing.ggml_type = 1;
+        return params;
+    };
+    const std::vector<char> layout(2, 'r');
+    const std::vector<bool> trans_a(2, false), trans_b(2, true),
+            consts(2, true);
+    const std::vector<int> ms {M, M}, ns {N, N}, ks {K, N};
+    const std::vector<int> lda {K, N}, ldb {K, N}, ldc {N, N};
+    const std::vector<float> alpha(2, 1.f), beta(2, 0.f);
+    const std::vector<const void *> gsrc {src.data()};
+    const std::vector<const void *> gwei {w0.data(), w1.data()};
+    const std::vector<const void *> gbias(2, nullptr);
+    const std::vector<void *> gdst {d0.data(), d1.data()};
+    const std::vector<matmul_params> gparams {params_of(), params_of()};
+    const status_t st = group_matmul_direct(layout, trans_a, trans_b, ms, ns,
+            ks, alpha, gsrc, lda, gwei, ldb, gbias, beta, gdst, ldc, consts,
+            gparams);
+    EXPECT_EQ(st, status_t::failure);
 }
 
 /** @brief End-to-end GGML Q4_0 unpack: packed blob stays packed signed s4.

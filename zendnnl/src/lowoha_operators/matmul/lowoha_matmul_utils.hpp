@@ -378,6 +378,19 @@ inline bool has_quant_scale_metadata(
  *        pre-quantized s8 src with populated src/wei scale buffers
  *        (dynamic_quant=false).
  */
+/// Q4_K after unpack: selector 1 and an f32 or bf16 {G, N} offset in wei_zp
+/// whose shape matches the weight scale.  The unpack stores f32 so a small
+/// minimum is not rounded away.  Before unpack the offset buffer is null.
+inline bool is_q4k_offset(const matmul_params &params) {
+    if (params.packing.ggml_type != 1) { return false; }
+    const auto &zp = params.quant_params.wei_zp;
+    const auto &ws = params.quant_params.wei_scale;
+    return zp.buff != nullptr
+            && (zp.dt == data_type_t::f32 || zp.dt == data_type_t::bf16)
+            && zp.dims.size() == 2 && ws.dims.size() == 2 && zp.dims[0] > 1
+            && zp.dims[0] == ws.dims[0] && zp.dims[1] == ws.dims[1];
+}
+
 inline bool is_w4a8_config(const matmul_params &params) {
     if (params.dtypes.wei != data_type_t::s4) { return false; }
     if (params.dtypes.dst != data_type_t::bf16
@@ -385,7 +398,10 @@ inline bool is_w4a8_config(const matmul_params &params) {
         return false;
     }
     if (params.dtypes.compute != data_type_t::s8) { return false; }
-    if (params.quant_params.wei_zp.buff || params.quant_params.src_zp.buff) {
+    if (params.quant_params.src_zp.buff) { return false; }
+    // Q4_K stores its per-group offset in wei_zp.  Any other weight
+    // zero-point is not the symmetric W4A8 contract.
+    if (params.quant_params.wei_zp.buff && !is_q4k_offset(params)) {
         return false;
     }
     // Runtime/pre-quantized path: source is already quantized to s8.

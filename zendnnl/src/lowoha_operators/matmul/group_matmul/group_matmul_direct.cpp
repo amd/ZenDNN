@@ -1544,6 +1544,16 @@ status_t group_matmul_direct(const std::vector<char> &layout,
                     "weight the custom kernel packed in place");
             return status_t::failure;
         }
+        for (size_t i = 0; i < num_ops; ++i) {
+            if (i < exec_params.size() && M[i] > 0
+                    && exec_params[i].packing.ggml_type == 1) {
+                log_error(
+                        "group_matmul_direct: Q4_K is not supported on a "
+                        "multi-op sequential chain; the chain does not apply "
+                        "the weight offset");
+                return status_t::failure;
+            }
+        }
         static unsigned int auto_version = get_auto_tuner_ver();
         for (size_t i = 0; i < num_ops; ++i) {
             matmul_batch_params_t bp;
@@ -1662,6 +1672,9 @@ status_t group_matmul_direct(const std::vector<char> &layout,
                 if (fused_moe_unpacked.down_scale.size() < num_ops) {
                     fused_moe_unpacked.down_scale.resize(num_ops);
                 }
+                if (fused_moe_unpacked.down_zp.size() < num_ops) {
+                    fused_moe_unpacked.down_zp.resize(num_ops);
+                }
                 // Unpack gives each down weight its own writable capacity.
                 // The fused struct carries one capacity for the whole pool,
                 // which is valid when every expert's unpacked buffer agrees.
@@ -1745,6 +1758,8 @@ status_t group_matmul_direct(const std::vector<char> &layout,
                     matmul_params w2_params;
                     w2_params.packing.pack_format_b = 1;
                     w2_params.packing.is_superblock = expert_superblock;
+                    w2_params.packing.ggml_type
+                            = fused_params_unpacked[i].packing.ggml_type;
                     w2_params.dtypes.wei = expert_wei;
                     status_t un2 = unpack_ggml_weights_and_cache(w2,
                             fused_moe_unpacked.N_down[i], k_down,
@@ -1771,6 +1786,11 @@ status_t group_matmul_direct(const std::vector<char> &layout,
                     ds.dt = w2_params.quant_params.wei_scale.dt;
                     ds.dims = w2_params.quant_params.wei_scale.dims;
                     fused_moe_unpacked.down_scale[i] = ds;
+                    grp_matmul_fused_moe_params::down_weight_quant_t dz;
+                    dz.buff = w2_params.quant_params.wei_zp.buff;
+                    dz.dt = w2_params.quant_params.wei_zp.dt;
+                    dz.dims = w2_params.quant_params.wei_zp.dims;
+                    fused_moe_unpacked.down_zp[i] = dz;
                 }
                 if (down_capacity_uniform && unpacked_down_capacity > 0) {
                     fused_moe_unpacked.down_wei_buffer_capacity_bytes

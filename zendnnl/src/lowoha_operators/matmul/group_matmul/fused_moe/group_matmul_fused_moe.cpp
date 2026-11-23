@@ -1178,6 +1178,7 @@ inline status_t prepare_op2_dispatch(FusedMoEDispatchScratch &scratch,
         // that raw buffer.  Gated on Op1 still being packed, which is a
         // no-op once the unpack has cleared the flag and for every non-GGML
         // call.
+        p.packing.ggml_type = params[i].packing.ggml_type;
         if (params[i].packing.pack_format_b == 1) {
             p.mem_format_b = params[i].mem_format_b; // 'r' (reordered)
             p.packing.pack_format_b = params[i].packing.pack_format_b;

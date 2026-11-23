@@ -104,8 +104,10 @@ inline bool matmul_custom_kernel_quant_supported(int M, int N, int K,
         const bool src_per_group = M > 0 && qp.src_scale.dims.size() == 2
                 && qp.src_scale.dims[0] == static_cast<int64_t>(M)
                 && qp.src_scale.dims[1] > 1;
+        const bool q4k_offset = is_q4k_offset(params);
         if ((!src_per_token && !src_per_group) || qp.wei_scale.buff == nullptr
-                || qp.src_zp.buff != nullptr || qp.wei_zp.buff != nullptr) {
+                || qp.src_zp.buff != nullptr
+                || (qp.wei_zp.buff != nullptr && !q4k_offset)) {
             return false;
         }
         if (!params.dynamic_quant && qp.src_scale.buff == nullptr) return false;
@@ -195,7 +197,10 @@ inline bool single_matmul_group_routable(char layout, int M, int N, int K,
     const int32_t global_cache = config.get_weight_cache();
     if (global_cache < 0 || global_cache > 2) return false;
     if (!get_grp_matmul_custom_kernel()) return false;
-    if (get_grp_n_tile_strategy() == 0) return false;
+    // Strategy 0 is a performance choice.  Q4_K has no other correct
+    // kernel, so a declined grouped route would fail the call outright.
+    const bool q4k_offset = params.packing.ggml_type == 1;
+    if (get_grp_n_tile_strategy() == 0 && !q4k_offset) return false;
 
     // Prompt calls intentionally enter one-op grouped AUTO.  A dtype that
     // `..._SINGLE_EXPERT_PROMPT_TILE` lists executes the CK prompt tile
@@ -260,7 +265,7 @@ inline bool single_matmul_group_routable(char layout, int M, int N, int K,
     const bool single_layer = aocl_prepacked
             ? single_ck.covers(/*is_decode=*/M <= kDecodeMaxM)
             : single_ck.any();
-    if (!enough_ntiles && !single_layer) return false;
+    if (!enough_ntiles && !single_layer && !q4k_offset) return false;
     if (!params.postop_.empty()
             && !(int_variant && !params.dynamic_quant
                     && params.dtypes.src == data_type_t::u8

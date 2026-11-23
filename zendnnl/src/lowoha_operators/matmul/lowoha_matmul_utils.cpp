@@ -118,7 +118,8 @@ status_t validate_w4a8_inputs(
         return status_t::failure;
     }
 
-    if (params.quant_params.wei_zp.buff || params.quant_params.src_zp.buff) {
+    if (params.quant_params.src_zp.buff
+            || (params.quant_params.wei_zp.buff && !is_q4k_offset(params))) {
         log_error("W4A8 supports symmetric quantization only");
         return status_t::failure;
     }

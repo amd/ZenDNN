@@ -1893,6 +1893,13 @@ inline void cross_warm(const PrepackRequest &p, matmul_algo_t inner_kernel,
         CrossWarmRegime &out_regime) {
     out_regime = CrossWarmRegime::none;
     if (!get_grp_matmul_cross_warm()) { return; }
+    // Q4_K is refused on every AOCL executor.  Building that image at
+    // startup only spends the reorder and keeps a cache entry nothing reads.
+    if (p.params != nullptr) {
+        for (const matmul_params &param : *p.params) {
+            if (param.packing.ggml_type == 1) { return; }
+        }
+    }
     const bool w4a8 = w4a8_aocl_warm_candidate(p);
     if (inner_kernel != matmul_algo_t::aocl_dlp_blocked && !w4a8) { return; }
 

@@ -1024,6 +1024,7 @@ bool can_use_fused_grouped(const group_matmul_projection_params &primary,
             && p1.dtypes.compute == p2.dtypes.compute
             && p1.mem_format_b == p2.mem_format_b
             && p1.packing.pack_format_b == p2.packing.pack_format_b
+            && p1.packing.ggml_type == p2.packing.ggml_type
             && p1.lowoha_algo == p2.lowoha_algo
             && routed_moe::effective_num_threads(p1.num_threads)
             == routed_moe::effective_num_threads(p2.num_threads)

@@ -578,3 +578,147 @@ TEST(FusedMoEGgml, AutoCrossWarmDenseSiluBF16) {
             std::vector<int>(4, 16), H, dim, /*act=*/1,
             /*use_vertical_fusion=*/false, /*ntile_algo_pin=*/0);
 }
+
+// Fused gate/up → SiLU → down, both projections Q4_K, with a different
+// minimum on every group and output column.  The two-call reference applies
+// S*q-M on each projection by itself; a dropped down offset or a gate/up
+// offset left in the wrong half will not match.
+TEST(FusedMoEGgml, Q4KSiluOffsetMatchesTwoCall) {
+    SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
+    if (!zendnnl::common::zendnnl_platform_info().get_avx512_vnni_status()) {
+        GTEST_SKIP() << "Q4_K matmul requires AVX-512 VNNI";
+    }
+    constexpr int H = 256;
+    constexpr int dim = 256;
+    constexpr int E = 1;
+    constexpr int M = 2;
+    constexpr int N_gate = 2 * dim;
+    struct block_q4_K {
+        uint16_t d;
+        uint16_t dmin;
+        uint8_t scales[12];
+        uint8_t qs[128];
+    };
+    auto fill = [](std::vector<uint8_t> &dst, int N, int K, int salt) {
+        const int nblocks = K / 256;
+        dst.assign(sizeof(block_q4_K) * static_cast<size_t>(N) * nblocks, 0);
+        auto *blocks = reinterpret_cast<block_q4_K *>(dst.data());
+        for (int row = 0; row < N; ++row) {
+            for (int b = 0; b < nblocks; ++b) {
+                block_q4_K &blk
+                        = blocks[static_cast<size_t>(row) * nblocks + b];
+                blk.d = 0x3C00; // fp16 1
+                blk.dmin = static_cast<uint16_t>(0x3800 + ((row + salt) & 7));
+                for (int sb = 0; sb < 8; ++sb) {
+                    const int sc = 1 + ((row + sb + salt) % 15);
+                    const int mn = 1 + ((row * 3 + sb + salt * 5 + b) % 15);
+                    if (sb < 4) {
+                        blk.scales[sb] = static_cast<uint8_t>(sc);
+                        blk.scales[sb + 4] = static_cast<uint8_t>(mn);
+                    } else {
+                        blk.scales[sb + 4] = static_cast<uint8_t>(
+                                (sc & 0x0F) | ((mn & 0x0F) << 4));
+                    }
+                }
+                for (int c = 0; c < 4; ++c) {
+                    for (int l = 0; l < 32; ++l) {
+                        const int k0 = b * 256 + 64 * c + l;
+                        const int k1 = k0 + 32;
+                        const int lo = (row + k0 * 3 + salt) & 15;
+                        const int hi = (row + k1 * 3 + salt) & 15;
+                        blk.qs[32 * c + l]
+                                = static_cast<uint8_t>(lo | (hi << 4));
+                    }
+                }
+            }
+        }
+    };
+
+    reset_grp_matmul_caches();
+    zendnnl::lowoha::matmul::clear_ggml_weight_unpack_cache();
+    std::vector<uint8_t> w1, w2;
+    fill(w1, N_gate, H, 1);
+    fill(w2, H, dim, 9);
+
+    tensor_factory_t factory;
+    tensor_t src_t = factory.uniform_dist_tensor(
+            {static_cast<uint64_t>(M), static_cast<uint64_t>(H)},
+            data_type_t::bf16, 1.5);
+    const void *src = src_t.get_raw_handle_unsafe();
+    const void *w1p = w1.data();
+    const void *w2p = w2.data();
+
+    auto make_p = [](int rows, int K) {
+        matmul_params p;
+        p.dtypes.src = data_type_t::bf16;
+        p.dtypes.wei = data_type_t::s4;
+        p.dtypes.dst = data_type_t::bf16;
+        p.dtypes.compute = data_type_t::s8;
+        p.dynamic_quant = true;
+        p.packing.pack_format_b = 1;
+        p.packing.ggml_type = 1;
+        p.quant_params.src_scale.dt = data_type_t::bf16;
+        p.quant_params.src_scale.dims = {rows, K / 32};
+        return p;
+    };
+
+    const std::vector<int> Ms = {M};
+    std::vector<char> layout(E, 'r');
+    std::vector<bool> transA(E, false), transB(E, true), is_wc(E, true);
+    std::vector<float> alpha(E, 1.f), beta(E, 0.f);
+    std::vector<const void *> no_bias(E, nullptr);
+    std::vector<const void *> srcs = {src};
+    std::vector<const void *> w1ps = {w1p};
+    std::vector<const void *> w2ps = {w2p};
+    grp_matmul_gated_act_params act_params {};
+    act_params.act = grp_matmul_gated_act_t::silu_and_mul;
+
+    TypedBuffers d1_ref, d2_ref, d1_test, d2_test;
+    d1_ref.alloc(E, static_cast<size_t>(M) * N_gate, /*is_bf16=*/true);
+    d2_ref.alloc(E, static_cast<size_t>(M) * H, true);
+    d1_test.alloc(E, static_cast<size_t>(M) * N_gate, true);
+    d2_test.alloc(E, static_cast<size_t>(M) * H, true);
+
+    {
+        AlgoEnvGuard algo(1);
+        std::vector<matmul_params> p1 = {make_p(M, H)};
+        std::vector<int> Ns = {N_gate}, Ks = {H}, lda = {H}, ldb = {H},
+                         ldc = {N_gate};
+        auto d1_p = d1_ref.ptrs(true);
+        ASSERT_EQ(group_matmul_direct(layout, transA, transB, Ms, Ns, Ks, alpha,
+                          srcs, lda, w1ps, ldb, no_bias, beta, d1_p, ldc, is_wc,
+                          p1, nullptr, &act_params),
+                status_t::success);
+        std::vector<matmul_params> p2 = {make_p(M, dim)};
+        std::vector<int> Ns2 = {H}, Ks2 = {dim}, lda2 = {N_gate}, ldb2 = {dim},
+                         ldc2 = {H};
+        std::vector<const void *> src2 = {d1_ref.cptrs(true)[0]};
+        auto d2_p = d2_ref.ptrs(true);
+        ASSERT_EQ(group_matmul_direct(layout, transA, transB, Ms, Ns2, Ks2,
+                          alpha, src2, lda2, w2ps, ldb2, no_bias, beta, d2_p,
+                          ldc2, is_wc, p2),
+                status_t::success);
+    }
+    {
+        AlgoEnvGuard algo(1);
+        std::vector<matmul_params> p1 = {make_p(M, H)};
+        std::vector<int> Ns = {N_gate}, Ks = {H}, lda = {H}, ldb = {H},
+                         ldc = {N_gate};
+        auto fused = make_fused_moe_op2(E, H, w2ps, no_bias);
+        fused.dst_down = d2_test.ptrs(true);
+        fused.ldc_down = {H};
+        fused.ldb_down = {dim};
+        auto d1_p = d1_test.ptrs(true);
+        ASSERT_EQ(group_matmul_direct(layout, transA, transB, Ms, Ns, Ks, alpha,
+                          srcs, lda, w1ps, ldb, no_bias, beta, d1_p, ldc, is_wc,
+                          p1, nullptr, &act_params, &fused),
+                status_t::success);
+    }
+    double ref_sum = 0.0;
+    for (int i = 0; i < M * H; ++i)
+        ref_sum += std::abs(static_cast<float>(d2_ref.bf16[0][i]));
+    ASSERT_GT(ref_sum, 1e-3);
+    verify_per_expert_2d(d2_test, static_cast<size_t>(H), d2_ref,
+            static_cast<size_t>(H), Ms, H, /*is_bf16=*/true, tol_fused(true),
+            "q4k fused silu");
+}

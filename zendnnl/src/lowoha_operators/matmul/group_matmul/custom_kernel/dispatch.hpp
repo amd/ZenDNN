@@ -529,6 +529,9 @@ struct CallContext {
     /// range is `1..max_mr_for_nv_s4(NV)`, tighter than the int8
     /// table's.
     w4a8_ukernel_fn_t kernel_table_s4[kMaxMR + 1] = {};
+    /// Q4_K specialization of the same table. Used when the tile has an
+    /// offset buffer. The plain table is the Q4_0 kernel.
+    w4a8_ukernel_fn_t kernel_table_s4_offset[kMaxMR + 1] = {};
     /// The MXFP4 variant's per-MR table, filled instead of
     /// `kernel_table_s4`; zero for every other variant.  Valid MR range is
     /// `1..max_mr_for_nv_mxfp4(NV)`.
@@ -877,7 +880,10 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
         void *tight_dst, int tight_ldc, const void *src_scale,
         const int32_t *src_zp, const void *wei_scale,
         const Int8EpilogueConfig &int8_epilogue,
-        const int32_t *src_group_sums = nullptr);
+        const int32_t *src_group_sums = nullptr,
+        // Q4_K per-group offset, same layout and dtype as wei_scale.
+        // Null for every other kernel.
+        const void *wei_zp = nullptr);
 
 /// Whether the u8-source DQ-INT8 kernels repay their source copy on this
 /// CPU.  The per-broadcast XOR they drop measured ~15% of the NR32 K-loop on

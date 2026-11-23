@@ -42,6 +42,7 @@
 #include <omp.h>
 
 #include "../common/group_matmul_parallel_common.hpp"
+#include "../common/grp_matmul_constants.hpp"
 #include "../custom_kernel/dispatch.hpp"
 #include "../executors/m_tile/group_matmul_m_tile.hpp" // m_tile_execute + M-tile env knobs
 #include "../executors/n_tile/group_matmul_n_tile.hpp" // n_tile_execute + N-tile env knobs
@@ -367,6 +368,21 @@ bool group_matmul_execute(const std::vector<char> &layout,
     const int use_algo
             = group_matmul_algo_select(layout, M, N, K, params, num_threads,
                     &algo_trace, fused_act, single_expert_epilogue_ok, &route);
+
+    bool any_q4k = false;
+    for (size_t i = 0; i < M.size() && i < params.size(); ++i) {
+        if (M[i] > 0 && params[i].packing.ggml_type == 1) any_q4k = true;
+    }
+    if (any_q4k && use_algo != 3) {
+        log_error(
+                "group_matmul: Q4_K requires the N-tile s4 kernel, and this "
+                "call resolved to algo ",
+                use_algo);
+        if (execution_path_out != nullptr) {
+            *execution_path_out = kGrpNTileErrUndefinedDst;
+        }
+        return false;
+    }
 
     // A call ALGO 3 cannot serve follows the mixed policy.  `params` is a
     // per-call copy, so the cap does not reach the caller.
