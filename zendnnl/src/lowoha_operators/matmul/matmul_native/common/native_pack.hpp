@@ -38,21 +38,31 @@ using zendnnl::error_handling::status_t;
 inline constexpr int kNativeS4Octet
         = native_format(native_format_t::s4).geometry.k_per_word;
 
+/// K groups of a weight of geometry g in the layout.  No intermediate
+/// overflows, at any K.
+inline int native_k_groups(const native_geometry_t &g, int K) {
+    return K / g.k_per_word + (K % g.k_per_word != 0);
+}
+
 /// K groups of a weight in the layout: K pairs for bf16, K quads for s8, K
-/// octets for s4, K rows for f32 and f16.  No intermediate overflows, at any
-/// K.
+/// octets for s4, K rows for f32 and f16.
 inline int native_k_groups(data_type_t wei_dt, int K) {
-    const int g = native_geometry(wei_dt).k_per_word;
-    return K / g + (K % g != 0);
+    return native_k_groups(native_geometry(wei_dt), K);
+}
+
+/// Bytes of one block of pack_nr columns of a weight of geometry g: the K
+/// groups, then with col_sums the pack_nr int32 column sums.
+inline size_t native_block_bytes(
+        const native_geometry_t &g, int K, int pack_nr) {
+    const size_t groups = static_cast<size_t>(native_k_groups(g, K));
+    return (groups * g.word_bytes + (g.col_sums ? sizeof(int32_t) : 0))
+            * pack_nr;
 }
 
 /// Bytes of one block of pack_nr columns: the K groups, then for s8 the
 /// pack_nr int32 column sums.
 inline size_t native_block_bytes(data_type_t wei_dt, int K, int pack_nr) {
-    const native_geometry_t g = native_geometry(wei_dt);
-    const size_t groups = static_cast<size_t>(native_k_groups(wei_dt, K));
-    return (groups * g.word_bytes + (g.col_sums ? sizeof(int32_t) : 0))
-            * pack_nr;
+    return native_block_bytes(native_geometry(wei_dt), K, pack_nr);
 }
 
 /// The columns the layout holds for a weight of N columns: N rounded up to
@@ -81,9 +91,10 @@ size_t native_packed_bytes(data_type_t wei_dt, int K, int N, int pack_nr);
 
 /// Writes weight -- [K, N] row-major ldb apart, or [N, K] when transB --
 /// into dst (native_packed_bytes) in the layout, splitting the blocks over up
-/// to num_threads threads (one inside a parallel region).  Odd K pads a
-/// pair, K % 4 != 0 a quad, K % 8 != 0 an s4 octet, with zeros (f32 and f16
-/// weights have no padding);
+/// to num_threads threads (one inside a parallel region), with one block
+/// packer for the words, nibble planes and column sums of the weight's
+/// geometry (native_geometry_t).  Odd K pads a pair, K % 4 != 0 a quad,
+/// K % 8 != 0 an s4 octet, with zeros (f32 and f16 weights have no padding);
 /// s8 column sums cover the real K.  An s4 weight holds two's-complement
 /// nibbles at its linear element index (n * ldb + k with transB, else
 /// k * ldb + n, ldb in elements), the even index in the low nibble of its
@@ -103,16 +114,14 @@ status_t native_pack_weight(data_type_t wei_dt, const void *weight, int K,
 /// the threads' loop counts in, and such a weight packs block by block.
 int native_pack_tiles(int n_blocks, int k_groups);
 
-/// Inverse of native_pack_weight for bf16: writes every weight element the
-/// image packed back to weight (same arguments as the pack).  The padding of
-/// a padded ldb is not written.  For an image of N a multiple of pack_nr,
-/// the only images an in-place rewrite makes.
-void native_unpack_bf16(const void *packed, int K, int N, int ldb, int pack_nr,
-        bool transB, void *weight, int num_threads);
-
-/// native_unpack_bf16 for an f16 image (same arguments and contract).
-void native_unpack_f16(const void *packed, int K, int N, int ldb, int pack_nr,
-        bool transB, void *weight, int num_threads);
+/// Inverse of native_pack_weight for a weight whose format unpacks
+/// (native_cache_rules_t::unpack: bf16, f16), from the same geometry:
+/// writes every weight element the image packed back to weight (same
+/// arguments as the pack).  The padding of a padded ldb is not written.
+/// For an image of N a multiple of pack_nr, the only images an in-place
+/// rewrite makes.
+void native_unpack_weight(data_type_t wei_dt, const void *packed, int K, int N,
+        int ldb, int pack_nr, bool transB, void *weight, int num_threads);
 
 } // namespace native
 } // namespace matmul

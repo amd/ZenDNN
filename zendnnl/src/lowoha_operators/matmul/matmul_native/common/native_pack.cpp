@@ -37,12 +37,45 @@ using zendnnl::error_handling::log_error;
 
 namespace {
 
-/// A K group row of a block: 32 columns of 4 bytes (a bf16 pair, an s8 quad
-/// or an f32), two vectors of 16 columns.
+/// A block's columns: a K group row of 4-byte words is two vectors of 16
+/// columns.
 constexpr int kBlockCols = 32;
 constexpr size_t kGroupRowBytes = kBlockCols * 4;
 static_assert(kNativeLayoutPackNr == kBlockCols,
         "the pack writes blocks of 32 columns");
+
+/// The geometries pack_block writes: words of one or two 2-byte elements,
+/// of four 1-byte elements with column sums or of one 4-byte element, and
+/// words of nibbles in two planes of a K quad each, two's complement plus 8.
+/// 1-byte elements always take column sums: the paths of a weight stored
+/// [K, N] write the sums after the quads, and the tile path, which takes
+/// the words without sums, reads 2-byte elements.
+constexpr bool packs(const native_geometry_t &g) {
+    if (g.planes == 2)
+        return g.elem_bits == 4 && g.word_bytes == 4
+                && g.k_per_word == 2 * INT8_VNNI_GRP
+                && g.encode == native_encode_t::nibble_offset && !g.col_sums;
+    if (g.planes != 1 || g.encode != native_encode_t::copy
+            || g.k_per_word * g.elem_bits != g.word_bytes * 8
+            || g.col_sums != (g.elem_bits == 8))
+        return false;
+    return (g.elem_bits == 16 && g.k_per_word <= 2)
+            || (g.elem_bits == 8 && g.k_per_word == INT8_VNNI_GRP)
+            || (g.elem_bits == 32 && g.k_per_word == 1);
+}
+static_assert(!packs({8, 4, INT8_VNNI_GRP, 1, native_encode_t::copy, false}),
+        "1-byte elements without column sums are not a geometry the pack "
+        "writes");
+
+/// Every format packs, and those that unpack hold 2-byte elements.
+constexpr bool packs_every_format() {
+    for (const native_format_desc_t &f : kNativeFormats)
+        if (!packs(f.geometry)
+                || (f.cache.unpack && f.geometry.elem_bits != 16))
+            return false;
+    return true;
+}
+static_assert(packs_every_format(), "a format the pack does not write");
 
 /// Lane i of out[j] is lane j of in[i]: a transpose of 16 x 16 groups of 4
 /// bytes.
@@ -109,11 +142,11 @@ inline void load_group_columns(const uint8_t *const (&rows)[16], size_t at,
 }
 
 /// The 8 two's-complement nibbles n0 .. n7 (n_i at bits 4i) of each 32-bit
-/// lane of v, one s4 octet of one column as the caller stores it, in the
-/// layout: byte q holds n_q + 8 in its low nibble and n_(q + 4) + 8 in its
-/// high nibble.  Zero bytes give the layout's zero, nibble 8.
+/// lane of v, a word of one column as the caller stores it, in the layout's
+/// two nibble planes: byte q holds n_q + 8 in its low nibble and n_(q + 4) +
+/// 8 in its high nibble.  Zero bytes give the layout's zero, nibble 8.
 ZENDNNL_TARGET("avx512f,avx512bw")
-inline __m512i s4_octets(__m512i v) {
+inline __m512i nibble_planes(__m512i v) {
     // Bytes 1 and 2 of each lane swap places: n0 n1 n4 n5 n2 n3 n6 n7.
     const __m512i bytes
             = _mm512_set4_epi32(0x0F0D0E0C, 0x0B090A08, 0x07050604, 0x03010200);
@@ -126,15 +159,13 @@ inline __m512i s4_octets(__m512i v) {
     return _mm512_xor_si512(v, _mm512_set1_epi8(static_cast<char>(0x88)));
 }
 
-/// Bytes of a K row of a block of an f16 weight: 32 columns of 2 bytes.
-constexpr size_t kF16RowBytes = kBlockCols * sizeof(uint16_t);
-
-/// The word permutes of 32 pack columns of K pairs of 16-bit values (lo
-/// columns 0 .. 15, hi 16 .. 31) into their two K rows, built at compile
-/// time: v[0] makes the first row of the pair, v[1] the second.
-struct f16_row_idx_t {
+/// The word permutes of 32 pack columns of groups of two 2-byte words (lo
+/// columns 0 .. 15, hi 16 .. 31) into the two K rows the words hold, built
+/// at compile time: v[0] makes the row of the first words, v[1] of the
+/// second.
+struct half_words_idx_t {
     alignas(64) uint16_t v[2][32] {};
-    constexpr f16_row_idx_t() {
+    constexpr half_words_idx_t() {
         for (int j = 0; j < 32; ++j) {
             v[0][j] = static_cast<uint16_t>(2 * j);
             v[1][j] = static_cast<uint16_t>(2 * j + 1);
@@ -142,21 +173,23 @@ struct f16_row_idx_t {
     }
 };
 
-inline constexpr f16_row_idx_t kF16RowIdx {};
+inline constexpr half_words_idx_t kHalfWordsIdx {};
 
 /// The block of pack columns p0 .. p0 + 31 of a weight stored [N, K]
 /// (transB): each pack column is a row of the buffer, row_bytes apart, of
-/// which k_bytes are the weight's; groups K groups of 4 bytes.  Sums: the s8
-/// column sums follow the groups.  S4: each group of 4 bytes is an s4 octet,
-/// stored as s4_octets makes it.  F16Rows: each group of 4 bytes is a K pair
-/// of an f16 column, stored as the two K rows of 32 columns the pair holds
-/// (none past the k_bytes / 2 rows of the weight).  Tail: only the first
-/// cols pack columns hold weight columns; the others are zero and their rows
-/// are not read.
-template <bool Sums, bool Tail, bool S4 = false, bool F16Rows = false>
+/// which k_bytes are the weight's, read in groups of 4 bytes of consecutive
+/// K values, groups of them.  WordBytes 4: each group is a word of the
+/// layout, in nibble planes (nibble_planes) with Nibbles; WordBytes 2: each
+/// group is two words, stored as the two K rows of 32 columns they make
+/// (none past the k_bytes / 2 rows of the weight).  Sums: the column sums
+/// of the words' signed bytes follow the K groups.  Tail: only the first
+/// cols pack columns hold weight columns; the others are zero and their
+/// rows are not read.
+template <bool Tail, bool Sums, bool Nibbles, int WordBytes>
 ZENDNNL_TARGET("avx512f,avx512bw")
 void pack_block_rows_of_n(const uint8_t *w, size_t row_bytes, size_t k_bytes,
         int groups, int p0, uint8_t *blk, int cols) {
+    constexpr size_t kRowBytes = kBlockCols * WordBytes;
     // Pack columns 0 .. 15 and 16 .. 31 of the block.
     const uint8_t *first[16], *second[16];
     const int n_first = Tail ? std::min(16, cols) : 16;
@@ -177,23 +210,23 @@ void pack_block_rows_of_n(const uint8_t *w, size_t row_bytes, size_t k_bytes,
         load_group_columns<Tail>(second, at, k_bytes - at, b, n_second);
         for (int q = 0; q < count; ++q) {
             __m512i lo = a[q], hi = b[q];
-            if constexpr (S4) {
-                lo = s4_octets(lo);
-                hi = s4_octets(hi);
+            if constexpr (Nibbles) {
+                lo = nibble_planes(lo);
+                hi = nibble_planes(hi);
             }
-            if constexpr (F16Rows) {
+            if constexpr (WordBytes == 2) {
                 const size_t k = 2 * static_cast<size_t>(g0 + q);
-                uint8_t *d = blk + k * kF16RowBytes;
+                uint8_t *d = blk + k * kRowBytes;
                 _mm512_storeu_si512(d,
                         _mm512_permutex2var_epi16(
-                                lo, _mm512_load_si512(kF16RowIdx.v[0]), hi));
-                if (k + 1 < k_bytes / sizeof(uint16_t))
-                    _mm512_storeu_si512(d + kF16RowBytes,
+                                lo, _mm512_load_si512(kHalfWordsIdx.v[0]), hi));
+                if (k + 1 < k_bytes / WordBytes)
+                    _mm512_storeu_si512(d + kRowBytes,
                             _mm512_permutex2var_epi16(lo,
-                                    _mm512_load_si512(kF16RowIdx.v[1]), hi));
+                                    _mm512_load_si512(kHalfWordsIdx.v[1]), hi));
                 continue;
             }
-            uint8_t *d = blk + static_cast<size_t>(g0 + q) * kGroupRowBytes;
+            uint8_t *d = blk + static_cast<size_t>(g0 + q) * kRowBytes;
             _mm512_storeu_si512(d, lo);
             _mm512_storeu_si512(d + 64, hi);
             if constexpr (Sums) {
@@ -203,112 +236,9 @@ void pack_block_rows_of_n(const uint8_t *w, size_t row_bytes, size_t k_bytes,
         }
     }
     if constexpr (Sums) {
-        uint8_t *d = blk + static_cast<size_t>(groups) * kGroupRowBytes;
+        uint8_t *d = blk + static_cast<size_t>(groups) * kRowBytes;
         _mm512_storeu_si512(d, sum_lo);
         _mm512_storeu_si512(d + 64, sum_hi);
-    }
-}
-
-/// Pack columns p0 .. p0 + 31 of a row of a bf16 weight stored [K, N].
-/// Tail: only the first cols pack columns (cols below 32) hold weight
-/// columns; the others read as zero.
-template <bool Tail>
-ZENDNNL_TARGET("avx512f,avx512bw")
-inline __m512i load_bf16_columns(const uint16_t *row, int p0, int cols) {
-    if constexpr (Tail) {
-        return _mm512_maskz_loadu_epi16((__mmask32 {1} << cols) - 1, row + p0);
-    } else {
-        (void)cols;
-        return _mm512_loadu_si512(row + p0);
-    }
-}
-
-/// The word permutes of a K pair row of 32 pack columns of a bf16 weight
-/// stored [K, N], built at compile time: v[0] makes its first 16 columns,
-/// v[1] its last 16.
-struct bf16_pair_idx_t {
-    alignas(64) uint16_t v[2][32] {};
-    constexpr bf16_pair_idx_t() {
-        // The pair of a column takes row k (index below 32) and row k + 1
-        // (index 32 and up) of its column.
-        for (int t = 0; t < 32; ++t) {
-            const int from_next = (t & 1) ? 32 : 0;
-            v[0][t] = static_cast<uint16_t>(from_next + t / 2);
-            v[1][t] = static_cast<uint16_t>(from_next + 16 + t / 2);
-        }
-    }
-};
-
-inline constexpr bf16_pair_idx_t kBf16PairIdx {};
-
-ZENDNNL_TARGET("avx512f,avx512bw")
-inline void bf16_pair_index(__m512i &lo, __m512i &hi) {
-    lo = _mm512_load_si512(kBf16PairIdx.v[0]);
-    hi = _mm512_load_si512(kBf16PairIdx.v[1]);
-}
-
-/// K pair row kp of pack columns p0 .. p0 + 31 of a bf16 weight stored
-/// [K, N], at d; Tail as load_bf16_columns.
-template <bool Tail>
-ZENDNNL_TARGET("avx512f,avx512bw")
-inline void pack_bf16_pair_row(const uint16_t *w, int K, size_t ldb, int p0,
-        int kp, __m512i lo_idx, __m512i hi_idx, uint16_t *d, int cols) {
-    const int k = kp * VNNI_PAIR;
-    const uint16_t *row = w + static_cast<size_t>(k) * ldb;
-    const __m512i a = load_bf16_columns<Tail>(row, p0, cols);
-    const __m512i b = k + 1 < K ? load_bf16_columns<Tail>(row + ldb, p0, cols)
-                                : _mm512_setzero_si512();
-    _mm512_storeu_si512(d, _mm512_permutex2var_epi16(a, lo_idx, b));
-    _mm512_storeu_si512(d + 32, _mm512_permutex2var_epi16(a, hi_idx, b));
-}
-
-/// The block of pack columns p0 .. p0 + 31 of a bf16 weight stored [K, N];
-/// Tail as load_bf16_columns.
-template <bool Tail>
-ZENDNNL_TARGET("avx512f,avx512bw")
-void pack_bf16_block_rows_of_k(
-        const uint16_t *w, int K, size_t ldb, int p0, uint16_t *blk, int cols) {
-    __m512i lo_idx, hi_idx;
-    bf16_pair_index(lo_idx, hi_idx);
-    const int k_pairs = native_k_groups(data_type_t::bf16, K);
-    for (int kp = 0; kp < k_pairs; ++kp)
-        pack_bf16_pair_row<Tail>(w, K, ldb, p0, kp, lo_idx, hi_idx,
-                blk + static_cast<size_t>(kp) * kBlockCols * VNNI_PAIR, cols);
-}
-
-/// A bf16 or f32 weight stored [K, N] of at least kTileMinK rows packs by
-/// tiles of kTileGroups K groups by kTileBlocks blocks.  A block reads one
-/// or two lines of each of its rows, a row stride apart: a walk down that
-/// many rows loses the lines it fetches ahead (all in one cache set when the
-/// stride is a multiple of the page size).  A tile reads the segments of its
-/// rows in order and writes the part of each block whole.
-constexpr int kTileGroups = 8;
-constexpr int kTileBlocks = 16;
-constexpr int kTileMinK = 1024;
-
-/// K pairs kp0 .. kp1 (at most kTileGroups) of blocks nb0 .. nb1 (at most
-/// kTileBlocks) of a bf16 weight stored [K, N] into the layout at out, whose
-/// blocks are block_bytes long.
-ZENDNNL_TARGET("avx512f,avx512bw")
-void pack_bf16_tile_rows_of_k(const uint16_t *w, int K, size_t ldb, int kp0,
-        int kp1, int nb0, int nb1, size_t block_bytes, uint8_t *out) {
-    alignas(64)
-            uint16_t tile[kTileBlocks][kTileGroups * kBlockCols * VNNI_PAIR];
-    __m512i lo_idx, hi_idx;
-    bf16_pair_index(lo_idx, hi_idx);
-    for (int kp = kp0; kp < kp1; ++kp)
-        for (int nb = nb0; nb < nb1; ++nb)
-            pack_bf16_pair_row<false>(w, K, ldb, nb * kBlockCols, kp, lo_idx,
-                    hi_idx,
-                    tile[nb - nb0] + (kp - kp0) * kBlockCols * VNNI_PAIR,
-                    kBlockCols);
-    const size_t part = static_cast<size_t>(kp1 - kp0) * kGroupRowBytes;
-    for (int nb = nb0; nb < nb1; ++nb) {
-        const uint8_t *s = reinterpret_cast<const uint8_t *>(tile[nb - nb0]);
-        uint8_t *d = out + static_cast<size_t>(nb) * block_bytes
-                + static_cast<size_t>(kp0) * kGroupRowBytes;
-        for (size_t i = 0; i < part; i += 64)
-            _mm512_storeu_si512(d + i, _mm512_load_si512(s + i));
     }
 }
 
@@ -319,111 +249,99 @@ inline __mmask16 lanes_below(int lanes) {
             : static_cast<__mmask16>((1u << std::max(0, lanes)) - 1u);
 }
 
-/// Pack columns p0 .. p0 + 31 of a row of an f32 weight stored [K, N], at
-/// d.  Tail: only the first cols pack columns hold weight columns; the
-/// others are zero.
-template <bool Tail>
-ZENDNNL_TARGET("avx512f")
-inline void pack_f32_row(const float *row, int p0, float *d, int cols) {
-    if constexpr (Tail) {
-        _mm512_storeu_ps(d, _mm512_maskz_loadu_ps(lanes_below(cols), row + p0));
-        _mm512_storeu_ps(d + 16,
-                _mm512_maskz_loadu_ps(lanes_below(cols - 16), row + p0 + 16));
-    } else {
-        (void)cols;
-        _mm512_storeu_ps(d, _mm512_loadu_ps(row + p0));
-        _mm512_storeu_ps(d + 16, _mm512_loadu_ps(row + p0 + 16));
-    }
-}
-
-/// The block of pack columns p0 .. p0 + 31 of an f32 weight stored [K, N];
-/// Tail as pack_f32_row.
-template <bool Tail>
-ZENDNNL_TARGET("avx512f")
-void pack_f32_block_rows_of_k(
-        const float *w, int K, size_t ldb, int p0, float *blk, int cols) {
-    for (int k = 0; k < K; ++k)
-        pack_f32_row<Tail>(w + static_cast<size_t>(k) * ldb, p0,
-                blk + static_cast<size_t>(k) * kBlockCols, cols);
-}
-
-/// Rows k0 .. k1 (at most kTileGroups) of blocks nb0 .. nb1 (at most
-/// kTileBlocks) of an f32 weight stored [K, N] into the layout at out, whose
-/// blocks are block_bytes long.
-ZENDNNL_TARGET("avx512f")
-void pack_f32_tile_rows_of_k(const float *w, size_t ldb, int k0, int k1,
-        int nb0, int nb1, size_t block_bytes, uint8_t *out) {
-    alignas(64) float tile[kTileBlocks][kTileGroups * kBlockCols];
-    for (int k = k0; k < k1; ++k)
-        for (int nb = nb0; nb < nb1; ++nb)
-            pack_f32_row<false>(w + static_cast<size_t>(k) * ldb,
-                    nb * kBlockCols, tile[nb - nb0] + (k - k0) * kBlockCols,
-                    kBlockCols);
-    const size_t part = static_cast<size_t>(k1 - k0) * kGroupRowBytes;
-    for (int nb = nb0; nb < nb1; ++nb) {
-        const uint8_t *s = reinterpret_cast<const uint8_t *>(tile[nb - nb0]);
-        uint8_t *d = out + static_cast<size_t>(nb) * block_bytes
-                + static_cast<size_t>(k0) * kGroupRowBytes;
-        for (size_t i = 0; i < part; i += 64)
-            _mm512_storeu_si512(d + i, _mm512_load_si512(s + i));
-    }
-}
-
-/// Pack columns p0 .. p0 + 31 of a row of an f16 weight stored [K, N], at
-/// d.  Tail: only the first cols pack columns (cols below 32) hold weight
-/// columns; the others are zero.
+/// Pack columns p0 .. p0 + 31 of a row of 2-byte elements stored [K, N].
+/// Tail: only the first cols pack columns (cols below 32) hold weight
+/// columns; the others read as zero.
 template <bool Tail>
 ZENDNNL_TARGET("avx512f,avx512bw")
-inline void pack_f16_row(const uint16_t *row, int p0, uint16_t *d, int cols) {
+inline __m512i load_words16(const uint8_t *row, int p0, int cols) {
+    const uint16_t *r = reinterpret_cast<const uint16_t *>(row) + p0;
     if constexpr (Tail) {
+        return _mm512_maskz_loadu_epi16((__mmask32 {1} << cols) - 1, r);
+    } else {
+        (void)cols;
+        return _mm512_loadu_si512(r);
+    }
+}
+
+/// The word permutes of a K pair row of 32 pack columns of 2-byte elements
+/// stored [K, N], built at compile time: v[0] makes its first 16 columns,
+/// v[1] its last 16.
+struct pair_idx_t {
+    alignas(64) uint16_t v[2][32] {};
+    constexpr pair_idx_t() {
+        // The pair of a column takes row k (index below 32) and row k + 1
+        // (index 32 and up) of its column.
+        for (int t = 0; t < 32; ++t) {
+            const int from_next = (t & 1) ? 32 : 0;
+            v[0][t] = static_cast<uint16_t>(from_next + t / 2);
+            v[1][t] = static_cast<uint16_t>(from_next + 16 + t / 2);
+        }
+    }
+};
+
+inline constexpr pair_idx_t kPairIdx {};
+
+/// K group row kg of pack columns p0 .. p0 + 31 of a weight of ElemBytes
+/// elements stored [K, N], rows ld bytes apart, at d: with KPerWord 1 row kg
+/// itself, with KPerWord 2 rows 2kg and 2kg + 1 in pairs (the second zero
+/// past K).  Tail: only the first cols pack columns hold weight columns;
+/// the others are zero.
+template <int KPerWord, int ElemBytes, bool Tail>
+ZENDNNL_TARGET("avx512f,avx512bw")
+inline void pack_group_row(const uint8_t *w, int K, size_t ld, int p0, int kg,
+        uint8_t *d, int cols) {
+    const uint8_t *row = w + static_cast<size_t>(kg) * KPerWord * ld;
+    if constexpr (KPerWord == 2) {
+        static_assert(ElemBytes == 2, "pairs of 2-byte elements");
+        const __m512i a = load_words16<Tail>(row, p0, cols);
+        const __m512i b = KPerWord * kg + 1 < K
+                ? load_words16<Tail>(row + ld, p0, cols)
+                : _mm512_setzero_si512();
         _mm512_storeu_si512(d,
-                _mm512_maskz_loadu_epi16(
-                        (__mmask32 {1} << cols) - 1, row + p0));
+                _mm512_permutex2var_epi16(
+                        a, _mm512_load_si512(kPairIdx.v[0]), b));
+        _mm512_storeu_si512(d + 64,
+                _mm512_permutex2var_epi16(
+                        a, _mm512_load_si512(kPairIdx.v[1]), b));
+    } else if constexpr (ElemBytes == 4) {
+        static_assert(KPerWord == 1, "a word of one 4-byte element");
+        const float *r = reinterpret_cast<const float *>(row) + p0;
+        float *o = reinterpret_cast<float *>(d);
+        if constexpr (Tail) {
+            _mm512_storeu_ps(o, _mm512_maskz_loadu_ps(lanes_below(cols), r));
+            _mm512_storeu_ps(o + 16,
+                    _mm512_maskz_loadu_ps(lanes_below(cols - 16), r + 16));
+        } else {
+            _mm512_storeu_ps(o, _mm512_loadu_ps(r));
+            _mm512_storeu_ps(o + 16, _mm512_loadu_ps(r + 16));
+        }
     } else {
-        (void)cols;
-        _mm512_storeu_si512(d, _mm512_loadu_si512(row + p0));
+        static_assert(KPerWord == 1 && ElemBytes == 2,
+                "a word of one 2-byte element");
+        _mm512_storeu_si512(d, load_words16<Tail>(row, p0, cols));
     }
 }
 
-/// The block of pack columns p0 .. p0 + 31 of an f16 weight stored [K, N];
-/// Tail as pack_f16_row.
-template <bool Tail>
+/// The block of pack columns p0 .. p0 + 31 of a weight stored [K, N], rows
+/// ld bytes apart: its K group rows (pack_group_row).
+template <int KPerWord, int ElemBytes, bool Tail>
 ZENDNNL_TARGET("avx512f,avx512bw")
-void pack_f16_block_rows_of_k(
-        const uint16_t *w, int K, size_t ldb, int p0, uint16_t *blk, int cols) {
-    for (int k = 0; k < K; ++k)
-        pack_f16_row<Tail>(w + static_cast<size_t>(k) * ldb, p0,
-                blk + static_cast<size_t>(k) * kBlockCols, cols);
+void pack_block_rows_of_k(
+        const uint8_t *w, int K, size_t ld, int p0, uint8_t *blk, int cols) {
+    constexpr size_t kRowBytes = kBlockCols * KPerWord * ElemBytes;
+    const int groups = K / KPerWord + (K % KPerWord != 0);
+    for (int kg = 0; kg < groups; ++kg)
+        pack_group_row<KPerWord, ElemBytes, Tail>(w, K, ld, p0, kg,
+                blk + static_cast<size_t>(kg) * kRowBytes, cols);
 }
 
-/// Rows k0 .. k1 (at most kTileGroups) of blocks nb0 .. nb1 (at most
-/// kTileBlocks) of an f16 weight stored [K, N] into the layout at out, whose
-/// blocks are block_bytes long.
-ZENDNNL_TARGET("avx512f,avx512bw")
-void pack_f16_tile_rows_of_k(const uint16_t *w, size_t ldb, int k0, int k1,
-        int nb0, int nb1, size_t block_bytes, uint8_t *out) {
-    alignas(64) uint16_t tile[kTileBlocks][kTileGroups * kBlockCols];
-    for (int k = k0; k < k1; ++k)
-        for (int nb = nb0; nb < nb1; ++nb)
-            pack_f16_row<false>(w + static_cast<size_t>(k) * ldb,
-                    nb * kBlockCols, tile[nb - nb0] + (k - k0) * kBlockCols,
-                    kBlockCols);
-    const size_t part = static_cast<size_t>(k1 - k0) * kF16RowBytes;
-    for (int nb = nb0; nb < nb1; ++nb) {
-        const uint8_t *s = reinterpret_cast<const uint8_t *>(tile[nb - nb0]);
-        uint8_t *d = out + static_cast<size_t>(nb) * block_bytes
-                + static_cast<size_t>(k0) * kF16RowBytes;
-        for (size_t i = 0; i < part; i += 64)
-            _mm512_storeu_si512(d + i, _mm512_load_si512(s + i));
-    }
-}
-
-/// Pack columns p0 .. p0 + 31 of a row of an s8 weight stored [K, N].
+/// Pack columns p0 .. p0 + 31 of a row of one-byte elements stored [K, N].
 /// Tail: only the first cols pack columns (cols below 32) hold weight
 /// columns; the others read as zero.
 template <bool Tail>
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
-inline __m256i load_s8_columns(const int8_t *row, int p0, int cols) {
+inline __m256i load_bytes(const uint8_t *row, int p0, int cols) {
     if constexpr (Tail) {
         return _mm256_maskz_loadu_epi8((__mmask32 {1} << cols) - 1, row + p0);
     } else {
@@ -432,14 +350,14 @@ inline __m256i load_s8_columns(const int8_t *row, int p0, int cols) {
     }
 }
 
-/// The block of pack columns p0 .. p0 + 31 of an s8 weight stored [K, N],
-/// its column sums after the quads; Tail as load_s8_columns (the zero
-/// columns sum to zero).
+/// The block of pack columns p0 .. p0 + 31 of a weight of one-byte elements
+/// stored [K, N], ld bytes apart, in words of K quads, their column sums
+/// after them; Tail as load_bytes (the zero columns sum to zero).
 template <bool Tail>
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
-void pack_s8_block_rows_of_k(
-        const int8_t *w, int K, size_t ldb, int p0, int8_t *blk, int cols) {
-    const int k_quads = native_k_groups(data_type_t::s8, K);
+void pack_block_quads_of_k(
+        const uint8_t *w, int K, size_t ld, int p0, uint8_t *blk, int cols) {
+    const int k_quads = K / INT8_VNNI_GRP + (K % INT8_VNNI_GRP != 0);
     __m256i sums[4];
     for (__m256i &s : sums)
         s = _mm256_setzero_si256();
@@ -448,8 +366,8 @@ void pack_s8_block_rows_of_k(
         __m256i r[4];
         for (int i = 0; i < 4; ++i)
             r[i] = k + i < K
-                    ? load_s8_columns<Tail>(
-                              w + static_cast<size_t>(k + i) * ldb, p0, cols)
+                    ? load_bytes<Tail>(
+                              w + static_cast<size_t>(k + i) * ld, p0, cols)
                     : _mm256_setzero_si256();
         // Byte pairs of rows 0 | 1 and 2 | 3, then the quads of columns
         // 0 .. 3 | 16 .. 19 (e), 4 .. 7 | 20 .. 23 (f), 8 .. 11 | 24 .. 27 (g)
@@ -466,21 +384,24 @@ void pack_s8_block_rows_of_k(
                 _mm256_permute2x128_si256(g, h, 0x20),
                 _mm256_permute2x128_si256(e, f, 0x31),
                 _mm256_permute2x128_si256(g, h, 0x31)};
-        int8_t *dst = blk + static_cast<size_t>(kq) * kGroupRowBytes;
+        uint8_t *dst = blk + static_cast<size_t>(kq) * kGroupRowBytes;
         for (int i = 0; i < 4; ++i) {
             _mm256_storeu_si256(
                     reinterpret_cast<__m256i *>(dst + 32 * i), quads[i]);
             sums[i] = _mm256_add_epi32(sums[i], quad_sums(quads[i]));
         }
     }
-    int8_t *dst = blk + static_cast<size_t>(k_quads) * kGroupRowBytes;
+    uint8_t *dst = blk + static_cast<size_t>(k_quads) * kGroupRowBytes;
     for (int i = 0; i < 4; ++i)
         _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst + 32 * i), sums[i]);
 }
 
-/// The two's-complement nibble of element (k, n) of an s4 weight stored
-/// [K, N] ldb elements apart, or [N, K] when transB.
-inline uint8_t s4_nibble(
+/// K values of a word of nibbles: two planes of a K quad.
+constexpr int kNibbleWordK = 2 * INT8_VNNI_GRP;
+
+/// The two's-complement nibble of element (k, n) of a weight of nibbles
+/// stored [K, N] ldb elements apart, or [N, K] when transB.
+inline uint8_t nibble_at(
         const uint8_t *w, size_t ldb, bool transB, int k, int n) {
     const size_t i = transB
             ? static_cast<size_t>(n) * ldb + static_cast<size_t>(k)
@@ -488,23 +409,24 @@ inline uint8_t s4_nibble(
     return static_cast<uint8_t>((w[i >> 1] >> ((i & 1) * 4)) & 0x0F);
 }
 
-/// The block of pack columns p0 .. p0 + 31 of an s4 weight read element by
-/// element (any ldb, either storage); pack columns from N on and K past the
-/// weight's hold the layout's zero.
-void pack_s4_block_of_elements(const uint8_t *w, int K, int N, size_t ldb,
+/// The block of pack columns p0 .. p0 + 31 of a weight of nibbles read
+/// element by element (any ldb, either storage), as nibble_planes writes a
+/// word; pack columns from N on and K past the weight's hold the layout's
+/// zero.
+void pack_block_of_nibbles(const uint8_t *w, int K, int N, size_t ldb,
         bool transB, int p0, uint8_t *blk) {
-    const int octets = native_k_groups(data_type_t::s4, K);
-    for (int o = 0; o < octets; ++o) {
+    const int words = K / kNibbleWordK + (K % kNibbleWordK != 0);
+    for (int o = 0; o < words; ++o) {
         uint8_t *row = blk + static_cast<size_t>(o) * kGroupRowBytes;
         for (int q = 0; q < 4; ++q) {
-            const int k0 = kNativeS4Octet * o + q;
-            const int k1 = k0 + kNativeS4Octet / 2;
+            const int k0 = kNibbleWordK * o + q;
+            const int k1 = k0 + kNibbleWordK / 2;
             for (int j = 0; j < kBlockCols; ++j) {
                 const int p = p0 + j;
                 uint8_t lo = 0, hi = 0;
                 if (p < N) {
-                    if (k0 < K) lo = s4_nibble(w, ldb, transB, k0, p);
-                    if (k1 < K) hi = s4_nibble(w, ldb, transB, k1, p);
+                    if (k0 < K) lo = nibble_at(w, ldb, transB, k0, p);
+                    if (k1 < K) hi = nibble_at(w, ldb, transB, k1, p);
                 }
                 row[j * 4 + q] = static_cast<uint8_t>(
                         (lo ^ 0x08u) | ((hi ^ 0x08u) << 4));
@@ -513,119 +435,133 @@ void pack_s4_block_of_elements(const uint8_t *w, int K, int N, size_t ldb,
     }
 }
 
-/// The block nb of an s4 weight: by rows of whole bytes for a weight stored
-/// [N, K] with even ldb and K, else element by element; Tail as
-/// pack_bf16_block.
+/// The block nb of a weight of geometry g, stored [K, N] ldb elements apart
+/// or [N, K] when TransB; Tail: the last block, of fewer than 32 columns of
+/// the weight (pack columns from N on are zero).
 template <bool TransB, bool Tail>
-void pack_s4_block(const uint8_t *w, int K, int N, size_t ldb, int pack_nr,
-        int nb, uint8_t *blk) {
-    const int p0 = nb * pack_nr;
-    if (TransB && ldb % 2 == 0 && K % 2 == 0)
-        pack_block_rows_of_n<false, Tail, true>(w, ldb / 2,
-                static_cast<size_t>(K) / 2, native_k_groups(data_type_t::s4, K),
-                p0, blk, N - p0);
-    else
-        pack_s4_block_of_elements(w, K, N, ldb, TransB, p0, blk);
-}
-
-/// The block nb of a bf16 weight; Tail: the last block, of fewer than
-/// pack_nr columns of the weight (pack columns from N on are zero).
-template <bool TransB, bool Tail>
-void pack_bf16_block(const uint16_t *w, int K, int N, size_t ldb, int pack_nr,
-        int nb, uint16_t *blk) {
-    const int p0 = nb * pack_nr;
+void pack_block(const native_geometry_t &g, const uint8_t *w, int K, int N,
+        size_t ldb, int nb, uint8_t *blk) {
+    const int p0 = nb * kBlockCols;
     const int cols = N - p0;
-    if constexpr (TransB)
-        pack_block_rows_of_n<false, Tail>(reinterpret_cast<const uint8_t *>(w),
-                ldb * sizeof(uint16_t),
-                static_cast<size_t>(K) * sizeof(uint16_t),
-                native_k_groups(data_type_t::bf16, K), p0,
-                reinterpret_cast<uint8_t *>(blk), cols);
-    else
-        pack_bf16_block_rows_of_k<Tail>(w, K, ldb, p0, blk, cols);
-}
-
-/// The block nb of an s8 weight; Tail as pack_bf16_block.
-template <bool TransB, bool Tail>
-void pack_s8_block(const int8_t *w, int K, int N, size_t ldb, int pack_nr,
-        int nb, int8_t *blk) {
-    const int p0 = nb * pack_nr;
-    const int cols = N - p0;
-    if constexpr (TransB)
-        pack_block_rows_of_n<true, Tail>(reinterpret_cast<const uint8_t *>(w),
-                ldb, static_cast<size_t>(K),
-                native_k_groups(data_type_t::s8, K), p0,
-                reinterpret_cast<uint8_t *>(blk), cols);
-    else
-        pack_s8_block_rows_of_k<Tail>(w, K, ldb, p0, blk, cols);
-}
-
-/// The block nb of an f32 weight; Tail as pack_bf16_block.
-template <bool TransB, bool Tail>
-void pack_f32_block(const float *w, int K, int N, size_t ldb, int pack_nr,
-        int nb, float *blk) {
-    const int p0 = nb * pack_nr;
-    const int cols = N - p0;
-    if constexpr (TransB)
-        pack_block_rows_of_n<false, Tail>(reinterpret_cast<const uint8_t *>(w),
-                ldb * sizeof(float), static_cast<size_t>(K) * sizeof(float), K,
-                p0, reinterpret_cast<uint8_t *>(blk), cols);
-    else
-        pack_f32_block_rows_of_k<Tail>(w, K, ldb, p0, blk, cols);
-}
-
-/// The block nb of an f16 weight; Tail as pack_bf16_block.  Stored [N, K],
-/// its K pairs are read as the groups of 4 bytes of a bf16 weight.
-template <bool TransB, bool Tail>
-void pack_f16_block(const uint16_t *w, int K, int N, size_t ldb, int pack_nr,
-        int nb, uint16_t *blk) {
-    const int p0 = nb * pack_nr;
-    const int cols = N - p0;
-    if constexpr (TransB)
-        pack_block_rows_of_n<false, Tail, false, true>(
-                reinterpret_cast<const uint8_t *>(w), ldb * sizeof(uint16_t),
-                static_cast<size_t>(K) * sizeof(uint16_t),
-                native_k_groups(data_type_t::bf16, K), p0,
-                reinterpret_cast<uint8_t *>(blk), cols);
-    else
-        pack_f16_block_rows_of_k<Tail>(w, K, ldb, p0, blk, cols);
-}
-
-template <bool TransB>
-void unpack_f16_block(const uint16_t *blk, int K, size_t ldb, int pack_nr,
-        int nb, uint16_t *w) {
-    const int p0 = nb * pack_nr;
-    for (int k = 0; k < K; ++k) {
-        const uint16_t *d = blk + static_cast<size_t>(k) * pack_nr;
-        for (int j = 0; j < pack_nr; ++j) {
-            const size_t c = static_cast<size_t>(p0 + j);
-            if constexpr (TransB)
-                w[c * ldb + k] = d[j];
-            else
-                w[static_cast<size_t>(k) * ldb + c] = d[j];
-        }
+    if (g.planes == 2) {
+        // Rows of whole bytes as groups of 4 bytes, else element by element.
+        if (TransB && ldb % 2 == 0 && K % 2 == 0)
+            pack_block_rows_of_n<Tail, false, true, 4>(w, ldb / 2,
+                    static_cast<size_t>(K) / 2, native_k_groups(g, K), p0, blk,
+                    cols);
+        else
+            pack_block_of_nibbles(w, K, N, ldb, TransB, p0, blk);
+        return;
+    }
+    const size_t esz = static_cast<size_t>(g.elem_bits / 8);
+    if constexpr (TransB) {
+        const size_t k_bytes = static_cast<size_t>(K) * esz;
+        const int groups = static_cast<int>((k_bytes + 3) / 4);
+        if (g.word_bytes == 2)
+            pack_block_rows_of_n<Tail, false, false, 2>(
+                    w, ldb * esz, k_bytes, groups, p0, blk, cols);
+        else if (g.col_sums)
+            pack_block_rows_of_n<Tail, true, false, 4>(
+                    w, ldb * esz, k_bytes, groups, p0, blk, cols);
+        else
+            pack_block_rows_of_n<Tail, false, false, 4>(
+                    w, ldb * esz, k_bytes, groups, p0, blk, cols);
+    } else if (g.k_per_word == INT8_VNNI_GRP) {
+        pack_block_quads_of_k<Tail>(w, K, ldb, p0, blk, cols);
+    } else if (g.k_per_word == 2) {
+        pack_block_rows_of_k<2, 2, Tail>(w, K, ldb * 2, p0, blk, cols);
+    } else if (esz == 4) {
+        pack_block_rows_of_k<1, 4, Tail>(w, K, ldb * 4, p0, blk, cols);
+    } else {
+        pack_block_rows_of_k<1, 2, Tail>(w, K, ldb * 2, p0, blk, cols);
     }
 }
 
-template <bool TransB>
-void unpack_bf16_block(const uint16_t *blk, int K, size_t ldb, int pack_nr,
-        int nb, uint16_t *w) {
+/// A weight stored [K, N] of at least kTileMinK rows, of words of one
+/// element or of K pairs, packs by tiles of kTileGroups K groups by
+/// kTileBlocks blocks.  A block reads one or two lines of each of its rows,
+/// a row stride apart: a walk down that many rows loses the lines it fetches
+/// ahead (all in one cache set when the stride is a multiple of the page
+/// size).  A tile reads the segments of its rows in order and writes the
+/// part of each block whole.
+constexpr int kTileGroups = 8;
+constexpr int kTileBlocks = 16;
+constexpr int kTileMinK = 1024;
+
+/// K groups kg0 .. kg1 (at most kTileGroups) of blocks nb0 .. nb1 (at most
+/// kTileBlocks) of a weight stored [K, N], rows ld bytes apart, into the
+/// layout at out, whose blocks are block_bytes long.
+template <int KPerWord, int ElemBytes>
+ZENDNNL_TARGET("avx512f,avx512bw")
+void pack_tile_rows_of_k(const uint8_t *w, int K, size_t ld, int kg0, int kg1,
+        int nb0, int nb1, size_t block_bytes, uint8_t *out) {
+    constexpr size_t kRowBytes = kBlockCols * KPerWord * ElemBytes;
+    alignas(64) uint8_t tile[kTileBlocks][kTileGroups * kRowBytes];
+    for (int kg = kg0; kg < kg1; ++kg)
+        for (int nb = nb0; nb < nb1; ++nb)
+            pack_group_row<KPerWord, ElemBytes, false>(w, K, ld,
+                    nb * kBlockCols, kg,
+                    tile[nb - nb0] + (kg - kg0) * kRowBytes, kBlockCols);
+    const size_t part = static_cast<size_t>(kg1 - kg0) * kRowBytes;
+    for (int nb = nb0; nb < nb1; ++nb) {
+        const uint8_t *s = tile[nb - nb0];
+        uint8_t *d = out + static_cast<size_t>(nb) * block_bytes
+                + static_cast<size_t>(kg0) * kRowBytes;
+        for (size_t i = 0; i < part; i += 64)
+            _mm512_storeu_si512(d + i, _mm512_load_si512(s + i));
+    }
+}
+
+/// Tile t of a weight of geometry g stored [K, N] ldb elements apart, of
+/// n_blocks whole blocks: K group chunks outer, so that the tiles of a
+/// thread take its rows in order.
+void pack_tile(const native_geometry_t &g, const uint8_t *w, int K, size_t ldb,
+        int t, int n_blocks, size_t block_bytes, uint8_t *out) {
+    const int groups = ceil_div(n_blocks, kTileBlocks);
+    const int k_groups = native_k_groups(g, K);
+    const int kg0 = t / groups * kTileGroups;
+    const int kg1 = std::min(k_groups, kg0 + kTileGroups);
+    const int nb0 = t % groups * kTileBlocks;
+    const int nb1 = std::min(n_blocks, nb0 + kTileBlocks);
+    if (g.k_per_word == 2)
+        pack_tile_rows_of_k<2, 2>(
+                w, K, ldb * 2, kg0, kg1, nb0, nb1, block_bytes, out);
+    else if (g.elem_bits == 32)
+        pack_tile_rows_of_k<1, 4>(
+                w, K, ldb * 4, kg0, kg1, nb0, nb1, block_bytes, out);
+    else
+        pack_tile_rows_of_k<1, 2>(
+                w, K, ldb * 2, kg0, kg1, nb0, nb1, block_bytes, out);
+}
+
+/// Inverse of the pack of block nb of a weight of 2-byte elements in words
+/// of KPerWord K values: each element the block holds of the weight's K,
+/// back to the weight.  The word width is a template argument: with a width
+/// known only at run time the copies of a row do not vectorize.
+template <bool TransB, int KPerWord>
+void unpack_block(const uint16_t *blk, int K, size_t ldb, int pack_nr, int nb,
+        uint16_t *w) {
+    static_assert(KPerWord == 1 || KPerWord == 2,
+            "words of one or two 2-byte elements");
     const int p0 = nb * pack_nr;
-    const int k_pairs = native_k_groups(data_type_t::bf16, K);
-    for (int kp = 0; kp < k_pairs; ++kp) {
-        const int k = kp * VNNI_PAIR;
-        const bool pair = k + 1 < K;
-        const uint16_t *d = blk + static_cast<size_t>(kp) * pack_nr * VNNI_PAIR;
+    const int groups = K / KPerWord + (K % KPerWord != 0);
+    for (int kg = 0; kg < groups; ++kg) {
+        const int k = kg * KPerWord;
+        // The second element of the last word of an odd K is past the
+        // weight.
+        const bool second = KPerWord == 2 && k + 1 < K;
+        const uint16_t *d = blk + static_cast<size_t>(kg) * pack_nr * KPerWord;
         for (int j = 0; j < pack_nr; ++j) {
             const size_t c = static_cast<size_t>(p0 + j);
             if constexpr (TransB) {
                 uint16_t *s = w + c * ldb + k;
-                s[0] = d[2 * j];
-                if (pair) s[1] = d[2 * j + 1];
+                s[0] = d[KPerWord * j];
+                if (second) s[1] = d[KPerWord * j + 1];
             } else {
-                w[static_cast<size_t>(k) * ldb + c] = d[2 * j];
-                if (pair)
-                    w[static_cast<size_t>(k + 1) * ldb + c] = d[2 * j + 1];
+                w[static_cast<size_t>(k) * ldb + c] = d[KPerWord * j];
+                if (second)
+                    w[static_cast<size_t>(k + 1) * ldb + c]
+                            = d[KPerWord * j + 1];
             }
         }
     }
@@ -641,134 +577,41 @@ void for_each_part(int parts, int num_threads, Fn fn) {
 }
 
 template <bool TransB>
-void pack_typed(data_type_t wei_dt, const void *weight, int K, int N,
+void pack_layout(const native_geometry_t &g, const void *weight, int K, int N,
         size_t ldb, int pack_nr, void *dst, int num_threads) {
-    const size_t block_bytes = native_block_bytes(wei_dt, K, pack_nr);
+    const size_t block_bytes = native_block_bytes(g, K, pack_nr);
+    const uint8_t *w = static_cast<const uint8_t *>(weight);
     uint8_t *out = static_cast<uint8_t *>(dst);
     // The whole blocks; then, on the calling thread, the block of the last
     // N % pack_nr columns, padded with zero columns.
     const int n_blocks = N / pack_nr;
     const bool tail = n_blocks * pack_nr < N;
-    uint8_t *tail_blk = out + static_cast<size_t>(n_blocks) * block_bytes;
-    if (wei_dt == data_type_t::s8) {
-        const int8_t *w = static_cast<const int8_t *>(weight);
-        for_each_part(n_blocks, num_threads, [=](int nb) {
-            pack_s8_block<TransB, false>(w, K, N, ldb, pack_nr, nb,
-                    reinterpret_cast<int8_t *>(out + nb * block_bytes));
-        });
-        if (tail)
-            pack_s8_block<TransB, true>(w, K, N, ldb, pack_nr, n_blocks,
-                    reinterpret_cast<int8_t *>(tail_blk));
-        return;
-    }
-    if (wei_dt == data_type_t::s4) {
-        const uint8_t *w = static_cast<const uint8_t *>(weight);
-        for_each_part(n_blocks, num_threads, [=](int nb) {
-            pack_s4_block<TransB, false>(
-                    w, K, N, ldb, pack_nr, nb, out + nb * block_bytes);
-        });
-        if (tail)
-            pack_s4_block<TransB, true>(
-                    w, K, N, ldb, pack_nr, n_blocks, tail_blk);
-        return;
-    }
-    const int tiles = !TransB && K >= kTileMinK
-            ? native_pack_tiles(n_blocks, native_k_groups(wei_dt, K))
+    const int tiles = !TransB && g.planes == 1 && !g.col_sums && K >= kTileMinK
+            ? native_pack_tiles(n_blocks, native_k_groups(g, K))
             : 0;
-    if (wei_dt == data_type_t::f32) {
-        const float *w = static_cast<const float *>(weight);
-        if (tiles > 0) {
-            const int groups = ceil_div(n_blocks, kTileBlocks);
-            // Row chunks outer: the tiles of a thread take its rows in order.
-            for_each_part(tiles, num_threads, [=](int t) {
-                const int g = t % groups;
-                const int c = t / groups;
-                pack_f32_tile_rows_of_k(w, ldb, c * kTileGroups,
-                        std::min(K, (c + 1) * kTileGroups), g * kTileBlocks,
-                        std::min(n_blocks, (g + 1) * kTileBlocks), block_bytes,
-                        out);
-            });
-        } else {
-            for_each_part(n_blocks, num_threads, [=](int nb) {
-                pack_f32_block<TransB, false>(w, K, N, ldb, pack_nr, nb,
-                        reinterpret_cast<float *>(out + nb * block_bytes));
-            });
-        }
-        if (tail)
-            pack_f32_block<TransB, true>(w, K, N, ldb, pack_nr, n_blocks,
-                    reinterpret_cast<float *>(tail_blk));
-        return;
-    }
-    if (wei_dt == data_type_t::f16) {
-        const uint16_t *w = static_cast<const uint16_t *>(weight);
-        if (tiles > 0) {
-            const int groups = ceil_div(n_blocks, kTileBlocks);
-            // Row chunks outer: the tiles of a thread take its rows in order.
-            for_each_part(tiles, num_threads, [=](int t) {
-                const int g = t % groups;
-                const int c = t / groups;
-                pack_f16_tile_rows_of_k(w, ldb, c * kTileGroups,
-                        std::min(K, (c + 1) * kTileGroups), g * kTileBlocks,
-                        std::min(n_blocks, (g + 1) * kTileBlocks), block_bytes,
-                        out);
-            });
-        } else {
-            for_each_part(n_blocks, num_threads, [=](int nb) {
-                pack_f16_block<TransB, false>(w, K, N, ldb, pack_nr, nb,
-                        reinterpret_cast<uint16_t *>(out + nb * block_bytes));
-            });
-        }
-        if (tail)
-            pack_f16_block<TransB, true>(w, K, N, ldb, pack_nr, n_blocks,
-                    reinterpret_cast<uint16_t *>(tail_blk));
-        return;
-    }
-    const uint16_t *w = static_cast<const uint16_t *>(weight);
     if (tiles > 0) {
-        const int k_pairs = native_k_groups(data_type_t::bf16, K);
-        const int groups = ceil_div(n_blocks, kTileBlocks);
-        // K pair chunks outer: the tiles of a thread take its rows in order.
         for_each_part(tiles, num_threads, [=](int t) {
-            const int g = t % groups;
-            const int c = t / groups;
-            pack_bf16_tile_rows_of_k(w, K, ldb, c * kTileGroups,
-                    std::min(k_pairs, (c + 1) * kTileGroups), g * kTileBlocks,
-                    std::min(n_blocks, (g + 1) * kTileBlocks), block_bytes,
-                    out);
+            pack_tile(g, w, K, ldb, t, n_blocks, block_bytes, out);
         });
     } else {
         for_each_part(n_blocks, num_threads, [=](int nb) {
-            pack_bf16_block<TransB, false>(w, K, N, ldb, pack_nr, nb,
-                    reinterpret_cast<uint16_t *>(out + nb * block_bytes));
+            pack_block<TransB, false>(
+                    g, w, K, N, ldb, nb, out + nb * block_bytes);
         });
     }
     if (tail)
-        pack_bf16_block<TransB, true>(w, K, N, ldb, pack_nr, n_blocks,
-                reinterpret_cast<uint16_t *>(tail_blk));
+        pack_block<TransB, true>(g, w, K, N, ldb, n_blocks,
+                out + static_cast<size_t>(n_blocks) * block_bytes);
 }
 
-template <bool TransB>
-void unpack_typed(const void *packed, int K, int N, size_t ldb, int pack_nr,
-        void *weight, int num_threads) {
-    const size_t block_bytes
-            = native_block_bytes(data_type_t::bf16, K, pack_nr);
+template <bool TransB, int KPerWord>
+void unpack_layout(const native_geometry_t &g, const void *packed, int K, int N,
+        size_t ldb, int pack_nr, void *weight, int num_threads) {
+    const size_t block_bytes = native_block_bytes(g, K, pack_nr);
     const uint8_t *in = static_cast<const uint8_t *>(packed);
     uint16_t *w = static_cast<uint16_t *>(weight);
     for_each_part(N / pack_nr, num_threads, [=](int nb) {
-        unpack_bf16_block<TransB>(
-                reinterpret_cast<const uint16_t *>(in + nb * block_bytes), K,
-                ldb, pack_nr, nb, w);
-    });
-}
-
-template <bool TransB>
-void unpack_f16_typed(const void *packed, int K, int N, size_t ldb, int pack_nr,
-        void *weight, int num_threads) {
-    const size_t block_bytes = native_block_bytes(data_type_t::f16, K, pack_nr);
-    const uint8_t *in = static_cast<const uint8_t *>(packed);
-    uint16_t *w = static_cast<uint16_t *>(weight);
-    for_each_part(N / pack_nr, num_threads, [=](int nb) {
-        unpack_f16_block<TransB>(
+        unpack_block<TransB, KPerWord>(
                 reinterpret_cast<const uint16_t *>(in + nb * block_bytes), K,
                 ldb, pack_nr, nb, w);
     });
@@ -802,30 +645,24 @@ status_t native_pack_weight(data_type_t wei_dt, const void *weight, int K,
                 " weight=", weight, " dst=", dst);
         return status_t::failure;
     }
+    const native_geometry_t g = native_geometry(wei_dt);
     const size_t ld = static_cast<size_t>(ldb);
     if (transB)
-        pack_typed<true>(wei_dt, weight, K, N, ld, pack_nr, dst, num_threads);
+        pack_layout<true>(g, weight, K, N, ld, pack_nr, dst, num_threads);
     else
-        pack_typed<false>(wei_dt, weight, K, N, ld, pack_nr, dst, num_threads);
+        pack_layout<false>(g, weight, K, N, ld, pack_nr, dst, num_threads);
     return status_t::success;
 }
 
-void native_unpack_bf16(const void *packed, int K, int N, int ldb, int pack_nr,
-        bool transB, void *weight, int num_threads) {
-    const size_t ld = static_cast<size_t>(ldb);
-    if (transB)
-        unpack_typed<true>(packed, K, N, ld, pack_nr, weight, num_threads);
-    else
-        unpack_typed<false>(packed, K, N, ld, pack_nr, weight, num_threads);
-}
-
-void native_unpack_f16(const void *packed, int K, int N, int ldb, int pack_nr,
-        bool transB, void *weight, int num_threads) {
-    const size_t ld = static_cast<size_t>(ldb);
-    if (transB)
-        unpack_f16_typed<true>(packed, K, N, ld, pack_nr, weight, num_threads);
-    else
-        unpack_f16_typed<false>(packed, K, N, ld, pack_nr, weight, num_threads);
+void native_unpack_weight(data_type_t wei_dt, const void *packed, int K, int N,
+        int ldb, int pack_nr, bool transB, void *weight, int num_threads) {
+    assert(native_format(wei_dt).cache.unpack);
+    const native_geometry_t g = native_geometry(wei_dt);
+    const auto unpack = g.k_per_word == 2
+            ? (transB ? unpack_layout<true, 2> : unpack_layout<false, 2>)
+            : (transB ? unpack_layout<true, 1> : unpack_layout<false, 1>);
+    unpack(g, packed, K, N, static_cast<size_t>(ldb), pack_nr, weight,
+            num_threads);
 }
 
 } // namespace native

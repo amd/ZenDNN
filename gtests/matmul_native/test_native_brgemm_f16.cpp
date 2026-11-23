@@ -610,8 +610,8 @@ TEST(NativeBrgemmF16Layout, UnpackRebuildsTheWeight) {
                                       kNr, transB, packed.data(), 4),
                             status_t::success);
                     std::vector<uint16_t> back(elems, 0x5A5A);
-                    nat::native_unpack_f16(packed.data(), K, N, ldb, kNr,
-                            transB, back.data(), 4);
+                    nat::native_unpack_weight(kF16, packed.data(), K, N, ldb,
+                            kNr, transB, back.data(), 4);
                     int bad = 0;
                     for (size_t i = 0; i < elems; ++i) {
                         const bool element

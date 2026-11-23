@@ -299,6 +299,7 @@ class TestPack(unittest.TestCase):
     """ab.py pack on stand-in binaries: the times of the same cases in every round, else status 2."""
 
     TIMES = ("PACK bf16/K4096/N4096/tB1/pad0/t1 median_ms=2.0 min_ms=1.9\n"
+             "UNPACK bf16/K4096/N4096/tB1/pad0/t1 median_ms=4.0 min_ms=3.9\n"
              "PACK s4/K4096/N4096/tB1/pad0/t1 median_ms=1.0 min_ms=0.9\n")
     binary = TestRun.binary
 
@@ -311,10 +312,18 @@ class TestPack(unittest.TestCase):
     def test_the_same_cases_are_timed(self):
         with tempfile.TemporaryDirectory() as d:
             a = self.binary(d, "a", {"pack": self.TIMES})
-            b = self.binary(d, "b", {"pack": self.TIMES.replace("median_ms=2.0", "median_ms=3.0")})
+            b = self.binary(d, "b", {"pack": self.TIMES.replace("median_ms=2.0", "median_ms=3.0")
+                                     .replace("median_ms=4.0", "median_ms=1.0")})
             status, out = self.pack(a, b)
             self.assertEqual(status, 0, out)
-            self.assertIn("geomean B/A 1.225 over 2 cases", out)
+            self.assertIn("pack: geomean B/A 1.225 over 2 cases", out)
+            self.assertIn("unpack: geomean B/A 0.250 over 1 cases", out)
+            self.assertIn("unpack bf16/K4096/N4096/tB1/pad0/t1", out)
+            # A run without the unpack's time times other cases.
+            packs = self.binary(d, "p", {"pack": self.TIMES.replace("UNPACK", "#")})
+            status, out = self.pack(a, packs)
+            self.assertEqual(status, 2, out)
+            self.assertIn("unpack bf16/K4096/N4096/tB1/pad0/t1 in one of them only", out)
 
     def test_a_run_without_its_cases_fails(self):
         with tempfile.TemporaryDirectory() as d:

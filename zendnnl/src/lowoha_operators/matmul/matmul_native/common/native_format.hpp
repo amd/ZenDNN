@@ -72,13 +72,23 @@ static_assert(static_cast<unsigned>(data_type_t::f8_e8m0) < 32,
 /// for a u8 source.
 enum class native_prepack_t : uint8_t { none, bf16, u8s8 };
 
+/// How the pack writes a weight's elements into the layout's words.
+enum class native_encode_t : uint8_t {
+    copy, ///< as the weight stores them
+    nibble_offset, ///< two's-complement nibbles plus 8
+};
+
 /// The layout's blocks of kNativeLayoutPackNr columns: K groups of one word
 /// per column, zero past K, then with col_sums one int32 per column, the
-/// sum of its weights.
+/// sum of its weights.  A word of 2 planes holds its first k_per_word / 2
+/// K values in the low nibbles of its bytes and the others in the high
+/// nibbles, byte q K values q and k_per_word / 2 + q.
 struct native_geometry_t {
     int elem_bits;
     int word_bytes;
     int k_per_word;
+    int planes;
+    native_encode_t encode;
     bool col_sums;
 };
 
@@ -149,7 +159,7 @@ struct native_format_desc_t {
 /// Indexed by native_format_t.
 inline constexpr native_format_desc_t kNativeFormats[] = {
         {native_format_t::bf16, "bf16", data_type_t::bf16,
-                {16, VNNI_PAIR * 2, VNNI_PAIR, false},
+                {16, VNNI_PAIR * 2, VNNI_PAIR, 1, native_encode_t::copy, false},
                 {{{~native_type_bit(data_type_t::bf16),
                          "bf16 weight with a non-bf16 source"}},
                         native_isa_t::avx512_bf16, false, 16, 0,
@@ -159,7 +169,8 @@ inline constexpr native_format_desc_t kNativeFormats[] = {
                         nullptr, kNativeNoLimit, nullptr},
                 {true, true, native_prepack_t::bf16}},
         {native_format_t::s8, "s8", data_type_t::s8,
-                {8, INT8_VNNI_GRP, INT8_VNNI_GRP, true},
+                {8, INT8_VNNI_GRP, INT8_VNNI_GRP, 1, native_encode_t::copy,
+                        true},
                 {{{~(native_type_bit(data_type_t::u8)
                            | native_type_bit(data_type_t::s8)),
                          "s8 weight with a source other than u8 / s8"}},
@@ -174,7 +185,7 @@ inline constexpr native_format_desc_t kNativeFormats[] = {
                         kNativeNoLimit, nullptr},
                 {false, false, native_prepack_t::u8s8}},
         {native_format_t::s4, "s4", data_type_t::s4,
-                {4, INT8_VNNI_GRP, 8, false},
+                {4, INT8_VNNI_GRP, 8, 2, native_encode_t::nibble_offset, false},
                 {{{native_type_bit(data_type_t::u8),
                           "a u8 source with an s4 weight"},
                          {~native_type_bit(data_type_t::s8),
@@ -187,13 +198,15 @@ inline constexpr native_format_desc_t kNativeFormats[] = {
                                 "accumulation bound"},
                         "an s4 weight of K whose whole octets exceed int"},
                 {true, false, native_prepack_t::none}},
-        {native_format_t::f32, "f32", data_type_t::f32, {32, 4, 1, false},
+        {native_format_t::f32, "f32", data_type_t::f32,
+                {32, 4, 1, 1, native_encode_t::copy, false},
                 {{{~native_type_bit(data_type_t::f32),
                          "f32 weight with a non-f32 source"}},
                         native_isa_t::base, false, 32, 0, kNativeNoLimit,
                         nullptr, kNativeNoLimit, nullptr},
                 {false, false, native_prepack_t::none}},
-        {native_format_t::f16, "f16", data_type_t::f16, {16, 2, 1, false},
+        {native_format_t::f16, "f16", data_type_t::f16,
+                {16, 2, 1, 1, native_encode_t::copy, false},
                 {{{~native_type_bit(data_type_t::f16),
                          "f16 weight with a non-f16 source"}},
                         native_isa_t::base, false, 16, 0,

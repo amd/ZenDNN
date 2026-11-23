@@ -64,9 +64,14 @@
 //         route (taken=0); --filter selects verdicts by these names:
 //           RULE <case> taken=<0|1> st=<status> why=<reason>
 // pack    The prepack time of native_pack_weight per format on weights of
-//         model size (median and minimum of --reps packs after one warm-up);
-//         a pack that fails ends the run with exit status 1:
+//         model size and, for bf16 and f16, the time of the unpack of their
+//         layout (median and minimum of --reps runs after one warm-up); a
+//         pack that fails ends the run with exit status 1:
 //           PACK <case> median_ms=<ms> min_ms=<ms>
+//           UNPACK <case> median_ms=<ms> min_ms=<ms>
+// build.sh compiles this corpus against the tree of each build, also one
+// from before native_unpack_weight, whose unpacks are native_unpack_bf16
+// and native_unpack_f16.
 // layout and pack call native_pack_weight, which needs the native BRGEMM's
 // base instruction sets (native_base_isa): without them they exit with
 // status 2.  Every input comes from a generator seeded by its case name: a
@@ -87,6 +92,7 @@
 #include <set>
 #include <string>
 #include <vector>
+#include <type_traits>
 
 #include "zendnnl.hpp"
 
@@ -104,6 +110,22 @@ using zendnnl::common::matmul_algo_t;
 using zendnnl::common::post_op_type_t;
 using zendnnl::error_handling::status_t;
 using gated_t = mm::matmul_gated_act_t;
+
+/// Stand-ins for the unpack functions of a library that lacks them.  A
+/// library function of the same name outranks its stand-in (any argument
+/// converts to any_t, the others pass through the ellipsis), so a call
+/// resolves to a stand-in only where the library has no function of its
+/// name; unpack_layout reads that from the call's type and runs none.
+namespace ab_unpack_api {
+struct missing_t {};
+struct any_t {
+    template <typename T>
+    any_t(const T &) {}
+};
+missing_t native_unpack_weight(any_t, ...);
+missing_t native_unpack_bf16(any_t, ...);
+missing_t native_unpack_f16(any_t, ...);
+} // namespace ab_unpack_api
 
 namespace {
 
@@ -999,7 +1021,33 @@ struct layout_case_t {
                 + (transB ? K : N);
         return wei == kS4 ? (elems + 1) / 2 : elems * dt_bytes(wei);
     }
+    /// Whether the layout of the case unpacks: bf16 and f16 of whole blocks.
+    bool unpacks() const {
+        return (wei == kBf16 || wei == kF16)
+                && N % nat::kNativeLayoutPackNr == 0;
+    }
 };
+
+/// The unpack of the bf16 or f16 layout of c into weight: the library's
+/// native_unpack_weight, or the unpack of the weight's type in a library
+/// from before it.
+void unpack_layout(
+        const layout_case_t &c, const void *packed, void *weight, int threads) {
+    using namespace ab_unpack_api;
+    using namespace nat;
+    const int nr = kNativeLayoutPackNr;
+    using generic_t = decltype(native_unpack_weight(
+            c.wei, packed, c.K, c.N, c.ldb(), nr, c.transB, weight, threads));
+    if constexpr (!std::is_same<generic_t, missing_t>::value)
+        native_unpack_weight(c.wei, packed, c.K, c.N, c.ldb(), nr, c.transB,
+                weight, threads);
+    else if (c.wei == kF16)
+        native_unpack_f16(
+                packed, c.K, c.N, c.ldb(), nr, c.transB, weight, threads);
+    else
+        native_unpack_bf16(
+                packed, c.K, c.N, c.ldb(), nr, c.transB, weight, threads);
+}
 
 std::vector<layout_case_t> layout_cases() {
     std::vector<layout_case_t> out;
@@ -1055,14 +1103,11 @@ int run_layout(const char *filter) {
                 static_cast<int>(st), bytes,
                 static_cast<unsigned long long>(
                         fnv1a(packed.get(), bytes + kGuard)));
-        if ((c.wei == kBf16 || c.wei == kF16)
-                && c.N % nat::kNativeLayoutPackNr == 0) {
+        if (c.unpacks()) {
             const size_t back_bytes = c.raw_bytes() + kGuard;
             buffer_t back = make_buffer(back_bytes);
             std::memset(back.get(), 0x5A, back_bytes);
-            (c.wei == kF16 ? nat::native_unpack_f16 : nat::native_unpack_bf16)(
-                    packed.get(), c.K, c.N, c.ldb(), nat::kNativeLayoutPackNr,
-                    c.transB, back.get(), c.threads);
+            unpack_layout(c, packed.get(), back.get(), c.threads);
             std::printf("UNPACK %s hash=%016llx\n", name.c_str(),
                     static_cast<unsigned long long>(
                             fnv1a(back.get(), back_bytes)));
@@ -1199,11 +1244,32 @@ int run_rules(const char *filter) {
 
 // ----------------------------------------------------------------- pack
 
+/// Prints "<what> <name> median_ms=<ms> min_ms=<ms>" over reps runs of run
+/// after one warm-up run; false, printing nothing, when a run fails.
+template <typename Run>
+bool time_runs(const char *what, const std::string &name, int reps, Run run) {
+    std::vector<double> ms;
+    for (int i = 0; i <= reps; ++i) {
+        const auto t0 = std::chrono::steady_clock::now();
+        if (!run()) return false;
+        const auto t1 = std::chrono::steady_clock::now();
+        if (i > 0)
+            ms.push_back(
+                    std::chrono::duration<double, std::milli>(t1 - t0).count());
+    }
+    std::sort(ms.begin(), ms.end());
+    std::printf("%s %s median_ms=%.4f min_ms=%.4f\n", what, name.c_str(),
+            ms[ms.size() / 2], ms.front());
+    std::fflush(stdout);
+    return true;
+}
+
 int run_pack(const char *filter, int reps) {
     struct shape_t {
         int N, K;
     };
     const shape_t shapes[] = {{4096, 4096}, {14336, 4096}, {4096, 14336}};
+    const int threads = omp_get_max_threads();
     for (const data_type_t w : {kBf16, kS8, kS4, kF32, kF16})
         for (const shape_t &sh : shapes)
             for (const bool tB : {true, false}) {
@@ -1220,29 +1286,24 @@ int run_pack(const char *filter, int reps) {
                 const size_t bytes = nat::native_packed_bytes(
                         w, c.K, c.N, nat::kNativeLayoutPackNr);
                 buffer_t dst = make_buffer(bytes);
-                std::vector<double> ms;
-                for (int i = 0; i <= reps; ++i) {
-                    const auto t0 = std::chrono::steady_clock::now();
-                    const status_t st = nat::native_pack_weight(w, src.get(),
-                            c.K, c.N, c.ldb(), nat::kNativeLayoutPackNr,
-                            c.transB, dst.get(), omp_get_max_threads());
-                    const auto t1 = std::chrono::steady_clock::now();
-                    if (st != status_t::success) {
-                        std::fprintf(stderr,
-                                "pack %s: native_pack_weight returned status "
-                                "%d\n",
-                                name.c_str(), static_cast<int>(st));
-                        return 1;
-                    }
-                    if (i > 0)
-                        ms.push_back(std::chrono::duration<double, std::milli>(
-                                t1 - t0)
-                                             .count());
+                status_t st = status_t::success;
+                if (!time_runs("PACK", name, reps, [&] {
+                    st = nat::native_pack_weight(w, src.get(), c.K, c.N,
+                            c.ldb(), nat::kNativeLayoutPackNr, c.transB,
+                            dst.get(), threads);
+                    return st == status_t::success;
+                })) {
+                    std::fprintf(stderr,
+                            "pack %s: native_pack_weight returned status %d\n",
+                            name.c_str(), static_cast<int>(st));
+                    return 1;
                 }
-                std::sort(ms.begin(), ms.end());
-                std::printf("PACK %s median_ms=%.4f min_ms=%.4f\n",
-                        name.c_str(), ms[ms.size() / 2], ms.front());
-                std::fflush(stdout);
+                if (!c.unpacks()) continue;
+                buffer_t back = make_buffer(c.raw_bytes());
+                time_runs("UNPACK", name, reps, [&] {
+                    unpack_layout(c, dst.get(), back.get(), threads);
+                    return true;
+                });
             }
     return 0;
 }

@@ -1060,11 +1060,11 @@ status_t pack_from_source(const native_raw_weight_t &w,
                 w.pack_nr, w.transB, dst, num_threads);
     }
     const native_raw_weight_t &img = image->layout;
-    const size_t extent = static_cast<size_t>(img.K) * img.N;
-    const bool f16 = img.wei_dt == data_type_t::f16;
+    const size_t raw_bytes = static_cast<size_t>(img.K) * img.N
+            * (native_geometry(img.wei_dt).elem_bits / 8);
     if (!native_format(img.wei_dt).cache.unpack || w.wei_dt != img.wei_dt
             || native_raw_weight_bytes(w.wei_dt, w.K, w.N, w.ldb, w.transB)
-                    > extent * sizeof(uint16_t)
+                    > raw_bytes
             || image->bytes > owned) {
         log_error("native weight: weight=", w.weight,
                 " holds an in-place image of a ", dtype_info(img.wei_dt), " ",
@@ -1075,15 +1075,14 @@ status_t pack_from_source(const native_raw_weight_t &w,
                 ", ", owned, " bytes)");
         return status_t::failure;
     }
-    std::unique_ptr<void, layout_free_t> raw(
-            alloc_layout(extent * sizeof(uint16_t)));
+    std::unique_ptr<void, layout_free_t> raw(alloc_layout(raw_bytes));
     if (!raw) {
         log_error("native weight: no buffer to rebuild an in-place image (",
-                extent * sizeof(uint16_t), " bytes)");
+                raw_bytes, " bytes)");
         return status_t::failure;
     }
-    (f16 ? native_unpack_f16 : native_unpack_bf16)(image->layout.weight, img.K,
-            img.N, img.ldb, img.pack_nr, img.transB, raw.get(), num_threads);
+    native_unpack_weight(img.wei_dt, image->layout.weight, img.K, img.N,
+            img.ldb, img.pack_nr, img.transB, raw.get(), num_threads);
     return native_pack_weight(w.wei_dt, raw.get(), w.K, w.N, w.ldb, w.pack_nr,
             w.transB, dst, num_threads);
 }

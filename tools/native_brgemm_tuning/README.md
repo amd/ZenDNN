@@ -28,7 +28,7 @@ run time, gradient-boosted trees when present, numpy models otherwise).
 | `results.py` | Results store (JSONL) and the statistics: per-session ratios, noise, significance. |
 | `backends/` | `jobs.py` (pod sessions), `benchdnn.py`, `replay.py`, `synthetic.py`, `common.py` (API-log line). |
 | `replay/` | The cold-weight replay driver (`replay.cpp`), its build script and a pod-side A/B runner. |
-| `ab/` | The A/B gate of a library change: a corpus of calls, layouts and layout rule verdicts (`ab_corpus.cpp`, its build script) and `ab.py`, which compares two builds on it, their code size and their prepack time (see Comparing two builds). |
+| `ab/` | The A/B gate of a library change: a corpus of calls, layouts and layout rule verdicts (`ab_corpus.cpp`, its build script) and `ab.py`, which compares two builds on it, their code size and their pack and unpack time (see Comparing two builds). |
 | `plan_dump/`, `refresh_fixtures.sh` | The library's plans for the cases of `tests/plan_cases.py` (`plan_dump.cpp` and its build script), and the refresh of both fixtures from a build (see Tests). |
 | `search.py`, `surrogate.py` | Grid, random and model-guided search; surrogate models. |
 | `export.py`, `rules.py` | Class winners, confirmation, the tuning file and its validation; the learned rules. |
@@ -470,7 +470,9 @@ packing, kernels or planner) is checked against the build it starts from on a fi
     python3 tools/native_brgemm_tuning/ab/ab.py size <build dir of A> <build dir of B> --budget 0.1 --same-kernels
 
 Each binary holds its build's library (the static archive), so a binary built once keeps
-standing for its build. `run` runs both on the machine it runs on (the kernels follow its
+standing for its build. Both binaries build from the corpus of the checkout that runs `build.sh`,
+also against a tree from before `native_unpack_weight` (whose unpacks are `native_unpack_bf16`
+and `native_unpack_f16`). `run` runs both on the machine it runs on (the kernels follow its
 instruction sets), under `ZENDNNL_MATMUL_ALGO=10` and `ZENDNNL_API_LOG_LEVEL=4` with the
 same thread count, and compares, case by case:
 
@@ -509,10 +511,12 @@ functions of the kernel objects (the archive's members, found in the build tree 
 and bytes: not the shared library's copies, nor the objects of sources removed or moved since),
 and lists the kernel functions of one build only; `--same-kernels` fails when there are any. It
 exits with status 2 when a build tree lacks an object of its archive or its kernel objects
-define no function. `pack` times `native_pack_weight` on weights of model size, the two
-binaries in turn (`--rounds`), for the prepack time of a packing change; a pack that fails ends
-the run, and every round of both binaries has to time the cases of the first round of A (exit
-status 2 otherwise, or when there are none). The op-level time of the calls is
+define no function. `pack` times `native_pack_weight` on weights of model size and the unpack of
+their bf16 and f16 layouts (a weight cache's rebuild of a weight from its in-place image), the
+two binaries in turn (`--rounds`), for the time of a packing change: per case B / A, and the
+geomean of the packs and of the unpacks; a pack that fails ends the run, and every round of both
+binaries has to time the cases of the first round of A (exit status 2 otherwise, or when there
+are none). The op-level time of the calls is
 `replay/run_replay.sh` with the two builds' replay binaries. `layout` and `pack` exit with
 status 2 on a CPU without the native BRGEMM's base instruction sets (`native_base_isa`).
 

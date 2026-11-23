@@ -28,9 +28,10 @@ holds.  This script runs the binaries of two builds and compares them:
         text moves by more than --budget percent, or with --same-kernels when the kernel functions
         differ, 2 when a build tree lacks an object of its archive or its kernel objects define no
         function.
-  pack  the prepack time of the layouts, the two binaries in turn: per case the median over the
-        rounds and the B / A ratio; exit status 2 when a round of A or B times other cases than the
-        first round of A, or none.
+  pack  the prepack time of the layouts and the unpack time of the bf16 and f16 layouts, the two
+        binaries in turn: per case the median over the rounds and the B / A ratio, and the geomean
+        of the packs and of the unpacks; exit status 2 when a round of A or B times other cases
+        than the first round of A, or none.
 
 Usage:
   ab.py run <binary-a> <binary-b> [--out DIR] [--modes calls,layout,rules] [--threads N]
@@ -368,12 +369,15 @@ def cmd_size(args: argparse.Namespace) -> int:
     return status
 
 
-PACK_RE = re.compile(r"^PACK (?P<name>\S+) median_ms=(?P<median>[\d.eE+-]+) min_ms=(?P<min>[\d.eE+-]+)")
+PACK_RE = re.compile(r"^(?P<kind>PACK|UNPACK) (?P<name>\S+) median_ms=(?P<median>[\d.eE+-]+) "
+                     r"min_ms=(?P<min>[\d.eE+-]+)")
 
 
 def parse_pack(text: str) -> Dict[str, float]:
-    """Per layout case of a pack run, its median time in ms."""
-    return {m["name"]: float(m["median"]) for m in map(PACK_RE.match, text.splitlines()) if m}
+    """Per pack and unpack of a layout case in a pack run ("pack <case>", "unpack <case>"), its median
+    time in ms."""
+    return {f"{m['kind'].lower()} {m['name']}": float(m["median"])
+            for m in map(PACK_RE.match, text.splitlines()) if m}
 
 
 def median(values: Sequence[float]) -> float:
@@ -403,14 +407,14 @@ def cmd_pack(args: argparse.Namespace) -> int:
                       f"({len(times)} against {len(cases)}, {odd[0]} in one of them only)")
                 return 2
     print(f"{'case':40} {'A ms':>10} {'B ms':>10} {'B/A':>7}")
-    ratios = []
+    ratios: Dict[str, List[float]] = {}
     for name in runs["a"][0]:
         ta = median([r[name] for r in runs["a"]])
         tb = median([r[name] for r in runs["b"]])
-        ratios.append(tb / ta)
+        ratios.setdefault(name.split()[0], []).append(tb / ta)
         print(f"{name:40} {ta:10.3f} {tb:10.3f} {tb / ta:7.3f}")
-    if ratios:
-        print(f"geomean B/A {math.exp(sum(map(math.log, ratios)) / len(ratios)):.3f} over {len(ratios)} cases")
+    for kind, r in ratios.items():
+        print(f"{kind}: geomean B/A {math.exp(sum(map(math.log, r)) / len(r)):.3f} over {len(r)} cases")
     return 0
 
 
@@ -431,7 +435,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     size.add_argument("--budget", type=float, help="largest change of the library text, percent")
     size.add_argument("--same-kernels", action="store_true",
                       help="exit status 1 when the kernel symbols of the two builds differ")
-    pack = sub.add_parser("pack", help="compare the prepack time of two builds")
+    pack = sub.add_parser("pack", help="compare the pack and unpack time of two builds")
     pack.add_argument("binary_a")
     pack.add_argument("binary_b")
     pack.add_argument("--rounds", type=int, default=3)

@@ -665,6 +665,51 @@ TEST_F(NativeBrgemmLayoutTest, PackMatchesCustomKernelPrepack) {
     }
 }
 
+// The unpack of a bf16 image writes back every weight element the pack
+// placed, from [K, N] or [N, K] storage, the one element of the last K pair
+// of an odd K included, and nothing else: the padding of a padded ldb and
+// a row of ldb elements after the weight keep their values.
+TEST_F(NativeBrgemmLayoutTest, UnpackRebuildsTheWeight) {
+    constexpr uint16_t kKept = 0x5A5A;
+    int i = 0;
+    for (const int K : {1, 2, 3, 63, 64, 1031})
+        for (const int N : {32, 96})
+            for (const bool transB : {false, true})
+                for (const int pad : {0, 3}) {
+                    const int ldb = (transB ? K : N) + pad;
+                    const int threads = ++i % 2 ? 1 : 4;
+                    const std::string what = "K=" + std::to_string(K)
+                            + " N=" + std::to_string(N)
+                            + " transB=" + std::to_string(transB)
+                            + " pad=" + std::to_string(pad)
+                            + " threads=" + std::to_string(threads);
+                    const size_t elems
+                            = static_cast<size_t>(transB ? N : K) * ldb;
+                    const std::vector<bfloat16_t> w
+                            = random_bf16(elems, 600 + K + N);
+                    buffer_t packed = alloc_buffer(nv::native_packed_bytes(
+                            data_type_t::bf16, K, N, 32));
+                    ASSERT_TRUE(packed) << what;
+                    ASSERT_EQ(nv::native_pack_weight(data_type_t::bf16,
+                                      w.data(), K, N, ldb, 32, transB,
+                                      packed.get(), threads),
+                            status_t::success)
+                            << what;
+                    std::vector<uint16_t> back(elems + ldb, kKept);
+                    nv::native_unpack_weight(data_type_t::bf16, packed.get(), K,
+                            N, ldb, 32, transB, back.data(), threads);
+                    int bad = 0;
+                    for (size_t e = 0; e < back.size(); ++e) {
+                        uint16_t want = kKept;
+                        if (e < elems
+                                && static_cast<int>(e % ldb) < (transB ? K : N))
+                            std::memcpy(&want, &w[e], sizeof(want));
+                        bad += back[e] != want;
+                    }
+                    EXPECT_EQ(bad, 0) << what;
+                }
+}
+
 TEST_F(NativeBrgemmLayoutTest, PackRejects) {
     const int K = 64, N = 64;
     const std::vector<bfloat16_t> w
