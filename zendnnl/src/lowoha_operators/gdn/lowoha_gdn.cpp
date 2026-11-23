@@ -209,6 +209,59 @@ bool reads_initial_state(const gdn_params &p, const int32_t *state_indices) {
     return false;
 }
 
+// Speculative verify (see gdn_params::spec_state_indices). Runs after
+// validate_offsets.
+status_t validate_spec(const gdn_params &p) {
+    constexpr const char *op = "gdn_direct";
+    if (p.spec_state_stride < 1 || !p.num_accepted_tokens || !p.cu_seqlens) {
+        log_error(op,
+                ": speculative verify needs spec_state_stride >= 1, "
+                "num_accepted_tokens and cu_seqlens");
+        return status_t::failure;
+    }
+    if (p.num_decodes != 0 || !p.update_state || p.separate_qkv()
+            || p.precomputed_gates()) {
+        log_error(op,
+                ": speculative verify takes no decodes, update_state = true, "
+                "packed rows and raw gates");
+        return status_t::failure;
+    }
+    if (p.conv_width == 1) {
+        log_error(op, ": speculative verify needs conv_width 0 or at least 2");
+        return status_t::failure;
+    }
+    const int64_t SS = p.spec_state_stride;
+    for (int64_t i = 0; i < p.batch; ++i) {
+        const int64_t len = static_cast<int64_t>(p.cu_seqlens[i + 1])
+                - static_cast<int64_t>(p.cu_seqlens[i]);
+        const int32_t *slots = p.spec_state_indices + i * SS;
+        if (len > SS) {
+            log_error(op, ": sequence ", i, " has ", len,
+                    " tokens, more than spec_state_stride (", SS, ")");
+            return status_t::failure;
+        }
+        if (len == 0 || slots[0] == p.pad_slot_id) { continue; }
+        const int32_t acc = p.num_accepted_tokens[i];
+        if (acc < 1 || acc > SS) {
+            log_error(op, ": num_accepted_tokens[", i, "] = ", acc,
+                    " is outside [1, ", SS, "]");
+            return status_t::failure;
+        }
+        // The slot the state comes from, then those the tokens write.
+        for (int64_t t = -1; t < len; ++t) {
+            const int64_t col = t < 0 ? acc - 1 : t;
+            const int32_t s = slots[col];
+            if (s == p.pad_slot_id || s < 0
+                    || (p.num_state_slots > 0 && s >= p.num_state_slots)) {
+                log_error(op, ": spec_state_indices[", i, "][", col, "] = ", s,
+                        " is not a slot");
+                return status_t::failure;
+            }
+        }
+    }
+    return status_t::success;
+}
+
 status_t validate_params(const gdn_params &p, const void *mixed_qkv,
         const void *a, const void *b, const void *A_log, const void *dt_bias,
         const void *conv_weight, const void *conv_state, const void *ssm_state,
@@ -239,8 +292,17 @@ status_t validate_params(const gdn_params &p, const void *mixed_qkv,
         log_error(op, ": invalid gate_input");
         return status_t::failure;
     }
+    if (p.allow_neg_eigval && p.precomputed_gates()) {
+        log_error(op,
+                ": allow_neg_eigval takes raw gates; precomputed gates give "
+                "beta itself");
+        return status_t::failure;
+    }
     if (validate_offsets(p) != status_t::success) { return status_t::failure; }
     if (p.batch == 0) { return status_t::success; }
+    if (p.spec_verify() && validate_spec(p) != status_t::success) {
+        return status_t::failure;
+    }
     if (!p.update_state && p.num_decodes > 0) {
         log_error(op,
                 ": update_state = false needs a prefill-only call "
@@ -257,9 +319,10 @@ status_t validate_params(const gdn_params &p, const void *mixed_qkv,
         log_error(op, ": separate q / k / v need k, v and conv_width = 0");
         return status_t::failure;
     }
-    // Precomputed gates read neither A_log nor dt_bias.
-    if (!mixed_qkv || !a || !b || !state_indices || !output
-            || (!p.precomputed_gates() && (!A_log || !dt_bias))) {
+    // Precomputed gates read neither A_log nor dt_bias, and speculative
+    // verify takes its slots from spec_state_indices.
+    if (!mixed_qkv || !a || !b || (!state_indices && !p.spec_verify())
+            || !output || (!p.precomputed_gates() && (!A_log || !dt_bias))) {
         log_error(op, ": null tensor pointer");
         return status_t::failure;
     }
@@ -314,7 +377,7 @@ status_t validate_params(const gdn_params &p, const void *mixed_qkv,
     if (p.conv_width > 1) {
         // Taps x channels of one slot must not overlap each other or the
         // next slot, in either the SD (dim contiguous) or DS layout.
-        const int64_t taps = p.conv_width - 1, D = p.conv_dim();
+        const int64_t taps = p.conv_taps(), D = p.conv_dim();
         const int64_t ts = p.conv_state_tap_stride;
         const int64_t ds = p.conv_state_dim_stride;
         const bool disjoint
@@ -338,7 +401,7 @@ status_t validate_params(const gdn_params &p, const void *mixed_qkv,
                 "norm_weight_dt and a silu or sigmoid gate");
         return status_t::failure;
     }
-    if (p.num_state_slots > 0) {
+    if (p.num_state_slots > 0 && !p.spec_verify()) {
         for (int64_t i = 0; i < p.batch; ++i) {
             const int32_t s = state_indices[i];
             if (s != p.pad_slot_id && (s < 0 || s >= p.num_state_slots)) {
@@ -374,8 +437,11 @@ void log_call(const gdn_params &p, gdn_kernel_t kernel,
        << (p.state_layout == gdn_state_layout_t::kv ? "kv" : "vk")
        << ", fused_norm=" << (p.norm_weight ? "true" : "false")
        << ", update_state=" << (p.update_state ? "true" : "false")
+       << ", spec_state_stride="
+       << (p.spec_verify() ? p.spec_state_stride : int64_t(0))
        << ", qkv=" << (p.separate_qkv() ? "separate" : "packed")
        << ", gates=" << (p.precomputed_gates() ? "precomputed" : "raw")
+       << (p.allow_neg_eigval ? ", allow_neg_eigval=true" : "")
        << ", src_dt=" << dtype_info(p.src_dt)
        << ", state_dt=" << dtype_info(p.state_dt)
        << ", kernel=" << kernel_to_string(kernel)
@@ -502,6 +568,16 @@ status_t gdn_direct(const void *mixed_qkv, const void *a, const void *b,
 
     const gdn_kernel_t kernel = select_kernel(params);
     const bool native = kernel == gdn_kernel_t::native;
+    if (params.spec_verify()) {
+        st = native ? gdn_verify_native(io, ns, offsets, params)
+                    : gdn_verify_reference(io, ns, offsets, params);
+        if (st != status_t::success) { return st; }
+        if (is_profile) { profiler.tbp_stop(); }
+        if (apilog_info_enabled() || is_profile) {
+            log_call(params, kernel, "none", nullptr, 0, is_profile, profiler);
+        }
+        return status_t::success;
+    }
     gdn_prefill_algo_t algo = gdn_prefill_algo_t::recurrent;
     gdn_chunk_split_t split {1, 0};
     if (native && nd < ns) {

@@ -104,7 +104,7 @@ void recurrent_step(const std::vector<float> &x, const void *a_row,
         if (!p.precomputed_gates()) {
             g = -std::exp(A_log[hv])
                     * softplus_f32(av + dt_bias[hv], p.softplus_threshold);
-            beta = sigmoid_f32(bv);
+            beta = p.beta_scale() * sigmoid_f32(bv);
         }
         const float eg = std::exp(g);
 
@@ -239,6 +239,102 @@ status_t gdn_decode_reference(
                 byte_ptr(io.b) + bi * p.b_stride * es, io.A_log, io.dt_bias,
                 S.data(), z_row, out_row, p);
         store_state(io.ssm_state, slot, S.data(), p);
+    }
+    return status_t::success;
+}
+
+status_t gdn_verify_reference(const gdn_tensors_t &io, int64_t n,
+        const int32_t *offsets, const gdn_params &p) {
+    const int64_t D = p.conv_dim();
+    const int64_t W = p.conv_width;
+    const int64_t es = dt_size(p.src_dt);
+    const int64_t L = p.conv_taps();
+    std::vector<float> x(D), window(W > 0 ? W : 1);
+    std::vector<float> S(p.num_v_heads * p.head_k_dim * p.head_v_dim);
+    // hist[c][j]: the W - 1 most recent raw inputs of channel c, oldest first.
+    std::vector<float> hist(W > 1 ? D * (W - 1) : 1);
+    std::vector<float> keep(L > 0 ? L : 1);
+
+    for (int64_t bi = 0; bi < n; ++bi) {
+        const int64_t r0 = offsets[bi], r1 = offsets[bi + 1];
+        const int32_t *slots = p.spec_state_indices + bi * p.spec_state_stride;
+        if (r1 <= r0) { continue; }
+        if (slots[0] == p.pad_slot_id) {
+            for (int64_t r = r0; r < r1; ++r) {
+                char *out_row = static_cast<char *>(io.output)
+                        + r * p.out_stride_t * es;
+                for (int64_t hv = 0; hv < p.num_v_heads; ++hv) {
+                    for (int64_t j = 0; j < p.head_v_dim; ++j) {
+                        store_f32(out_row + hv * p.out_stride_h * es, p.src_dt,
+                                j, 0.0f);
+                    }
+                }
+            }
+            continue;
+        }
+        const int64_t a = p.num_accepted_tokens[bi];
+        for (int64_t c = 0; W > 1 && c < D; ++c) {
+            for (int64_t j = 0; j < W - 1; ++j) {
+                hist[c * (W - 1) + j]
+                        = load_f32(conv_state_elem(io.conv_state, p, slots[0],
+                                           a - 1 + j, c),
+                                p.src_dt, 0);
+            }
+        }
+        load_state(io.ssm_state, slots[a - 1], S.data(), p);
+
+        for (int64_t r = r0; r < r1; ++r) {
+            const char *in_row = byte_ptr(io.mixed_qkv) + r * p.qkv_stride * es;
+            for (int64_t c = 0; c < D; ++c) {
+                const float xin = load_f32(in_row, p.src_dt, c);
+                if (W == 0) {
+                    x[c] = xin;
+                    continue;
+                }
+                float *h = hist.data() + c * (W - 1);
+                for (int64_t j = 0; j < W - 1; ++j) {
+                    window[j] = h[j];
+                }
+                window[W - 1] = xin;
+                x[c] = conv_channel(
+                        window.data(), io.conv_weight, io.conv_bias, c, p);
+                for (int64_t j = 0; j + 1 < W - 1; ++j) {
+                    h[j] = h[j + 1];
+                }
+                if (W > 1) { h[W - 2] = xin; }
+            }
+            char *out_row
+                    = static_cast<char *>(io.output) + r * p.out_stride_t * es;
+            const void *z_row = p.z ? static_cast<const void *>(byte_ptr(p.z)
+                                              + r * p.z_stride_t * es)
+                                    : nullptr;
+            recurrent_step(x, byte_ptr(io.a) + r * p.a_stride * es,
+                    byte_ptr(io.b) + r * p.b_stride * es, io.A_log, io.dt_bias,
+                    S.data(), z_row, out_row, p);
+            // The next token starts from the stored state, as a decode does.
+            store_state(io.ssm_state, slots[r - r0], S.data(), p);
+            load_state(io.ssm_state, slots[r - r0], S.data(), p);
+        }
+
+        const int64_t q = r1 - r0;
+        for (int64_t c = 0; W > 1 && c < D; ++c) {
+            for (int64_t j = 0; j < W - 2; ++j) {
+                keep[j] = load_f32(
+                        conv_state_elem(io.conv_state, p, slots[0], a + j, c),
+                        p.src_dt, 0);
+            }
+            for (int64_t j = 0; j < W - 2; ++j) {
+                store_f32(conv_state_elem(io.conv_state, p, slots[0], j, c),
+                        p.src_dt, 0, keep[j]);
+            }
+            for (int64_t t = 0; t < q; ++t) {
+                const char *in_row
+                        = byte_ptr(io.mixed_qkv) + (r0 + t) * p.qkv_stride * es;
+                store_f32(conv_state_elem(
+                                  io.conv_state, p, slots[0], W - 2 + t, c),
+                        p.src_dt, 0, load_f32(in_row, p.src_dt, c));
+            }
+        }
     }
     return status_t::success;
 }

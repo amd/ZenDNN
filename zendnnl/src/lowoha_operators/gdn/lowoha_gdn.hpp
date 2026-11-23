@@ -46,6 +46,18 @@ namespace gdn {
  * untouched, as does a prefill with no tokens. Otherwise two sequences of one
  * call must not share a slot.
  *
+ * A prefill continued from the state an earlier call left gives the output
+ * bits of one call over all its tokens when state_dt is f32 and both calls
+ * run the same kernel, pinned prefill_algo and the same rounding options
+ * (round_conv_out, round_core_out): the recurrent form at any cut, the
+ * chunked form at a cut on one of the sequence's 32-token chunk boundaries.
+ * The final state matches too when both calls write it (update_state).
+ *
+ * With params.spec_state_indices set, the call verifies speculative draft
+ * tokens instead (see gdn_params): at the same num_threads it gives the bits
+ * of as many decode calls over the same sequences on a conv state of the same
+ * strides, and it stores the state after every token.
+ *
  * @param mixed_qkv     [num_tokens][qkv_stride] packed q, k, v (pre-conv when
  *                      params.conv_width > 0), or q alone when params.k and
  *                      params.v are set
@@ -58,7 +70,8 @@ namespace gdn {
  * @param conv_bias     [conv_dim] or nullptr
  * @param conv_state    conv state pool [slot][tap][channel] (strided)
  * @param ssm_state     SSM state pool [slot][v_head][...] (strided)
- * @param state_indices [batch] pool slot per sequence (int32)
+ * @param state_indices [batch] pool slot per sequence (int32); not read by
+ *                      speculative verify
  * @param output        [num_tokens][num_v_heads][head_v_dim] (strided)
  * @param params        GDN parameters
  *

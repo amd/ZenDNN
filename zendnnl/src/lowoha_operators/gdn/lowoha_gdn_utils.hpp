@@ -186,6 +186,13 @@ status_t gdn_decode_reference(
 status_t gdn_decode_native(
         const gdn_tensors_t &io, int64_t n, const gdn_params &params);
 
+/// Speculative verify of sequences [0, n) (params.spec_state_indices set):
+/// sequence i owns token rows [offsets[i], offsets[i + 1]).
+status_t gdn_verify_reference(const gdn_tensors_t &io, int64_t n,
+        const int32_t *offsets, const gdn_params &params);
+status_t gdn_verify_native(const gdn_tensors_t &io, int64_t n,
+        const int32_t *offsets, const gdn_params &params);
+
 /// Prefill sequences [s0, s1) of the batch: sequence i owns token rows
 /// [offsets[i], offsets[i + 1]) and reads params.has_initial_state[i].
 status_t gdn_prefill_reference(const gdn_tensors_t &io, int64_t s0, int64_t s1,

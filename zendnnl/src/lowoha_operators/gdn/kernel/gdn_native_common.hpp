@@ -78,14 +78,15 @@ inline void prepare_qk(const float *q, const float *k, int64_t K, bool l2,
     }
 }
 
-// Delta-rule update of one K x (NV * 16) state tile with row stride ld,
-// writing the FP32 output of the tile to o. Both sweeps walk the same block,
-// so the second one is served from cache. Narrow tiles keep P partial sums
-// over k to hide the FMA latency.
+// Delta-rule update of one K x (NV * 16) state tile with row stride ld, read
+// from S_in and written to S_out (which may be S_in), writing the FP32 output
+// of the tile to o. Both sweeps walk the same block, so the second one is
+// served from cache. Narrow tiles keep P partial sums over k to hide the FMA
+// latency.
 template <data_type_t ST, int NV>
-inline void kv_tile_step(avx512::elem_t<ST> *S, int64_t ld, int64_t K,
-        const float *vin, const float *qn, const float *kn, float eg,
-        float beta, __m512 *o) {
+inline void kv_tile_step(const avx512::elem_t<ST> *S_in,
+        avx512::elem_t<ST> *S_out, int64_t ld, int64_t K, const float *vin,
+        const float *qn, const float *kn, float eg, float beta, __m512 *o) {
     using namespace avx512;
     constexpr int P = NV >= 4 ? 1 : (NV == 2 ? 2 : 4);
     __m512 acc[P][NV];
@@ -98,7 +99,7 @@ inline void kv_tile_step(avx512::elem_t<ST> *S, int64_t ld, int64_t K,
     for (; k + P <= K; k += P) {
         for (int i = 0; i < P; ++i) {
             const __m512 kk = _mm512_set1_ps(kn[k + i]);
-            const elem_t<ST> *row = S + (k + i) * ld;
+            const elem_t<ST> *row = S_in + (k + i) * ld;
             for (int n = 0; n < NV; ++n) {
                 acc[i][n] = _mm512_fmadd_ps(
                         load16<ST>(row + 16 * n), kk, acc[i][n]);
@@ -107,7 +108,7 @@ inline void kv_tile_step(avx512::elem_t<ST> *S, int64_t ld, int64_t K,
     }
     for (; k < K; ++k) {
         const __m512 kk = _mm512_set1_ps(kn[k]);
-        const elem_t<ST> *row = S + k * ld;
+        const elem_t<ST> *row = S_in + k * ld;
         for (int n = 0; n < NV; ++n) {
             acc[0][n]
                     = _mm512_fmadd_ps(load16<ST>(row + 16 * n), kk, acc[0][n]);
@@ -133,11 +134,12 @@ inline void kv_tile_step(avx512::elem_t<ST> *S, int64_t ld, int64_t K,
         for (int i = 0; i < P; ++i) {
             const __m512 kk = _mm512_set1_ps(kn[k + i]);
             const __m512 qq = _mm512_set1_ps(qn[k + i]);
-            elem_t<ST> *row = S + (k + i) * ld;
+            const elem_t<ST> *rin = S_in + (k + i) * ld;
+            elem_t<ST> *rout = S_out + (k + i) * ld;
             for (int n = 0; n < NV; ++n) {
-                const __m512 s = _mm512_fmadd_ps(load16<ST>(row + 16 * n), egv,
+                const __m512 s = _mm512_fmadd_ps(load16<ST>(rin + 16 * n), egv,
                         _mm512_mul_ps(kk, dt[n]));
-                store16<ST>(row + 16 * n, s);
+                store16<ST>(rout + 16 * n, s);
                 op[i][n] = _mm512_fmadd_ps(s, qq, op[i][n]);
             }
         }
@@ -145,11 +147,12 @@ inline void kv_tile_step(avx512::elem_t<ST> *S, int64_t ld, int64_t K,
     for (; k < K; ++k) {
         const __m512 kk = _mm512_set1_ps(kn[k]);
         const __m512 qq = _mm512_set1_ps(qn[k]);
-        elem_t<ST> *row = S + k * ld;
+        const elem_t<ST> *rin = S_in + k * ld;
+        elem_t<ST> *rout = S_out + k * ld;
         for (int n = 0; n < NV; ++n) {
             const __m512 s = _mm512_fmadd_ps(
-                    load16<ST>(row + 16 * n), egv, _mm512_mul_ps(kk, dt[n]));
-            store16<ST>(row + 16 * n, s);
+                    load16<ST>(rin + 16 * n), egv, _mm512_mul_ps(kk, dt[n]));
+            store16<ST>(rout + 16 * n, s);
             op[0][n] = _mm512_fmadd_ps(s, qq, op[0][n]);
         }
     }
@@ -163,10 +166,10 @@ inline void kv_tile_step(avx512::elem_t<ST> *S, int64_t ld, int64_t K,
 }
 
 inline void gate_scalars(float a, float b, float A_log, float dt_bias,
-        float threshold, float &eg, float &beta) {
+        float threshold, float beta_scale, float &eg, float &beta) {
     const float g = -std::exp(A_log) * softplus_f32(a + dt_bias, threshold);
     eg = std::exp(g);
-    beta = sigmoid_f32(b);
+    beta = beta_scale * sigmoid_f32(b);
 }
 
 // n values of type dt to FP32.
@@ -220,6 +223,29 @@ inline __m512 conv16(const float (*wt)[kConvBlock], const float *bias,
     return acc;
 }
 
+// Whether conv16 reads a conv state of these strides: unit-stride channels
+// (vLLM's SD layout) or each channel's taps contiguous (its DS layout, also
+// with draft taps or padding after them). Other layouts take conv1.
+inline bool conv16_layout(int64_t tap_stride, int64_t dim_stride, int64_t nt) {
+    return dim_stride == 1
+            || (tap_stride == 1
+                    && (dim_stride == nt || (nt > 0 && dim_stride > nt)));
+}
+
+// One channel of the conv in scalar arithmetic: bias + sum_j wt[j][c] *
+// tap(j) + wt[nt][c] * x, then the activation and rounding.
+template <data_type_t SRC, typename Tap>
+inline float conv1(const float (*wt)[kConvBlock], const float *bias, int64_t c,
+        int64_t nt, Tap tap, float x, const gdn_params &p) {
+    float acc = bias[c];
+    for (int64_t j = 0; j < nt; ++j) {
+        acc += wt[j][c] * tap(j);
+    }
+    acc += wt[nt][c] * x;
+    if (p.silu) { acc = silu_f32(acc); }
+    return p.round_conv_out ? round_to(acc, SRC) : acc;
+}
+
 // Conv1d update of channels [c0, c0 + nc) for every decode sequence:
 // xbuf[b][c] = act(bias + sum_j w[c][j] * window_j), then the conv state
 // shifts by one token. With conv_width == 0 the input is copied as is.
@@ -256,8 +282,9 @@ inline void conv_update_block(int64_t c0, int64_t nc, int64_t B,
     const int64_t tap = p.conv_state_tap_stride;
     const int64_t cstr = p.conv_state_dim_stride;
     const int64_t nt = W - 1;
-    // vLLM's DS layout keeps the taps of the block contiguous ([nc][nt]).
-    const bool ds_block = cstr != 1 && tap == 1 && cstr == nt;
+    // vLLM's DS layout keeps each channel's taps contiguous ([nc][cstr], the
+    // first nt used).
+    const bool ds_block = cstr != 1 && conv16_layout(tap, cstr, nt);
     for (int64_t bi = 0; bi < B; ++bi) {
         const int32_t slot = state_indices[bi];
         if (slot == p.pad_slot_id) { continue; }
@@ -279,7 +306,13 @@ inline void conv_update_block(int64_t c0, int64_t nc, int64_t B,
             // The taps by channel in FP32, then by tap for the vector loop.
             alignas(64) float hb[kConvBlock * kMaxConvWidth];
             alignas(64) float ht[kMaxConvWidth][kConvBlock];
-            row_f32<SRC>(srow, nc * nt, hb);
+            if (cstr == nt) {
+                row_f32<SRC>(srow, nc * nt, hb);
+            } else {
+                for (int64_t c = 0; c < nc; ++c) {
+                    row_f32<SRC>(srow + c * cstr, nt, hb + c * nt);
+                }
+            }
             for (int64_t c = 0; c < nc; ++c) {
                 for (int64_t j = 0; j < nt; ++j) {
                     ht[j][c] = hb[c * nt + j];
@@ -292,23 +325,23 @@ inline void conv_update_block(int64_t c0, int64_t nc, int64_t B,
                                 wt, bias, nt, ht[0], kConvBlock, x, n, m, p));
             }
             // Shift each channel's taps by one and append its input.
-            if (nt > 1) {
+            if (nt > 1 && cstr == nt) {
                 std::memmove(srow, srow + 1, (nc * nt - 1) * sizeof(T));
+            } else if (nt > 1) {
+                for (int64_t c = 0; c < nc; ++c) {
+                    std::memmove(srow + c * cstr, srow + c * cstr + 1,
+                            (nt - 1) * sizeof(T));
+                }
             }
             for (int64_t c = 0; nt > 0 && c < nc; ++c) {
-                srow[c * nt + nt - 1] = x[c];
+                srow[c * cstr + nt - 1] = x[c];
             }
         } else {
             for (int64_t c = 0; c < nc; ++c) {
                 T *cell = srow + c * cstr;
-                float acc = bias[c];
-                for (int64_t j = 0; j < W - 1; ++j) {
-                    acc += wt[j][c] * load1<SRC>(cell + j * tap);
-                }
-                const float xin = load1<SRC>(x + c);
-                acc += wt[W - 1][c] * xin;
-                if (p.silu) { acc = silu_f32(acc); }
-                xo[c] = p.round_conv_out ? round_to(acc, SRC) : acc;
+                xo[c] = conv1<SRC>(wt, bias, c, nt, [cell, tap](int64_t j) {
+                    return load1<SRC>(cell + j * tap);
+                }, load1<SRC>(x + c), p);
                 for (int64_t j = 0; j + 1 < W - 1; ++j) {
                     cell[j * tap] = cell[(j + 1) * tap];
                 }

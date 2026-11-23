@@ -60,7 +60,8 @@ enum class gdn_norm_gate_t : int32_t { silu = 0, sigmoid = 1 };
  * @brief What the a and b inputs hold.
  *
  * raw: the gate projections; g = -exp(A_log) * softplus(a + dt_bias) and
- *     beta = sigmoid(b) are computed in the kernel.
+ *     beta = sigmoid(b) (2 * sigmoid with allow_neg_eigval) are computed in
+ *     the kernel.
  * precomputed: a holds g (the log decay) and b holds beta, as FLA's and
  *     transformers' chunk_gated_delta_rule take them; A_log and dt_bias are
  *     not read.
@@ -90,7 +91,7 @@ inline const char *prefill_algo_to_string(gdn_prefill_algo_t algo) {
  * t, with q_t, k_t L2-normalised when use_qk_l2norm is set:
  *
  *   g_t    = -exp(A_log[hv]) * softplus(a_t[hv] + dt_bias[hv])
- *   beta_t = sigmoid(b_t[hv])
+ *   beta_t = sigmoid(b_t[hv])   (2 * sigmoid with allow_neg_eigval)
  *   S      = exp(g_t) * S
  *   S      = S + k_t (beta_t * (v_t - S^T k_t))^T
  *   o_t    = scale * S^T q_t
@@ -172,6 +173,10 @@ struct gdn_params {
     gdn_gate_input_t gate_input;
     data_type_t a_dt;
     data_type_t b_dt;
+    // Raw gates: beta = 2 * sigmoid(b), as FLA's allow_neg_eigval (OLMo's
+    // hybrid layers), so the transition I - beta k k^T has eigenvalues down
+    // to -1 (with L2-normalised k).
+    bool allow_neg_eigval;
 
     // Output [token][v_head][head_v_dim].
     int64_t out_stride_t;
@@ -221,6 +226,25 @@ struct gdn_params {
     // (num_decodes == 0); decodes always advance their slot.
     bool update_state;
 
+    // Speculative verify (vLLM's speculative decoding), when
+    // spec_state_indices is set: every sequence checks up to
+    // spec_state_stride draft tokens. Sequence i continues from SSM slot
+    // spec_state_indices[i * spec_state_stride + num_accepted_tokens[i] - 1]
+    // and writes the state after its token t to slot
+    // spec_state_indices[i * spec_state_stride + t]; 1 <=
+    // num_accepted_tokens[i] <= spec_state_stride, whatever its token count.
+    // Its conv state is slot spec_state_indices[i * spec_state_stride] of
+    // conv_taps() taps, laid out as vLLM's speculative conv update keeps it:
+    // the conv reads the conv_width - 1 taps from num_accepted_tokens[i] - 1
+    // on, then the conv_width - 2 taps from num_accepted_tokens[i] on move to
+    // the front and the sequence's q tokens follow, so the next step finds its
+    // history at tap num_accepted_tokens - 1 whatever q was; the taps after
+    // them keep their values. state_indices and has_initial_state are not
+    // read. No decodes, update_state, packed rows and raw gates.
+    const int32_t *spec_state_indices;
+    int64_t spec_state_stride;
+    const int32_t *num_accepted_tokens;
+
     // Round the conv output to src_dt before the recurrence, which is what an
     // unfused conv -> recurrence pipeline does. Off keeps it in FP32.
     bool round_conv_out;
@@ -235,6 +259,8 @@ struct gdn_params {
     bool round_core_out;
 
     // Prefill: token-recurrent or chunked delta rule (native kernel only).
+    // automatic decides per call from the prefills' average length; split
+    // passes give one call's bits only with the algorithm pinned.
     // ZENDNNL_GDN_PREFILL overrides it.
     gdn_prefill_algo_t prefill_algo;
 
@@ -268,6 +294,7 @@ struct gdn_params {
         , gate_input(gdn_gate_input_t::raw)
         , a_dt(data_type_t::none)
         , b_dt(data_type_t::none)
+        , allow_neg_eigval(false)
         , out_stride_t(0)
         , out_stride_h(0)
         , conv_state_slot_stride(0)
@@ -288,6 +315,9 @@ struct gdn_params {
         , pad_slot_id(-1)
         , num_state_slots(0)
         , update_state(true)
+        , spec_state_indices(nullptr)
+        , spec_state_stride(0)
+        , num_accepted_tokens(nullptr)
         , round_conv_out(true)
         , norm_weight(nullptr)
         , z(nullptr)
@@ -304,9 +334,18 @@ struct gdn_params {
     int64_t v_dim() const { return num_v_heads * head_v_dim; }
     int64_t conv_dim() const { return 2 * qk_dim() + v_dim(); }
     bool separate_qkv() const { return k != nullptr || v != nullptr; }
+    bool spec_verify() const { return spec_state_indices != nullptr; }
+    // Taps of one conv state slot: the conv history, plus one per draft token
+    // past the first in speculative verify.
+    int64_t conv_taps() const {
+        if (conv_width <= 1) { return 0; }
+        return conv_width - 1 + (spec_verify() ? spec_state_stride - 1 : 0);
+    }
     bool precomputed_gates() const {
         return gate_input == gdn_gate_input_t::precomputed;
     }
+    // beta = beta_scale() * sigmoid(b) for raw gates.
+    float beta_scale() const { return allow_neg_eigval ? 2.0f : 1.0f; }
     // Types a and b are read as.
     data_type_t a_type() const {
         return precomputed_gates() && a_dt != data_type_t::none ? a_dt : src_dt;

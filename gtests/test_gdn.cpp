@@ -16,7 +16,8 @@
 
 /// Gated DeltaNet (GDN): gdn_direct on decode-only, prefill-only and mixed
 /// batches. The native kernels are checked against the FP32 reference kernel,
-/// and the reference prefill against repeated reference decode steps.
+/// the reference prefill against repeated reference decode steps, and
+/// prefills split over two calls against one call.
 
 #include "common/zendnnl_global.hpp"
 #include "lowoha_operators/common/operator_instrumentation.hpp"
@@ -596,6 +597,21 @@ void expect_same(problem_t &x, problem_t &y, float otol, const char *what) {
     expect_close(x.conv_state, y.conv_state, 0.0f, 0.0f, "conv_state");
 }
 
+// x's conv state laid out with the given tap and channel strides over taps
+// taps, slots one after another, refilled at random.
+void set_conv_strides(problem_t &x, int64_t taps, int64_t tap_stride,
+        int64_t dim_stride, uint32_t seed) {
+    const int64_t D = 2 * x.s.H * x.s.K + x.s.HV * x.s.V;
+    const int64_t slot = (taps - 1) * tap_stride + (D - 1) * dim_stride + 1;
+    x.p.conv_state_tap_stride = tap_stride;
+    x.p.conv_state_dim_stride = dim_stride;
+    x.p.conv_state_slot_stride = slot;
+    x.conv_state
+            = buf_t(x.conv_state.dt, static_cast<size_t>(x.slots * slot + 1));
+    std::mt19937 rng(seed);
+    x.conv_state.fill_uniform(rng, -1.0f, 1.0f);
+}
+
 // Decode then prefill on both kernels with one params tweak applied.
 void check_variant(const shape_t &s, data_type_t src, data_type_t state_dt,
         ng::gdn_state_layout_t layout, bool norm, void (*tweak)(problem_t &)) {
@@ -676,6 +692,29 @@ TEST(GdnVariants, Options) {
     }
 }
 
+// Conv states the API takes beyond vLLM's two layouts: DS with padding after
+// each channel's taps, which decode reads as it reads DS, and channels at a
+// stride of 2 in an SD-like layout, which it reads in scalar arithmetic.
+// Decode and prefill match the reference, the conv state exactly.
+TEST(GdnVariants, PaddedConvStateLayouts) {
+    GDN_SKIP_UNLESS_NATIVE();
+    using tweak_t = void (*)(problem_t &);
+    const tweak_t tweaks[] = {[](problem_t &x) {
+        set_conv_strides(x, x.s.W - 1, 1, x.s.W + 1, 151);
+    }, [](problem_t &x) {
+        const int64_t D = 2 * x.s.H * x.s.K + x.s.HV * x.s.V;
+        set_conv_strides(x, x.s.W - 1, 2 * D, 2, 153);
+    }};
+    for (data_type_t src : {kBf16, kF32}) {
+        for (size_t i = 0; i < 2; ++i) {
+            SCOPED_TRACE(testing::Message()
+                    << dt_tag(src)
+                    << (i == 0 ? " padded DS" : " SD, channel stride 2"));
+            check_variant(kSmall, src, kF32, kKv, false, tweaks[i]);
+        }
+    }
+}
+
 // The fused gated RMSNorm on the rounded (default) and the FP32 core output,
 // with both gates, for bf16 and f16 sources (an f16 core output rounds to
 // f16 before the norm). The Qwen3.6 shape has four value tiles per head,
@@ -705,6 +744,48 @@ TEST(GdnVariants, FusedNorm) {
                     << dt_tag(src) << " source, tweak " << i);
             check_variant(kQwen36, src, data_type_t::f32,
                     ng::gdn_state_layout_t::kv, true, tweaks[i]);
+        }
+    }
+}
+
+// allow_neg_eigval doubles beta (OLMo's hybrid layers): decode, the recurrent
+// prefill and the chunked prefill match the reference kernel, which doubles
+// it too, and the flag changes the result.
+TEST(GdnVariants, NegativeEigenvalueGate) {
+    GDN_SKIP_UNLESS_NATIVE();
+    const auto neg = [](problem_t &x) { x.p.allow_neg_eigval = true; };
+    for (data_type_t src : {kBf16, kF32}) {
+        for (bool norm : {false, true}) {
+            SCOPED_TRACE(
+                    testing::Message() << dt_tag(src) << (norm ? " norm" : ""));
+            check_variant(kQwen36, src, kF32, kKv, norm, neg);
+            const std::vector<int32_t> qsl = offsets({70, 9, 33});
+            const std::vector<uint8_t> init {1, 0, 1};
+            problem_t ref(kQwen36, qsl.back(), 5, kF32, kKv, norm, 131, src);
+            ref.idx = distinct_slots(3, 5, 31);
+            problem_t off = ref;
+            neg(ref);
+            problem_t nat = ref;
+            nat.p.prefill_algo = ng::gdn_prefill_algo_t::chunked;
+            ASSERT_EQ(ref.prefill(ng::gdn_kernel_t::reference, qsl, init),
+                    status_t::success);
+            ASSERT_EQ(nat.prefill(ng::gdn_kernel_t::native, qsl, init),
+                    status_t::success);
+            ASSERT_EQ(off.prefill(ng::gdn_kernel_t::reference, qsl, init),
+                    status_t::success);
+            SCOPED_TRACE("chunked prefill");
+            // beta up to 2 doubles the weight of every rank-1 update, and with
+            // it the rounding of bf16 operands, which the norm carries into
+            // rows of small RMS.
+            tol_t t = chunked_tol(src, kF32, norm);
+            if (src == kBf16 && norm) { t.out *= 2.0f; }
+            expect_tol(nat, ref, t);
+            size_t changed = 0;
+            for (size_t i = 0; i < ref.out.raw.size(); ++i) {
+                changed += ref.out.raw[i] != off.out.raw[i];
+            }
+            EXPECT_GT(changed, 0u)
+                    << "allow_neg_eigval left the outputs as they were";
         }
     }
 }
@@ -1398,34 +1479,63 @@ rule_inputs_t rule_inputs(
     return r;
 }
 
-status_t rule_call(problem_t &y, rule_inputs_t &r, ng::gdn_kernel_t kernel,
-        const std::vector<int32_t> &qsl, const std::vector<uint8_t> &init) {
+size_t words(const buf_t &buf) {
+    return buf.dt == data_type_t::f32 ? 2 : 1;
+}
+
+// gdn_direct on y's token rows from r0 on, as the batch qsl describes
+// (sequence i on slot y.idx[i], the first nd sequences decodes); with r, on
+// its separate q / k / v and precomputed gates instead of y's packed rows and
+// gate projections.
+status_t call_rows(problem_t &y, const rule_inputs_t *r, int64_t r0,
+        const std::vector<int32_t> &qsl, const std::vector<uint8_t> &init,
+        ng::gdn_kernel_t kernel, int64_t nd = 0) {
     ng::gdn_params q = y.p;
     q.kernel = kernel;
     q.batch = static_cast<int64_t>(y.idx.size());
+    q.num_decodes = nd;
     q.num_tokens = qsl.back();
     q.cu_seqlens = qsl.data();
     q.has_initial_state = reinterpret_cast<const bool *>(init.data());
-    q.qkv_stride = r.qs_t;
-    q.q_stride_h = r.qs_h;
-    q.k = r.k.data();
-    q.k_stride_t = r.ks_t;
-    q.k_stride_h = r.ks_h;
-    q.v = r.v.data();
-    q.v_stride_t = r.vs_t;
-    q.v_stride_h = r.vs_h;
-    q.gate_input = ng::gdn_gate_input_t::precomputed;
-    q.a_dt = r.g.dt;
-    q.b_dt = r.beta.dt;
-    q.a_stride = y.s.HV;
-    q.b_stride = y.s.HV;
+    const auto row = [r0](const buf_t &buf, int64_t stride) {
+        return static_cast<const uint16_t *>(buf.data())
+                + r0 * stride * static_cast<int64_t>(words(buf));
+    };
     if (q.norm_weight) {
         q.norm_weight = y.norm_w.data();
-        q.z = y.z.data();
+        q.z = row(y.z, y.s.HV * y.s.V);
     }
-    return ng::gdn_direct(r.q.data(), r.g.data(), r.beta.data(), nullptr,
-            nullptr, y.conv_w.data(), y.conv_b.data(), y.conv_state.data(),
-            y.ssm_state.data(), y.idx.data(), y.out.data(), q);
+    void *out = const_cast<uint16_t *>(row(y.out, q.out_stride_t));
+    if (r == nullptr) {
+        const uint16_t *b = static_cast<const uint16_t *>(y.b_ptr())
+                + r0 * q.b_stride * static_cast<int64_t>(words(y.b));
+        return ng::gdn_direct(row(y.qkv, q.qkv_stride), row(y.a, q.a_stride), b,
+                y.a_log.data(), y.dt_bias.data(), y.conv_w.data(),
+                y.conv_b.data(), y.conv_state.data(), y.ssm_state.data(),
+                y.idx.data(), out, q);
+    }
+    q.qkv_stride = r->qs_t;
+    q.q_stride_h = r->qs_h;
+    q.k = row(r->k, r->ks_t);
+    q.k_stride_t = r->ks_t;
+    q.k_stride_h = r->ks_h;
+    q.v = row(r->v, r->vs_t);
+    q.v_stride_t = r->vs_t;
+    q.v_stride_h = r->vs_h;
+    q.gate_input = ng::gdn_gate_input_t::precomputed;
+    q.a_dt = r->g.dt;
+    q.b_dt = r->beta.dt;
+    q.a_stride = y.s.HV;
+    q.b_stride = y.s.HV;
+    return ng::gdn_direct(row(r->q, r->qs_t), row(r->g, y.s.HV),
+            row(r->beta, y.s.HV), nullptr, nullptr, y.conv_w.data(),
+            y.conv_b.data(), y.conv_state.data(), y.ssm_state.data(),
+            y.idx.data(), out, q);
+}
+
+status_t rule_call(problem_t &y, rule_inputs_t &r, ng::gdn_kernel_t kernel,
+        const std::vector<int32_t> &qsl, const std::vector<uint8_t> &init) {
+    return call_rows(y, &r, 0, qsl, init, kernel);
 }
 
 TEST(GdnRuleInputs, SeparateQkvAndPrecomputedGatesMatchPackedRows) {
@@ -1628,6 +1738,880 @@ TEST(GdnChunkedValueBlocks, UpdateStateFalseBitExactAcrossSplits) {
     }
 }
 
+// Split passes: a prefill continued from the state an earlier call left in
+// its slot (has_initial_state), as vLLM's prefix caching and decision models
+// answering prompts from a shared context run it.
+
+const shape_t kQwen35 {16, 16, 128, 128, 4};
+
+// Copies x's token rows to y: row from[j] of x's per-token tensors (packed
+// rows, gate projections, z and output) becomes row j of y's.
+void gather_rows(
+        const problem_t &x, problem_t &y, const std::vector<int64_t> &from) {
+    const auto copy = [&from](const buf_t &src, buf_t &dst, int64_t stride) {
+        const size_t n = static_cast<size_t>(stride) * words(src);
+        for (size_t j = 0; j < from.size(); ++j) {
+            std::memcpy(dst.raw.data() + j * n,
+                    src.raw.data() + static_cast<size_t>(from[j]) * n,
+                    n * sizeof(uint16_t));
+        }
+    };
+    copy(x.qkv, y.qkv, x.p.qkv_stride);
+    copy(x.a, y.a, x.p.a_stride);
+    copy(x.b, y.b, x.p.b_stride);
+    copy(x.z, y.z, x.s.HV * x.s.V);
+    copy(x.out, y.out, x.p.out_stride_t);
+}
+
+// A batch run as two calls: every sequence's first cut[i] tokens, then every
+// rest, continuing from the state the first call left. Row j of the split
+// rows holds row from[j] of the batch.
+struct split_t {
+    std::vector<int64_t> from;
+    int64_t first_rows = 0;
+    std::vector<int32_t> first_qsl, rest_qsl;
+    std::vector<uint8_t> rest_init;
+};
+
+split_t split_rows(const std::vector<int32_t> &lens,
+        const std::vector<int32_t> &cuts, const std::vector<uint8_t> &init) {
+    const std::vector<int32_t> qsl = offsets(lens);
+    split_t sp;
+    std::vector<int32_t> rest(lens.size());
+    for (size_t i = 0; i < lens.size(); ++i) {
+        for (int32_t t = 0; t < cuts[i]; ++t) {
+            sp.from.push_back(qsl[i] + t);
+        }
+        rest[i] = lens[i] - cuts[i];
+        sp.rest_init.push_back(cuts[i] > 0 ? uint8_t {1} : init[i]);
+    }
+    sp.first_rows = static_cast<int64_t>(sp.from.size());
+    for (size_t i = 0; i < lens.size(); ++i) {
+        for (int32_t t = cuts[i]; t < lens[i]; ++t) {
+            sp.from.push_back(qsl[i] + t);
+        }
+    }
+    sp.first_qsl = offsets(cuts);
+    sp.rest_qsl = offsets(rest);
+    return sp;
+}
+
+// x runs the batch as one call; y, holding x's rows in split order, as the
+// two calls of sp. Each runs with its own params (algorithm, threads); call
+// it in ASSERT_NO_FATAL_FAILURE.
+void run_split(problem_t &x, problem_t &y, const rule_inputs_t *rx,
+        const rule_inputs_t *ry, const std::vector<int32_t> &lens,
+        const std::vector<uint8_t> &init, const split_t &sp,
+        ng::gdn_kernel_t k) {
+    ASSERT_EQ(call_rows(x, rx, 0, offsets(lens), init, k), status_t::success);
+    ASSERT_EQ(call_rows(y, ry, 0, sp.first_qsl, init, k), status_t::success);
+    ASSERT_EQ(call_rows(y, ry, sp.first_rows, sp.rest_qsl, sp.rest_init, k),
+            status_t::success);
+}
+
+// y's output rows, row j holding row from[j] of x's: bit for bit when tol is
+// 0, else within tol (absolute and relative). Only the HV x V values of a row
+// count, and each must have been written (outputs start as NaN), except in
+// x's rows listed in unwritten.
+void expect_rows_match(const problem_t &x, const problem_t &y,
+        const std::vector<int64_t> &from, float tol = 0.0f,
+        const std::vector<int64_t> &unwritten = {}) {
+    const size_t w = words(x.out);
+    size_t bad = 0, nan = 0;
+    int64_t first_bad = -1;
+    float worst = 0.0f;
+    for (size_t j = 0; j < from.size(); ++j) {
+        if (std::find(unwritten.begin(), unwritten.end(), from[j])
+                != unwritten.end()) {
+            continue;
+        }
+        for (int64_t hv = 0; hv < x.s.HV; ++hv) {
+            for (int64_t e = 0; e < x.s.V; ++e) {
+                const size_t xi = static_cast<size_t>(
+                        from[j] * x.p.out_stride_t + hv * x.p.out_stride_h + e);
+                const size_t yi = static_cast<size_t>(
+                        j * y.p.out_stride_t + hv * y.p.out_stride_h + e);
+                const float a = x.out.get(xi), b = y.out.get(yi);
+                const bool written = !std::isnan(a) && !std::isnan(b);
+                const bool same = written
+                        && (tol == 0.0f ? std::memcmp(x.out.raw.data() + xi * w,
+                                                  y.out.raw.data() + yi * w,
+                                                  w * sizeof(uint16_t))
+                                                == 0
+                                        : std::fabs(a - b)
+                                                <= tol + tol * std::fabs(a));
+                if (same) { continue; }
+                ++bad;
+                if (written) {
+                    worst = std::max(worst, std::fabs(a - b));
+                } else {
+                    ++nan;
+                }
+                if (first_bad < 0) { first_bad = from[j]; }
+            }
+        }
+    }
+    EXPECT_EQ(bad, 0u) << "output: " << bad << " elements differ (" << nan
+                       << " not written), the first in row " << first_bad
+                       << ", worst abs diff " << worst;
+}
+
+// Raw 16-bit words in which two buffers differ.
+size_t differing_words(const buf_t &x, const buf_t &y) {
+    size_t n = 0;
+    for (size_t i = 0; i < std::min(x.raw.size(), y.raw.size()); ++i) {
+        n += x.raw[i] != y.raw[i];
+    }
+    return n + std::max(x.raw.size(), y.raw.size())
+            - std::min(x.raw.size(), y.raw.size());
+}
+
+// Outputs (see expect_rows_match) and both pools: the SSM state bit for bit
+// when its tolerances are 0, the conv state always.
+void expect_split_matches(const problem_t &x, const problem_t &y,
+        const std::vector<int64_t> &from, float otol = 0.0f,
+        float stol_abs = 0.0f, float stol_rel = 0.0f,
+        const std::vector<int64_t> &unwritten = {}) {
+    expect_rows_match(x, y, from, otol, unwritten);
+    if (stol_abs == 0.0f && stol_rel == 0.0f) {
+        EXPECT_EQ(differing_words(x.ssm_state, y.ssm_state), 0u)
+                << "ssm_state words differ";
+    } else {
+        expect_close(y.ssm_state, x.ssm_state, stol_abs, stol_rel, "ssm_state");
+    }
+    EXPECT_EQ(differing_words(x.conv_state, y.conv_state), 0u)
+            << "conv_state words differ";
+}
+
+struct split_cfg_t {
+    shape_t s;
+    data_type_t src;
+    ng::gdn_state_layout_t layout;
+    bool norm, ds_conv;
+};
+
+testing::Message split_cfg_tag(const split_cfg_t &c) {
+    return testing::Message()
+            << c.s << " " << dt_tag(c.src) << (c.layout == kKv ? " kv" : " vk")
+            << (c.norm ? " norm" : "") << (c.ds_conv ? " ds" : "");
+}
+
+// The batch of the split tests below: a long prompt, one starting from zero,
+// three short ones and a pad slot.
+const std::vector<int32_t> kSplitLens {300, 97, 64, 45, 130, 20};
+const std::vector<uint8_t> kSplitInit {1, 0, 1, 1, 0, 1};
+
+// x's rows of the sequences (lengths lens) on the pad slot, which no call
+// writes.
+std::vector<int64_t> pad_rows(
+        const problem_t &x, const std::vector<int32_t> &lens) {
+    const std::vector<int32_t> qsl = offsets(lens);
+    std::vector<int64_t> rows;
+    for (size_t i = 0; i < lens.size(); ++i) {
+        if (x.idx[i] != x.p.pad_slot_id) { continue; }
+        for (int32_t r = qsl[i]; r < qsl[i + 1]; ++r) {
+            rows.push_back(r);
+        }
+    }
+    return rows;
+}
+
+problem_t split_problem(const split_cfg_t &c, const split_t &sp,
+        ng::gdn_prefill_algo_t algo, int32_t threads) {
+    problem_t x(c.s, static_cast<int64_t>(sp.from.size()), 8, kF32, c.layout,
+            c.norm, 73, c.src);
+    if (c.ds_conv) { x.use_ds_conv_state(); }
+    x.idx = distinct_slots(6, 8, 19);
+    x.idx[5] = -1;
+    x.p.prefill_algo = algo;
+    x.p.num_threads = threads;
+    return x;
+}
+
+// The chunked form continues a prefill with the bits of one call when the
+// state is FP32 and the cut falls on one of the prompt's 32-token chunk
+// boundaries: the chunks start at each call's first token. The two calls
+// group the prompts differently and split heads into other value blocks,
+// which changes no bit. Cuts after 3 chunks and after 1, at a prompt's end (no
+// rest), at 0 (no first part), and before a 2-token rest, shorter than the
+// conv history.
+TEST(GdnSplitPass, ChunkedCutsOnChunkBoundariesMatchOneCall) {
+    GDN_SKIP_UNLESS_NATIVE();
+    const split_t sp
+            = split_rows(kSplitLens, {96, 32, 64, 0, 128, 0}, kSplitInit);
+    const split_cfg_t cfgs[] = {{kQwen36, kBf16, kKv, false, false},
+            {kQwen36, kBf16, kVk, true, false},
+            {kQwen38, kBf16, kKv, true, true},
+            {kQwen35, kBf16, kKv, false, false},
+            {kQwen36, kF16, kKv, true, false},
+            {kQwen36, kF32, kVk, false, true},
+            {kSmall, kBf16, kKv, true, true}};
+    for (const split_cfg_t &c : cfgs) {
+        for (int32_t threads : {1, 8, 64}) {
+            SCOPED_TRACE(split_cfg_tag(c) << " T" << threads);
+            problem_t x = split_problem(
+                    c, sp, ng::gdn_prefill_algo_t::chunked, threads);
+            // The split calls run at another thread count.
+            problem_t y = x;
+            y.p.num_threads = threads == 1 ? 64 : 1;
+            gather_rows(x, y, sp.from);
+            ASSERT_NO_FATAL_FAILURE(run_split(x, y, nullptr, nullptr,
+                    kSplitLens, kSplitInit, sp, ng::gdn_kernel_t::native));
+            expect_split_matches(
+                    x, y, sp.from, 0.0f, 0.0f, 0.0f, pad_rows(x, kSplitLens));
+        }
+    }
+}
+
+// The token-recurrent form continues a prefill at any cut with the bits of
+// one call, on the native and the reference kernel: cuts after 1 and 2 tokens
+// (inside the conv history), on and off chunk boundaries, and at a prompt's
+// end; the norm on the rounded core output and on the FP32 one.
+TEST(GdnSplitPass, RecurrentCutsAnywhereMatchOneCall) {
+    if (kernel_env_set() || prefill_env_set()) {
+        GTEST_SKIP() << "ZENDNNL_GDN_KERNEL / ZENDNNL_GDN_PREFILL is set";
+    }
+    const std::vector<int32_t> lens {70, 33, 5, 9};
+    const std::vector<uint8_t> init {1, 0, 1, 1};
+    struct cfg_t {
+        split_cfg_t c;
+        bool round_core_out;
+        ng::gdn_kernel_t k;
+    };
+    const auto native = ng::gdn_kernel_t::native;
+    const auto ref = ng::gdn_kernel_t::reference;
+    const cfg_t cfgs[] = {{{kQwen36, kBf16, kKv, true, false}, true, native},
+            {{kQwen36, kBf16, kVk, true, false}, false, native},
+            {{kQwen38, kF16, kKv, false, true}, true, native},
+            {{kQwen36, kF32, kVk, false, false}, true, native},
+            {{kSmall, kBf16, kKv, true, true}, true, ref},
+            {{kSmall, kF32, kVk, false, false}, true, ref}};
+    const std::vector<std::vector<int32_t>> cut_sets {
+            {1, 1, 1, 1}, {17, 31, 2, 0}, {33, 32, 4, 9}, {69, 2, 3, 8}};
+    for (const cfg_t &c : cfgs) {
+        if (c.k == native && !has_native_isa()) { continue; }
+        for (const std::vector<int32_t> &cuts : cut_sets) {
+            for (int32_t threads : {1, 32}) {
+                SCOPED_TRACE(split_cfg_tag(c.c)
+                        << " " << ng::kernel_to_string(c.k)
+                        << (c.round_core_out ? "" : " fp32 norm") << " cuts "
+                        << cuts[0] << "," << cuts[1] << "," << cuts[2] << ","
+                        << cuts[3] << " T" << threads);
+                const split_t sp = split_rows(lens, cuts, init);
+                problem_t x(c.c.s, static_cast<int64_t>(sp.from.size()), 6,
+                        kF32, c.c.layout, c.c.norm, 79, c.c.src);
+                if (c.c.ds_conv) { x.use_ds_conv_state(); }
+                x.idx = distinct_slots(4, 6, 23);
+                x.p.round_core_out = c.round_core_out;
+                x.p.prefill_algo = ng::gdn_prefill_algo_t::recurrent;
+                x.p.num_threads = threads;
+                problem_t y = x;
+                gather_rows(x, y, sp.from);
+                ASSERT_NO_FATAL_FAILURE(
+                        run_split(x, y, nullptr, nullptr, lens, init, sp, c.k));
+                expect_split_matches(x, y, sp.from);
+            }
+        }
+    }
+}
+
+// Off a chunk boundary the continuation's chunks start elsewhere, so the
+// chunked form matches one call only to the precision of its operands (see
+// chunked_tol).
+TEST(GdnSplitPass, ChunkedCutsOffChunkBoundariesStayClose) {
+    GDN_SKIP_UNLESS_NATIVE();
+    const split_t sp
+            = split_rows(kSplitLens, {40, 33, 50, 1, 100, 0}, kSplitInit);
+    for (const split_cfg_t &c : {split_cfg_t {kQwen36, kBf16, kKv, true, false},
+                 split_cfg_t {kQwen36, kF16, kVk, false, false},
+                 split_cfg_t {kQwen36, kF32, kKv, true, true}}) {
+        SCOPED_TRACE(split_cfg_tag(c));
+        problem_t x = split_problem(c, sp, ng::gdn_prefill_algo_t::chunked, 0);
+        problem_t y = x;
+        gather_rows(x, y, sp.from);
+        ASSERT_NO_FATAL_FAILURE(run_split(x, y, nullptr, nullptr, kSplitLens,
+                kSplitInit, sp, ng::gdn_kernel_t::native));
+        const tol_t t = chunked_tol(c.src, kF32, c.norm);
+        expect_split_matches(x, y, sp.from, t.out, t.state_atol, t.state_rtol,
+                pad_rows(x, kSplitLens));
+    }
+}
+
+// Prompts continuing read-only from one slot (update_state = false) after a
+// call prefilled their shared context into it give each prompt the bits of one
+// call over the context and that prompt, on packed rows with the conv and on
+// chunk_gated_delta_rule inputs. The context ends on a chunk boundary for the
+// chunked form and off one for the recurrent form.
+TEST(GdnSplitPass, PromptsFromOneSharedStateMatchOneCall) {
+    if (kernel_env_set() || prefill_env_set()) {
+        GTEST_SKIP() << "ZENDNNL_GDN_KERNEL / ZENDNNL_GDN_PREFILL is set";
+    }
+    const std::vector<int32_t> plens {1, 31, 50, 96, 181};
+    const int64_t n = static_cast<int64_t>(plens.size());
+    const std::vector<int32_t> pqsl = offsets(plens);
+    for (ng::gdn_kernel_t k : kernels_to_check()) {
+        const bool native = k == ng::gdn_kernel_t::native;
+        for (bool rule : {false, true}) {
+            for (ng::gdn_prefill_algo_t algo :
+                    {ng::gdn_prefill_algo_t::recurrent,
+                            ng::gdn_prefill_algo_t::chunked}) {
+                if (!native && algo == ng::gdn_prefill_algo_t::chunked) {
+                    continue;
+                }
+                for (data_type_t src : {kBf16, kF32}) {
+                    const shape_t s = native
+                            ? (rule ? shape_t {16, 32, 128, 128, 0} : kQwen36)
+                            : (rule ? shape_t {2, 4, 64, 32, 0} : kSmall);
+                    const int32_t ctx
+                            = algo == ng::gdn_prefill_algo_t::chunked ? 96 : 70;
+                    SCOPED_TRACE(testing::Message()
+                            << ng::kernel_to_string(k) << " "
+                            << ng::prefill_algo_to_string(algo) << " " << s
+                            << " " << dt_tag(src)
+                            << (rule ? " rule inputs" : " packed"));
+                    problem_t y(
+                            s, ctx + pqsl.back(), 2, kF32, kKv, true, 83, src);
+                    y.p.prefill_algo = algo;
+                    // Prompt j of x: the context rows of y, then its own.
+                    std::vector<int64_t> from;
+                    std::vector<int32_t> xlens;
+                    for (int64_t j = 0; j < n; ++j) {
+                        for (int32_t t = 0; t < ctx; ++t) {
+                            from.push_back(t);
+                        }
+                        for (int32_t t = 0; t < plens[j]; ++t) {
+                            from.push_back(ctx + pqsl[j] + t);
+                        }
+                        xlens.push_back(ctx + plens[j]);
+                    }
+                    problem_t x(s, static_cast<int64_t>(from.size()), n, kF32,
+                            kKv, true, 83, src);
+                    x.a_log = y.a_log;
+                    x.dt_bias = y.dt_bias;
+                    x.conv_w = y.conv_w;
+                    x.conv_b = y.conv_b;
+                    x.norm_w = y.norm_w;
+                    x.p.prefill_algo = algo;
+                    x.idx = distinct_slots(n, n, 29);
+                    gather_rows(y, x, from);
+                    rule_inputs_t ry, rx;
+                    if (rule) {
+                        ry = rule_inputs(y, kF32, kF32);
+                        rx = rule_inputs(x, kF32, kF32);
+                    }
+                    y.idx = {1};
+                    ASSERT_EQ(call_rows(y, rule ? &ry : nullptr, 0, {0, ctx},
+                                      {0}, k),
+                            status_t::success);
+                    y.idx.assign(static_cast<size_t>(n), 1);
+                    y.p.update_state = false;
+                    ASSERT_EQ(call_rows(y, rule ? &ry : nullptr, ctx, pqsl,
+                                      std::vector<uint8_t>(n, 1), k),
+                            status_t::success);
+                    ASSERT_EQ(call_rows(x, rule ? &rx : nullptr, 0,
+                                      offsets(xlens),
+                                      std::vector<uint8_t>(n, 0), k),
+                            status_t::success);
+                    expect_rows_match(y, x, from);
+                }
+            }
+        }
+    }
+}
+
+// Speculative verify: draft tokens checked from the state the previous step
+// accepted, with a state stored after every token.
+
+// n sequences of draft tokens in x's rows; sequence i owns SSM slots
+// spec[i * stride .. (i + 1) * stride) and conv slot spec[i * stride], whose
+// conv state has conv_taps() taps (DS or SD).
+struct verify_t {
+    problem_t x;
+    int64_t stride;
+    std::vector<int32_t> spec, accepted;
+};
+
+verify_t make_verify(const split_cfg_t &c, data_type_t state_dt, int64_t n,
+        int64_t tokens, int64_t stride, uint32_t seed) {
+    const int64_t slots = n * stride + 1;
+    verify_t v {problem_t(c.s, tokens, slots, state_dt, c.layout, c.norm, seed,
+                        c.src),
+            stride, distinct_slots(n * stride, slots, seed + 1), {}};
+    problem_t &x = v.x;
+    const int64_t D = 2 * c.s.H * c.s.K + c.s.HV * c.s.V;
+    const int64_t L = c.s.W > 1 ? c.s.W - 1 + stride - 1 : 0;
+    x.conv_state = buf_t(c.src, static_cast<size_t>(slots * L * D + 1));
+    std::mt19937 rng(seed + 2);
+    x.conv_state.fill_uniform(rng, -1.0f, 1.0f);
+    x.p.conv_state_slot_stride = L * D;
+    x.p.conv_state_tap_stride = c.ds_conv ? 1 : D;
+    x.p.conv_state_dim_stride = c.ds_conv ? L : 1;
+    x.p.spec_state_stride = stride;
+    x.idx.assign(static_cast<size_t>(n), 0);
+    return v;
+}
+
+// A verify call on rows [r0, r0 + qsl.back()) of v.
+status_t verify_rows(verify_t &v, int64_t r0, const std::vector<int32_t> &qsl,
+        ng::gdn_kernel_t k) {
+    v.x.p.spec_state_indices = v.spec.data();
+    v.x.p.num_accepted_tokens = v.accepted.data();
+    return call_rows(
+            v.x, nullptr, r0, qsl, std::vector<uint8_t>(qsl.size() - 1, 1), k);
+}
+
+// The decode twin of v, before its first verify call: slot i holds sequence
+// i's state from slot spec[i * stride + accepted[i] - 1], conv slot i the
+// conv_width - 1 taps from tap accepted[i] - 1, and row s * n + i the token
+// that sequence i decodes in step s (rows[s * n + i] of v, or -1: a pad slot
+// in that step). With verify_layout its conv slots have v's strides.
+problem_t decode_twin(const verify_t &v, const split_cfg_t &c,
+        const std::vector<int64_t> &rows, int64_t n,
+        bool verify_layout = false) {
+    const problem_t &x = v.x;
+    problem_t tw(c.s, static_cast<int64_t>(rows.size()), n, x.p.state_dt,
+            c.layout, c.norm, 103, c.src);
+    if (verify_layout) {
+        tw.p.conv_state_slot_stride = x.p.conv_state_slot_stride;
+        tw.p.conv_state_tap_stride = x.p.conv_state_tap_stride;
+        tw.p.conv_state_dim_stride = x.p.conv_state_dim_stride;
+        tw.conv_state = buf_t(
+                c.src, static_cast<size_t>(n * x.p.conv_state_slot_stride + 1));
+    } else if (c.ds_conv) {
+        tw.use_ds_conv_state();
+    }
+    tw.a_log = x.a_log;
+    tw.dt_bias = x.dt_bias;
+    tw.conv_w = x.conv_w;
+    tw.conv_b = x.conv_b;
+    tw.norm_w = x.norm_w;
+    tw.p.num_threads = x.p.num_threads;
+    tw.p.allow_neg_eigval = x.p.allow_neg_eigval;
+    std::vector<int64_t> from(rows.size());
+    for (size_t j = 0; j < rows.size(); ++j) {
+        from[j] = std::max<int64_t>(rows[j], 0);
+    }
+    gather_rows(x, tw, from);
+    const size_t sw = static_cast<size_t>(x.p.ssm_state_slot_stride)
+            * words(x.ssm_state);
+    const int64_t D = 2 * c.s.H * c.s.K + c.s.HV * c.s.V;
+    for (int64_t i = 0; i < n; ++i) {
+        const int64_t acc = v.accepted[i];
+        std::memcpy(tw.ssm_state.raw.data() + i * sw,
+                x.ssm_state.raw.data() + v.spec[i * v.stride + acc - 1] * sw,
+                sw * sizeof(uint16_t));
+        for (int64_t j = 0; j + 1 < c.s.W; ++j) {
+            for (int64_t ch = 0; ch < D; ++ch) {
+                tw.conv_state.set(i * tw.p.conv_state_slot_stride
+                                + j * tw.p.conv_state_tap_stride
+                                + ch * tw.p.conv_state_dim_stride,
+                        x.conv_state.get(v.spec[i * v.stride]
+                                        * x.p.conv_state_slot_stride
+                                + (acc - 1 + j) * x.p.conv_state_tap_stride
+                                + ch * x.p.conv_state_dim_stride));
+            }
+        }
+    }
+    return tw;
+}
+
+// Decode step s of the twin: sequence i decodes row s * n + i on slot i, or
+// sits out as a pad slot.
+status_t twin_step(problem_t &tw, const std::vector<int64_t> &rows, int64_t s,
+        int64_t n, ng::gdn_kernel_t k) {
+    tw.idx.resize(static_cast<size_t>(n));
+    for (int64_t i = 0; i < n; ++i) {
+        tw.idx[i] = rows[s * n + i] < 0 ? -1 : static_cast<int32_t>(i);
+    }
+    return call_rows(tw, nullptr, s * n,
+            offsets(std::vector<int32_t>(static_cast<size_t>(n), 1)),
+            std::vector<uint8_t>(static_cast<size_t>(n), 1), k, n);
+}
+
+bool same_slot(const problem_t &x, int64_t xs, const problem_t &y, int64_t ys) {
+    const size_t n = static_cast<size_t>(x.p.ssm_state_slot_stride)
+            * words(x.ssm_state);
+    return std::memcmp(x.ssm_state.raw.data() + xs * n,
+                   y.ssm_state.raw.data() + ys * n, n * sizeof(uint16_t))
+            == 0;
+}
+
+// Each verified sequence's conv state after the call: the conv_width - 2
+// taps from tap accepted[i] on (of `before`), its q tokens, then the taps of
+// `before` that follow.
+void expect_conv_rolled(const verify_t &v, const buf_t &before,
+        const std::vector<int32_t> &qsl, int64_t r0) {
+    const problem_t &x = v.x;
+    const int64_t D = 2 * x.s.H * x.s.K + x.s.HV * x.s.V;
+    const int64_t L = x.s.W > 1 ? x.s.W - 1 + v.stride - 1 : 0;
+    const int64_t W2 = x.s.W - 2;
+    const auto at = [&x](int64_t slot, int64_t tap, int64_t ch) {
+        return static_cast<size_t>(slot * x.p.conv_state_slot_stride
+                + tap * x.p.conv_state_tap_stride
+                + ch * x.p.conv_state_dim_stride);
+    };
+    size_t bad = 0;
+    for (size_t i = 0; i + 1 < qsl.size(); ++i) {
+        const int64_t q = qsl[i + 1] - qsl[i];
+        const int64_t slot = v.spec[i * v.stride];
+        if (q == 0 || slot < 0) { continue; }
+        for (int64_t ch = 0; ch < D; ++ch) {
+            for (int64_t j = 0; j < L; ++j) {
+                const float want = j < W2
+                        ? before.get(at(slot, v.accepted[i] + j, ch))
+                        : j < W2 + q
+                        ? x.qkv.get(
+                                  (r0 + qsl[i] + j - W2) * x.p.qkv_stride + ch)
+                        : before.get(at(slot, j, ch));
+                bad += x.conv_state.get(at(slot, j, ch)) != want;
+            }
+        }
+    }
+    EXPECT_EQ(bad, 0u) << "conv state taps out of place";
+}
+
+struct verify_cfg_t {
+    split_cfg_t c;
+    data_type_t state_dt;
+    bool neg_eigval = false;
+};
+
+const verify_cfg_t kVerifyCfgs[] = {{{kQwen36, kBf16, kKv, false, false}, kF32},
+        {{kQwen36, kBf16, kVk, true, true}, kF32},
+        {{kQwen38, kF16, kKv, true, false}, kBf16},
+        {{kQwen36, kF32, kKv, false, true}, kF16},
+        {{kSmall, kBf16, kKv, true, false}, kF32},
+        {{kQwen36, kBf16, kKv, true, false}, kF32, true}};
+
+std::vector<int32_t> verify_threads(ng::gdn_kernel_t k) {
+    return k == ng::gdn_kernel_t::native ? std::vector<int32_t> {1, 64}
+                                         : std::vector<int32_t> {0};
+}
+
+// One verify call over v's sequences (lengths lens) against decode steps from
+// the accepted states on its twin: every output, the state stored after every
+// token, and the conv state afterwards. With verify_layout the twin's conv
+// state has v's strides.
+void expect_verify_matches_decode(verify_t &v, const split_cfg_t &c,
+        const std::vector<int32_t> &lens, ng::gdn_kernel_t k,
+        bool verify_layout = false) {
+    const std::vector<int32_t> qsl = offsets(lens);
+    const int64_t n = static_cast<int64_t>(lens.size()), stride = v.stride;
+    std::vector<int64_t> rows(static_cast<size_t>(stride * n));
+    for (int64_t s = 0; s < stride; ++s) {
+        for (int64_t i = 0; i < n; ++i) {
+            rows[s * n + i] = s < lens[i] ? qsl[i] + s : -1;
+        }
+    }
+    problem_t tw = decode_twin(v, c, rows, n, verify_layout);
+    const buf_t before = v.x.conv_state;
+    ASSERT_EQ(verify_rows(v, 0, qsl, k), status_t::success);
+    for (int64_t s = 0; s < stride; ++s) {
+        ASSERT_EQ(twin_step(tw, rows, s, n, k), status_t::success);
+        for (int64_t i = 0; i < n; ++i) {
+            if (s >= lens[i]) { continue; }
+            EXPECT_TRUE(same_slot(v.x, v.spec[i * stride + s], tw, i))
+                    << "sequence " << i << ", token " << s;
+        }
+    }
+    std::vector<int64_t> to_twin(static_cast<size_t>(qsl.back()));
+    for (int64_t i = 0; i < n; ++i) {
+        for (int64_t t = 0; t < lens[i]; ++t) {
+            to_twin[qsl[i] + t] = t * n + i;
+        }
+    }
+    expect_rows_match(tw, v.x, to_twin);
+    expect_conv_rolled(v, before, qsl, 0);
+}
+
+// One verify call gives, bit for bit, what that many decode steps from the
+// accepted state give. Sequences of 16, 9 and 2 draft tokens (the shorter
+// ones sit out the later decode steps as pad slots), accepted counts of 1 and
+// of every token, every source and state type, kv and vk, the fused norm, and
+// DS and SD conv states.
+TEST(GdnSpecVerify, MatchesDecodeSteps) {
+    if (kernel_env_set()) { GTEST_SKIP() << "ZENDNNL_GDN_KERNEL is set"; }
+    const std::vector<int32_t> lens {16, 9, 2};
+    for (ng::gdn_kernel_t k : kernels_to_check()) {
+        for (const verify_cfg_t &c : kVerifyCfgs) {
+            for (int32_t threads : verify_threads(k)) {
+                SCOPED_TRACE(split_cfg_tag(c.c)
+                        << " " << dt_tag(c.state_dt) << " state "
+                        << (c.neg_eigval ? "neg_eigval " : "")
+                        << ng::kernel_to_string(k) << " T" << threads);
+                verify_t v = make_verify(c.c, c.state_dt, 3, 27, 16, 107);
+                v.accepted = {1, 9, 2};
+                v.x.p.allow_neg_eigval = c.neg_eigval;
+                v.x.p.num_threads = threads;
+                ASSERT_NO_FATAL_FAILURE(
+                        expect_verify_matches_decode(v, c.c, lens, k));
+            }
+        }
+    }
+}
+
+// Verify gives the bits of decode steps on a conv state of the same strides
+// whatever its layout: vLLM's DS buffer with draft taps decoded in place, a
+// padded DS layout of one tap (both read as DS), and channels at a stride of 2
+// in an SD-like layout (read in scalar arithmetic). f32 and bf16 sources, with
+// SiLU.
+TEST(GdnSpecVerify, MatchesDecodeOnAnyConvLayout) {
+    if (kernel_env_set()) { GTEST_SKIP() << "ZENDNNL_GDN_KERNEL is set"; }
+    const int64_t D = 2 * kSmall.H * kSmall.K + kSmall.HV * kSmall.V;
+    for (ng::gdn_kernel_t k : kernels_to_check()) {
+        for (data_type_t src : {kF32, kBf16}) {
+            SCOPED_TRACE(testing::Message()
+                    << ng::kernel_to_string(k) << " " << dt_tag(src));
+            const split_cfg_t ds {kSmall, src, kKv, false, true};
+            const split_cfg_t sd {kSmall, src, kKv, false, false};
+            const split_cfg_t one_tap {
+                    shape_t {2, 4, 64, 32, 2}, src, kKv, false, true};
+            {
+                SCOPED_TRACE("DS with draft taps");
+                verify_t v = make_verify(ds, kF32, 3, 14, 8, 137);
+                v.accepted = {1, 8, 3};
+                ASSERT_NO_FATAL_FAILURE(expect_verify_matches_decode(
+                        v, ds, {8, 5, 1}, k, true));
+            }
+            {
+                SCOPED_TRACE("padded DS, one tap");
+                verify_t v = make_verify(one_tap, kF32, 2, 2, 1, 139);
+                set_conv_strides(v.x, 1, 1, 2, 141);
+                v.accepted = {1, 1};
+                ASSERT_NO_FATAL_FAILURE(expect_verify_matches_decode(
+                        v, one_tap, {1, 1}, k, true));
+            }
+            {
+                SCOPED_TRACE("SD, channel stride 2");
+                verify_t v = make_verify(sd, kF32, 3, 14, 8, 143);
+                set_conv_strides(v.x, kSmall.W - 1 + 8 - 1, 2 * D, 2, 145);
+                v.accepted = {1, 8, 3};
+                ASSERT_NO_FATAL_FAILURE(expect_verify_matches_decode(
+                        v, sd, {8, 5, 1}, k, true));
+            }
+        }
+    }
+}
+
+// Two verify steps of n sequences at stride 8: lens1 tokens with acc1
+// accepted, then lens2 tokens with acc2 accepted (acc2[i] <= lens1[i]).
+struct next_step_case_t {
+    std::vector<int32_t> lens1, acc1, lens2, acc2;
+};
+
+// Full first steps; a short first step; then a row that drafted nothing and
+// rows shorter than the count the step before them accepted.
+const next_step_case_t kNextStepCases[]
+        = {{{8, 8, 8}, {1, 4, 8}, {8, 8, 8}, {3, 8, 1}},
+                {{5, 2, 8}, {1, 2, 8}, {8, 8, 8}, {3, 2, 5}},
+                {{8, 8, 8}, {1, 1, 1}, {1, 3, 8}, {8, 6, 2}}};
+
+// The second step gives what decode steps over the first step's tokens that
+// it accepts and then over its own tokens give: every output, the state
+// stored after every token and the conv state afterwards.
+void expect_next_step(const verify_cfg_t &c, const shape_t &s,
+        ng::gdn_kernel_t k, const next_step_case_t &nc) {
+    const int64_t n = static_cast<int64_t>(nc.lens1.size()), stride = 8;
+    const std::vector<int32_t> qsl1 = offsets(nc.lens1);
+    const std::vector<int32_t> qsl2 = offsets(nc.lens2);
+    const int64_t T1 = qsl1.back(), T2 = qsl2.back();
+    split_cfg_t sc = c.c;
+    sc.s = s;
+    verify_t v = make_verify(sc, c.state_dt, n, T1 + T2, stride, 109);
+    v.accepted = nc.acc1;
+    v.x.p.allow_neg_eigval = c.neg_eigval;
+    // Steps 0 .. stride - 1 decode the first step's tokens that the second
+    // accepts, steps stride .. 2 * stride - 1 the second step's tokens.
+    std::vector<int64_t> rows(static_cast<size_t>(2 * stride * n), -1);
+    for (int64_t t = 0; t < stride; ++t) {
+        for (int64_t i = 0; i < n; ++i) {
+            if (t < nc.acc2[i]) { rows[t * n + i] = qsl1[i] + t; }
+            if (t < nc.lens2[i]) {
+                rows[(stride + t) * n + i] = T1 + qsl2[i] + t;
+            }
+        }
+    }
+    problem_t tw = decode_twin(v, sc, rows, n);
+    ASSERT_EQ(verify_rows(v, 0, qsl1, k), status_t::success);
+    const buf_t after_first = v.x.conv_state;
+    v.accepted = nc.acc2;
+    ASSERT_EQ(verify_rows(v, T1, qsl2, k), status_t::success);
+    for (int64_t t = 0; t < 2 * stride; ++t) {
+        ASSERT_EQ(twin_step(tw, rows, t, n, k), status_t::success);
+        for (int64_t i = 0; t >= stride && i < n; ++i) {
+            if (t - stride >= nc.lens2[i]) { continue; }
+            EXPECT_TRUE(same_slot(v.x, v.spec[i * stride + t - stride], tw, i))
+                    << "sequence " << i << ", token " << t - stride;
+        }
+    }
+    std::vector<int64_t> second_rows, to_twin;
+    for (int64_t r = 0; r < T2; ++r) {
+        second_rows.push_back(T1 + r);
+    }
+    for (int64_t i = 0; i < n; ++i) {
+        for (int64_t t = 0; t < nc.lens2[i]; ++t) {
+            to_twin.push_back((stride + t) * n + i);
+        }
+    }
+    problem_t second = v.x;
+    gather_rows(v.x, second, second_rows);
+    expect_rows_match(tw, second, to_twin);
+    expect_conv_rolled(v, after_first, qsl2, T1);
+}
+
+// A verify step continues from the state after the token the step before it
+// accepted last, whatever either step's length: with full and short first
+// steps, a row that drafted nothing after a step that accepted all its tokens,
+// and conv widths 4, 2 (no history taps kept) and 0.
+TEST(GdnSpecVerify, NextStepContinuesFromTheAcceptedToken) {
+    if (kernel_env_set()) { GTEST_SKIP() << "ZENDNNL_GDN_KERNEL is set"; }
+    for (ng::gdn_kernel_t k : kernels_to_check()) {
+        for (const verify_cfg_t &c : kVerifyCfgs) {
+            for (int64_t w : {c.c.s.W, int64_t {2}, int64_t {0}}) {
+                shape_t s = c.c.s;
+                s.W = w;
+                for (size_t ci = 0;
+                        ci < sizeof(kNextStepCases) / sizeof(kNextStepCases[0]);
+                        ++ci) {
+                    SCOPED_TRACE(split_cfg_tag(c.c)
+                            << " " << dt_tag(c.state_dt) << " state "
+                            << (c.neg_eigval ? "neg_eigval " : "")
+                            << ng::kernel_to_string(k) << " W" << w << " case "
+                            << ci);
+                    expect_next_step(c, s, k, kNextStepCases[ci]);
+                }
+            }
+        }
+    }
+}
+
+// A sequence whose first slot is the pad slot writes zero output rows and
+// touches neither pool, and an empty sequence touches nothing.
+TEST(GdnSpecVerify, PadAndEmptySequencesAreSkipped) {
+    if (kernel_env_set()) { GTEST_SKIP() << "ZENDNNL_GDN_KERNEL is set"; }
+    const std::vector<int32_t> qsl = offsets({4, 0, 3});
+    const int64_t stride = 4;
+    for (ng::gdn_kernel_t k : kernels_to_check()) {
+        for (bool norm : {false, true}) {
+            SCOPED_TRACE(std::string(ng::kernel_to_string(k))
+                    + (norm ? " norm" : ""));
+            verify_t v = make_verify({kSmall, kBf16, kKv, norm, false}, kF32, 3,
+                    qsl.back(), stride, 113);
+            const std::vector<int32_t> slots = v.spec;
+            v.spec[0] = -1;
+            v.accepted = {1, 1, 2};
+            const problem_t before = v.x;
+            ASSERT_EQ(verify_rows(v, 0, qsl, k), status_t::success);
+            const int64_t st = v.x.p.out_stride_t;
+            for (int64_t e = qsl[0] * st; e < qsl[1] * st; ++e) {
+                ASSERT_EQ(v.x.out.get(e), 0.0f) << "pad row element " << e;
+            }
+            for (int64_t e = qsl[2] * st; e < qsl[3] * st; ++e) {
+                ASSERT_FALSE(std::isnan(v.x.out.get(e)))
+                        << "third sequence, element " << e;
+            }
+            for (int64_t t = 0; t < 2 * stride; ++t) {
+                EXPECT_TRUE(same_slot(v.x, slots[t], before, slots[t]))
+                        << "SSM slot " << slots[t];
+            }
+            const size_t cw = static_cast<size_t>(v.x.p.conv_state_slot_stride)
+                    * words(v.x.conv_state);
+            for (const int32_t s : {slots[0], slots[stride]}) {
+                EXPECT_EQ(std::memcmp(v.x.conv_state.raw.data() + s * cw,
+                                  before.conv_state.raw.data() + s * cw,
+                                  cw * sizeof(uint16_t)),
+                        0)
+                        << "conv slot " << s;
+            }
+        }
+    }
+}
+
+// Speculative verify takes no decodes, update_state = true, packed rows and
+// raw gates, conv_width 0 or at least 2, cu_seqlens, at most
+// spec_state_stride tokens per sequence, 1 <= num_accepted_tokens <=
+// spec_state_stride and a slot in every column it reads or writes; a refused
+// call touches no buffer. Each tweak passes every other rule, so it fails on
+// its own.
+TEST(GdnApi, RejectsInvalidSpecVerify) {
+    GDN_SKIP_UNLESS_VALIDATING();
+    const std::vector<int32_t> qsl = offsets({3, 2});
+    using tweak_t = void (*)(verify_t &, ng::gdn_params &);
+    const tweak_t tweaks[] = {
+            [](verify_t &v, ng::gdn_params &) { v.accepted[0] = 0; },
+            [](verify_t &v, ng::gdn_params &) { v.accepted[1] = 5; },
+            [](verify_t &v, ng::gdn_params &) {
+        // Sequence 1 continues from the slot in column 3, past its tokens.
+        v.accepted[1] = 4;
+        v.spec[7] = -1;
+    },
+            [](verify_t &, ng::gdn_params &q) { q.spec_state_stride = 2; },
+            [](verify_t &, ng::gdn_params &q) { q.spec_state_stride = 0; },
+            [](verify_t &, ng::gdn_params &q) {
+        q.num_accepted_tokens = nullptr;
+    },
+            [](verify_t &, ng::gdn_params &q) {
+        static const std::vector<int32_t> one_decode {0, 1, 3};
+        q.cu_seqlens = one_decode.data();
+        q.num_tokens = 3;
+        q.num_decodes = 1;
+    },
+            [](verify_t &, ng::gdn_params &q) { q.update_state = false; },
+            [](verify_t &, ng::gdn_params &q) {
+        q.gate_input = ng::gdn_gate_input_t::precomputed;
+    },
+            [](verify_t &v, ng::gdn_params &q) {
+        q.k = v.x.qkv.data();
+        q.v = v.x.qkv.data();
+        q.conv_width = 0;
+        q.q_stride_h = q.k_stride_h = q.head_k_dim;
+        q.k_stride_t = q.num_k_heads * q.head_k_dim;
+        q.v_stride_h = q.head_v_dim;
+        q.v_stride_t = q.num_v_heads * q.head_v_dim;
+    },
+            [](verify_t &, ng::gdn_params &q) { q.conv_width = 1; },
+            [](verify_t &, ng::gdn_params &q) { q.num_state_slots = 2; },
+            [](verify_t &v, ng::gdn_params &) { v.spec[1] = -1; },
+            [](verify_t &, ng::gdn_params &q) {
+        q.cu_seqlens = nullptr;
+        q.num_tokens = q.batch;
+    },
+            [](verify_t &, ng::gdn_params &q) {
+        q.spec_state_indices = nullptr;
+    },
+    };
+    // Run 0 leaves the call valid; run i applies tweak i - 1.
+    for (size_t i = 0; i <= sizeof(tweaks) / sizeof(tweaks[0]); ++i) {
+        SCOPED_TRACE(testing::Message() << "run " << i);
+        verify_t v = make_verify({kSmall, kBf16, kKv, false, false}, kF32, 2,
+                qsl.back(), 4, 127);
+        v.accepted = {1, 2};
+        const problem_t before = v.x;
+        ng::gdn_params q = v.x.p;
+        q.batch = 2;
+        q.num_tokens = qsl.back();
+        q.cu_seqlens = qsl.data();
+        q.spec_state_indices = v.spec.data();
+        q.num_accepted_tokens = v.accepted.data();
+        q.kernel = ng::gdn_kernel_t::reference;
+        if (i > 0) { tweaks[i - 1](v, q); }
+        const status_t st = ng::gdn_direct(v.x.qkv.data(), v.x.a.data(),
+                v.x.b_ptr(), v.x.a_log.data(), v.x.dt_bias.data(),
+                v.x.conv_w.data(), v.x.conv_b.data(), v.x.conv_state.data(),
+                v.x.ssm_state.data(), nullptr, v.x.out.data(), q);
+        if (i == 0) {
+            EXPECT_EQ(st, status_t::success);
+            continue;
+        }
+        EXPECT_EQ(st, status_t::failure);
+        EXPECT_EQ(differing_words(v.x.out, before.out), 0u) << "output";
+        EXPECT_EQ(differing_words(v.x.ssm_state, before.ssm_state), 0u)
+                << "ssm_state";
+        EXPECT_EQ(differing_words(v.x.conv_state, before.conv_state), 0u)
+                << "conv_state";
+    }
+}
+
 // The rule inputs take prefill-only calls without conv, consistent strides,
 // and A_log / dt_bias only with raw gates.
 TEST(GdnApi, RejectsInvalidRuleInputs) {
@@ -1645,6 +2629,7 @@ TEST(GdnApi, RejectsInvalidRuleInputs) {
             [](ng::gdn_params &q) {
         q.gate_input = static_cast<ng::gdn_gate_input_t>(3);
     },
+            [](ng::gdn_params &q) { q.allow_neg_eigval = true; },
     };
     for (size_t i = 0; i < sizeof(tweaks) / sizeof(tweaks[0]); ++i) {
         SCOPED_TRACE(testing::Message() << "tweak " << i);

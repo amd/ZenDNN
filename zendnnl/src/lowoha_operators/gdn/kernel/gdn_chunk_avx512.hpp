@@ -89,11 +89,12 @@ inline __m512 log1p01(__m512 y) {
     return _mm512_mul_ps(_mm512_mul_ps(_mm512_set1_ps(2.0f), s), p);
 }
 
-// g = -e^A_log softplus(a + dt_bias) and beta = sigmoid(b) for kChunk
+// g = -e^A_log softplus(a + dt_bias) and beta = beta_scale sigmoid(b) for kChunk
 // tokens; rows past n get g = beta = 0. softplus(x) = x above threshold, else
 // max(x, 0) + log1p(e^-|x|).
 inline void gates(const float *a, const float *b, int64_t n, float A_log,
-        float dt_bias, float threshold, float *g, float *beta) {
+        float dt_bias, float threshold, float beta_scale, float *g,
+        float *beta) {
     const __m512 ea = _mm512_set1_ps(-std::exp(A_log));
     const __m512 one = _mm512_set1_ps(1.0f);
     const __m512 zero = _mm512_setzero_ps();
@@ -110,8 +111,9 @@ inline void gates(const float *a, const float *b, int64_t n, float A_log,
         _mm512_storeu_ps(g + j, _mm512_maskz_mul_ps(m, ea, sp));
         const __m512 e = Ops::vec_exp_u20(
                 _mm512_sub_ps(zero, _mm512_maskz_loadu_ps(m, b + j)));
-        _mm512_storeu_ps(
-                beta + j, _mm512_maskz_div_ps(m, one, _mm512_add_ps(one, e)));
+        _mm512_storeu_ps(beta + j,
+                _mm512_mul_ps(_mm512_set1_ps(beta_scale),
+                        _mm512_maskz_div_ps(m, one, _mm512_add_ps(one, e))));
     }
 }
 

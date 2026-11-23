@@ -370,7 +370,8 @@ void prefill_typed(const gdn_tensors_t &io, int64_t s0, int64_t s1,
                         }
                     } else {
                         chunk::gates(ga, gb, n, A_log[hv], dt_bias[hv],
-                                p.softplus_threshold, sc.in.g, sc.in.beta);
+                                p.softplus_threshold, p.beta_scale(), sc.in.g,
+                                sc.in.beta);
                     }
                     chunk::chunk_step<ODT>(sc, n, K, vt, tile);
                     for (int64_t i = 0; i < n; ++i) {
@@ -395,20 +396,22 @@ void prefill_typed(const gdn_tensors_t &io, int64_t s0, int64_t s1,
                 } else {
                     gate_scalars(load1<SRC>(a_p + t * p.a_stride + hv),
                             load1<SRC>(b_p + t * p.b_stride + hv), A_log[hv],
-                            dt_bias[hv], p.softplus_threshold, eg, beta);
+                            dt_bias[hv], p.softplus_threshold, p.beta_scale(),
+                            eg, beta);
                 }
                 const float *vin = xc + 2 * K;
                 for (int64_t j = 0; j < vt; j += kPrefillTile) {
                     __m512 o[2];
                     if (vt - j >= 32) {
-                        kv_tile_step<data_type_t::f32, 2>(
-                                tile + j, vt, K, vin + j, qn, kn, eg, beta, o);
+                        kv_tile_step<data_type_t::f32, 2>(tile + j, tile + j,
+                                vt, K, vin + j, qn, kn, eg, beta, o);
                         _mm512_storeu_ps(orow + j, o[0]);
                         _mm512_storeu_ps(orow + j + 16, o[1]);
                     } else {
                         for (int64_t jj = j; jj < vt; jj += 16) {
-                            kv_tile_step<data_type_t::f32, 1>(tile + jj, vt, K,
-                                    vin + jj, qn, kn, eg, beta, o);
+                            kv_tile_step<data_type_t::f32, 1>(tile + jj,
+                                    tile + jj, vt, K, vin + jj, qn, kn, eg,
+                                    beta, o);
                             _mm512_storeu_ps(orow + jj, o[0]);
                         }
                     }
