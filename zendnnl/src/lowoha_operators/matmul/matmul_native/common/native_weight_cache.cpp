@@ -42,6 +42,7 @@
 #include "common/zendnnl_compat.hpp"
 #include "common/zendnnl_global.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_format.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_operator_bridge.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_pack.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_weight_ends.hpp"
@@ -1025,12 +1026,18 @@ void log_image_refusal(const void *weight, size_t owned,
             " bytes)");
 }
 
+/// The AOCL prepack of an aocl_blocked w is the one of a u8 source.
+bool u8s8_prepack(const native_raw_weight_t &w) {
+    return native_format(w.wei_dt).cache.foreign_prepack
+            == native_prepack_t::u8s8;
+}
+
 /// Packs the AOCL inverse of an aocl_blocked w into dst.
 status_t pack_from_aocl(
         const native_raw_weight_t &w, void *dst, int num_threads) {
     std::unique_ptr<void, native_aligned_free_t> raw;
     const status_t st = aocl_prepack_unreorder(w.weight, w.K, w.N, w.ldb,
-            w.transB, w.wei_dt == data_type_t::s8, num_threads, raw);
+            w.transB, u8s8_prepack(w), num_threads, raw);
     if (st != status_t::success) {
         // Nothing was written: AOCL can still serve its own prepack.
         log_error("native weight: the AOCL blocked weight=", w.weight,
@@ -1055,7 +1062,7 @@ status_t pack_from_source(const native_raw_weight_t &w,
     const native_raw_weight_t &img = image->layout;
     const size_t extent = static_cast<size_t>(img.K) * img.N;
     const bool f16 = img.wei_dt == data_type_t::f16;
-    if ((img.wei_dt != data_type_t::bf16 && !f16) || w.wei_dt != img.wei_dt
+    if (!native_format(img.wei_dt).cache.unpack || w.wei_dt != img.wei_dt
             || native_raw_weight_bytes(w.wei_dt, w.K, w.N, w.ldb, w.transB)
                     > extent * sizeof(uint16_t)
             || image->bytes > owned) {
@@ -1085,8 +1092,7 @@ status_t pack_from_source(const native_raw_weight_t &w,
 /// the size of its AOCL prepack.
 size_t aocl_capacity(const native_raw_weight_t &w, size_t capacity_bytes) {
     if (capacity_bytes != 0) return capacity_bytes;
-    return aocl_prepack_bytes(
-            w.K, w.N, w.ldb, w.transB, w.wei_dt == data_type_t::s8);
+    return aocl_prepack_bytes(w.K, w.N, w.ldb, w.transB, u8s8_prepack(w));
 }
 
 /// The records whose bytes a reservation took (reserve_image_locked), as
@@ -1859,8 +1865,7 @@ struct layout_request_t {
 layout_request_t make_request(const native_raw_weight_t &w,
         int32_t weight_cache_mode, size_t capacity_bytes, int num_threads) {
     const size_t extent = w.aocl_blocked
-            ? aocl_prepack_bytes(
-                      w.K, w.N, w.ldb, w.transB, w.wei_dt == data_type_t::s8)
+            ? aocl_prepack_bytes(w.K, w.N, w.ldb, w.transB, u8s8_prepack(w))
             : native_raw_weight_bytes(w.wei_dt, w.K, w.N, w.ldb, w.transB);
     return {w, weight_cache_mode, capacity_bytes, num_threads, key_of(w),
             native_packed_bytes(w.wei_dt, w.K, w.N, w.pack_nr), extent,
@@ -2244,9 +2249,7 @@ status_t rewrite_if_fits(exclusive_lock_t &lock, const layout_request_t &r,
         if (!contiguous || used > aocl_capacity(w, r.capacity_bytes))
             return status_t::success;
     } else {
-        if ((w.wei_dt != data_type_t::bf16 && w.wei_dt != data_type_t::s4
-                    && w.wei_dt != data_type_t::f16)
-                || !contiguous)
+        if (!native_format(w.wei_dt).cache.in_place || !contiguous)
             return status_t::success;
         const size_t plain
                 = native_raw_weight_bytes(w.wei_dt, w.K, w.N, w.ldb, w.transB);
@@ -2326,8 +2329,13 @@ size_t native_raw_weight_bytes(
     const size_t rows = static_cast<size_t>(transB ? N : K);
     const size_t cols = static_cast<size_t>(transB ? K : N);
     const size_t elements = (rows - 1) * static_cast<size_t>(ldb) + cols;
-    // Two s4 elements per byte, the first in the low nibble of byte 0.
-    if (wei_dt == data_type_t::s4) return (elements + 1) / 2;
+    // A format of sub-byte elements packs them in bytes, the first in the
+    // low bits of byte 0 (two s4 elements per byte).
+    const native_format_desc_t *f = native_format_of(wei_dt);
+    if (f != nullptr && f->geometry.elem_bits < 8) {
+        const size_t per_byte = static_cast<size_t>(8 / f->geometry.elem_bits);
+        return (elements + per_byte - 1) / per_byte;
+    }
     return elements * zendnnl::common::size_of(wei_dt);
 }
 

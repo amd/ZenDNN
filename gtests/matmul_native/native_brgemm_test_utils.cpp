@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -41,7 +42,9 @@
 #include "gtest_utils.hpp"
 #include "lowoha_operators/common/omp_thread_control.hpp"
 #include "lowoha_operators/matmul/group_matmul/common/group_matmul_parallel_common.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/f16/native_f16_ph_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_brgemm_looper.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_weight_cache.hpp"
 #include "lowoha_operators/matmul/matmul_native/native_matmul.hpp"
 #include "nlohmann/json.hpp"
@@ -418,6 +421,16 @@ size_t native_layouts(const void *weight) {
 
 bool native_selected(const mm::matmul_params &p) {
     return mm::native::native_brgemm_selected(p);
+}
+
+bool f16_ph_kernels_registered() {
+    const char *env = std::getenv("ZENDNNL_MATMUL_NATIVE_F16_ACCUM");
+    std::string accum = env != nullptr ? env : "";
+    for (char &ch : accum)
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    return mm::native::detect_uarch().avx512fp16
+            && mm::native::select_native_f16_ph_ukernel(1, 2) != nullptr
+            && accum != "f32";
 }
 
 ck_engagement_t::ck_engagement_t() {

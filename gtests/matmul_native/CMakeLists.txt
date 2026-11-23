@@ -15,17 +15,18 @@
 # *******************************************************************************/
 
 # Native BRGEMM over native-layout weights: layout rule and route, layout
-# and weight view, INT8 (per-channel and per-group), s4 weights, FP32, F16,
-# epilogue, route parity, refused calls, what matmul_direct's checks take for
-# it, weights of any N, gated calls over the plain layout, planner config
-# and tuning file, plan, cost model, partition and execution, hardening,
-# weight lifetime and group-matmul scope suites. Appended to the parent
-# `gtests` target.
+# and weight view, the format, family and route tables, INT8 (per-channel
+# and per-group), s4 weights, FP32, F16, epilogue, route parity, refused
+# calls, what matmul_direct's checks take for it, weights of any N, gated
+# calls over the plain layout, planner config and tuning file, plan, cost
+# model, partition and execution, hardening, weight lifetime and
+# group-matmul scope suites. Appended to the parent `gtests` target.
 target_sources(gtests
   PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/native_brgemm_test_utils.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_layout_rule.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_brgemm_layout.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_native_format.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_brgemm_fp32.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_brgemm_f16.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_brgemm_int8.cpp

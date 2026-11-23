@@ -29,7 +29,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -128,7 +127,7 @@ uint32_t bits_of(float v) {
 
 /// Whether this process runs f16 calls on the F16_PH kernels: a CPU with
 /// AVX512-FP16, a build that has them, and ZENDNNL_MATMUL_NATIVE_F16_ACCUM
-/// unset or f16.
+/// other than f32 (in any case).
 bool f16_ph_calls() {
     return nat::native_kernel_registry().f16_kind()
             == nat::native_kernel_kind_t::f16_ph;
@@ -495,18 +494,12 @@ TEST(NativeBrgemmF16PhKernel, BlocksBoundTheErrorOfLongSums) {
 
 // The registry offers the F16_PH kernels at 16, 32 and 64 columns, every
 // row count 1 .. 12, and tiles of 128 columns of two calls of 64, exactly on
-// a CPU with AVX512-FP16 in a build that has them while
-// ZENDNNL_MATMUL_NATIVE_F16_ACCUM is unset or f16, and f16 calls then take
-// them; otherwise it has none and f16 calls take the F16 kernels.
+// a CPU with AVX512-FP16 in a build that has them unless
+// ZENDNNL_MATMUL_NATIVE_F16_ACCUM is f32 (in any case), and f16 calls then
+// take them; otherwise it has none and f16 calls take the F16 kernels.
 TEST(NativeBrgemmF16PhKernel, RegistryServesThemWhereTheCpuHasAvx512Fp16) {
     const nat::native_kernel_registry_t &r = nat::native_kernel_registry();
-    const char *env = std::getenv("ZENDNNL_MATMUL_NATIVE_F16_ACCUM");
-    std::string accum = env != nullptr ? env : "";
-    for (char &ch : accum)
-        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-    const bool want = nat::detect_uarch().avx512fp16
-            && nat::select_native_f16_ph_ukernel(1, 2) != nullptr
-            && accum != "f32";
+    const bool want = nt::f16_ph_kernels_registered();
     for (const int nr : {16, 32, 64, 128}) {
         const nat::native_kernel_caps_t *c
                 = r.caps(nat::native_kernel_kind_t::f16_ph, nr);

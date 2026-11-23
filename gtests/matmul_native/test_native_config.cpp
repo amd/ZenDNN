@@ -44,6 +44,7 @@
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_tuning_file.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_tuning_keys.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_format.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_hw.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_pack.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_utils.hpp"
@@ -2525,10 +2526,10 @@ const char *const kPlanLineGemv[]
         = {"none", "bf16", "f32", "f16", "f16_ph", "s8", "s8_group", "s4"};
 
 /// What the planner reads and offers on this build and CPU: the config keys,
-/// the match keys, rule features and comparisons, the kernels, the hardware
-/// and what the plan reads of it (uarch), this CPU's value of every
-/// hardware key (hw_match), and the fields of the plan line and the values
-/// of its gemv field.
+/// the match keys, rule features and comparisons, the kernels (k_unit their
+/// family's k_step), the hardware and what the plan reads of it (uarch), this
+/// CPU's value of every hardware key (hw_match), and the fields of the plan
+/// line and the values of its gemv field.
 nlohmann::ordered_json schema_json() {
     const native_hw_t &hw = native_hw();
     const UarchParams &u = native_plan_uarch();
@@ -2597,7 +2598,7 @@ nlohmann::ordered_json schema_json() {
             const bool bf16 = kind == native_kernel_kind_t::bf16;
             kernels.push_back({{"kind", bf16 ? "bf16" : "int8"}, {"nr", nr},
                     {"mr_mask", kernel_rows(kind, nr)}, {"max_mr", c->max_mr},
-                    {"k_unit", bf16 ? 2 : 4},
+                    {"k_unit", native_family(kind).k_step},
                     {"int8_schemes", scheme_names(c->int8_schemes)}});
         }
     // The INT8 and INT4 kernels of a tile of several slabs are those of the
@@ -2614,7 +2615,8 @@ nlohmann::ordered_json schema_json() {
                             != nullptr)
                 mask |= 1u << (mr - 1);
         kernels.push_back({{"kind", "int8"}, {"nr", nr}, {"mr_mask", mask},
-                {"max_mr", c->max_mr}, {"k_unit", 4},
+                {"max_mr", c->max_mr},
+                {"k_unit", native_family(native_kernel_kind_t::int8).k_step},
                 {"int8_schemes", scheme_names(c->int8_schemes)}});
     }
     for (const int nr : {16, 32, 64, 128}) {
@@ -2631,7 +2633,8 @@ nlohmann::ordered_json schema_json() {
                             != nullptr)
                 mask |= 1u << (mr - 1);
         kernels.push_back({{"kind", "int4"}, {"nr", nr}, {"mr_mask", mask},
-                {"max_mr", c->max_mr}, {"k_unit", kNativeS4Octet},
+                {"max_mr", c->max_mr},
+                {"k_unit", native_family(native_kernel_kind_t::int4).k_step},
                 {"int8_schemes", scheme_names(c->int8_schemes)}});
     }
     for (const int nr : {16, 32, 64, 128}) {
@@ -2649,7 +2652,8 @@ nlohmann::ordered_json schema_json() {
                             != nullptr)
                 mask |= 1u << (mr - 1);
         kernels.push_back({{"kind", "int4"}, {"nr", nr}, {"mr_mask", mask},
-                {"max_mr", c->max_mr}, {"k_unit", kNativeS4Octet},
+                {"max_mr", c->max_mr},
+                {"k_unit", native_family(native_kernel_kind_t::int4).k_step},
                 {"int8_schemes", scheme_names(c->int8_schemes)}});
     }
     for (const int nr : {16, 32, 64, 128}) {
@@ -2657,7 +2661,8 @@ nlohmann::ordered_json schema_json() {
         if (c == nullptr) continue;
         kernels.push_back({{"kind", "f32"}, {"nr", nr},
                 {"mr_mask", kernel_rows(native_kernel_kind_t::f32, nr)},
-                {"max_mr", c->max_mr}, {"k_unit", 1},
+                {"max_mr", c->max_mr},
+                {"k_unit", native_family(native_kernel_kind_t::f32).k_step},
                 {"int8_schemes", scheme_names(c->int8_schemes)}});
     }
     // An f16 call takes the F16_PH kernels where the registry has them, else
@@ -2670,7 +2675,7 @@ nlohmann::ordered_json schema_json() {
             if (c == nullptr) continue;
             kernels.push_back({{"kind", name}, {"nr", nr},
                     {"mr_mask", kernel_rows(kind, nr)}, {"max_mr", c->max_mr},
-                    {"k_unit", 1},
+                    {"k_unit", native_family(kind).k_step},
                     {"int8_schemes", scheme_names(c->int8_schemes)}});
         }
     doc["kernels"] = kernels;

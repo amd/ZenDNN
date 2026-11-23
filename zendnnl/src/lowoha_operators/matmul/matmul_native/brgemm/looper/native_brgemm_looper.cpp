@@ -44,6 +44,7 @@
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_planner.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_epilogue.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_format.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_pack.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_utils.hpp"
 #include "lowoha_operators/matmul/matmul_native/native_layout_policy.hpp"
@@ -1260,10 +1261,9 @@ void log_plan_line(const execute_call_t &c, const native_plan_t &p,
     const std::string kc_field
             = c.bf16 || c.f32 || c.f16 ? " kc=" + std::to_string(p.kc) : "";
     // An F16 call names its kernels: the widening F16 ones or F16_PH.
-    const std::string kernels_field = c.f16 ? std::string(" kernels=")
-                    + (p.kind == native_kernel_kind_t::f16_ph ? "f16_ph"
-                                                              : "f16")
-                                            : std::string();
+    const std::string kernels_field = c.f16
+            ? std::string(" kernels=") + native_family(p.kind).name
+            : std::string();
     // The blocks schedule names the fields its deal reads: the unit width,
     // in tiles and in columns, and the threads of a domain.
     const std::string blocks_field = p.unit_tiles > 0

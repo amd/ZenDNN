@@ -23,6 +23,7 @@
 #include "common/error_status.hpp"
 #include "lowoha_operators/matmul/lowoha_common.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_format.hpp"
 #include "lowoha_operators/matmul/matmul_native/native_layout_policy.hpp"
 
 namespace zendnnl {
@@ -34,29 +35,24 @@ using zendnnl::error_handling::status_t;
 
 /// K values of an s4 weight in one K group of the layout: an octet, whose
 /// 4 bytes per column hold two K quads.
-inline constexpr int kNativeS4Octet = 8;
+inline constexpr int kNativeS4Octet
+        = native_format(native_format_t::s4).geometry.k_per_word;
 
 /// K groups of a weight in the layout: K pairs for bf16, K quads for s8, K
 /// octets for s4, K rows for f32 and f16.  No intermediate overflows, at any
 /// K.
 inline int native_k_groups(data_type_t wei_dt, int K) {
-    if (wei_dt == data_type_t::f32 || wei_dt == data_type_t::f16) return K;
-    const int g = wei_dt == data_type_t::s8 ? INT8_VNNI_GRP
-            : wei_dt == data_type_t::s4     ? kNativeS4Octet
-                                            : VNNI_PAIR;
+    const int g = native_geometry(wei_dt).k_per_word;
     return K / g + (K % g != 0);
 }
 
 /// Bytes of one block of pack_nr columns: the K groups, then for s8 the
 /// pack_nr int32 column sums.
 inline size_t native_block_bytes(data_type_t wei_dt, int K, int pack_nr) {
+    const native_geometry_t g = native_geometry(wei_dt);
     const size_t groups = static_cast<size_t>(native_k_groups(wei_dt, K));
-    if (wei_dt == data_type_t::s8)
-        return (groups * INT8_VNNI_GRP + sizeof(int32_t)) * pack_nr;
-    if (wei_dt == data_type_t::f32) return groups * sizeof(float) * pack_nr;
-    if (wei_dt == data_type_t::f16) return groups * sizeof(uint16_t) * pack_nr;
-    if (wei_dt == data_type_t::s4) return groups * INT8_VNNI_GRP * pack_nr;
-    return groups * VNNI_PAIR * sizeof(uint16_t) * pack_nr;
+    return (groups * g.word_bytes + (g.col_sums ? sizeof(int32_t) : 0))
+            * pack_nr;
 }
 
 /// The columns the layout holds for a weight of N columns: N rounded up to
@@ -74,11 +70,8 @@ inline int native_padded_n(int N, int pack_nr) {
 /// layout rule (decide_native_layout) admits no other weight; the functions
 /// of the layout, the weight view and the looper assume it.
 inline bool native_layout_fits(data_type_t wei_dt, int K, int N, int pack_nr) {
-    return (wei_dt == data_type_t::bf16 || wei_dt == data_type_t::s8
-                   || wei_dt == data_type_t::s4 || wei_dt == data_type_t::f32
-                   || wei_dt == data_type_t::f16)
-            && K >= 1 && pack_nr == kNativeLayoutPackNr && N >= 1
-            && N <= kMaxNativeN;
+    return native_format_of(wei_dt) != nullptr && K >= 1
+            && pack_nr == kNativeLayoutPackNr && N >= 1 && N <= kMaxNativeN;
 }
 
 /// Bytes of a K x N weight in the layout (see native_weight_view_t), its

@@ -210,6 +210,11 @@ size_t native_layouts(const void *weight);
 /// all: ZENDNNL_MATMUL_ALGO=10, or lowoha_algo == native_brgemm.
 bool native_selected(const mm::matmul_params &p);
 
+/// Whether the kernel registry of this process holds the F16_PH kernels: on
+/// a CPU with AVX512-FP16, in a build that has them, unless
+/// ZENDNNL_MATMUL_NATIVE_F16_ACCUM is f32 (in any case).
+bool f16_ph_kernels_registered();
+
 /// Records whether the dense calls made while it lives went through the
 /// custom kernel (the group gemm-mode capture).
 class ck_engagement_t {

@@ -24,6 +24,7 @@
 
 #include "common/error_status.hpp"
 #include "lowoha_operators/matmul/lowoha_common.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_format.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_weight_cache.hpp"
 #include "lowoha_operators/matmul/matmul_native/native_layout_policy.hpp"
 
@@ -86,9 +87,8 @@ struct native_weight_view_t {
     /// Elements of wei_dt (bytes of an s4 weight) between consecutive K
     /// groups of one column.
     int group_stride() const {
-        if (wei_dt == data_type_t::f32 || wei_dt == data_type_t::f16)
-            return pack_nr;
-        return pack_nr * (wei_dt == data_type_t::bf16 ? 2 : 4);
+        const native_geometry_t g = native_geometry(wei_dt);
+        return pack_nr * (g.elem_bits < 8 ? g.word_bytes : g.k_per_word);
     }
 
     /// K group 0 of weight column c.

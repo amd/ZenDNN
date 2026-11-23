@@ -133,24 +133,24 @@ int widest_tile(const native_problem_t &p, native_kernel_kind_t kind,
 /// Bytes of a source element of the call (of a weight element too, but for
 /// an s4 weight): the L1, L2 and L3 rules weigh rows and slabs by it.
 int elem_bytes(const native_problem_t &p) {
-    return p.f32() ? 4 : (p.bf16() || p.f16() ? 2 : 1);
+    return native_format(p.wei_dt).contract.src_bits / 8;
 }
 
 /// Bytes of a weight element: elem_bytes, half a byte for an s4 weight.
 double wei_elem_bytes(const native_problem_t &p) {
-    return p.int4() ? 0.5 : elem_bytes(p);
+    return native_format(p.wei_dt).geometry.elem_bits / 8.0;
 }
 
 /// The units of the bytes the makespan weighs per element of K: a column of
 /// weight and a row of source count one each, but over an s4 weight, whose
 /// column takes half the bytes of a source row, two for a row.
 int row_byte_units(const native_problem_t &p) {
-    return p.int4() ? 2 : 1;
+    const native_format_desc_t &f = native_format(p.wei_dt);
+    return f.contract.src_bits / f.geometry.elem_bits;
 }
 
 const char *dtype_name(const native_problem_t &p) {
-    if (p.f16()) return "f16";
-    return p.f32() ? "f32" : (p.bf16() ? "bf16" : (p.int4() ? "s4" : "s8"));
+    return native_format(p.wei_dt).name;
 }
 
 const char *source_name(native_plan_source_t s) {

@@ -32,6 +32,7 @@
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_brgemm_looper.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/gemm_descriptor.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_format.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_operator_bridge.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_utils.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_weight_cache.hpp"
@@ -77,9 +78,9 @@ native_layout_query_t native_layout_query_for(
     const data_type_t compute = params.dtypes.compute;
     if (params.dynamic_quant
             && (q.src_dt == data_type_t::bf16 || q.src_dt == data_type_t::f32)
-            && (q.wei_dt == data_type_t::s8 || q.wei_dt == data_type_t::s4)
             && (compute == data_type_t::s8 || compute == data_type_t::u8)) {
-        q.src_dt = compute;
+        const native_format_desc_t *f = native_format_of(q.wei_dt);
+        if (f != nullptr && f->contract.dynamic_quant) q.src_dt = compute;
     }
     q.K = K;
     q.N = N;
@@ -338,18 +339,17 @@ ZENDNNL_ALWAYS_INLINE inline size_t weight_read_bytes(char layout,
         const matmul_params &params, int K, int N, int ldb, bool transB) {
     size_t reads = 0;
     const data_type_t wdt = params.dtypes.wei;
-    if ((wdt == data_type_t::bf16 || wdt == data_type_t::s8
-                || wdt == data_type_t::s4 || wdt == data_type_t::f32
-                || wdt == data_type_t::f16)
-            && K > 0 && N > 0 && ldb > 0 && params.packing.pack_format_b == 0) {
+    const native_format_desc_t *f = native_format_of(wdt);
+    if (f != nullptr && K > 0 && N > 0 && ldb > 0
+            && params.packing.pack_format_b == 0) {
         // A column-major weight spans as the row-major one of the other
         // transB.
         const bool row_trans = transB != (layout != 'r' && layout != 'R');
         if (params.mem_format_b == 'r') {
             if (aocl_prepacked_weight(params)
                     && aocl_prepack_unreorderable(params))
-                reads = aocl_prepack_bytes(
-                        K, N, ldb, row_trans, wdt == data_type_t::s8);
+                reads = aocl_prepack_bytes(K, N, ldb, row_trans,
+                        f->cache.foreign_prepack == native_prepack_t::u8s8);
         } else if (params.mem_format_b == 'n') {
             reads = native_raw_weight_bytes(wdt, K, N, ldb, row_trans);
         }

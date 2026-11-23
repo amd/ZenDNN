@@ -18,6 +18,7 @@
 set(matmul_native_common_sources
   cost_model.cpp
   kernel_cache.cpp
+  native_format.cpp
   native_pack.cpp
   native_weight_cache.cpp
   native_weight_view.cpp
@@ -28,6 +29,7 @@ set(matmul_native_common_sources
 
 set(matmul_native_common_headers
   gemm_descriptor.hpp
+  native_format.hpp
   native_pack.hpp
   native_weight_cache.hpp
   native_weight_view.hpp

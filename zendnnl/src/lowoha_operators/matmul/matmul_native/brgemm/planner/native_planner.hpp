@@ -28,6 +28,7 @@
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_config.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/gemm_descriptor.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_format.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_int8_scheme.hpp"
 
 namespace zendnnl {
@@ -70,19 +71,24 @@ struct native_problem_t {
     /// weight.
     int wei_scale_bytes = 0;
 
-    bool bf16() const { return wei_dt == data_type_t::bf16; }
-    bool f32() const { return wei_dt == data_type_t::f32; }
+    /// A weight of format id.
+    bool is(native_format_t id) const {
+        return wei_dt == native_format(id).wei_dt;
+    }
+    bool bf16() const { return is(native_format_t::bf16); }
+    bool f32() const { return is(native_format_t::f32); }
     /// An f16 weight: the F16 kernels, whose source rows are widened to f32,
     /// or the F16_PH kernels over the source rows (native_plan_t::kind).
-    bool f16() const { return wei_dt == data_type_t::f16; }
-    /// An s8 or s4 weight: the INT8 tile and its plan fields.
+    bool f16() const { return is(native_format_t::f16); }
+    /// A weight of a quantized format (s8 or s4): the INT8 tile and its plan
+    /// fields.
     bool int8() const {
-        return wei_dt == data_type_t::s8 || wei_dt == data_type_t::s4;
+        return (native_type_bit(wei_dt) & kNativeQuantizedTypes) != 0;
     }
     /// An s4 weight: the INT4 kernels, of one group over K
     /// (int4_one_group()) or the group kernels (native_int4_scheme);
     /// int8_scheme is per_group for every s4 weight.
-    bool int4() const { return wei_dt == data_type_t::s4; }
+    bool int4() const { return is(native_format_t::s4); }
     /// An s4 weight of one group over K ({1, N} weight scales; a group of 0
     /// is one, as the layout query and the cost model take it): the INT4
     /// kernels of one group, which take more rows per call.

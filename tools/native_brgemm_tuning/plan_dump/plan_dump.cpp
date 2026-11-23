@@ -36,24 +36,13 @@
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/native_kernel_registry.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_config.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_planner.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_format.hpp"
 
 namespace mm = zendnnl::lowoha::matmul;
 namespace nat = zendnnl::lowoha::matmul::native;
 using zendnnl::memory::data_type_t;
 
 namespace {
-
-const char *kind_name(nat::native_kernel_kind_t k) {
-    switch (k) {
-        case nat::native_kernel_kind_t::bf16: return "bf16";
-        case nat::native_kernel_kind_t::int8: return "int8";
-        case nat::native_kernel_kind_t::f32: return "f32";
-        case nat::native_kernel_kind_t::int4: return "int4";
-        case nat::native_kernel_kind_t::f16: return "f16";
-        case nat::native_kernel_kind_t::f16_ph: return "f16_ph";
-    }
-    return "?";
-}
 
 bool weight_type(const std::string &wei, data_type_t &dt) {
     if (wei == "bf16")
@@ -141,8 +130,8 @@ int main() {
                 "budget=%lld quads=%d direct=%d dequant_bias=%d scheme=%s "
                 "copy_block=%d copy_par_min=%lld valid=%d\n",
                 p.N, q.nr, q.mr, q.mb, q.m_blocks, q.n_tiles, q.kc,
-                kind_name(q.kind), q.threads, q.col_groups, q.unit_tiles,
-                q.domain_threads, q.row_unit,
+                nat::native_family(q.kind).name, q.threads, q.col_groups,
+                q.unit_tiles, q.domain_threads, q.row_unit,
                 q.traversal == nat::native_traversal_t::m_inner ? "m_inner"
                                                                 : "n_inner",
                 q.scratch_floats, q.int8_rows_nv1, q.int8_rows_nv2,
