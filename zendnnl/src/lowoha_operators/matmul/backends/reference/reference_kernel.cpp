@@ -890,8 +890,12 @@ status_t compute_w4a8_matmul(int batch_size, int M, int N, int K, int lda,
     const int8_t *packed_weights = static_cast<const int8_t *>(weights);
     cvt_s4_to_s8(packed_weights, wei_s8, K, N, ldb, is_transpose_weights);
 
-    const unsigned int offset_wei_s8
-            = static_cast<unsigned int>(K) * static_cast<unsigned int>(N);
+    // Only the first weight matrix is converted. A zero batch stride shares
+    // that matrix across the batch, so the s8 copy keeps the zero stride;
+    // a K*N stride would send every later batch to unconverted memory.
+    const unsigned int offset_wei_s8 = offset_wei == 0
+            ? 0u
+            : static_cast<unsigned int>(K) * static_cast<unsigned int>(N);
     compute_quantized_matmul(batch_size, M, N, K, lda, N, ldc, offset_src,
             offset_wei_s8, offset_out, batch_a_count, batch_b_count, alpha,
             beta, is_transpose_src, false, input, wei_s8, bias, output,

@@ -17,6 +17,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <new>
 #include "common/bfloat16.hpp"
 #include "common/float16.hpp"
 #include "common/zendnnl_compat.hpp"
@@ -473,6 +474,8 @@ struct direct_call_t {
     /// are left unchanged so the same struct can be reused across
     /// iterations.
     matmul_params params;
+    std::vector<uint8_t> quant_hold; ///< buffers of the defaulted scale
+    bool quant_defaults = false; ///< apply_quant_defaults changed params
     grp_matmul_gated_act_params group_gated_act;
     bool has_gated_act = false; ///< a gated_act argument was given
     bool run_gated_act = false; ///< and it is an activation
@@ -496,6 +499,14 @@ ZENDNNL_ALWAYS_INLINE inline bool native_takes_f16(const matmul_params &params,
     call.f16_isa_deferred = native::native_brgemm_requested(
             params, std::max(batch_params.Batch_A, batch_params.Batch_B));
     return call.f16_isa_deferred;
+}
+
+/// Several packed S4 weight matrices, read at the default batch stride, run
+/// past the buffer; a zero stride shares one matrix and is safe. matmul_direct
+/// rejects such a W4A8 call.
+inline bool w4a8_weight_batch_unsafe(
+        const matmul_batch_params_t &batch_params) {
+    return batch_params.Batch_B > 1 && batch_params.batch_stride_wei != 0;
 }
 
 /// matmul_direct's checks of a call and its normalization of call.params,
@@ -542,14 +553,38 @@ ZENDNNL_ALWAYS_INLINE inline status_t prepare_direct_call(const int M,
     // explicitly disabled, this resolves to a single predicted-taken branch,
     // skipping the full validation path (null-pointer checks, dimension
     // checks, and quantization-parameter validation).
-    // Must judge params, not the call's copy: diagnostics report the
-    // caller-supplied configuration, not the library's internal state.
+    // Judges the call with oneDNN's default source scale applied, whatever
+    // ZENDNNL_DIAGNOSTICS_ENABLE says. A null pointer or a non-positive
+    // Batch_A leaves the call as given. The M ones are built only after
+    // validation, and not for a call matmul_direct rejects for its weight
+    // batch, so a rejected call allocates nothing. An allocation failure
+    // fails the call.
+    call.quant_defaults = params.dtypes.wei == data_type_t::s4
+            && params.dtypes.src == data_type_t::s8
+            && params.quant_params.src_scale.buff == nullptr && src != nullptr
+            && weight != nullptr && dst != nullptr && batch_params.Batch_A > 0
+            && apply_quant_defaults(call.params, M, N, K, call.quant_hold,
+                    native::native_brgemm_requested(params,
+                            std::max(batch_params.Batch_A,
+                                    batch_params.Batch_B)));
+    const matmul_params &params_to_validate
+            = call.quant_defaults ? call.params : params;
     status_t status = zendnnl::common::op_instrumentation::validate([&]() {
         return validate_matmul_direct_inputs(src, weight, dst, M, N, K,
-                batch_params.Batch_A, batch_params.Batch_B, params,
+                batch_params.Batch_A, batch_params.Batch_B, params_to_validate,
                 is_weights_const);
     });
     if (status != status_t::success) { return status; }
+    if (call.quant_defaults && !w4a8_weight_batch_unsafe(batch_params)) {
+        try {
+            materialize_quant_defaults(call.params, call.quant_hold);
+        } catch (const std::bad_alloc &) {
+            log_error(
+                    "matmul_direct: out of memory building default quant "
+                    "scales");
+            return status_t::failure;
+        }
+    }
 
     // Defaults N for binary post-ops when leading_dim is -1. Mutates the
     // call's copy only. Must always execute regardless of
@@ -691,6 +726,14 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
     const status_t checked = prepare_direct_call(M, N, K, src, weight, dst,
             is_weights_const, batch_params, params, gated_act, call);
     if (checked != status_t::success) { return checked; }
+    // Not in validation, which the native BRGEMM's refusal shares.
+    if (w4a8_weight_batch_unsafe(batch_params) && is_w4a8_config(call.params)
+            && params.packing.pack_format_b != 1) {
+        log_error(
+                "matmul_direct: W4A8 with Batch_B > 1 needs batch_stride_wei "
+                "= 0 (one shared weight)");
+        return status_t::failure;
+    }
 
     // MXFP4 has one backend, the custom kernel, reached through the one-op
     // grouped route below (`group_matmul/selection/mxfp4_route.hpp`).
@@ -766,7 +809,8 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
                         = zendnnl::common::op_instrumentation::validate([&]() {
                     return validate_matmul_direct_inputs(src, weight, dst, M, N,
                             K, batch_params.Batch_A, batch_params.Batch_B,
-                            params, is_weights_const, false);
+                            call.quant_defaults ? call.params : params,
+                            is_weights_const, false);
                 });
                 if (status != status_t::success) { return status; }
             }

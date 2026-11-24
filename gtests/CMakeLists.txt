@@ -46,6 +46,7 @@ if(ZENDNNL_BUILD_GTEST)
     test_sdpa_ck_int8.cpp
     test_omp_api.cpp
     test_quant_layout.cpp
+    test_quant_defaults.cpp
     test_softmax.cpp)
 
   # test_postop_cache.cpp exercises the AOCL-DLP post-op metadata cache

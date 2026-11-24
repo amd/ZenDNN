@@ -68,6 +68,37 @@ void apply_bmm_postop_offsets(
     }
 }
 
+namespace {
+
+// Why a W4A8 weight scale is not accepted, or nullptr. f16 only on native.
+const char *w4a8_wei_scale_error(
+        const matmul_quantization_params_t::matmul_quant_t &wei_scale, int N,
+        int K, bool native) {
+    if (!wei_scale.buff) { return "W4A8 requires quant_params.wei_scale.buff"; }
+    if (wei_scale.dt != data_type_t::f32 && wei_scale.dt != data_type_t::bf16
+            && !(native && wei_scale.dt == data_type_t::f16)) {
+        return native ? "W4A8 weight scale supports only f32, bf16 or f16 data "
+                        "type"
+                      : "W4A8 weight scale supports only f32 or bf16 data type";
+    }
+    if (wei_scale.dims.size() != 2) {
+        return "W4A8 requires weight scale dims {G,N}";
+    }
+    if (wei_scale.dims[0] <= 0 || wei_scale.dims[1] != N) {
+        return "W4A8 requires weight scale dims {G,N} with G > 0 and N "
+               "matching the matmul N";
+    }
+    if (!quant_groups_divide(K, wei_scale.dims[0])) {
+        return "W4A8 requires K divisible by the weight group count";
+    }
+    if (!quant_groups_are_whole_quads(K, wei_scale.dims[0])) {
+        return "W4A8 requires K/G to be a multiple of 4";
+    }
+    return nullptr;
+}
+
+} // namespace
+
 status_t validate_w4a8_inputs(
         const matmul_params &params, int M, int N, int K, bool native) {
     // GGML packed weights (pack_format_b == 1) are exempt from the native W4A8
@@ -125,44 +156,11 @@ status_t validate_w4a8_inputs(
     }
 
     const auto &wei_scale = params.quant_params.wei_scale;
-    if (!wei_scale.buff) {
-        log_error("W4A8 requires quant_params.wei_scale.buff");
+    if (const char *why = w4a8_wei_scale_error(wei_scale, N, K, native)) {
+        log_error(why, " (N=", N, ", K=", K, ")");
         return status_t::failure;
     }
-    if (wei_scale.dt != data_type_t::f32 && wei_scale.dt != data_type_t::bf16
-            && !(native && wei_scale.dt == data_type_t::f16)) {
-        log_error(native ? "W4A8 weight scale supports only f32, bf16 or f16 "
-                           "data type"
-                         : "W4A8 weight scale supports only f32 or bf16 data "
-                           "type");
-        return status_t::failure;
-    }
-    if (wei_scale.dims.size() != 2) {
-        log_error("W4A8 requires weight scale dims {G,N}");
-        return status_t::failure;
-    }
-
     const int64_t G = wei_scale.dims[0];
-    const int64_t scale_N = wei_scale.dims[1];
-    if (G <= 0 || scale_N != static_cast<int64_t>(N)) {
-        log_error(
-                "W4A8 requires weight scale dims {G,N} "
-                "(G=",
-                G, ", scale_N=", scale_N, ", N=", N, ")");
-        return status_t::failure;
-    }
-
-    if (!quant_groups_divide(K, G)) {
-        log_error("W4A8 requires K divisible by weight group count (K=", K,
-                ", G=", G, ")");
-        return status_t::failure;
-    }
-    if (!quant_groups_are_whole_quads(K, G)) {
-        const int64_t group_size = static_cast<int64_t>(K) / G;
-        log_error("W4A8 requires K/G to be a multiple of 4 (got group_size=",
-                group_size, ")");
-        return status_t::failure;
-    }
 
     const auto &src_scale = params.quant_params.src_scale;
     if (w4a8_static_entry && !src_scale.buff) {
@@ -657,6 +655,55 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
         }
     }
     return status_t::success;
+}
+
+namespace {
+
+// Points scale at count ones of dt (f32, bf16 or f16), held by hold.
+void fill_unit_scale(matmul_quantization_params_t::matmul_quant_t &scale,
+        data_type_t dt, int64_t count, std::vector<uint8_t> &hold) {
+    const size_t elem_size = size_of(dt);
+    const uint32_t one_f32 = 0x3F800000u;
+    const uint16_t one_16bit = dt == data_type_t::bf16 ? 0x3F80 : 0x3C00;
+    const void *one = elem_size == 4 ? static_cast<const void *>(&one_f32)
+                                     : static_cast<const void *>(&one_16bit);
+    hold.resize(static_cast<size_t>(count) * elem_size);
+    for (int64_t i = 0; i < count; ++i)
+        std::memcpy(hold.data() + static_cast<size_t>(i) * elem_size, one,
+                elem_size);
+    scale.buff = hold.data();
+    scale.dt = dt;
+}
+
+} // namespace
+
+bool apply_quant_defaults(matmul_params &params, int M, int N, int K,
+        std::vector<uint8_t> &hold, bool native) {
+    auto &quant = params.quant_params;
+    // Static W4A8 only, with no zero-point; dynamic and GGML calls are not.
+    if (M <= 0 || N <= 0 || K <= 0 || params.dynamic_quant
+            || params.packing.pack_format_b == 1
+            || params.dtypes.src != data_type_t::s8
+            || params.dtypes.wei != data_type_t::s4
+            || params.dtypes.compute != data_type_t::s8
+            || (params.dtypes.dst != data_type_t::f32
+                    && params.dtypes.dst != data_type_t::bf16)
+            || quant.src_scale.buff || quant.src_zp.buff || quant.wei_zp.buff) {
+        return false;
+    }
+    // A call whose weight scale validate_w4a8_inputs rejects stays as given.
+    const auto &wei_scale = quant.wei_scale;
+    if (w4a8_wei_scale_error(wei_scale, N, K, native)) { return false; }
+    // One placeholder value: validation reads the metadata, not the values.
+    fill_unit_scale(quant.src_scale, wei_scale.dt, 1, hold);
+    quant.src_scale.dims = {M, 1};
+    return true;
+}
+
+void materialize_quant_defaults(
+        matmul_params &params, std::vector<uint8_t> &hold) {
+    auto &scale = params.quant_params.src_scale;
+    fill_unit_scale(scale, scale.dt, scale.dims[0], hold);
 }
 
 // Helper function to convert post_op_type_t to string

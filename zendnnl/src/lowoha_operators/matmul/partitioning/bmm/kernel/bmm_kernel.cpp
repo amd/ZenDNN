@@ -46,6 +46,26 @@ void bmm_tile_execute(int batch_idx, int m_start, int m_len,
     }
     apply_bmm_postop_offsets(tile_params, batch_idx, m_start, ctx.N);
 
+    // A source scale of one value per row, or per row and group ({M, 1},
+    // {M, G}), given or written by a dynamic quantization, is this tile's
+    // rows: m_start * G values in, presented as {m_len, G}. A one-row tile
+    // keeps the sym-quant kernel of the whole call only with a {1, N}
+    // per-channel weight scale.
+    auto &src_scale = tile_params.quant_params.src_scale;
+    const int64_t src_count = checked_quant_param_num_elements(src_scale.dims);
+    if (src_scale.buff != nullptr && m_len < ctx.M && src_count >= ctx.M
+            && src_count % ctx.M == 0) {
+        const int64_t groups_per_row = src_count / ctx.M;
+        src_scale.buff = static_cast<const uint8_t *>(src_scale.buff)
+                + static_cast<size_t>(m_start * groups_per_row)
+                        * size_of(src_scale.dt);
+        src_scale.dims = {m_len, groups_per_row};
+        auto &wei_scale = tile_params.quant_params.wei_scale;
+        if (m_len == 1 && groups_per_row == 1 && wei_scale.buff != nullptr
+                && checked_quant_param_num_elements(wei_scale.dims) == ctx.N)
+            wei_scale.dims = {1, ctx.N};
+    }
+
     matmul_algo_t tile_kernel = ctx.kernel;
 
 #if ZENDNNL_DEPENDS_LIBXSMM

@@ -1504,3 +1504,98 @@ TEST_F(TestPostopCacheClearMechanism, ClearProducesFreshHolderForSameKey) {
     EXPECT_EQ(get_aocl_postop_metadata_cache_size(), 1u)
             << "Second post-clear hit must NOT insert another holder";
 }
+
+// A hit on a sym-quant entry (s8 source, per-token source scale) must read the
+// dst scale and dst zero point of its own call, not the buffers of the call
+// that built the entry, which the caller may reuse or free.
+TEST(PostopCacheSymQuantDst, DstScaleAndZeroPointRefreshOnHit) {
+    if (!zendnnl::common::is_postop_cache_enabled()) {
+        GTEST_SKIP() << "AOCL DLP post-op metadata cache is disabled";
+    }
+    constexpr int M = 8, N = 32, K = 64;
+    std::vector<int8_t> src(M * K), wei(K * N);
+    std::vector<float> src_scale(M), wei_scale(N);
+    for (size_t i = 0; i < src.size(); ++i)
+        src[i] = static_cast<int8_t>(static_cast<int>(i * 7 % 41) - 20);
+    for (size_t i = 0; i < wei.size(); ++i)
+        wei[i] = static_cast<int8_t>(static_cast<int>(i * 11 % 37) - 18);
+    for (int i = 0; i < M; ++i)
+        src_scale[i] = 0.02f + 0.01f * static_cast<float>(i);
+    for (int i = 0; i < N; ++i)
+        wei_scale[i] = 0.03f + 0.001f * static_cast<float>(i);
+
+    for (const data_type_t dst_dt : {data_type_t::f32, data_type_t::bf16})
+        for (const bool with_zp : {false, true}) {
+            SCOPED_TRACE(::testing::Message()
+                    << (dst_dt == data_type_t::f32 ? "f32" : "bf16")
+                    << (with_zp ? " with dst zero point" : " no dst zp"));
+            // dst scale / zero point of call 1 and call 2.
+            float scale_1 = 0.5f, scale_2 = 2.0f;
+            int32_t zp_1 = 3, zp_2 = -5;
+            const auto run
+                    = [&](const float *dst_scale, const int32_t *dst_zp) {
+                matmul_params p;
+                p.dtypes.src = data_type_t::s8;
+                p.dtypes.wei = data_type_t::s8;
+                p.dtypes.dst = dst_dt;
+                p.weight_cache_type = 1;
+                p.num_threads = 1;
+                p.quant_params.src_scale.buff = src_scale.data();
+                p.quant_params.src_scale.dt = data_type_t::f32;
+                p.quant_params.src_scale.dims = {M, 1};
+                p.quant_params.wei_scale.buff = wei_scale.data();
+                p.quant_params.wei_scale.dt = data_type_t::f32;
+                p.quant_params.wei_scale.dims = {1, N};
+                if (dst_scale != nullptr) {
+                    p.quant_params.dst_scale.buff = dst_scale;
+                    p.quant_params.dst_scale.dt = data_type_t::f32;
+                    p.quant_params.dst_scale.dims = {1};
+                }
+                if (dst_zp != nullptr) {
+                    p.quant_params.dst_zp.buff = dst_zp;
+                    p.quant_params.dst_zp.dt = data_type_t::s32;
+                    p.quant_params.dst_zp.dims = {1};
+                }
+                std::vector<uint8_t> out(M * N * size_of(dst_dt), 0);
+                matmul_batch_params_t batch;
+                EXPECT_EQ(matmul_direct('r', false, false, M, N, K, 1.0f,
+                                  src.data(), K, wei.data(), N, nullptr, 0.0f,
+                                  out.data(), N, true, batch, p),
+                        status_t::success);
+                return out;
+            };
+            const auto cold
+                    = [&](const float *dst_scale, const int32_t *dst_zp) {
+                // Clears the weight and post-op metadata caches.
+                clear_matmul_weight_caches();
+                return run(dst_scale, dst_zp);
+            };
+            const int32_t *zp1 = with_zp ? &zp_1 : nullptr;
+            const int32_t *zp2 = with_zp ? &zp_2 : nullptr;
+
+            // Cold results, and proof that the dst quantization matters: the
+            // two calls differ from each other and from a call without it.
+            const auto plain = cold(nullptr, nullptr);
+            const auto want_1 = cold(&scale_1, zp1);
+            const auto want_2 = cold(&scale_2, zp2);
+            ASSERT_NE(want_1, plain) << "dst quantization changes nothing";
+            ASSERT_NE(want_2, plain) << "dst quantization changes nothing";
+            ASSERT_NE(want_1, want_2) << "calls 1 and 2 are not told apart";
+
+            // Call 1 builds the entry; its dst buffers are then overwritten.
+            clear_matmul_weight_caches();
+            const auto got_1 = run(&scale_1, zp1);
+            ASSERT_EQ(get_aocl_postop_metadata_cache_size(), 1u);
+            scale_1 = 1000.0f;
+            zp_1 = 9999;
+            // Call 2 hits that entry with its own dst buffers.
+            const auto got_2 = run(&scale_2, zp2);
+            EXPECT_EQ(get_aocl_postop_metadata_cache_size(), 1u)
+                    << "call 2 must hit the entry call 1 built";
+            EXPECT_EQ(got_1, want_1);
+            EXPECT_EQ(got_2, want_2)
+                    << "a hit used the dst scale / zero point of call 1";
+            scale_1 = 0.5f;
+            zp_1 = 3;
+        }
+}

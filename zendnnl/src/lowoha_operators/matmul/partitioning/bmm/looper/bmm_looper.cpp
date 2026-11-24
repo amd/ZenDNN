@@ -158,6 +158,7 @@ static void execute_partitioned(const void *src, const void *weight, void *dst,
     ctx.trans_input = trans_input;
     ctx.trans_weight = trans_weight;
     ctx.transA = transA;
+    ctx.M = config.M;
     ctx.N = config.N;
     ctx.K = config.K;
     ctx.alpha = alpha;
@@ -315,6 +316,7 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
         ctx.trans_input = trans_input;
         ctx.trans_weight = trans_weight;
         ctx.transA = transA;
+        ctx.M = M;
         ctx.N = N;
         ctx.K = K;
         ctx.alpha = alpha;

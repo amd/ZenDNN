@@ -158,7 +158,7 @@ struct matmul_data_types {
 | BF16 | BF16 | F32/BF16 | F32/BF16 | Mixed-precision BFloat16 |
 | F16 | F16 | F32/F16 | F16/F32 | Half-precision (requires AVX512-FP16, except on the native BRGEMM). No scales or zero-points. |
 | BF16 | S4/U4 | F32/BF16 | F32/BF16 | Weight-only (`dynamic_quant=false`). Source stays BF16. S4 is symmetric (no zero-point). U4 is asymmetric (weight zero-point required, S8 or BF16). |
-| BF16/F32/S8 | S4 | F32/BF16 | F32/BF16 | W4A8 (`compute=s8`, no zero-points). A BF16 or F32 source requires `dynamic_quant=true`. S8 source requires `dynamic_quant=false` and a source scale. An F32 source writes an F32 destination. See [W4A8](#w4a8-symmetric-w4--a8). |
+| BF16/F32/S8 | S4 | F32/BF16 | F32/BF16 | W4A8 (`compute=s8`, no zero-points). A BF16 or F32 source requires `dynamic_quant=true`. S8 source requires `dynamic_quant=false`; an omitted source scale is read as 1. An F32 source writes an F32 destination. See [W4A8](#w4a8-symmetric-w4--a8). |
 | BF16/F32/S8 | F4_E2M1 | F32/BF16/F16 | F32/BF16 | MXFP4 (`compute=s8`, no zero-points), group-matmul custom kernel only. Weight scale is `f8_e8m0` with dims `{K/32, N}`. A BF16 or F32 source requires `dynamic_quant=true`. S8 source requires `dynamic_quant=false` and its source scale. The source scale is per token `{M, 1}` or per block `{M, K/32}`. Destination is BF16 or F32. See [MXFP4](#mxfp4-f4_e2m1-weights-f8_e8m0-scales). |
 | S8 | S4 | F32/BF16 | F32 | GGML Q4_0. Packed symmetric S4 with an S8 source. Source scale is per-token or per-group. No zero-point. |
 | U8/S8 | S8 | F32/BF16/S8/U8/S32 | F32/BF16/S8/U8/S32/F16 | INT8. U8 source scale is per-tensor only. An S8 per-token or per-group source scale writes F32 or BF16 only. S32, S8, U8, and F16 outputs need a per-tensor source scale. |
@@ -341,7 +341,7 @@ Two entry contracts:
 | Entry | Src dtype | `dynamic_quant` | Who quantizes A | `src_scale.buff` |
 |-------|-----------|-----------------|-----------------|------------------|
 | **Dynamic** | BF16 or F32 | `true` | Library at runtime | Optional (computed if null); `dims`/`dt` required |
-| **Static** | S8 (pre-quantized) | `false` | Caller | **Required** |
+| **Static** | S8 (pre-quantized) | `false` | Caller | Optional (read as ones if null) |
 
 `s8` source with `dynamic_quant = true` is rejected. `bf16` source with `dynamic_quant = false` is **WOQ**, not W4A8.
 
@@ -354,6 +354,7 @@ Two entry contracts:
 > **Notes:**
 > - **Backends:** with the algorithm unset, the custom-kernel route where it serves the call and AOCL-DLP (`aocl_dlp` / `aocl_dlp_blocked`) otherwise; the native BRGEMM for a call that asks for it (`ZENDNNL_MATMUL_ALGO=10`, or `lowoha_algo = matmul_algo_t::native_brgemm`).
 > - **Shape constraints:** `src_scale` dims `{M, 1}` or `{M, G}` (`G` matching `wei_scale.dims[0]`); `wei_scale` dims `{G, N}` with `N` matching the matmul `N`; `K` divisible by `G`; `K / G` (group size) a multiple of 4. Compact `{M, 1}` scales are broadcast to `{M, G}` in the AOCL path before GEMM.
+> - **Default source scale:** a static call without `src_scale.buff` reads it as 1, as oneDNN does. `matmul_direct` makes it `{M, 1}` ones of the weight scale's type (F32 or BF16; F16 on the native BRGEMM) in its copy of `params`; the caller's buffers are not modified. This holds for raw weights and for weights prepacked by AOCL-DLP (`mem_format_b = 'r'`). The weight scale is never defaulted: its dims give the group count of a prepacked weight, so a prepacked W4A8 weight, or a prepacked S8 weight with a per-token or per-group source scale over several rows, is rejected without one. At `M = 1` a one-value S8 source scale looks the same as a per-tensor one, so on a prepacked S8 weight the weight scale's form picks the kernel: `{1, N}` (or `{G, N}`) runs the sym-quant kernel and needs a sym-quant prepack (`sym_group_size`); `{N}`, or no weight scale, runs the classic kernel and needs a classic prepack. The default applies only in `matmul_direct`: `group_matmul_direct` / MoE static W4A8, MXFP4 (which requires its source scale) and GGML packed weights are not defaulted, nor is a call with a zero-point or dynamic quantization. W4A8 with `Batch_B > 1` is rejected, with or without a source scale, unless `batch_stride_wei = 0` (one weight shared by every batch): the default batch stride of several packed S4 weight matrices is out of bounds. The rejection precedes building the default scale.
 > - **vs WOQ:** WOQ is bf16×s4 with `dynamic_quant = false`. W4A8 uses the symmetric grouped blocked weight layout, not the weight-only s4 layout.
 
 ### MXFP4 (`f4_e2m1` weights, `f8_e8m0` scales)
@@ -1099,7 +1100,7 @@ int lowoha_w4a8_matmul_example() {
 
 ### Example 8b: W4A8 static (pre-quantized s8 activations + symmetric s4 weights)
 
-Static entry: the caller passes **s8** activations and populated `src_scale.buff` / `wei_scale.buff` with `dynamic_quant = false` and `dtypes.compute = s8`. Do **not** set `dynamic_quant = true` on an s8 source (validation fails). `src_scale` dims remain **logical** `{M, 1}` or `{M, G}` even if `transA` is true.
+Static entry: the caller passes **s8** activations and a populated `wei_scale.buff` (`src_scale.buff` is optional and read as ones when omitted, see [Default source scale](#w4a8-symmetric-w4--a8)) with `dynamic_quant = false` and `dtypes.compute = s8`. Do **not** set `dynamic_quant = true` on an s8 source (validation fails). `src_scale` dims remain **logical** `{M, 1}` or `{M, G}` even if `transA` is true.
 
 ```cpp
 int lowoha_w4a8_static_matmul_example() {
@@ -1170,7 +1171,7 @@ int lowoha_w4a8_static_matmul_example() {
 **Key points for W4A8:**
 
 - **Not WOQ**: `dynamic_quant = false` with **bf16×s4** selects weight-only quantization, not W4A8.
-- **Static vs dynamic**: pre-quantized **s8×s4** requires `dynamic_quant = false` and a populated `src_scale.buff`. Dynamic **bf16×s4** requires `dynamic_quant = true`. Mixing s8 src with `dynamic_quant = true` is rejected.
+- **Static vs dynamic**: pre-quantized **s8×s4** requires `dynamic_quant = false`; `src_scale.buff` is optional and read as ones when omitted (`wei_scale.buff` stays required). Dynamic **bf16×s4** requires `dynamic_quant = true`. Mixing s8 src with `dynamic_quant = true` is rejected.
 - **Source scales**: logical dims `{M, 1}` or `{M, G}` (or `{1, 1}` when `M == 1`); dtype **f32** or **bf16**. `{M, 1}` is broadcast to `{M, G}` before the sym_quant GEMM.
 - **Weight scales**: `wei_scale` dims `{G, N}`; dtype **f32** or **bf16** (**f16** too on the native BRGEMM).
 - **Weight prepack**: WOQ s4/u4 uses the weight-only blocked layout. Native W4A8 (`s4` weights, source `s8`) uses a separate blocked layout. Widening s4 to s8 before the GEMM uses the symmetric grouped s8 layout. The native BRGEMM keeps the s4 weight as nibbles in its own layout, the raw weight's size when `K` is a multiple of 8 and `N` of 32; for a contiguous weight (`ldb` equal to its row) of that size, weight cache mode 2 writes the layout over the weight under `ZENDNNL_MATMUL_ALGO=10`.

@@ -2571,12 +2571,13 @@ TEST(GgmlWeightUnpackQ4_K, SuperblockMatchesPlain) {
 TEST(GgmlWeightUnpackQ4_K, SequentialChainIsRejected) {
     constexpr int M = 1;
     constexpr int N = 32;
-    constexpr int K = 256;
+    // static: the captureless lambda below reads K (MSVC C3493 otherwise).
+    static constexpr int K = 256;
     std::vector<float> src(static_cast<size_t>(M) * K, 1.f);
     std::vector<uint8_t> w0(144, 0), w1(144, 0);
     std::vector<float> d0(static_cast<size_t>(M) * N, 0.f);
     std::vector<float> d1(static_cast<size_t>(M) * N, 0.f);
-    auto params_of = [K]() {
+    auto params_of = []() {
         matmul_params params;
         params.dtypes.src = data_type_t::f32;
         params.dtypes.wei = data_type_t::s4;

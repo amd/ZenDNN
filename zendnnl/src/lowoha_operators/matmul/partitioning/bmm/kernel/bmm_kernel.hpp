@@ -48,6 +48,8 @@ struct BmmKernelContext {
     char trans_input;
     char trans_weight;
     bool transA;
+    /// Rows of each batch.
+    int M = 0;
     int N;
     int K;
     float alpha;

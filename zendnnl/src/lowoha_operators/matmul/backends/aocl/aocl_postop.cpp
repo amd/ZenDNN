@@ -1065,31 +1065,32 @@ static void patch_mutable_fields(dlp_metadata_t *md,
                     = infer_scale_dim(get_num_elements(wei_scale.dims), M, N,
                             DLP_PARAM_DIM_PER_CHANNEL);
         }
-        if (lowoha_param.quant_params.dst_scale.buff) {
-            const auto &dst_scale = lowoha_param.quant_params.dst_scale;
-            md->scale[scale_index].sf->scale_factor
-                    = const_cast<void *>(dst_scale.buff);
-            md->scale[scale_index].sf->scale_factor_len
-                    = get_num_elements(dst_scale.dims);
-            md->scale[scale_index].sf->scale_factor_type
-                    = to_dlp_type(dst_scale.dt);
-            // Dst scale is per-tensor (len 1) or per-channel / per-column (len N).
-            md->scale[scale_index].sf->scale_factor_dim
-                    = infer_scale_dim(get_num_elements(dst_scale.dims), M, N,
-                            DLP_PARAM_DIM_PER_CHANNEL);
-            // dst_zp shares the same slot as dst_scale in the cold path
-            // (lines 1017-1023). Only patch when the caller actually supplies
-            // a dst_zp buffer; the dummy-zp branch on the cold path uses a
-            // process-lifetime constexpr int, so it needs no refresh.
-            if (lowoha_param.quant_params.dst_zp.buff) {
-                const auto &dst_zp = lowoha_param.quant_params.dst_zp;
-                md->scale[scale_index].zp->zero_point
-                        = const_cast<void *>(dst_zp.buff);
-                md->scale[scale_index].zp->zero_point_len
-                        = get_num_elements(dst_zp.dims);
-                md->scale[scale_index].zp->zero_point_type
-                        = to_dlp_type(dst_zp.dt);
-            }
+    }
+    // The dst SCALE slot (and its zero point) is wired on the cold path for
+    // sym-quant too, so it is repointed on a hit whatever the quant mode.
+    if (is_int8 && lowoha_param.quant_params.dst_scale.buff) {
+        const auto &dst_scale = lowoha_param.quant_params.dst_scale;
+        md->scale[scale_index].sf->scale_factor
+                = const_cast<void *>(dst_scale.buff);
+        md->scale[scale_index].sf->scale_factor_len
+                = get_num_elements(dst_scale.dims);
+        md->scale[scale_index].sf->scale_factor_type
+                = to_dlp_type(dst_scale.dt);
+        // Dst scale is per-tensor (len 1) or per-channel / per-column (len N).
+        md->scale[scale_index].sf->scale_factor_dim
+                = infer_scale_dim(get_num_elements(dst_scale.dims), M, N,
+                        DLP_PARAM_DIM_PER_CHANNEL);
+        // dst_zp shares the same slot as dst_scale in the cold path
+        // (lines 1017-1023). Only patch when the caller actually supplies
+        // a dst_zp buffer; the dummy-zp branch on the cold path uses a
+        // process-lifetime constexpr int, so it needs no refresh.
+        if (lowoha_param.quant_params.dst_zp.buff) {
+            const auto &dst_zp = lowoha_param.quant_params.dst_zp;
+            md->scale[scale_index].zp->zero_point
+                    = const_cast<void *>(dst_zp.buff);
+            md->scale[scale_index].zp->zero_point_len
+                    = get_num_elements(dst_zp.dims);
+            md->scale[scale_index].zp->zero_point_type = to_dlp_type(dst_zp.dt);
         }
     }
 }

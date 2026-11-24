@@ -211,6 +211,28 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
         const int Batch_A, const int Batch_B, const matmul_params &params,
         const bool is_weights_const, const bool native);
 
+/**
+* @brief Gives an omitted static W4A8 source scale its oneDNN default of 1.
+*
+* On static W4A8 (s8 source, s4 weights, s8 compute, no zero-point, f32 or
+* bf16 output) with no source scale, the source scale becomes {M,1} ones of
+* the weight scale's type: f32 or bf16, or f16 when native is true. Raw and
+* prepacked weights alike. A weight scale that validate_w4a8_inputs rejects
+* leaves the call as given. The source scale points at one placeholder
+* value, enough to validate the call; materialize_quant_defaults then fills
+* the {M,1} ones, so a call that fails validation allocates almost nothing.
+*
+* @param hold Owns the ones; it must outlive every use of params.
+* @param native The call is validated as the native BRGEMM.
+* @return true when params changed.
+*/
+bool apply_quant_defaults(matmul_params &params, int M, int N, int K,
+        std::vector<uint8_t> &hold, bool native = false);
+
+/// Fills the source scale apply_quant_defaults set up with its {M,1} ones.
+void materialize_quant_defaults(
+        matmul_params &params, std::vector<uint8_t> &hold);
+
 inline bool quant_scale_dtype_supported(data_type_t dt) noexcept {
     return dt == data_type_t::f32 || dt == data_type_t::bf16;
 }
