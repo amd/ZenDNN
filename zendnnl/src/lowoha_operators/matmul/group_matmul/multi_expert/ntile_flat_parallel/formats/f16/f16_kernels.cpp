@@ -29,7 +29,8 @@
 
 #include <immintrin.h>
 
-#include "nr32_kernel_common.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/formats/f16/f16.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/kernel/nr32_epilogue.hpp"
 
 // The toolchain gate of the custom kernel's FP16 family, which these
 // kernels need for `__m512h` and `_Float16`.
@@ -51,6 +52,9 @@ namespace nr32 {
 namespace {
 
 using namespace kernel;
+
+/// What the kernels store: their row's output type.
+constexpr data_type_t kDst = f16::kFormat.dst;
 
 /// f16 elements from one block row to the next.
 constexpr int kRow = 32;
@@ -162,36 +166,19 @@ static void f16_kernel(const ukernel_args &p) {
             }
     }
 
-    auto *C = static_cast<uint16_t *>(p.c);
-    if constexpr (Ep == epilogue::plain) {
+    auto *C = static_cast<out_elem_t<kDst> *>(p.c);
+    [[maybe_unused]] const act_mode_t mode
+            = gated(Ep) ? act_mode() : act_mode_t {};
 #pragma GCC unroll 12
-        for (int m = 0; m < MR; ++m) {
-            uint16_t *dst = C + static_cast<size_t>(m) * p.ldc;
-            store_f16(dst, _mm512_load_ps(&sum[m][0]), cols);
-            store_f16(dst + 16, _mm512_load_ps(&sum[m][16]), cols - 16);
-        }
-    } else if constexpr (Ep == epilogue::swiglu_pairs) {
-        const act_mode_t mode = act_mode();
-#pragma GCC unroll 12
-        for (int m = 0; m < MR; ++m) {
-            store_f16(C + static_cast<size_t>(m) * p.ldc,
-                    gated_out<Ep>(_mm512_load_ps(&sum[m][0]),
-                            _mm512_load_ps(&sum[m][16]), mode),
-                    cols);
-        }
-    } else {
-        const act_mode_t mode = act_mode();
-#pragma GCC unroll 12
-        for (int m = 0; m < MR; ++m) {
-            uint16_t *dst = C + static_cast<size_t>(m) * p.ldc;
-            store_f16(dst,
-                    gated_out<Ep>(_mm512_load_ps(&sum[m][0]),
-                            _mm512_load_ps(&sum[m][32]), mode),
-                    cols);
-            store_f16(dst + 16,
-                    gated_out<Ep>(_mm512_load_ps(&sum[m][16]),
-                            _mm512_load_ps(&sum[m][48]), mode),
-                    cols - 16);
+    for (int m = 0; m < MR; ++m) {
+        auto *const dst = C + static_cast<size_t>(m) * p.ldc;
+        if constexpr (split(Ep)) {
+            store_wide_step<Ep, kDst>(dst, _mm512_load_ps(&sum[m][0]),
+                    _mm512_load_ps(&sum[m][16]), _mm512_load_ps(&sum[m][32]),
+                    _mm512_load_ps(&sum[m][48]), cols, mode);
+        } else {
+            store_step<Ep, kDst>(dst, _mm512_load_ps(&sum[m][0]),
+                    _mm512_load_ps(&sum[m][16]), cols, mode);
         }
     }
 }
@@ -215,11 +202,14 @@ ukernel_fn pick(const int mr) {
 
 #endif // ZENDNNL_NR32_F16_KERNELS
 
-bool f16_kernels_built() {
+namespace f16 {
+
+bool built() {
     return ZENDNNL_NR32_F16_KERNELS != 0;
 }
 
-ukernel_fn select_f16(const int mr, const epilogue ep, const bool unaligned) {
+ukernel_fn narrow(const int mr, const epilogue ep, bool, const bool unaligned,
+        scale_groups) {
 #if ZENDNNL_NR32_F16_KERNELS
     switch (ep) {
         case epilogue::plain:
@@ -242,6 +232,8 @@ ukernel_fn select_f16(const int mr, const epilogue ep, const bool unaligned) {
     return nullptr;
 #endif
 }
+
+} // namespace f16
 
 } // namespace nr32
 } // namespace ntile_flat_parallel

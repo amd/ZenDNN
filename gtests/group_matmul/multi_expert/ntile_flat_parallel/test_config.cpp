@@ -25,9 +25,10 @@
 #include <vector>
 
 #include "lowoha_operators/matmul/group_matmul/common/grp_matmul_machine.hpp"
-#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/nr32_pack.hpp"
-#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/nr32_tile.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/formats/formats.hpp"
 #include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/ntile_flat_parallel_config.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/pack/nr32_pack.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/tile/nr32_tile.hpp"
 
 namespace {
 
@@ -175,8 +176,7 @@ protected:
 TEST_F(NTileFlatParallelConfig, TheDefaults) {
     mm::test_api::set_ntile_flat_parallel_config("");
     EXPECT_TRUE(mm::test_api::ntile_flat_parallel_config_warnings().empty());
-    for (const data_type_t wei : {data_type_t::bf16, data_type_t::f16,
-                 data_type_t::s8, data_type_t::s4}) {
+    for (const nfp::nr32::format_desc &wei : nfp::nr32::kFormats) {
         for (const nfp::api_kind api :
                 {nfp::api_kind::routed, nfp::api_kind::grouped}) {
             for (const grp_matmul_phase phase :
@@ -194,9 +194,9 @@ TEST_F(NTileFlatParallelConfig, TheDefaults) {
                     gm::machine().l2_budget_bytes);
         }
     }
-    EXPECT_EQ(nfp::u8_src(data_type_t::s8, nfp::api_kind::routed),
+    EXPECT_EQ(nfp::u8_src(nfp::nr32::s8::kFormat, nfp::api_kind::routed),
             gm::dot_rates().u8_src_pays);
-    EXPECT_EQ(nfp::u8_src(data_type_t::s8, nfp::api_kind::grouped),
+    EXPECT_EQ(nfp::u8_src(nfp::nr32::s8::kFormat, nfp::api_kind::grouped),
             gm::dot_rates().u8_src_pays);
     const nfp::limits_t &l = nfp::limits();
     EXPECT_EQ(l.gather_rows, 16);
@@ -212,26 +212,26 @@ TEST_F(NTileFlatParallelConfig, TheFirstMatchingClauseThatSetsASettingWins) {
             "phase=prompt,dtype=s8:prompt_units=12;api=grouped:units=5;"
             "units=3,prompt_units=4,heavy_light=off;phase=decode:units=9");
     EXPECT_TRUE(mm::test_api::ntile_flat_parallel_config_warnings().empty());
-    const auto knobs = [](grp_matmul_phase p, data_type_t w, nfp::api_kind a) {
-        return nfp::call_knobs_for(p, w, a);
-    };
-    const nfp::call_knobs s8_prompt = knobs(
-            grp_matmul_phase::prompt, data_type_t::s8, nfp::api_kind::routed);
+    const auto knobs
+            = [](grp_matmul_phase p, const nfp::nr32::format_desc &w,
+                      nfp::api_kind a) { return nfp::call_knobs_for(p, w, a); };
+    const nfp::call_knobs s8_prompt = knobs(grp_matmul_phase::prompt,
+            nfp::nr32::s8::kFormat, nfp::api_kind::routed);
     EXPECT_EQ(s8_prompt.prompt_units, 12);
     EXPECT_EQ(s8_prompt.units, 3);
     EXPECT_FALSE(s8_prompt.heavy_light);
-    const nfp::call_knobs bf16_prompt = knobs(
-            grp_matmul_phase::prompt, data_type_t::bf16, nfp::api_kind::routed);
+    const nfp::call_knobs bf16_prompt = knobs(grp_matmul_phase::prompt,
+            nfp::nr32::bf16::kFormat, nfp::api_kind::routed);
     EXPECT_EQ(bf16_prompt.prompt_units, 4);
-    EXPECT_EQ(knobs(grp_matmul_phase::decode, data_type_t::s4,
+    EXPECT_EQ(knobs(grp_matmul_phase::decode, nfp::nr32::s4::kFormat,
                       nfp::api_kind::grouped)
                       .units,
             5);
-    EXPECT_EQ(knobs(grp_matmul_phase::decode, data_type_t::s4,
+    EXPECT_EQ(knobs(grp_matmul_phase::decode, nfp::nr32::s4::kFormat,
                       nfp::api_kind::routed)
                       .units,
             3);
-    EXPECT_EQ(knobs(grp_matmul_phase::decode, data_type_t::s4,
+    EXPECT_EQ(knobs(grp_matmul_phase::decode, nfp::nr32::s4::kFormat,
                       nfp::api_kind::routed)
                       .sweep_rows,
             mm::kDecodeMaxM);
@@ -246,23 +246,26 @@ TEST_F(NTileFlatParallelConfig, PlanSettingsAndLimits) {
             "scratch_keep_mib=64");
     EXPECT_TRUE(mm::test_api::ntile_flat_parallel_config_warnings().empty());
     const gm::machine_t &m = gm::machine();
-    EXPECT_EQ(nfp::l2_budget_bytes(data_type_t::s8, nfp::api_kind::routed),
+    EXPECT_EQ(
+            nfp::l2_budget_bytes(nfp::nr32::s8::kFormat, nfp::api_kind::routed),
             static_cast<int64_t>(m.l2_plan_bytes * 0.5));
-    EXPECT_EQ(nfp::l2_budget_bytes(data_type_t::bf16, nfp::api_kind::routed),
+    EXPECT_EQ(nfp::l2_budget_bytes(
+                      nfp::nr32::bf16::kFormat, nfp::api_kind::routed),
             m.l2_budget_bytes);
-    EXPECT_EQ(nfp::plan_knobs_for(data_type_t::s8, nfp::api_kind::grouped)
-                      .subtile_rows,
+    EXPECT_EQ(
+            nfp::plan_knobs_for(nfp::nr32::s8::kFormat, nfp::api_kind::grouped)
+                    .subtile_rows,
             8);
-    EXPECT_TRUE(nfp::u8_src(data_type_t::s8, nfp::api_kind::routed));
+    EXPECT_TRUE(nfp::u8_src(nfp::nr32::s8::kFormat, nfp::api_kind::routed));
     // The dtype clause comes first and sets u8_src for grouped calls too.
-    EXPECT_TRUE(nfp::u8_src(data_type_t::s8, nfp::api_kind::grouped));
+    EXPECT_TRUE(nfp::u8_src(nfp::nr32::s8::kFormat, nfp::api_kind::grouped));
     mm::test_api::set_ntile_flat_parallel_config(
             "api=grouped:u8_src=off;u8_src=on");
-    EXPECT_FALSE(nfp::u8_src(data_type_t::s8, nfp::api_kind::grouped));
-    EXPECT_TRUE(nfp::u8_src(data_type_t::s8, nfp::api_kind::routed));
+    EXPECT_FALSE(nfp::u8_src(nfp::nr32::s8::kFormat, nfp::api_kind::grouped));
+    EXPECT_TRUE(nfp::u8_src(nfp::nr32::s8::kFormat, nfp::api_kind::routed));
     // Only s8 has u8-source kernels.
-    EXPECT_FALSE(nfp::u8_src(data_type_t::s4, nfp::api_kind::routed));
-    EXPECT_FALSE(nfp::u8_src(data_type_t::bf16, nfp::api_kind::routed));
+    EXPECT_FALSE(nfp::u8_src(nfp::nr32::s4::kFormat, nfp::api_kind::routed));
+    EXPECT_FALSE(nfp::u8_src(nfp::nr32::bf16::kFormat, nfp::api_kind::routed));
     mm::test_api::set_ntile_flat_parallel_config(
             "gather_rows=8,call_sites=7,scratch_keep_mib=64");
     EXPECT_EQ(nfp::limits().gather_rows, 8);
@@ -297,8 +300,8 @@ TEST_F(NTileFlatParallelConfig, BadClausesAreDroppedWithOneWarningEach) {
     mm::test_api::set_ntile_flat_parallel_config(text.c_str());
     EXPECT_EQ(mm::test_api::ntile_flat_parallel_config_warnings().size(),
             bad.size());
-    EXPECT_EQ(nfp::call_knobs_for(grp_matmul_phase::decode, data_type_t::bf16,
-                      nfp::api_kind::routed)
+    EXPECT_EQ(nfp::call_knobs_for(grp_matmul_phase::decode,
+                      nfp::nr32::bf16::kFormat, nfp::api_kind::routed)
                       .units,
             7);
     EXPECT_EQ(nfp::limits().gather_rows, 16);
@@ -307,7 +310,7 @@ TEST_F(NTileFlatParallelConfig, BadClausesAreDroppedWithOneWarningEach) {
 // The L2 budget and subtile rows size a plan's subtiles.
 TEST(NTileFlatParallelPlan, TheBudgetSizesTheSubtiles) {
     nfp::nr32::weight_desc d;
-    d.wei = data_type_t::bf16;
+    d.fmt = &nfp::nr32::bf16::kFormat;
     d.K = 4096;
     d.N = 4096;
     d.trans = true;

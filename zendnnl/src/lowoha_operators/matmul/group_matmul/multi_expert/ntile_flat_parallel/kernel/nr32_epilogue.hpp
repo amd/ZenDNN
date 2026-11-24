@@ -14,12 +14,12 @@
  * limitations under the License.
  *******************************************************************************/
 
-/// Epilogue pieces the `nr32_ukernel_*.cpp` kernels share: bias loads,
-/// stores of a step's last, partial columns, and the gated activations.
-/// Internal to those files.
+/// The epilogue every format's kernels (formats/<format>/<format>_kernels.cpp)
+/// share: bias loads, the gated activations, and the stores of a step's
+/// outputs, the one place an output type lands.  Internal to those files.
 
-#ifndef ZENDNNL_GROUP_MATMUL_NTILE_FLAT_PARALLEL_NR32_KERNEL_COMMON_HPP
-#define ZENDNNL_GROUP_MATMUL_NTILE_FLAT_PARALLEL_NR32_KERNEL_COMMON_HPP
+#ifndef ZENDNNL_GROUP_MATMUL_NTILE_FLAT_PARALLEL_KERNEL_NR32_EPILOGUE_HPP
+#define ZENDNNL_GROUP_MATMUL_NTILE_FLAT_PARALLEL_KERNEL_NR32_EPILOGUE_HPP
 
 #include <cstdint>
 
@@ -27,7 +27,7 @@
 
 #include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/group_matmul/common/group_matmul_act_avx512.hpp"
-#include "nr32_ukernel.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/kernel/nr32_ukernel.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -144,6 +144,63 @@ ZENDNNL_ALWAYS_INLINE static inline __m512
     }
 }
 
+/// How an output element of type `Dst` (`format_desc::dst`) is held: 16
+/// bits for bf16 and f16.  An FP32 output would be held as `float` here,
+/// with its stores in `store_out` (the README lists what else it needs).
+template <data_type_t Dst>
+struct out_elem;
+template <>
+struct out_elem<data_type_t::bf16> {
+    using type = uint16_t;
+};
+template <>
+struct out_elem<data_type_t::f16> {
+    using type = uint16_t;
+};
+template <data_type_t Dst>
+using out_elem_t = typename out_elem<Dst>::type;
+
+/// Stores the first `lanes` of `v` as output type `Dst`
+/// (`format_desc::dst`).
+template <data_type_t Dst>
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+ZENDNNL_ALWAYS_INLINE static inline void store_out(
+        out_elem_t<Dst> *dst, __m512 v, int lanes) {
+    if constexpr (Dst == data_type_t::f16) {
+        store_f16(dst, v, lanes);
+    } else {
+        static_assert(Dst == data_type_t::bf16, "a 16-bit output type");
+        store_bf16(dst, v, lanes);
+    }
+}
+
+/// Stores row `dst` of a step from its two vectors' f32 results: both
+/// (`cols` outputs) for `plain`, else one output per (gate, up) pair.
+template <epilogue Ep, data_type_t Dst>
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,avx512dq,fma")
+ZENDNNL_ALWAYS_INLINE static inline void store_step(
+        out_elem_t<Dst> *dst, __m512 lo, __m512 hi, int cols, act_mode_t mode) {
+    if constexpr (Ep == epilogue::plain) {
+        store_out<Dst>(dst, lo, cols);
+        store_out<Dst>(dst + 16, hi, cols - 16);
+    } else {
+        store_out<Dst>(dst, gated_out<Ep>(lo, hi, mode), cols);
+    }
+}
+
+/// Stores row `dst` of a split step of 32 outputs, `cols` of them, from the
+/// f32 results of two gate vectors and two up vectors: a wide kernel's gate
+/// and up blocks, or the halves of f16's 32-column gate and up vectors.
+template <epilogue Ep, data_type_t Dst>
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,avx512dq,fma")
+ZENDNNL_ALWAYS_INLINE static inline void store_wide_step(out_elem_t<Dst> *dst,
+        __m512 gate0, __m512 gate1, __m512 up0, __m512 up1, int cols,
+        act_mode_t mode) {
+    static_assert(split(Ep), "wide steps serve split epilogues");
+    store_out<Dst>(dst, gated_out<Ep>(gate0, up0, mode), cols);
+    store_out<Dst>(dst + 16, gated_out<Ep>(gate1, up1, mode), cols - 16);
+}
+
 /// The 32-bit lane indices that shift a vector pair down by `shift` lanes.
 ZENDNNL_TARGET("avx512f")
 static inline __m512i shift_index32(int shift) {
@@ -157,4 +214,4 @@ static inline __m512i shift_index32(int shift) {
 } // namespace lowoha
 } // namespace zendnnl
 
-#endif // ZENDNNL_GROUP_MATMUL_NTILE_FLAT_PARALLEL_NR32_KERNEL_COMMON_HPP
+#endif // ZENDNNL_GROUP_MATMUL_NTILE_FLAT_PARALLEL_KERNEL_NR32_EPILOGUE_HPP

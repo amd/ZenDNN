@@ -33,7 +33,8 @@
 
 #include <immintrin.h>
 
-#include "nr32_kernel_common.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/formats/s8/s8.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/kernel/nr32_epilogue.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -44,6 +45,9 @@ namespace nr32 {
 namespace {
 
 using namespace kernel;
+
+/// What the kernels store: their row's output type.
+constexpr data_type_t kDst = s8::kFormat.dst;
 
 /// Bytes from one block row to the next.
 constexpr int kRow = 128;
@@ -148,7 +152,7 @@ static void s8_kernel(const ukernel_args &p) {
     const __m512 bias1 = has_bias
             ? load_bias16(p.bias, p.bias_t, p.col_next, lanes16<Ep>(cols, 1))
             : _mm512_setzero_ps();
-    auto *C = static_cast<uint16_t *>(p.c);
+    auto *C = static_cast<out_elem_t<kDst> *>(p.c);
     const int ldc = p.ldc;
     [[maybe_unused]] const act_mode_t mode
             = gated(Ep) ? act_mode() : act_mode_t {};
@@ -160,13 +164,8 @@ static void s8_kernel(const ukernel_args &p) {
                 c##r##0, comp0, _mm512_mul_ps(ss, ws0), bias0, has_bias); \
         const __m512 hi = dequant( \
                 c##r##1, comp1, _mm512_mul_ps(ss, ws1), bias1, has_bias); \
-        uint16_t *dst = C + static_cast<size_t>(r) * ldc; \
-        if constexpr (Ep == epilogue::plain) { \
-            store_bf16(dst, lo, cols); \
-            store_bf16(dst + 16, hi, cols - 16); \
-        } else { \
-            store_bf16(dst, gated_out<Ep>(lo, hi, mode), cols); \
-        } \
+        store_step<Ep, kDst>( \
+                C + static_cast<size_t>(r) * ldc, lo, hi, cols, mode); \
     }
     NR32_S8_STORE(0)
     NR32_S8_STORE(1)
@@ -247,7 +246,7 @@ static void s8_wide_kernel(const ukernel_args &p) {
                 ? load_bias16(p.bias, p.bias_t, col_of[v], lanes_of[v])
                 : _mm512_setzero_ps();
     }
-    auto *C = static_cast<uint16_t *>(p.c);
+    auto *C = static_cast<out_elem_t<kDst> *>(p.c);
     const act_mode_t mode = act_mode();
 #pragma GCC unroll 6
     for (int m = 0; m < MR; ++m) {
@@ -258,9 +257,8 @@ static void s8_wide_kernel(const ukernel_args &p) {
             f[v] = dequant(c[m][v], comp[v], _mm512_mul_ps(ss, ws[v]), bias[v],
                     has_bias);
         }
-        uint16_t *dst = C + static_cast<size_t>(m) * p.ldc;
-        store_bf16(dst, gated_out<Ep>(f[0], f[2], mode), cols);
-        store_bf16(dst + 16, gated_out<Ep>(f[1], f[3], mode), cols - 16);
+        store_wide_step<Ep, kDst>(C + static_cast<size_t>(m) * p.ldc, f[0],
+                f[1], f[2], f[3], cols, mode);
     }
 }
 
@@ -400,7 +398,7 @@ static void s8_group_kernel(const ukernel_args &p) {
     const __m512 bias1 = has_bias
             ? load_bias16(p.bias, p.bias_t, p.col_next, lanes16<Ep>(cols, 1))
             : _mm512_setzero_ps();
-    auto *C = static_cast<uint16_t *>(p.c);
+    auto *C = static_cast<out_elem_t<kDst> *>(p.c);
     [[maybe_unused]] const act_mode_t mode
             = gated(Ep) ? act_mode() : act_mode_t {};
 #pragma GCC unroll 12
@@ -409,13 +407,8 @@ static void s8_group_kernel(const ukernel_args &p) {
                 _mm512_load_ps(facc[m][0]), p, m, bias0, has_bias);
         const __m512 hi = group_out<kSrcGroups>(
                 _mm512_load_ps(facc[m][1]), p, m, bias1, has_bias);
-        uint16_t *dst = C + static_cast<size_t>(m) * p.ldc;
-        if constexpr (Ep == epilogue::plain) {
-            store_bf16(dst, lo, cols);
-            store_bf16(dst + 16, hi, cols - 16);
-        } else {
-            store_bf16(dst, gated_out<Ep>(lo, hi, mode), cols);
-        }
+        store_step<Ep, kDst>(
+                C + static_cast<size_t>(m) * p.ldc, lo, hi, cols, mode);
     }
 }
 
@@ -492,7 +485,7 @@ static void s8_group_wide_kernel(const ukernel_args &p) {
                 ? load_bias16(p.bias, p.bias_t, col_of[v], lanes_of[v])
                 : _mm512_setzero_ps();
     }
-    auto *C = static_cast<uint16_t *>(p.c);
+    auto *C = static_cast<out_elem_t<kDst> *>(p.c);
     const act_mode_t mode = act_mode();
 #pragma GCC unroll 6
     for (int m = 0; m < MR; ++m) {
@@ -502,9 +495,8 @@ static void s8_group_wide_kernel(const ukernel_args &p) {
             f[v] = group_out<kSrcGroups>(
                     _mm512_load_ps(facc[m][v]), p, m, bias[v], has_bias);
         }
-        uint16_t *dst = C + static_cast<size_t>(m) * p.ldc;
-        store_bf16(dst, gated_out<Ep>(f[0], f[2], mode), cols);
-        store_bf16(dst + 16, gated_out<Ep>(f[1], f[3], mode), cols - 16);
+        store_wide_step<Ep, kDst>(C + static_cast<size_t>(m) * p.ldc, f[0],
+                f[1], f[2], f[3], cols, mode);
     }
 }
 
@@ -635,33 +627,32 @@ ukernel_fn pick_ep(const int mr, const epilogue ep, const bool unaligned) {
 
 } // namespace
 
-ukernel_fn select_s8(const int mr, const epilogue ep, const bool src_u8,
-        const bool unaligned) {
-    return src_u8 ? pick_ep<true>(mr, ep, unaligned)
-                  : pick_ep<false>(mr, ep, unaligned);
-}
+namespace s8 {
 
-ukernel_fn select_s8_groups(const int mr, const epilogue ep, const bool src_u8,
-        const bool unaligned, const bool src_groups) {
-    if (src_u8) {
-        return src_groups ? pick_groups_ep<true, true>(mr, ep, unaligned)
-                          : pick_groups_ep<true, false>(mr, ep, unaligned);
+ukernel_fn narrow(const int mr, const epilogue ep, const bool src_u8,
+        const bool unaligned, const scale_groups groups) {
+    if (!groups.any()) {
+        return src_u8 ? pick_ep<true>(mr, ep, unaligned)
+                      : pick_ep<false>(mr, ep, unaligned);
     }
-    return src_groups ? pick_groups_ep<false, true>(mr, ep, unaligned)
-                      : pick_groups_ep<false, false>(mr, ep, unaligned);
-}
-
-ukernel_fn select_s8_groups_wide(const int mr, const epilogue ep,
-        const bool src_u8, const bool src_groups) {
     if (src_u8) {
-        return src_groups ? pick_groups_wide_ep<true, true>(mr, ep)
-                          : pick_groups_wide_ep<true, false>(mr, ep);
+        return groups.source ? pick_groups_ep<true, true>(mr, ep, unaligned)
+                             : pick_groups_ep<true, false>(mr, ep, unaligned);
     }
-    return src_groups ? pick_groups_wide_ep<false, true>(mr, ep)
-                      : pick_groups_wide_ep<false, false>(mr, ep);
+    return groups.source ? pick_groups_ep<false, true>(mr, ep, unaligned)
+                         : pick_groups_ep<false, false>(mr, ep, unaligned);
 }
 
-ukernel_fn select_s8_wide(const int mr, const epilogue ep, const bool src_u8) {
+ukernel_fn wide(const int mr, const epilogue ep, const bool src_u8, bool,
+        const scale_groups groups) {
+    if (groups.any()) {
+        if (src_u8) {
+            return groups.source ? pick_groups_wide_ep<true, true>(mr, ep)
+                                 : pick_groups_wide_ep<true, false>(mr, ep);
+        }
+        return groups.source ? pick_groups_wide_ep<false, true>(mr, ep)
+                             : pick_groups_wide_ep<false, false>(mr, ep);
+    }
     switch (ep) {
         case epilogue::silu_split:
             return src_u8 ? pick_wide<epilogue::silu_split, true>(mr)
@@ -672,6 +663,8 @@ ukernel_fn select_s8_wide(const int mr, const epilogue ep, const bool src_u8) {
         default: return nullptr;
     }
 }
+
+} // namespace s8
 
 } // namespace nr32
 } // namespace ntile_flat_parallel

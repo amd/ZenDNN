@@ -25,7 +25,8 @@
 
 #include <immintrin.h>
 
-#include "nr32_kernel_common.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/formats/bf16/bf16.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/kernel/nr32_epilogue.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -36,6 +37,9 @@ namespace nr32 {
 namespace {
 
 using namespace kernel;
+
+/// What the kernels store: their row's output type.
+constexpr data_type_t kDst = bf16::kFormat.dst;
 
 /// bf16 elements from one block row to the next.
 constexpr int kRow = 32 * 2;
@@ -199,21 +203,13 @@ static void bf16_kernel(const ukernel_args &p) {
         }
     }
 
-    auto *C = static_cast<uint16_t *>(p.c);
-    if constexpr (Ep == epilogue::plain) {
+    auto *C = static_cast<out_elem_t<kDst> *>(p.c);
+    [[maybe_unused]] const act_mode_t mode
+            = gated(Ep) ? act_mode() : act_mode_t {};
 #pragma GCC unroll 16
-        for (int m = 0; m < MR; ++m) {
-            uint16_t *dst = C + static_cast<size_t>(m) * p.ldc;
-            store_bf16(dst, acc[0][m][0], cols);
-            store_bf16(dst + 16, acc[0][m][1], cols - 16);
-        }
-    } else {
-        const act_mode_t mode = act_mode();
-#pragma GCC unroll 16
-        for (int m = 0; m < MR; ++m) {
-            store_bf16(C + static_cast<size_t>(m) * p.ldc,
-                    gated_out<Ep>(acc[0][m][0], acc[0][m][1], mode), cols);
-        }
+    for (int m = 0; m < MR; ++m) {
+        store_step<Ep, kDst>(C + static_cast<size_t>(m) * p.ldc, acc[0][m][0],
+                acc[0][m][1], cols, mode);
     }
 }
 
@@ -330,14 +326,13 @@ static void bf16_wide_kernel(const ukernel_args &p) {
                 acc[0][m][v] = _mm512_add_ps(acc[0][m][v], acc[1][m][v]);
     }
 
-    auto *C = static_cast<uint16_t *>(p.c);
+    auto *C = static_cast<out_elem_t<kDst> *>(p.c);
     const act_mode_t mode = act_mode();
 #pragma GCC unroll 6
     for (int m = 0; m < MR; ++m) {
-        uint16_t *dst = C + static_cast<size_t>(m) * p.ldc;
-        store_bf16(dst, gated_out<Ep>(acc[0][m][0], acc[0][m][2], mode), cols);
-        store_bf16(dst + 16, gated_out<Ep>(acc[0][m][1], acc[0][m][3], mode),
-                cols - 16);
+        store_wide_step<Ep, kDst>(C + static_cast<size_t>(m) * p.ldc,
+                acc[0][m][0], acc[0][m][1], acc[0][m][2], acc[0][m][3], cols,
+                mode);
     }
 }
 
@@ -371,20 +366,10 @@ ukernel_fn pick(const int mr) {
 
 } // namespace
 
-ukernel_fn select_bf16_wide(
-        const int mr, const epilogue ep, const bool two_chains) {
-    switch (ep) {
-        case epilogue::silu_split:
-            return two_chains ? pick_wide<epilogue::silu_split, true>(mr)
-                              : pick_wide<epilogue::silu_split, false>(mr);
-        case epilogue::gelu_split:
-            return two_chains ? pick_wide<epilogue::gelu_split, true>(mr)
-                              : pick_wide<epilogue::gelu_split, false>(mr);
-        default: return nullptr;
-    }
-}
+namespace bf16 {
 
-ukernel_fn select_bf16(const int mr, const epilogue ep, const bool unaligned) {
+ukernel_fn narrow(const int mr, const epilogue ep, bool, const bool unaligned,
+        scale_groups) {
     switch (ep) {
         case epilogue::plain:
             return unaligned ? nullptr : pick<epilogue::plain, false>(mr);
@@ -400,6 +385,21 @@ ukernel_fn select_bf16(const int mr, const epilogue ep, const bool unaligned) {
     }
     return nullptr;
 }
+
+ukernel_fn wide(const int mr, const epilogue ep, bool, const bool two_chains,
+        scale_groups) {
+    switch (ep) {
+        case epilogue::silu_split:
+            return two_chains ? pick_wide<epilogue::silu_split, true>(mr)
+                              : pick_wide<epilogue::silu_split, false>(mr);
+        case epilogue::gelu_split:
+            return two_chains ? pick_wide<epilogue::gelu_split, true>(mr)
+                              : pick_wide<epilogue::gelu_split, false>(mr);
+        default: return nullptr;
+    }
+}
+
+} // namespace bf16
 
 } // namespace nr32
 } // namespace ntile_flat_parallel

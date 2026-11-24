@@ -16,16 +16,15 @@
 
 /// N-tile flat parallel's weight packs.
 ///
-/// A pack is built from a weight and its metadata alone: its type, shape,
-/// layout and weight scales.  Nothing about the call that will read it (the
-/// activation, a bias, the output type, the source type or the batch) enters
-/// it, so the same pack serves every call, and a pack can be made before any
-/// call does.
+/// A pack is built from a weight and its metadata alone: its format, shape,
+/// layout and weight scales.  Nothing else about the calls that will read it
+/// (the activation, a bias or the batch) enters it, so the same pack serves
+/// every call of its format, and a pack can be made before any call does.
 ///
 /// Each expert's weight is stored as blocks of `kNr` output columns, in the
 /// weight's own column order.  A block holds its columns' weights for every
 /// K group of the type's dot-product width, one word of its format
-/// (`nr32_format.hpp`) per column and group:
+/// (formats/<format>/) per column and group:
 ///
 ///   bf16: [ceil(K/2)][32][2]    the VDPBF16PS pair order
 ///   f16:  [K][32]               one K element per lane
@@ -35,10 +34,10 @@
 ///                               in its high one, each XOR-ed with 8
 ///
 /// K is zero-padded to the group width.  Every block row is 128 bytes (64 for
-/// f16), so its two 16-column halves are one 64-byte line each.  A quantized
+/// f16), so its two 16-column halves are one 64-byte line each.  A scaled
 /// pack also keeps, per expert and in the weight's column order, the f32
-/// weight scales of its G scale groups along K and the sums its kernels'
-/// source recentering subtracts:
+/// weight scales of its G scale groups along K and, for a format with `sums`,
+/// the sums its kernels' source recentering subtracts:
 ///
 ///   s8: comp[G][N_pad] = sum over the group of w,          scale[G][N_pad]
 ///   s4: comp[G][N_pad] = -128 * sum over the group of w,   scale[G][N_pad]
@@ -46,38 +45,24 @@
 /// G is 1 for a per-channel s8 weight.  `N_pad` is `N` rounded up to whole
 /// blocks.  Padded columns hold zero weights, zero sums and zero scales.
 
-#ifndef ZENDNNL_GROUP_MATMUL_NTILE_FLAT_PARALLEL_NR32_PACK_HPP
-#define ZENDNNL_GROUP_MATMUL_NTILE_FLAT_PARALLEL_NR32_PACK_HPP
+#ifndef ZENDNNL_GROUP_MATMUL_NTILE_FLAT_PARALLEL_PACK_NR32_PACK_HPP
+#define ZENDNNL_GROUP_MATMUL_NTILE_FLAT_PARALLEL_PACK_NR32_PACK_HPP
 
 #include <atomic>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <vector>
 
-#include "../../common/group_matmul_parallel_common.hpp"
-#include "nr32_format.hpp"
+#include "lowoha_operators/matmul/group_matmul/common/group_matmul_parallel_common.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/formats/formats.hpp"
 
 namespace zendnnl {
 namespace lowoha {
 namespace matmul {
 namespace ntile_flat_parallel {
 namespace nr32 {
-
-/// A weight as a pack reads it.
-struct weight_desc {
-    /// A type of `kFormats`.
-    data_type_t wei = data_type_t::none;
-    int K = 0;
-    int N = 0;
-    /// `[N, K]` rows (`nn.Linear`) when true, else `[K, N]`.
-    bool trans = true;
-    /// Elements between consecutive rows of the weight.
-    int ldb = 0;
-    /// Weights per scale group along K: s4 always, s8 with per-group scales.
-    /// Zero for an s8 weight with one scale per column, and for bf16 and f16.
-    int group_size = 0;
-};
 
 /// Columns a pack of `N` columns holds.
 int padded_cols(int N);
@@ -88,7 +73,7 @@ size_t block_bytes(const weight_desc &desc);
 /// Whether `desc` is a weight N-tile flat parallel packs: a format's type, a
 /// positive shape, a leading dimension that holds a row, and scale groups that
 /// hold whole words and divide K, which a format that always groups its scales
-/// needs and another quantized one may have: a group size that is a multiple
+/// needs and another scaled one may have: a group size that is a multiple
 /// of 8 for s4 and, when an s8 weight has one, of 4.
 bool packable(const weight_desc &desc);
 
@@ -96,7 +81,7 @@ bool packable(const weight_desc &desc);
 struct packed_expert {
     /// `padded_cols(N) / kNr` blocks, 64-byte aligned.
     std::shared_ptr<uint8_t> blocks;
-    /// Quantized types only, in the weight's column order (see the file
+    /// Formats with `sums` only, in the weight's column order (see the file
     /// comment).  A weight's packs share its sums.
     std::shared_ptr<const std::vector<int32_t>> comp;
     std::vector<float> scale;
@@ -107,12 +92,16 @@ struct packed_expert {
 /// What the packs of every expert of a weight share.
 struct pack_layout {
     weight_desc desc;
-    /// `desc.wei`'s format.
-    const format_desc *fmt = nullptr;
     int n_pad = 0;
     /// Scale groups along K: K / group_size with a group size, else 1.
     int groups = 1;
     size_t block_bytes = 0;
+
+    /// Its format, `desc.fmt`: set, as `desc` is `packable`.
+    const format_desc &format() const {
+        assert(desc.fmt != nullptr);
+        return *desc.fmt;
+    }
 };
 
 /// The layout of every pack of a `packable` weight `desc`.
@@ -166,4 +155,4 @@ void unpack(const packed_weights &pw, int e, void *dst, int ld);
 } // namespace lowoha
 } // namespace zendnnl
 
-#endif // ZENDNNL_GROUP_MATMUL_NTILE_FLAT_PARALLEL_NR32_PACK_HPP
+#endif // ZENDNNL_GROUP_MATMUL_NTILE_FLAT_PARALLEL_PACK_NR32_PACK_HPP

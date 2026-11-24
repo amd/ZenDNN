@@ -21,9 +21,10 @@
 /// `[filters:]key=value,...` separated by `;`, as the native BRGEMM's config
 /// takes them.  For each setting, the first clause whose filters hold and that
 /// sets it applies.  Filters: `phase=decode|prompt`, `dtype=` a format's name
-/// (`nr32_format.hpp`: bf16, f16, s8, s4) and `api=routed|grouped`.  A weight's
-/// plans read the plan settings, so those take no phase filter, and the process
-/// limits take no filter at all.  A bad clause is dropped with one warning.
+/// (its row's `name`, formats/: bf16, f16, s8 or s4 today) and
+/// `api=routed|grouped`.  A weight's plans read the plan settings, so those
+/// take no phase filter, and the process limits take no filter at all.  A bad
+/// clause is dropped with one warning.
 
 #ifndef ZENDNNL_GROUP_MATMUL_NTILE_FLAT_PARALLEL_CONFIG_HPP
 #define ZENDNNL_GROUP_MATMUL_NTILE_FLAT_PARALLEL_CONFIG_HPP
@@ -92,21 +93,25 @@ struct limits_t {
     size_t warmed_pools = 4096;
 };
 
-/// The settings a call of `phase` on `wei` weights through `api` reads.
-const call_knobs &call_knobs_for(
-        grp_matmul_phase phase, data_type_t wei, api_kind api);
+namespace nr32 {
+struct format_desc;
+} // namespace nr32
 
-/// The settings plans of `wei` weights for `api` read.
-const plan_knobs &plan_knobs_for(data_type_t wei, api_kind api);
+/// The settings a call of `phase` on format `f` through `api` reads.
+const call_knobs &call_knobs_for(
+        grp_matmul_phase phase, const nr32::format_desc &f, api_kind api);
+
+/// The settings plans of format `f` for `api` read.
+const plan_knobs &plan_knobs_for(const nr32::format_desc &f, api_kind api);
 
 const limits_t &limits();
 
-/// The L2 bytes plans of `wei` weights for `api` give their weights.
-int64_t l2_budget_bytes(data_type_t wei, api_kind api);
+/// The L2 bytes plans of format `f` for `api` give their weights.
+int64_t l2_budget_bytes(const nr32::format_desc &f, api_kind api);
 
-/// Whether plans of `wei` weights for `api` run the u8-source kernels: never
+/// Whether plans of format `f` for `api` run the u8-source kernels: never
 /// for a format without them, which DA8W8's s8 alone has.
-bool u8_src(data_type_t wei, api_kind api);
+bool u8_src(const nr32::format_desc &f, api_kind api);
 
 } // namespace ntile_flat_parallel
 

@@ -28,8 +28,8 @@
 /// (row runs, column range) units of whole kernel blocks of columns, queued
 /// every W13 unit before any W2 unit.  The first W13 units to reach a run
 /// share the copies of its rows.  The thread that finishes a run's last W13
-/// unit quantizes that run's intermediate rows when the weights are
-/// quantized, and the W2 units over the run wait only for that.
+/// unit quantizes that run's intermediate rows when W2 reads s8 rows, and
+/// the W2 units over the run wait only for that.
 ///   * A decode call (one block per expert) has one block per run, and its
 ///     queue takes the heaviest expert first.  When the team has more
 ///     threads than one L3 has cores, each thread runs its own units first,
@@ -70,10 +70,10 @@
 /// no call reads anymore.
 ///
 /// Scratch, per calling thread: about (3H + 3I + 24) bytes per (token, slot)
-/// pair and (H + 4) per token of the largest quantized call the thread has
-/// run, and (4H + 2I + 16) per pair of the largest 16-bit one, kept until the
-/// thread exits or calls `reset_thread_local_scratch()`; a call that needs
-/// more than 1 GiB frees its scratch when it returns.
+/// pair and (H + 4) per token of the largest call over s8 rows the thread has
+/// run, and (4H + 2I + 16) per pair of the largest over 16-bit rows, kept
+/// until the thread exits or calls `reset_thread_local_scratch()`; a call that
+/// needs more than 1 GiB frees its scratch when it returns.
 ///
 /// Reached from `routed_fused_moe_direct` when N-tile flat parallel is
 /// requested for the call's phase
@@ -98,6 +98,10 @@ namespace zendnnl {
 namespace lowoha {
 namespace matmul {
 namespace ntile_flat_parallel {
+
+namespace nr32 {
+struct format_desc;
+} // namespace nr32
 
 /// One projection of the layer for every expert, as the prepack reads it.
 struct projection {
@@ -135,18 +139,20 @@ struct layer_key {
     /// Intermediate size: W2's K; W13's N is `2 * I`.
     int I = 0;
     grp_matmul_gated_act_t act = grp_matmul_gated_act_t::none;
-    data_type_t wei = data_type_t::none;
+    /// The weights' format: a row of `nr32::kFormats` (routed_moe_dispatch
+    /// resolves it from the projections' types and scales).
+    const nr32::format_desc *fmt = nullptr;
     /// Each projection's bias type: `none` without a bias.
     data_type_t w13_bias = data_type_t::none;
     data_type_t w2_bias = data_type_t::none;
-    /// Each quantized projection's tokens take one source scale per weight
-    /// scale group rather than one.
+    /// Each projection over s8 rows: its tokens take one source scale per
+    /// weight scale group rather than one.
     bool w13_src_groups = false;
     bool w2_src_groups = false;
 
     bool operator==(const layer_key &o) const {
         return w13 == o.w13 && w2 == o.w2 && num_experts == o.num_experts
-                && H == o.H && I == o.I && act == o.act && wei == o.wei
+                && H == o.H && I == o.I && act == o.act && fmt == o.fmt
                 && w13_bias == o.w13_bias && w2_bias == o.w2_bias
                 && w13_src_groups == o.w13_src_groups
                 && w2_src_groups == o.w2_src_groups;
@@ -208,9 +214,9 @@ using describe_layer
 /// rows and runs them on the engine `execute_grouped` uses.  The layer's
 /// first call takes its experts' packs from the pack store, packing through
 /// `describe` the weights no call has packed.  Returns `unimplemented`,
-/// before writing anything, for a
-/// non-gated activation, an empty call, a slot whose expert is not resident or
-/// out of range, and a layer it cannot pack or has no kernels for on this CPU
+/// before writing anything, for a key without a format, a non-gated
+/// activation, an empty call, a slot whose expert is not resident or out of
+/// range, and a layer it cannot pack or has no kernels for on this CPU
 /// (a layer that fails to pack fails its calls until `flush()`); and
 /// `memory_bad_size` / `memory_bad_storage` when an allocation fails, after
 /// which the next call packs the layer again.
@@ -232,17 +238,17 @@ status_t execute(const layer_key &key, const layer_scales &scales,
 /// with the same activation and source scale form, finds their packs and its
 /// tile plans through its call site.  With a gated activation, Op1's output is
 /// the activation's `N / 2` columns of each row; the rest of a wider `dst`
-/// row is not written.  Quantized experts take weight scales per tensor,
-/// channel or group, and source scales per row or per (row, weight group):
-/// bf16 rows it quantizes so, or the caller's s8 rows (DA8W8) with such
+/// row is not written.  Scaled experts take weight scales per tensor, channel
+/// or group, and their s8 rows source scales per row or per (row, weight
+/// group): bf16 rows it quantizes so, or the caller's s8 rows (DA8W8) with such
 /// scales or one for all of them.  Returns `unimplemented`, with the reason
 /// logged and before writing anything, for a call it cannot serve: other than
 /// BF16, FP16, DA8W8 or W4A8 experts; other scale layouts; post-ops, zero
 /// points, transposed or scaled sources, non-constant or pre-packed weights;
 /// weight cache mode 0; and a weight it cannot pack or has no kernels for on
-/// this CPU.  A malformed `reduce` returns its validation status.  `since`
-/// is the flush count (`flush_count()`) as the call read it on entering the
-/// API: after a flush that ran since, the call runs on packs of its own and
+/// this CPU.  A malformed `reduce` returns its validation status.  `since` is
+/// the flush count (`flush_count()`) as the call read it on entering the API:
+/// after a flush that ran since, the call runs on packs of its own and
 /// publishes nothing.
 status_t execute_grouped(size_t num_ops, const std::vector<char> &layout,
         const std::vector<bool> &transA, const std::vector<bool> &transB,

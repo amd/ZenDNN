@@ -54,13 +54,26 @@ set(lowoha_group_matmul_sources
   group_matmul/common/grp_matmul_machine.cpp
   group_matmul/multi_expert/ntile_flat_parallel/ntile_flat_parallel_config.cpp
   group_matmul/multi_expert/ntile_flat_parallel/ntile_flat_parallel.cpp
-  group_matmul/multi_expert/ntile_flat_parallel/nr32_pack.cpp
-  group_matmul/multi_expert/ntile_flat_parallel/nr32_tile.cpp
-  group_matmul/multi_expert/ntile_flat_parallel/nr32_ukernel.cpp
-  group_matmul/multi_expert/ntile_flat_parallel/nr32_ukernel_bf16.cpp
-  group_matmul/multi_expert/ntile_flat_parallel/nr32_ukernel_f16.cpp
-  group_matmul/multi_expert/ntile_flat_parallel/nr32_ukernel_s4.cpp
-  group_matmul/multi_expert/ntile_flat_parallel/nr32_ukernel_s8.cpp
+  group_matmul/multi_expert/ntile_flat_parallel/api/api_common.cpp
+  group_matmul/multi_expert/ntile_flat_parallel/api/grouped.cpp
+  group_matmul/multi_expert/ntile_flat_parallel/api/routed.cpp
+  group_matmul/multi_expert/ntile_flat_parallel/engine/schedule.cpp
+  group_matmul/multi_expert/ntile_flat_parallel/engine/scratch.cpp
+  group_matmul/multi_expert/ntile_flat_parallel/engine/source.cpp
+  group_matmul/multi_expert/ntile_flat_parallel/pack/call_sites.cpp
+  group_matmul/multi_expert/ntile_flat_parallel/pack/scales.cpp
+  group_matmul/multi_expert/ntile_flat_parallel/pack/store.cpp
+  group_matmul/multi_expert/ntile_flat_parallel/pack/nr32_pack.cpp
+  group_matmul/multi_expert/ntile_flat_parallel/tile/nr32_tile.cpp
+  group_matmul/multi_expert/ntile_flat_parallel/kernel/nr32_ukernel.cpp
+  group_matmul/multi_expert/ntile_flat_parallel/formats/bf16/bf16_kernels.cpp
+  group_matmul/multi_expert/ntile_flat_parallel/formats/bf16/bf16_pack.cpp
+  group_matmul/multi_expert/ntile_flat_parallel/formats/f16/f16_kernels.cpp
+  group_matmul/multi_expert/ntile_flat_parallel/formats/f16/f16_pack.cpp
+  group_matmul/multi_expert/ntile_flat_parallel/formats/s4/s4_kernels.cpp
+  group_matmul/multi_expert/ntile_flat_parallel/formats/s4/s4_pack.cpp
+  group_matmul/multi_expert/ntile_flat_parallel/formats/s8/s8_kernels.cpp
+  group_matmul/multi_expert/ntile_flat_parallel/formats/s8/s8_pack.cpp
   group_matmul/executors/n_tile/prompt_tile/prompt_tile_topology.cpp
   group_matmul/executors/n_tile/prompt_tile/prompt_tile_tunables.cpp
   group_matmul/executors/n_tile/prompt_tile/prompt_tile_executor.cpp)

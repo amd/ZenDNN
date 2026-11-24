@@ -866,13 +866,18 @@ divide K, and each quantized projection takes one source scale per token
 Its pack is made from the weights alone: each expert's weight in blocks of 32
 output columns, in the weight's own column order, grouped along K for the
 kernels' dot products, with weight sums and FP32 weight scales per column and
-scale group for DA8W8 and W4A8 (`nr32_pack.hpp`). Each weight type is one row
-of N-tile flat parallel's format table (`nr32_format.hpp`): how its packs store it, the
-sources and outputs its kernels take, and their rows per call; the packs, the
-plans and both APIs' checks read the row. Nothing about a call (its activation, a bias,
-the source type, the batch) enters the pack, so one pack serves every
-activation: the kernels read SwiGLU-OAI's interleaved (gate, up) pairs from one
-block, and SiLU's and GELU's gate and up halves from blocks `I` columns apart.
+scale group for DA8W8 and W4A8 (`pack/nr32_pack.hpp`). Each weight format is
+one row of N-tile flat parallel's format table (`formats/formats.hpp`), kept in
+its own directory under `formats/` beside its packer and kernels: how its packs
+store it and its scales, the sources and outputs its kernels take, their rows
+per call, and the functions that pack it and pick its kernels. A call finds its
+row by its weight type, the type of the rows its kernels read and its scales'
+encoding, so formats may share a weight type; the packs, the plans and both
+APIs' checks read the row (the executor's `README.md` lists its files and the
+steps to add a weight format). Nothing else about a call (its activation, a
+bias, the batch) enters the pack, so one pack serves every activation: the
+kernels read SwiGLU-OAI's interleaved (gate, up) pairs from one block, and
+SiLU's and GELU's gate and up halves from blocks `I` columns apart.
 DA8W8 and W4A8 tokens are quantized once and copied to their slots. Each
 expert's rows are cut into blocks of at most 64, and both
 projections into units of whole kernel blocks of columns that every thread

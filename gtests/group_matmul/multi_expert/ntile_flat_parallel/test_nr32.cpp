@@ -38,12 +38,17 @@
 #include <vector>
 
 #include "common/float16.hpp"
-#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/nr32_pack.hpp"
-#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/nr32_tile.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/engine/source.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/formats/formats.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/pack/nr32_pack.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/tile/nr32_tile.hpp"
+#include "lowoha_operators/reorder/lowoha_reorder.hpp"
+#include "nr32_test_rows.hpp"
 
 namespace {
 
 namespace nr32 = zendnnl::lowoha::matmul::ntile_flat_parallel::nr32;
+namespace detail = zendnnl::lowoha::matmul::ntile_flat_parallel::detail;
 using data_type_t = zendnnl::common::data_type_t;
 using status_t = zendnnl::error_handling::status_t;
 using zendnnl::common::float16_t;
@@ -93,14 +98,12 @@ struct weight_set {
             int group_size, int experts, uint32_t seed,
             data_type_t sdt = data_type_t::f32) {
         desc = {};
-        desc.wei = wei;
+        desc.fmt = nr32_test::row_of(wei);
         desc.K = K;
         desc.N = N;
         desc.trans = trans;
         desc.ldb = (trans ? K : N) + ld_pad;
-        desc.group_size = wei == data_type_t::s4 || wei == data_type_t::s8
-                ? group_size
-                : 0;
+        desc.group_size = desc.fmt->scaled() ? group_size : 0;
         E = experts;
         scale_dt = sdt;
         std::mt19937 rng(seed);
@@ -154,7 +157,7 @@ struct weight_set {
                     value[e][static_cast<size_t>(n) * K + k] = v;
                 }
             }
-            if (wei == data_type_t::s8 || wei == data_type_t::s4) {
+            if (desc.fmt->scaled()) {
                 scale[e].resize(static_cast<size_t>(groups()) * N);
                 for (auto &s : scale[e]) {
                     s = sc(rng);
@@ -171,7 +174,7 @@ struct weight_set {
         std::vector<const void *> w, s;
         for (int e = 0; e < E; ++e) {
             w.push_back(raw[e].data());
-            if (desc.wei == data_type_t::s8 || desc.wei == data_type_t::s4) {
+            if (desc.fmt != nullptr && desc.fmt->scaled()) {
                 s.push_back(scale_dt == data_type_t::bf16
                                 ? static_cast<const void *>(
                                           scale_bf16[e].data())
@@ -321,7 +324,7 @@ TEST(Nr32Pack, RoundTripsEveryTypeLayoutAndPadding) {
 
 TEST(Nr32Pack, RefusesWhatItCannotPack) {
     nr32::weight_desc d;
-    d.wei = data_type_t::s4;
+    d.fmt = nr32_test::row_of(data_type_t::s4);
     d.K = 60;
     d.N = 32;
     d.ldb = 60;
@@ -339,7 +342,7 @@ TEST(Nr32Pack, RefusesWhatItCannotPack) {
     EXPECT_FALSE(nr32::packable(d)) << "leading dimension shorter than a row";
 
     d = {};
-    d.wei = data_type_t::s8;
+    d.fmt = nr32_test::row_of(data_type_t::s8);
     d.K = 64;
     d.N = 32;
     d.ldb = 64;
@@ -352,7 +355,7 @@ TEST(Nr32Pack, RefusesWhatItCannotPack) {
     EXPECT_TRUE(nr32::packable(d));
 
     d = {};
-    d.wei = data_type_t::bf16;
+    d.fmt = nr32_test::row_of(data_type_t::bf16);
     d.K = 64;
     d.N = 32;
     d.ldb = 64;
@@ -360,7 +363,7 @@ TEST(Nr32Pack, RefusesWhatItCannotPack) {
     d.group_size = 32;
     EXPECT_FALSE(nr32::packable(d)) << "groups on a 16-bit weight";
     d.group_size = 0;
-    d.wei = data_type_t::u8;
+    d.fmt = nr32_test::row_of(data_type_t::u8);
     EXPECT_FALSE(nr32::packable(d)) << "unsupported type";
 
     // Missing or mistyped scales.
@@ -470,14 +473,13 @@ struct rows_t {
 
 rows_t make_rows(const weight_set &ws, int M, uint32_t seed, int groups = 1) {
     const int K = ws.desc.K;
-    const data_type_t dt = ws.desc.wei;
+    const data_type_t dt = ws.desc.fmt->src;
     rows_t r;
     r.M = M;
     r.lda = K + 3;
     r.groups = groups;
     r.value.resize(static_cast<size_t>(M) * K);
-    const size_t es
-            = (dt == data_type_t::bf16 || dt == data_type_t::f16) ? 2 : 1;
+    const size_t es = static_cast<size_t>(ws.desc.fmt->src_bytes());
     r.bytes.assign(
             static_cast<size_t>(M) * r.lda * es + nr32::kRowReadSlack, 0x5a);
     std::mt19937 rng(seed);
@@ -509,12 +511,36 @@ rows_t make_rows(const weight_set &ws, int M, uint32_t seed, int groups = 1) {
     return r;
 }
 
+/// The values and scales of `M` bf16 rows `in` of `K` values quantized to s8,
+/// each in `groups` equal runs with a scale each, as the reference reads them.
+rows_t quantized_rows(
+        const std::vector<uint16_t> &in, int M, int K, int groups) {
+    rows_t r;
+    r.M = M;
+    r.lda = K;
+    r.groups = groups;
+    const int run = K / groups;
+    std::vector<int8_t> q(in.size());
+    r.scale.resize(static_cast<size_t>(M) * groups);
+    for (int m = 0; m < M; ++m) {
+        float *const scales = r.scale.data() + static_cast<size_t>(m) * groups;
+        for (int g = 0; g < groups; ++g) {
+            const size_t at
+                    = static_cast<size_t>(m) * K + static_cast<size_t>(g) * run;
+            zendnnl::lowoha::reorder::dynamic_per_token_quant_bf16_s8_native(
+                    in.data() + at, q.data() + at, scales + g, 1, run);
+        }
+    }
+    r.value.assign(q.begin(), q.end());
+    return r;
+}
+
 /// Row m's dot product with weight column n of expert e, in its scales.
 double dot_ref(const weight_set &ws, const rows_t &r, int e, int m, int n) {
     const int K = ws.desc.K;
     const float *a = r.value.data() + static_cast<size_t>(m) * K;
     const float *w = ws.value[e].data() + static_cast<size_t>(n) * K;
-    if (ws.desc.wei != data_type_t::s8 && ws.desc.wei != data_type_t::s4) {
+    if (!ws.desc.fmt->scaled()) {
         double s = 0.0;
         for (int k = 0; k < K; ++k)
             s += static_cast<double>(a[k]) * w[k];
@@ -567,13 +593,12 @@ bias_t make_bias(nr32::bias_kind kind, int N, uint32_t seed) {
     return b;
 }
 
-/// Runs plan columns [0, plan.cols) of expert `e` in two tiles split at a
-/// step and checks every output against the reference, and that no column
-/// past the output's end is written.
-void check_tile(const weight_set &ws, const nr32::packed_weights &pw,
+/// Runs plan columns [0, plan.cols) of expert `e` on the rows `src` in two
+/// tiles split at a step, and checks every output against the reference of
+/// `r`'s values, and that no column past the output's end is written.
+void check_tile_on(const weight_set &ws, const nr32::packed_weights &pw,
         const nr32::tile_plan &plan, int e, const rows_t &r, const bias_t &b,
-        bool src_u8) {
-    const data_type_t dt = ws.desc.wei;
+        const nr32::tile_source &src) {
     const int M = r.M;
     // Gated epilogues: gate columns [0, N / 2), up columns [N / 2, N).
     const int I = ws.desc.N / 2;
@@ -587,27 +612,21 @@ void check_tile(const weight_set &ws, const nr32::packed_weights &pw,
     const int ldc = out_cols + 5;
     const uint16_t poison = 0x7FC1;
     std::vector<uint16_t> dst(static_cast<size_t>(M) * ldc, poison);
-    std::vector<uint8_t> src = r.bytes;
-    if (src_u8) {
-        for (auto &v : src)
-            v ^= 0x80u;
-    }
     const int split = plan.cols / plan.step / 2 * plan.step;
     const void *bias
             = b.kind == nr32::bias_kind::none ? nullptr : b.bytes.data();
-    const float *scale = r.scale.empty() ? nullptr : r.scale.data();
     if (split > 0) {
-        nr32::run_tile(plan, pw, pw.experts[e], M, src.data(), r.lda, scale,
-                bias, b.kind, dst.data(), ldc, 0, split);
+        nr32::run_tile(plan, pw, pw.experts[e], M, src, bias, b.kind,
+                dst.data(), ldc, 0, split);
     }
-    nr32::run_tile(plan, pw, pw.experts[e], M, src.data(), r.lda, scale, bias,
-            b.kind, dst.data(), ldc, split, plan.cols - split);
+    nr32::run_tile(plan, pw, pw.experts[e], M, src, bias, b.kind, dst.data(),
+            ldc, split, plan.cols - split);
 
     const auto biased = [&](int m, int n) {
         return static_cast<float>(dot_ref(ws, r, e, m, n))
                 + (b.value.empty() ? 0.f : b.value[n]);
     };
-    const bool f16 = dt == data_type_t::f16;
+    const bool f16 = ws.desc.fmt->dst == data_type_t::f16;
     // FP16 accumulates within K blocks in FP16; every type rounds its output.
     const double rtol = f16 ? 1.5e-2 : 1.2e-2;
     const double atol = f16 ? 2e-2 : 1e-2;
@@ -648,6 +667,20 @@ void check_tile(const weight_set &ws, const nr32::packed_weights &pw,
     }
 }
 
+/// `check_tile_on` the bytes of `r`, XOR-ed with 0x80 for the u8-source
+/// kernels.
+void check_tile(const weight_set &ws, const nr32::packed_weights &pw,
+        const nr32::tile_plan &plan, int e, const rows_t &r, const bias_t &b,
+        bool src_u8) {
+    std::vector<uint8_t> src = r.bytes;
+    if (src_u8) {
+        for (auto &v : src)
+            v ^= 0x80u;
+    }
+    check_tile_on(ws, pw, plan, e, r, b,
+            {src.data(), r.lda, r.scale.empty() ? nullptr : r.scale.data()});
+}
+
 TEST(Nr32Tile, MatchesTheReferenceForEveryTypeAndEpilogue) {
     struct shape_t {
         int K, N, group;
@@ -659,7 +692,7 @@ TEST(Nr32Tile, MatchesTheReferenceForEveryTypeAndEpilogue) {
     int served = 0;
     for (const data_type_t dt : {data_type_t::bf16, data_type_t::f16,
                  data_type_t::s8, data_type_t::s4}) {
-        if (!nr32::isa_supported(dt)) continue;
+        if (!nr32::isa_supported(*nr32_test::row_of(dt))) continue;
         const bool s4 = dt == data_type_t::s4;
         // N: whole blocks, a block and a half, columns ending inside a
         // vector; as 2 * I: up columns on a vector, inside one (I % 16), and
@@ -717,7 +750,7 @@ TEST(Nr32Tile, MatchesTheReferenceWithScaleGroups) {
     uint32_t seed = 0x6600u;
     int served = 0;
     for (const data_type_t dt : {data_type_t::s8, data_type_t::s4}) {
-        if (!nr32::isa_supported(dt)) continue;
+        if (!nr32::isa_supported(*nr32_test::row_of(dt))) continue;
         // As 2 * I: up columns on a block (wide kernels), inside a vector,
         // and inside a vector of a block and a half.
         const std::vector<shape_t> shapes = dt == data_type_t::s8
@@ -768,9 +801,61 @@ TEST(Nr32Tile, MatchesTheReferenceWithScaleGroups) {
     if (served == 0) GTEST_SKIP() << "no NR32 kernel runs on this CPU";
 }
 
+// The rows a projection's source makes from bf16 rows, one scale per row or
+// per weight scale group and XOR-ed with 0x80 for the u8-source kernels, are
+// the rows its plan's kernels read.
+TEST(Nr32Tile, MatchesTheReferenceOnTheRowsItsSourceMakes) {
+    constexpr int kK = 128, kN = 80;
+    uint32_t seed = 0x6800u;
+    int served = 0;
+    for (const nr32::format_desc &f : nr32::kFormats) {
+        if (f.src != data_type_t::s8 || !nr32::isa_supported(f)) continue;
+        weight_set ws;
+        ws.build(f.wei, kK, kN, true, 0, 32, 2, seed++);
+        nr32::packed_weights pw;
+        ASSERT_EQ(ws.pack(pw), status_t::success);
+        for (const nr32::epilogue ep :
+                {nr32::epilogue::plain, nr32::epilogue::silu_split}) {
+            for (const bool src_groups : {false, true}) {
+                for (const bool u8 : {false, true}) {
+                    if (u8 && !f.u8_src) continue;
+                    SCOPED_TRACE(::testing::Message()
+                            << f.name << " " << epilogue_name(ep)
+                            << " src_groups=" << src_groups << " u8=" << u8);
+                    nr32::tile_plan plan;
+                    ASSERT_TRUE(nr32::make_plan(pw, ep, u8, plan, src_groups));
+                    const detail::source_spec spec
+                            = detail::source_of(pw, plan);
+                    const int M
+                            = 2 * std::max(plan.max_mr, plan.wide_max_mr) + 1;
+                    std::mt19937 rng(seed++);
+                    std::uniform_real_distribution<float> unit(-1.f, 1.f);
+                    std::vector<uint16_t> in(static_cast<size_t>(M) * kK);
+                    for (uint16_t &h : in)
+                        h = to_bf16(unit(rng));
+                    detail::source_rows made;
+                    made.grow(spec, M, kK);
+                    for (int m = 0; m < M; ++m) {
+                        detail::quantize_row(spec,
+                                in.data() + static_cast<size_t>(m) * kK, kK,
+                                made, m);
+                    }
+                    const rows_t r = quantized_rows(
+                            in, M, kK, src_groups ? pw.groups : 1);
+                    check_tile_on(ws, pw, plan, 1, r,
+                            make_bias(nr32::bias_kind::none, kN, 0),
+                            made.view(spec, 0, kK));
+                    ++served;
+                }
+            }
+        }
+    }
+    if (served == 0) GTEST_SKIP() << "no s8-source kernel runs on this CPU";
+}
+
 // The two source forms of the s8 kernels write the same bits.
 TEST(Nr32Tile, U8SourceKernelsWriteWhatS8SourceKernelsWrite) {
-    if (!nr32::isa_supported(data_type_t::s8)) GTEST_SKIP();
+    if (!nr32::isa_supported(*nr32_test::row_of(data_type_t::s8))) GTEST_SKIP();
     struct form_t {
         nr32::epilogue ep;
         int K, group;
@@ -800,9 +885,10 @@ TEST(Nr32Tile, U8SourceKernelsWriteWhatS8SourceKernelsWrite) {
                     v ^= 0x80u;
             }
             out[u8].assign(static_cast<size_t>(r.M) * plan.out_cols, 0);
-            nr32::run_tile(plan, pw, pw.experts[0], r.M, src.data(), r.lda,
-                    r.scale.data(), nullptr, nr32::bias_kind::none,
-                    out[u8].data(), plan.out_cols, 0, plan.cols);
+            nr32::run_tile(plan, pw, pw.experts[0], r.M,
+                    {src.data(), r.lda, r.scale.data()}, nullptr,
+                    nr32::bias_kind::none, out[u8].data(), plan.out_cols, 0,
+                    plan.cols);
         }
         EXPECT_EQ(out[0], out[1]) << epilogue_name(ep);
     }
@@ -815,7 +901,7 @@ TEST(Nr32Tile, U8SourceKernelsWriteWhatS8SourceKernelsWrite) {
 TEST(Nr32Tile, AZeroDotProductStaysZeroWhereTheScalesOverflow) {
     int served = 0;
     for (const data_type_t dt : {data_type_t::s8, data_type_t::s4}) {
-        if (!nr32::isa_supported(dt)) continue;
+        if (!nr32::isa_supported(*nr32_test::row_of(dt))) continue;
         SCOPED_TRACE(type_name(dt));
         constexpr int K = 64, N = 32, group = 32;
         weight_set ws;
@@ -845,17 +931,18 @@ TEST(Nr32Tile, AZeroDotProductStaysZeroWhereTheScalesOverflow) {
             r.scale[g] = std::ldexp(1.f, 110);
         const int ldc = plan.out_cols;
         std::vector<uint16_t> dst(static_cast<size_t>(2) * ldc, 0x7FC1);
-        nr32::run_tile(plan, pw, pw.experts[0], 2, r.bytes.data(), r.lda,
-                r.scale.data(), nullptr, nr32::bias_kind::none, dst.data(), ldc,
-                0, plan.cols);
+        nr32::run_tile(plan, pw, pw.experts[0], 2,
+                {r.bytes.data(), r.lda, r.scale.data()}, nullptr,
+                nr32::bias_kind::none, dst.data(), ldc, 0, plan.cols);
         EXPECT_EQ(from_bf16(dst[0]), 0.f);
         for (int n = 1; n < N; ++n) {
             EXPECT_TRUE(std::isfinite(from_bf16(dst[n]))) << "column " << n;
         }
         std::vector<uint16_t> alone(static_cast<size_t>(ldc), 0x7FC1);
-        nr32::run_tile(plan, pw, pw.experts[0], 1, r.bytes.data() + r.lda,
-                r.lda, r.scale.data() + pw.groups, nullptr,
-                nr32::bias_kind::none, alone.data(), ldc, 0, plan.cols);
+        nr32::run_tile(plan, pw, pw.experts[0], 1,
+                {r.bytes.data() + r.lda, r.lda, r.scale.data() + pw.groups},
+                nullptr, nr32::bias_kind::none, alone.data(), ldc, 0,
+                plan.cols);
         EXPECT_TRUE(std::equal(alone.begin(), alone.end(), dst.begin() + ldc))
                 << "the second row's outputs differ from its own tile's";
         // The same with the overflowing row second, and with NaN scales.
@@ -865,16 +952,16 @@ TEST(Nr32Tile, AZeroDotProductStaysZeroWhereTheScalesOverflow) {
             for (int g = 0; g < pw.groups; ++g)
                 r2.scale[pw.groups + g] = big;
             std::vector<uint16_t> out(static_cast<size_t>(2) * ldc, 0x7FC1);
-            nr32::run_tile(plan, pw, pw.experts[0], 2, r2.bytes.data(), r2.lda,
-                    r2.scale.data(), nullptr, nr32::bias_kind::none, out.data(),
-                    ldc, 0, plan.cols);
+            nr32::run_tile(plan, pw, pw.experts[0], 2,
+                    {r2.bytes.data(), r2.lda, r2.scale.data()}, nullptr,
+                    nr32::bias_kind::none, out.data(), ldc, 0, plan.cols);
             EXPECT_EQ(from_bf16(out[ldc]), 0.f) << "second row, scales " << big;
         }
         ++served;
     }
     // S4's wide kernels: a split epilogue whose up columns start on a block,
     // at 1 to 3 rows, gate and up column 0 zero.
-    if (nr32::isa_supported(data_type_t::s4)) {
+    if (nr32::isa_supported(*nr32_test::row_of(data_type_t::s4))) {
         constexpr int K = 64, N = 64, group = 32;
         weight_set ws;
         ws.build(data_type_t::s4, K, N, true, 0, group, 1, 0x6702u);
@@ -904,9 +991,9 @@ TEST(Nr32Tile, AZeroDotProductStaysZeroWhereTheScalesOverflow) {
                 v = std::ldexp(1.f, 110);
             const int ldc = plan.out_cols;
             std::vector<uint16_t> dst(static_cast<size_t>(M) * ldc, 0x7FC1);
-            nr32::run_tile(plan, pw, pw.experts[0], M, r.bytes.data(), r.lda,
-                    r.scale.data(), nullptr, nr32::bias_kind::none, dst.data(),
-                    ldc, 0, plan.cols);
+            nr32::run_tile(plan, pw, pw.experts[0], M,
+                    {r.bytes.data(), r.lda, r.scale.data()}, nullptr,
+                    nr32::bias_kind::none, dst.data(), ldc, 0, plan.cols);
             for (int m = 0; m < M; ++m) {
                 EXPECT_EQ(from_bf16(dst[static_cast<size_t>(m) * ldc]), 0.f)
                         << "row " << m;
@@ -922,9 +1009,9 @@ TEST(Nr32Tile, AZeroDotProductStaysZeroWhereTheScalesOverflow) {
                 r.scale[static_cast<size_t>(M - 1) * pw.groups + g] = big;
             const int ldc = plan.out_cols;
             std::vector<uint16_t> dst(static_cast<size_t>(M) * ldc, 0x7FC1);
-            nr32::run_tile(plan, pw, pw.experts[0], M, r.bytes.data(), r.lda,
-                    r.scale.data(), nullptr, nr32::bias_kind::none, dst.data(),
-                    ldc, 0, plan.cols);
+            nr32::run_tile(plan, pw, pw.experts[0], M,
+                    {r.bytes.data(), r.lda, r.scale.data()}, nullptr,
+                    nr32::bias_kind::none, dst.data(), ldc, 0, plan.cols);
             EXPECT_EQ(from_bf16(dst[static_cast<size_t>(M - 1) * ldc]), 0.f)
                     << "scales " << big;
         }
@@ -935,7 +1022,8 @@ TEST(Nr32Tile, AZeroDotProductStaysZeroWhereTheScalesOverflow) {
 
 // A plan refuses a gated epilogue over an odd column count.
 TEST(Nr32Tile, PlansNoGatedEpilogueOverOddColumns) {
-    if (!nr32::isa_supported(data_type_t::bf16)) GTEST_SKIP();
+    if (!nr32::isa_supported(*nr32_test::row_of(data_type_t::bf16)))
+        GTEST_SKIP();
     weight_set ws;
     ws.build(data_type_t::bf16, 64, 33, true, 0, 0, 1, 0x6500u);
     nr32::packed_weights pw;

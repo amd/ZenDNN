@@ -33,7 +33,8 @@
 
 #include <immintrin.h>
 
-#include "nr32_kernel_common.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/formats/s4/s4.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/kernel/nr32_epilogue.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -44,6 +45,9 @@ namespace nr32 {
 namespace {
 
 using namespace kernel;
+
+/// What the kernels store: their row's output type.
+constexpr data_type_t kDst = s4::kFormat.dst;
 
 /// Bytes from one block row (a K octet) to the next.
 constexpr int kRow = 128;
@@ -214,7 +218,7 @@ static void s4_kernel(const ukernel_args &p) {
                     has_bias ? load_bias16(p.bias, p.bias_t, p.col_next,
                                        lanes16<Ep>(cols, 1))
                              : _mm512_setzero_ps()};
-    auto *C = static_cast<uint16_t *>(p.c);
+    auto *C = static_cast<out_elem_t<kDst> *>(p.c);
     [[maybe_unused]] const act_mode_t mode
             = gated(Ep) ? act_mode() : act_mode_t {};
 #pragma GCC unroll 8
@@ -230,13 +234,8 @@ static void s4_kernel(const ukernel_args &p) {
             if (has_bias) f = _mm512_add_ps(f, bias_v[v]);
             out[v] = f;
         }
-        uint16_t *dst = C + static_cast<size_t>(m) * p.ldc;
-        if constexpr (Ep == epilogue::plain) {
-            store_bf16(dst, out[0], cols);
-            store_bf16(dst + 16, out[1], cols - 16);
-        } else {
-            store_bf16(dst, gated_out<Ep>(out[0], out[1], mode), cols);
-        }
+        store_step<Ep, kDst>(
+                C + static_cast<size_t>(m) * p.ldc, out[0], out[1], cols, mode);
     }
 }
 // Wide split: the gate block's two vectors at `b`, the up block's at
@@ -360,7 +359,7 @@ static void s4_wide_kernel(const ukernel_args &p) {
                 ? load_bias16(p.bias, p.bias_t, col_of[v], lanes_of[v])
                 : _mm512_setzero_ps();
     }
-    auto *C = static_cast<uint16_t *>(p.c);
+    auto *C = static_cast<out_elem_t<kDst> *>(p.c);
     const act_mode_t mode = act_mode();
 #pragma GCC unroll 3
     for (int m = 0; m < MR; ++m) {
@@ -375,9 +374,8 @@ static void s4_wide_kernel(const ukernel_args &p) {
             if (has_bias) f = _mm512_add_ps(f, bias_v[v]);
             out[v] = f;
         }
-        uint16_t *dst = C + static_cast<size_t>(m) * p.ldc;
-        store_bf16(dst, gated_out<Ep>(out[0], out[2], mode), cols);
-        store_bf16(dst + 16, gated_out<Ep>(out[1], out[3], mode), cols - 16);
+        store_wide_step<Ep, kDst>(C + static_cast<size_t>(m) * p.ldc, out[0],
+                out[1], out[2], out[3], cols, mode);
     }
 }
 #undef NR32_S4_ROUND
@@ -429,24 +427,30 @@ ukernel_fn pick_ep(const int mr, const epilogue ep, const bool unaligned) {
 
 } // namespace
 
-ukernel_fn select_s4_wide(
-        const int mr, const epilogue ep, const bool src_groups) {
+namespace s4 {
+
+// The kernels sum by group whatever the weight's groups.
+
+ukernel_fn narrow(const int mr, const epilogue ep, bool, const bool unaligned,
+        const scale_groups groups) {
+    return groups.source ? pick_ep<true>(mr, ep, unaligned)
+                         : pick_ep<false>(mr, ep, unaligned);
+}
+
+ukernel_fn wide(const int mr, const epilogue ep, bool, bool,
+        const scale_groups groups) {
     switch (ep) {
         case epilogue::silu_split:
-            return src_groups ? pick_wide<epilogue::silu_split, true>(mr)
-                              : pick_wide<epilogue::silu_split, false>(mr);
+            return groups.source ? pick_wide<epilogue::silu_split, true>(mr)
+                                 : pick_wide<epilogue::silu_split, false>(mr);
         case epilogue::gelu_split:
-            return src_groups ? pick_wide<epilogue::gelu_split, true>(mr)
-                              : pick_wide<epilogue::gelu_split, false>(mr);
+            return groups.source ? pick_wide<epilogue::gelu_split, true>(mr)
+                                 : pick_wide<epilogue::gelu_split, false>(mr);
         default: return nullptr;
     }
 }
 
-ukernel_fn select_s4(const int mr, const epilogue ep, const bool unaligned,
-        const bool src_groups) {
-    return src_groups ? pick_ep<true>(mr, ep, unaligned)
-                      : pick_ep<false>(mr, ep, unaligned);
-}
+} // namespace s4
 
 } // namespace nr32
 } // namespace ntile_flat_parallel

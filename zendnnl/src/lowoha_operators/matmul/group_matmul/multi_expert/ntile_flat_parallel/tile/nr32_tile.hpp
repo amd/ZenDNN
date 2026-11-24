@@ -27,13 +27,13 @@
 /// against L2-sized subtiles of its columns, every call over the subtile's
 /// steps.
 
-#ifndef ZENDNNL_GROUP_MATMUL_NTILE_FLAT_PARALLEL_NR32_TILE_HPP
-#define ZENDNNL_GROUP_MATMUL_NTILE_FLAT_PARALLEL_NR32_TILE_HPP
+#ifndef ZENDNNL_GROUP_MATMUL_NTILE_FLAT_PARALLEL_TILE_NR32_TILE_HPP
+#define ZENDNNL_GROUP_MATMUL_NTILE_FLAT_PARALLEL_TILE_NR32_TILE_HPP
 
 #include <cstdint>
 
-#include "nr32_pack.hpp"
-#include "nr32_ukernel.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/kernel/nr32_ukernel.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/pack/nr32_pack.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -45,8 +45,8 @@ namespace nr32 {
 struct tile_plan {
     epilogue ep = epilogue::plain;
     bool src_u8 = false;
-    /// Quantized weights of several scale groups: each source row has one
-    /// scale per group, `layout.groups` scales apart from row to row.
+    /// Scaled weights of several scale groups: each source row has one scale
+    /// per group, `layout.groups` scales apart from row to row.
     bool src_groups = false;
     /// Columns of a row's output: N, or N / 2 under a gated epilogue.
     int out_cols = 0;
@@ -61,14 +61,20 @@ struct tile_plan {
     bool unaligned = false;
     int max_mr = 0;
     ukernel_fn kernels[kMaxMr + 1] = {};
-    /// Split epilogues of bf16, s8 and s4 whose up columns start on a block:
-    /// a step is 64 columns, one wide kernel call for a tile of at most
-    /// `wide_rows` rows and two of `kernels` for a taller one.
+    /// Split epilogues of a format with wide kernels whose up columns start
+    /// on a block: a step is 64 columns, one wide kernel call for a tile of at
+    /// most `wide_rows` rows and two of `kernels` for a taller one.
     bool wide = false;
     int wide_rows = 0;
     int wide_max_mr = 0;
     /// [two_chains][mr]
     ukernel_fn wide_kernels[2][kMaxMr + 1] = {};
+
+    /// Scales per source row over `layout`: one per weight scale group with
+    /// `src_groups`, else one.
+    int src_scales(const pack_layout &layout) const {
+        return src_groups ? layout.groups : 1;
+    }
 };
 
 /// The L2 bytes a plan's tiles may give their rows and weights, and the
@@ -95,17 +101,25 @@ bool make_plan(const pack_layout &layout, epilogue ep, bool src_u8,
 /// ends inside a group.  The bytes read past K meet zero weights.
 inline constexpr size_t kRowReadSlack = 4;
 
-/// One tile: `M` rows, `lda` elements apart (s8 for quantized weights, each
-/// with its scales at `src_scale` as `plan.src_groups` says, else the
-/// weight's 16-bit type), against plan columns
-/// [col, col + width), both multiples of `plan.step`, of expert pack `px` of
-/// `layout`.  The expert's bias row (or null) is in `bias_t`.  Output column
-/// j of row r goes to `dst + r * ldc + j`, in bf16 (f16 for f16 weights).
+/// A tile's source rows, `lda` elements apart, of the format's source type:
+/// s8 rows with their scales (one per row, or one per weight scale group as
+/// `tile_plan::src_groups` says) or 16-bit rows as they are.  What a
+/// format's kernels read beyond rows and scales goes here too.
+struct tile_source {
+    const void *rows = nullptr;
+    int lda = 0;
+    const float *scales = nullptr;
+};
+
+/// One tile: `M` rows of `src` against plan columns [col, col + width), both
+/// multiples of `plan.step`, of expert pack `px` of `layout`.  The expert's
+/// bias row (or null) is in `bias_t`.  Output column j of row r goes to
+/// element `r * ldc + j` of `dst`, in the format's output type.
 /// `kRowReadSlack` bytes past the last s8 row must be readable.
 void run_tile(const tile_plan &plan, const pack_layout &layout,
-        const packed_expert &px, int M, const void *src, int lda,
-        const float *src_scale, const void *bias, bias_kind bias_t, void *dst,
-        int ldc, int col, int width);
+        const packed_expert &px, int M, const tile_source &src,
+        const void *bias, bias_kind bias_t, void *dst, int ldc, int col,
+        int width);
 
 } // namespace nr32
 } // namespace ntile_flat_parallel
@@ -113,4 +127,4 @@ void run_tile(const tile_plan &plan, const pack_layout &layout,
 } // namespace lowoha
 } // namespace zendnnl
 
-#endif // ZENDNNL_GROUP_MATMUL_NTILE_FLAT_PARALLEL_NR32_TILE_HPP
+#endif // ZENDNNL_GROUP_MATMUL_NTILE_FLAT_PARALLEL_TILE_NR32_TILE_HPP

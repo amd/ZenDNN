@@ -79,6 +79,7 @@ target_sources(gtests
     ${CMAKE_CURRENT_SOURCE_DIR}/multi_expert/ntile_flat_parallel/test_format.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/multi_expert/ntile_flat_parallel/test_grouped.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/multi_expert/ntile_flat_parallel/test_nr32.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/multi_expert/ntile_flat_parallel/test_source.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/routed_moe/test_routed_moe.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/routed_moe/test_routed_moe_s4.cpp
 )

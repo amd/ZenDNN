@@ -26,8 +26,8 @@
 #include <utility>
 
 #include "lowoha_operators/matmul/group_matmul/common/grp_matmul_machine.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/formats/formats.hpp"
 #include "lowoha_operators/matmul/lowoha_common.hpp"
-#include "nr32_format.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -37,14 +37,10 @@ namespace ntile_flat_parallel {
 namespace {
 
 constexpr const char *kEnv = "ZENDNNL_GRP_MATMUL_NTILE_FLAT_PARALLEL_CONFIG";
-/// N-tile flat parallel's formats, then every other type.
+/// N-tile flat parallel's formats, then any other row.
 constexpr int kTypes = nr32::kFormatCount;
 constexpr int kPhases = 2;
 constexpr int kApis = 2;
-
-int type_index(const data_type_t wei) {
-    return nr32::format_index(wei);
-}
 
 /// The index of the format named `v`, or -1.
 int format_named(const std::string &v) {
@@ -387,30 +383,30 @@ const config_t &config() {
 } // namespace
 
 const call_knobs &call_knobs_for(const grp_matmul_phase phase,
-        const data_type_t wei, const api_kind api) {
+        const nr32::format_desc &f, const api_kind api) {
     const int p = phase == grp_matmul_phase::prompt ? 1 : 0;
-    return config().call[p][type_index(wei)][static_cast<int>(api)];
+    return config().call[p][nr32::format_index(f)][static_cast<int>(api)];
 }
 
-const plan_knobs &plan_knobs_for(const data_type_t wei, const api_kind api) {
-    return config().plan[type_index(wei)][static_cast<int>(api)];
+const plan_knobs &plan_knobs_for(
+        const nr32::format_desc &f, const api_kind api) {
+    return config().plan[nr32::format_index(f)][static_cast<int>(api)];
 }
 
 const limits_t &limits() {
     return config().limits;
 }
 
-int64_t l2_budget_bytes(const data_type_t wei, const api_kind api) {
+int64_t l2_budget_bytes(const nr32::format_desc &f, const api_kind api) {
     const grp_machine::machine_t &m = grp_machine::machine();
-    const double frac = plan_knobs_for(wei, api).l2_frac;
+    const double frac = plan_knobs_for(f, api).l2_frac;
     if (frac <= 0) return m.l2_budget_bytes;
     return std::max<int64_t>(static_cast<int64_t>(m.l2_plan_bytes * frac), 1);
 }
 
-bool u8_src(const data_type_t wei, const api_kind api) {
-    const nr32::format_desc *f = nr32::format_of(wei);
-    if (f == nullptr || !f->u8_src) return false;
-    const switch3 s = plan_knobs_for(wei, api).u8_src;
+bool u8_src(const nr32::format_desc &f, const api_kind api) {
+    if (!f.u8_src) return false;
+    const switch3 s = plan_knobs_for(f, api).u8_src;
     return s == switch3::on
             || (s == switch3::automatic
                     && grp_machine::dot_rates().u8_src_pays);

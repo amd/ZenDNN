@@ -20,7 +20,7 @@
 #include "lowoha_operators/matmul/group_matmul/common/grp_matmul_constants.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/ck_enable.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
-#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/nr32_format.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/formats/formats.hpp"
 #include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/ntile_flat_parallel.hpp"
 #include "lowoha_operators/matmul/group_matmul/selection/algo_select.hpp"
 #include "lowoha_operators/matmul/lowoha_common.hpp"
@@ -1683,16 +1683,27 @@ status_t run_generic(const char layout_src, const bool trans_src,
             primary.params.num_threads, descriptors);
 }
 
+/// The N-tile flat parallel format of a routed projection: of its weight type,
+/// whose kernels read the rows its source quantizes to (DA8W8, W4A8) or its
+/// source rows as they are (BF16, FP16), with its weight scales' encoding.
+/// Null when there is none.
+const ntile_flat_parallel::nr32::format_desc *ntile_flat_parallel_format(
+        const group_matmul_projection_params &p) {
+    const auto &d = p.params.dtypes;
+    const auto &ws = p.params.quant_params.wei_scale;
+    return ntile_flat_parallel::nr32::format_for(d.wei,
+            p.params.dynamic_quant ? d.compute : d.src,
+            ntile_flat_parallel::nr32::scale_enc_of(ws.buff, ws.dt));
+}
+
 /// N-tile flat parallel's weight scale groups along K of a projection of a
-/// quantized format's weights: 1 for `{E, N}` or `{E, 1, N}` scales of a format
-/// that need not group them (s8), G for `{E, G, N}` scales of groups of whole
+/// scaled format `f`: 1 for `{E, N}` or `{E, 1, N}` scales of a format that
+/// need not group them (s8), G for `{E, G, N}` scales of groups of whole
 /// words (s8 quads, s4 octets); 0 for scales it cannot take.
 int64_t ntile_flat_parallel_weight_groups(
         const matmul_quantization_params_t::matmul_quant_t &q,
-        const data_type_t wei, const int num_experts, const int input_size,
-        const int output_size) {
-    const ntile_flat_parallel::nr32::format_desc &f
-            = *ntile_flat_parallel::nr32::format_of(wei);
+        const ntile_flat_parallel::nr32::format_desc &f, const int num_experts,
+        const int input_size, const int output_size) {
     if (!f.always_grouped && tight_expert_scale(q, num_experts, output_size))
         return 1;
     if (q.buff == nullptr
@@ -1709,16 +1720,28 @@ int64_t ntile_flat_parallel_weight_groups(
 /// weight scale group), `{num_tokens, G}`, rather than one per token.
 bool ntile_flat_parallel_source_groups(const group_matmul_projection_params &p,
         const int num_tokens, const int num_experts) {
-    const auto &d = p.params.dtypes;
     const ntile_flat_parallel::nr32::format_desc *f
-            = ntile_flat_parallel::nr32::format_of(d.wei);
-    if (f == nullptr || !f->quantized) return false;
+            = ntile_flat_parallel_format(p);
+    if (f == nullptr || f->src != data_type_t::s8) return false;
     const int64_t groups
             = ntile_flat_parallel_weight_groups(p.params.quant_params.wei_scale,
-                    d.wei, num_experts, p.input_size, p.output_size);
+                    *f, num_experts, p.input_size, p.output_size);
     const auto &dims = p.params.quant_params.src_scale.dims;
     return groups > 1 && dims.size() == 2 && dims[0] == num_tokens
             && dims[1] == groups;
+}
+
+/// Why no N-tile flat parallel format takes projection `p`: the 16-bit row of
+/// its weight and source types takes neither weight scales nor a quantized
+/// source, and no row takes other types.
+const char *ntile_flat_parallel_no_format(
+        const group_matmul_projection_params &p) {
+    const auto &d = p.params.dtypes;
+    for (const auto &f : ntile_flat_parallel::nr32::kFormats) {
+        if (f.wei == d.wei && !f.scaled() && f.src == d.src && f.dst == d.dst)
+            return "scales_on_16bit_weights";
+    }
+    return "unsupported_types";
 }
 
 /// Why N-tile flat parallel cannot serve a routed projection, or null when it
@@ -1749,12 +1772,12 @@ const char *ntile_flat_parallel_projection_refusal(
     }
     if (q.dst_scale.buff != nullptr) return "destination_scale";
     if (!p.params.postop_.empty()) return "post_ops";
-    // A 16-bit format's sources and outputs are its own type; a quantized
+    // A 16-bit format's sources and outputs are its own type; a scaled
     // one's sources bf16 rows the call quantizes to its kernels' s8.
     const ntile_flat_parallel::nr32::format_desc *f
-            = ntile_flat_parallel::nr32::format_of(d.wei);
-    if (f == nullptr) return "unsupported_types";
-    if (!f->quantized) {
+            = ntile_flat_parallel_format(p);
+    if (f == nullptr) return ntile_flat_parallel_no_format(p);
+    if (!f->scaled()) {
         if (d.src != f->src || d.dst != f->dst) return "unsupported_types";
         if (p.params.dynamic_quant || q.wei_scale.buff != nullptr
                 || q.src_scale.buff != nullptr) {
@@ -1767,7 +1790,7 @@ const char *ntile_flat_parallel_projection_refusal(
         return "unsupported_types";
     }
     if (ntile_flat_parallel_weight_groups(
-                q.wei_scale, d.wei, num_experts, p.input_size, p.output_size)
+                q.wei_scale, *f, num_experts, p.input_size, p.output_size)
             <= 0) {
         return "unsupported_weight_scale";
     }
@@ -1845,6 +1868,10 @@ status_t run_ntile_flat_parallel(const char layout_src, const bool trans_src,
                 *p, num_tokens, num_experts);
         if (refusal != nullptr) return ntile_flat_parallel_declined(refusal);
     }
+    const ntile_flat_parallel::nr32::format_desc *const format
+            = ntile_flat_parallel_format(primary);
+    if (ntile_flat_parallel_format(secondary) != format)
+        return ntile_flat_parallel_declined("mixed_weight_types");
 
     const auto key_of = [](const group_matmul_projection_params &p) {
         ntile_flat_parallel::projection_key k;
@@ -1861,7 +1888,7 @@ status_t run_ntile_flat_parallel(const char layout_src, const bool trans_src,
     key.H = H;
     key.I = I;
     key.act = act;
-    key.wei = primary.params.dtypes.wei;
+    key.fmt = format;
     const auto bias_type = [](const group_matmul_projection_params &p) {
         return p.bias != nullptr ? p.params.dtypes.bias : data_type_t::none;
     };

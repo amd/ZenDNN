@@ -14,7 +14,7 @@
  * limitations under the License.
  *******************************************************************************/
 
-#include "nr32_tile.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/tile/nr32_tile.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -50,14 +50,16 @@ plan_budget default_budget() {
 bool make_plan(const pack_layout &layout, const epilogue ep, const bool src_u8,
         tile_plan &plan, const bool src_groups, const plan_budget &budget) {
     const weight_desc &d = layout.desc;
+    const format_desc &f = layout.format();
     plan = tile_plan {};
-    if (!isa_supported(d.wei) || (gated(ep) && d.N % 2 != 0)) return false;
-    const format_desc &f = *layout.fmt;
+    if (!isa_supported(f) || (gated(ep) && d.N % 2 != 0)) return false;
     plan.ep = ep;
     plan.src_u8 = src_u8;
-    plan.src_groups = f.quantized && src_groups && layout.groups > 1;
+    // Source scales per weight scale group are s8 sources'.
+    plan.src_groups
+            = f.src == data_type_t::s8 && src_groups && layout.groups > 1;
     const scale_groups groups {
-            f.quantized && layout.groups > 1, plan.src_groups};
+            f.scaled() && layout.groups > 1, plan.src_groups};
     // A split step is a gate vector and an up vector.
     const int vec = f.vec_cols();
     plan.step = split(ep) ? 2 * vec : kNr;
@@ -72,8 +74,7 @@ bool make_plan(const pack_layout &layout, const epilogue ep, const bool src_u8,
     }
     plan.max_mr = f.max_mr;
     for (int mr = 1; mr <= plan.max_mr; ++mr) {
-        plan.kernels[mr]
-                = select(d.wei, mr, ep, src_u8, plan.unaligned, groups);
+        plan.kernels[mr] = select(f, mr, ep, src_u8, plan.unaligned, groups);
         if (plan.kernels[mr] == nullptr) return false;
     }
     if (split(ep) && plan.up % kNr == 0 && f.max_mr_wide > 0) {
@@ -87,25 +88,28 @@ bool make_plan(const pack_layout &layout, const epilogue ep, const bool src_u8,
         for (int mr = 1; mr <= plan.wide_max_mr; ++mr) {
             for (const bool two : {false, true}) {
                 plan.wide_kernels[two][mr]
-                        = select_wide(d.wei, mr, ep, src_u8, two, groups);
+                        = select_wide(f, mr, ep, src_u8, two, groups);
             }
             if (plan.wide_kernels[0][mr] == nullptr) return false;
             if (mr <= f.two_chain_rows && plan.wide_kernels[1][mr] == nullptr)
                 return false;
         }
     }
+    // A scaled weight's columns also take their f32 scales.
     const int sub = l2_subtile_cols(
-            d.K, f.src_bytes(), f.whole_bytes(), f.quantized ? 4 : 0, budget);
+            d.K, f.src_bytes(), f.whole_bytes(), f.scaled() ? 4 : 0, budget);
     plan.subtile = std::max(sub / plan.step * plan.step, plan.step);
     return true;
 }
 
 void run_tile(const tile_plan &plan, const pack_layout &layout,
-        const packed_expert &px, const int M, const void *src, const int lda,
-        const float *src_scale, const void *bias, const bias_kind bias_t,
-        void *dst, const int ldc, const int col, const int width) {
+        const packed_expert &px, const int M, const tile_source &src,
+        const void *bias, const bias_kind bias_t, void *dst, const int ldc,
+        const int col, const int width) {
+    const int lda = src.lda;
+    const float *const src_scale = src.scales;
     const weight_desc &d = layout.desc;
-    const format_desc &f = *layout.fmt;
+    const format_desc &f = layout.format();
     const uint8_t *const blocks = px.blocks.get();
     const size_t bb = layout.block_bytes;
     const size_t src_es = static_cast<size_t>(f.src_bytes());
@@ -115,7 +119,8 @@ void run_tile(const tile_plan &plan, const pack_layout &layout,
             ? nullptr
             : px.comp->data();
     const float *const scale = px.scale.empty() ? nullptr : px.scale.data();
-    auto *const out = static_cast<uint16_t *>(dst);
+    char *const out = static_cast<char *>(dst);
+    const size_t dst_es = static_cast<size_t>(f.dst_bytes());
 
     // A split step's vectors are one 64-byte line of a block row each, 16
     // columns (32 for f16): half a block, or a block.  Its up vector starts
@@ -140,7 +145,7 @@ void run_tile(const tile_plan &plan, const pack_layout &layout,
     a.col_group = layout.n_pad;
     a.src_groups = plan.src_groups ? layout.groups : 0;
     a.max_scale = px.max_scale;
-    const size_t src_scales = plan.src_groups ? layout.groups : 1;
+    const size_t src_scales = static_cast<size_t>(plan.src_scales(layout));
     a.bias_t = bias == nullptr ? bias_kind::none : bias_t;
     a.ldc = ldc;
     // Points `a` at the narrow kernels' step at plan column `v` for the rows
@@ -171,7 +176,7 @@ void run_tile(const tile_plan &plan, const pack_layout &layout,
         a.comp = comp != nullptr ? comp + w0 : nullptr;
         a.scale = scale != nullptr ? scale + w0 : nullptr;
         a.bias = bias_bytes != nullptr ? bias_bytes + w0 * bias_es : nullptr;
-        a.c = out + static_cast<size_t>(m_off) * ldc + out0;
+        a.c = out + (static_cast<size_t>(m_off) * ldc + out0) * dst_es;
     };
     // The same for a wide kernel: the gate block holding output column
     // `v / 2` and the up block `plan.up` columns on, both whole.
@@ -186,7 +191,7 @@ void run_tile(const tile_plan &plan, const pack_layout &layout,
         a.comp = comp != nullptr ? comp + w0 : nullptr;
         a.scale = scale != nullptr ? scale + w0 : nullptr;
         a.bias = bias_bytes != nullptr ? bias_bytes + w0 * bias_es : nullptr;
-        a.c = out + static_cast<size_t>(m_off) * ldc + w0;
+        a.c = out + (static_cast<size_t>(m_off) * ldc + w0) * dst_es;
     };
 
     const bool wide = plan.wide && M <= plan.wide_rows;
@@ -205,7 +210,7 @@ void run_tile(const tile_plan &plan, const pack_layout &layout,
             const int mr = c < n_big ? mr_base + 1 : mr_base;
             const ukernel_fn fn = wide ? plan.wide_kernels[two_chains][mr]
                                        : plan.kernels[mr];
-            a.a = static_cast<const uint8_t *>(src)
+            a.a = static_cast<const uint8_t *>(src.rows)
                     + static_cast<size_t>(m_off) * lda * src_es;
             a.src_scale = src_scale != nullptr
                     ? src_scale + static_cast<size_t>(m_off) * src_scales

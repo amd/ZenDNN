@@ -14,14 +14,16 @@
  * limitations under the License.
  *******************************************************************************/
 
-/// N-tile flat parallel's microkernels over `nr32_pack.hpp` packs.
+/// N-tile flat parallel's microkernels over pack/nr32_pack.hpp packs.  Each
+/// format's kernels are in formats/<format>/; `select` and `select_wide` take
+/// them from its row.
 ///
 /// A call multiplies up to `max_mr` source rows by one step of columns and
 /// stores what the epilogue makes of them.  A step is two vectors of
-/// columns: 16 each for bf16, s8 and s4 (one zmm of each block row), 32 each
-/// for f16.  Where the two vectors' weights, scales, sums and biases come
-/// from is the caller's choice, which is how one pack serves every
-/// activation:
+/// columns, a format's `vec_cols()` each: 16 for bf16, s8 and s4 (one zmm of
+/// each block row), 32 for f16.  Where the two vectors' weights, scales, sums
+/// and biases come from is the caller's choice, which is how one pack serves
+/// every activation:
 ///   * plain and swiglu_pairs: a whole block, the second vector right after
 ///     the first (f16: one 32-column vector);
 ///   * silu_split and gelu_split: the gate columns and the up columns of a
@@ -36,13 +38,13 @@
 /// products over K in the same order, the same dequantization and the same
 /// activation, so outputs match it bit for bit.
 
-#ifndef ZENDNNL_GROUP_MATMUL_NTILE_FLAT_PARALLEL_NR32_UKERNEL_HPP
-#define ZENDNNL_GROUP_MATMUL_NTILE_FLAT_PARALLEL_NR32_UKERNEL_HPP
+#ifndef ZENDNNL_GROUP_MATMUL_NTILE_FLAT_PARALLEL_KERNEL_NR32_UKERNEL_HPP
+#define ZENDNNL_GROUP_MATMUL_NTILE_FLAT_PARALLEL_KERNEL_NR32_UKERNEL_HPP
 
 #include <cstddef>
 #include <cstdint>
 
-#include "nr32_pack.hpp"
+#include "common/data_types.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -50,7 +52,9 @@ namespace matmul {
 namespace ntile_flat_parallel {
 namespace nr32 {
 
-/// How a quantized weight's kernels apply scales along K.
+using zendnnl::common::data_type_t;
+
+/// How a scaled weight's kernels apply scales along K.
 struct scale_groups {
     /// The weight has more than one scale group (s4 kernels sum by group
     /// whatever their count).
@@ -61,10 +65,6 @@ struct scale_groups {
     /// Whether s8 kernels sum by group.
     bool any() const { return weight || source; }
 };
-
-/// Rows a call of `wei`'s kernels takes (`format_desc::max_mr`): 12 for s8,
-/// 6 for s4, 8 for bf16 and f16.
-int max_mr(data_type_t wei);
 
 /// What a call stores from a step's two vectors.
 enum class epilogue : uint8_t {
@@ -124,8 +124,8 @@ struct ukernel_args {
     /// The first vector's bias, or null.
     const void *bias = nullptr;
     bias_kind bias_t = bias_kind::none;
-    /// Row 0's first output column; rows `ldc` elements apart.  bf16, or f16
-    /// for f16 weights.
+    /// Row 0's first output column, in the format's `dst` type; rows `ldc`
+    /// elements apart.
     void *c = nullptr;
     int ldc = 0;
     /// Output columns to store: the step's full width, fewer at the end of
@@ -135,41 +135,25 @@ struct ukernel_args {
 
 using ukernel_fn = void (*)(const ukernel_args &);
 
-/// Whether this CPU, and the build, runs `wei`'s kernels.
-bool isa_supported(data_type_t wei);
+struct format_desc;
 
-/// The kernel for `mr` rows of `wei` with epilogue `ep`, or nullptr.
+/// Whether this CPU, and the build, runs `f`'s kernels.
+bool isa_supported(const format_desc &f);
+
+/// The kernel for `mr` rows of format `f` with epilogue `ep`, or nullptr.
 /// `src_u8` (a format with `u8_src` kernels: s8) reads source bytes already
 /// XOR-ed with 0x80; `unaligned` (split epilogues only) assembles misaligned
-/// up columns; `groups` (quantized formats) says how the scales are grouped
+/// up columns; `groups` (scaled formats) says how the scales are grouped
 /// along K.
-ukernel_fn select(data_type_t wei, int mr, epilogue ep, bool src_u8,
+ukernel_fn select(const format_desc &f, int mr, epilogue ep, bool src_u8,
         bool unaligned, scale_groups groups = {});
 
-/// Rows a call of `wei`'s wide split kernels takes
-/// (`format_desc::max_mr_wide`): 6 for s8 and bf16, 3 for s4, 0 for a type
-/// without them.
-int max_mr_wide(data_type_t wei);
-
-/// The wide split kernel for `mr` rows of `wei` with split epilogue `ep`, or
-/// nullptr.  `two_chains` (`mr` up to the format's `two_chain_rows`: bf16,
-/// three) sums even and odd K pairs in two accumulators, as the narrow
+/// The wide split kernel for `mr` rows of format `f` with split epilogue
+/// `ep`, or nullptr.  `two_chains` (`mr` up to the format's `two_chain_rows`:
+/// bf16, three) sums even and odd K pairs in two accumulators, as the narrow
 /// kernels do at three rows or fewer.
-ukernel_fn select_wide(data_type_t wei, int mr, epilogue ep, bool src_u8,
+ukernel_fn select_wide(const format_desc &f, int mr, epilogue ep, bool src_u8,
         bool two_chains, scale_groups groups = {});
-
-ukernel_fn select_s8(int mr, epilogue ep, bool src_u8, bool unaligned);
-ukernel_fn select_s8_groups(
-        int mr, epilogue ep, bool src_u8, bool unaligned, bool src_groups);
-ukernel_fn select_bf16(int mr, epilogue ep, bool unaligned);
-ukernel_fn select_f16(int mr, epilogue ep, bool unaligned);
-ukernel_fn select_s4(int mr, epilogue ep, bool unaligned, bool src_groups);
-ukernel_fn select_s8_wide(int mr, epilogue ep, bool src_u8);
-ukernel_fn select_s8_groups_wide(
-        int mr, epilogue ep, bool src_u8, bool src_groups);
-ukernel_fn select_bf16_wide(int mr, epilogue ep, bool two_chains);
-ukernel_fn select_s4_wide(int mr, epilogue ep, bool src_groups);
-bool f16_kernels_built();
 
 } // namespace nr32
 } // namespace ntile_flat_parallel
@@ -177,4 +161,4 @@ bool f16_kernels_built();
 } // namespace lowoha
 } // namespace zendnnl
 
-#endif // ZENDNNL_GROUP_MATMUL_NTILE_FLAT_PARALLEL_NR32_UKERNEL_HPP
+#endif // ZENDNNL_GROUP_MATMUL_NTILE_FLAT_PARALLEL_KERNEL_NR32_UKERNEL_HPP
