@@ -39,6 +39,9 @@
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/dispatch.hpp"
 #include "moe_test_utils.hpp"
 
+// gtest_utils.cpp; declared here as test_routed_moe.cpp does.
+void reset_grp_matmul_caches();
+
 namespace ck_test {
 
 namespace ck = zendnnl::lowoha::matmul::custom_kernel;
@@ -183,6 +186,17 @@ struct PrepCallStorage {
 // `kctx.enabled` / `kctx.variant` etc.).
 inline status_t run_prepare(const PrepCallCase &c, PrepCallStorage &storage,
         ck::CallContext &kctx) {
+    // A test's first probe starts from empty pack caches: its weight may
+    // reuse an address an earlier test packed in place at weight cache mode
+    // 2, whose image record would refuse it.  The test's later probes keep
+    // the caches, whose hits and misses several tests check.
+    static const ::testing::TestInfo *probed_test = nullptr;
+    const ::testing::TestInfo *const test
+            = ::testing::UnitTest::GetInstance()->current_test_info();
+    if (test != probed_test) {
+        probed_test = test;
+        ::reset_grp_matmul_caches();
+    }
     // Pick the weight storage based on wei_dt — int8 cases need a
     // K×N region of `int8_t`, every other case (including negative
     // dtype probes) gets bf16 storage and the dispatcher refuses

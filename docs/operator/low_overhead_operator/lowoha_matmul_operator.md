@@ -634,7 +634,7 @@ int lowoha_woq_bf16s4_matmul_example() {
 
 ### Static per-tensor U8×S8 custom-kernel route
 
-Eligible decode-class calls (`M <= 32`) can use the grouped N-tile VNNI custom
+Eligible decode-class calls (`M <= 64`) can use the grouped N-tile VNNI custom
 kernel when `ZENDNNL_MATMUL_CUSTOM_KERNEL=1` and
 `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_INT8=1`:
 

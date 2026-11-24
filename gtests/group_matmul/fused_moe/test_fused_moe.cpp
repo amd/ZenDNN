@@ -2691,6 +2691,12 @@ TEST_P(TestFusedMoEQuantDynINT8, BothPasses) {
             tol_fused(is_bf16), lbl.str());
 }
 
+/// Row-scaled tolerance of an INT8 fused MoE whose gated activation runs in
+/// registers (the ALGO 3 custom kernel's, ALGO 4's) against a two-call
+/// reference: twice the worst row error these tests measure (1.5% of the
+/// row's peak).
+constexpr float kInt8FusedActRowFrac = 0.03f;
+
 TEST(TestFusedMoEQuantDynINT8AllAlgos, GroupDynamicQuantBothPasses) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
@@ -2840,10 +2846,18 @@ TEST(TestFusedMoEQuantDynINT8AllAlgos, GroupDynamicQuantBothPasses) {
                 status_t::success)
                 << "algo=" << algo << " fused";
 
-        verify_per_expert_2d(d2_test, H, d2_ref, H, num_ops, M, H, is_bf16,
-                tol_fused(is_bf16),
-                "Dynamic_INT8_BothPasses_AllAlgos algo="
-                        + std::to_string(algo));
+        const std::string label = "Dynamic_INT8_BothPasses_AllAlgos algo="
+                + std::to_string(algo);
+        // ALGO 4 activates the fused call's gate and up in registers, the
+        // reference after rounding them to bf16.
+        if (algo == 4) {
+            verify_per_expert_2d_row_scaled(d2_test, H, d2_ref, H,
+                    std::vector<int>(num_ops, M), H, bool_to_fp_dt(is_bf16),
+                    kInt8FusedActRowFrac, label);
+        } else {
+            verify_per_expert_2d(d2_test, H, d2_ref, H, num_ops, M, H, is_bf16,
+                    tol_fused(is_bf16), label);
+        }
     }
 }
 
@@ -4116,16 +4130,11 @@ TEST(TestFusedMoEPreQuantSrc, SharedScaleWorkspaceTracksWeightIdentity) {
     }
 }
 
-/// Row-scaled tolerance of an INT8 fused MoE on the custom kernel's
-/// in-register activation against an AOCL two-call reference: twice the
-/// worst row error these tests measure (1.5% of the row's peak).
-constexpr float kInt8FusedActRowFrac = 0.03f;
-
 // Absolute correctness of the pre-quantized path against an independent
-// unfused 2-call reference, bit-exact on ALGO 1 / 2 / 5 / 6.  AUTO and a
-// declined W8A8 request (`4`) run this INT8 layer on ALGO 3, which engages
-// the TIGHT Op1 layout: it fuses the gated activation into Op1's epilogue and
-// rounds f32 -> bf16 ONCE, while the reference stores bf16 and then activates
+// unfused 2-call reference, bit-exact on ALGO 1 / 2 / 5 / 6.  AUTO runs this
+// INT8 layer on ALGO 3, which engages the TIGHT Op1 layout, and `4` on
+// ALGO 4: both fuse the gated activation into Op1's epilogue and round
+// f32 -> bf16 ONCE, while the reference stores bf16 and then activates
 // those rounded values.  Op2 re-quantizes per token, so one differing element
 // shifts a row's scale and with it the whole row.  Those two compare with a
 // row-scaled tolerance against the AOCL (ALGO 1) reference; ALGO 3 is also
@@ -4154,10 +4163,10 @@ TEST(TestFusedMoEPreQuantSrc, BothPassesVsTwoCallReference) {
         out_fused.alloc(
                 HW::num_ops, static_cast<size_t>(HW::M) * HW::H, HW::is_bf16);
 
-        const bool on_algo3 = algo == 0 || algo == 4;
+        const bool fused_act = algo == 0 || algo == 4;
         {
             reset_grp_matmul_caches();
-            AlgoEnvGuard algo_guard(on_algo3 ? 1 : algo);
+            AlgoEnvGuard algo_guard(fused_act ? 1 : algo);
             ASSERT_NO_FATAL_FAILURE(h.run_two_call_reference(
                     /*prequant=*/true, d1_ref, out_ref))
                     << "algo=" << algo;
@@ -4169,12 +4178,13 @@ TEST(TestFusedMoEPreQuantSrc, BothPassesVsTwoCallReference) {
             ASSERT_EQ(h.run_fused(/*prequant=*/true, out_fused),
                     status_t::success)
                     << "algo=" << algo << " fused";
-            if (on_algo3) {
+            if (fused_act) {
                 const char *m
                         = test_api::s_last_group_matmul_direct_execution_path
                                   .load(std::memory_order_relaxed);
                 const std::string mode = m != nullptr ? m : "";
-                EXPECT_EQ(executed_algo_from_execution_path(mode.c_str()), 3)
+                EXPECT_EQ(executed_algo_from_execution_path(mode.c_str()),
+                        algo == 4 ? 4 : 3)
                         << "algo=" << algo << " mode=" << mode;
             }
         }
@@ -4183,7 +4193,7 @@ TEST(TestFusedMoEPreQuantSrc, BothPassesVsTwoCallReference) {
                 all_active, "pre-quantized fused path"));
         const std::string label
                 = "PreQuantSrcVsTwoCallRef algo=" + std::to_string(algo);
-        if (on_algo3) {
+        if (fused_act) {
             verify_per_expert_2d_row_scaled(out_fused, HW::H, out_ref, HW::H,
                     all_active, HW::H, bool_to_fp_dt(HW::is_bf16),
                     kInt8FusedActRowFrac, label);

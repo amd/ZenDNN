@@ -36,6 +36,7 @@
 #include "lowoha_operators/matmul/ggml_weight_unpack.hpp"
 #include "lowoha_operators/matmul/quantization/reorder_quantization.hpp"
 #include "multi_expert/ntile_flat_parallel/ntile_flat_parallel.hpp"
+#include "selection/algo_select.hpp"
 #include "selection/mxfp4_route.hpp"
 
 namespace zendnnl {
@@ -930,6 +931,15 @@ status_t group_matmul_direct(const std::vector<char> &layout,
         const group_matmul_moe_postop_params *weighted_reduce,
         const grp_matmul_gated_act_params *gated_act,
         const grp_matmul_fused_moe_params *fused_moe) {
+    // First: ALGO 4 publishes no pack for a call that a flush overlaps from
+    // here on.
+    const uint64_t algo4_since = ntile_flat_parallel::flush_count();
+    auto &flush_after_entry = zendnnl::lowoha::matmul::test_api::
+            s_ntile_flat_parallel_flush_after_entry;
+    if (flush_after_entry.load(std::memory_order_relaxed)
+            && flush_after_entry.exchange(false, std::memory_order_relaxed)) {
+        ntile_flat_parallel::flush();
+    }
 
     // ── Always-on safety guards (O(1), production-live) ───────────────
     // The dispatch below indexes every input vector up to num_ops, so
@@ -1004,12 +1014,6 @@ status_t group_matmul_direct(const std::vector<char> &layout,
             ? static_cast<size_t>(params[0].active_matmul)
             : num_ops_input;
     const bool single_expert_parallel = (src.size() == 1 && num_ops == 1);
-    // Classify only the compute-active prefix. Framework callers may append
-    // prepack-only experts to M; a large-M cold expert must not turn this
-    // call's decode request into prompt.
-    const grp_matmul_phase call_phase = classify_grp_matmul_phase(M, num_ops);
-    const grp_matmul_ntile_flat_parallel_request_source algo4_source
-            = resolve_grp_matmul_ntile_flat_parallel_request(call_phase);
 
     // ── F16 ISA gate + reference-accum-type setup ────────────────────
     // The single-op path runs `kernel_select` per call, which both
@@ -1326,9 +1330,9 @@ status_t group_matmul_direct(const std::vector<char> &layout,
         }
     }
 
-    // Start common instrumentation before either the whole-call interceptor
-    // or generic dispatch so every successful execution reaches the same
-    // profiler, summary log, and test-observability epilogue.
+    // Start common instrumentation before dispatch so every successful
+    // execution reaches the same profiler, summary log, and
+    // test-observability epilogue.
     profiler_t profiler;
     bool is_profile = is_profile_enabled();
     if (is_profile) { profiler.tbp_start(); }
@@ -1344,8 +1348,6 @@ status_t group_matmul_direct(const std::vector<char> &layout,
     auto finish_success = [&]() -> status_t {
         if (is_profile) { profiler.tbp_stop(); }
 
-        // One summary path serves both generic execution and the W8A8
-        // whole-call interceptor.
         if (s_l1_log || is_profile) {
             std::ostringstream ss;
             ss << "[GRP_MATMUL.CALL] num_ops=" << num_ops << " mode="
@@ -1420,68 +1422,25 @@ status_t group_matmul_direct(const std::vector<char> &layout,
         return status_t::success;
     };
 
-    // ── ALGO 4: W8A8 grouped-MoE fast path ──────────────────────────
-    // Attempt only after the public API's always-on structural checks and
-    // enabled diagnostic contract have accepted the original caller inputs.
-    // This preserves the same rejection semantics as every generic ALGO; the
-    // specialized executor then applies its stricter W8A8 eligibility checks.
-    //
-    // A quantized MoE block whose experts arrive pre-grouped is entirely
-    // weight-bandwidth-bound at decode batch sizes, and the generic planner
-    // cannot express "touch each weight byte once, against an activation
-    // already in registers". When the arguments prove one of its two exact
-    // input modes, run it directly:
-    //   * bf16_dynamic: BF16 src, private runtime quantization, BF16 W2
-    //     output reusing src.
-    //   * s8_prequantized: caller S8 src + positive finite per-token BF16/F32
-    //     scales, and caller-owned BF16 dst_down over the exact same tight,
-    //     BF16-sized backing as the S8 prefix.
-    //
-    // `unimplemented` means "not this shape, nothing written". Both BF16 and
-    // caller-prequantized S8 may fall through to main's generic fused-MoE
-    // implementation. The generic path safely serves ALGO4's same-backing
-    // layout through its ordered two-pass execution; an enabled
-    // vertical-fusion attempt detects the unequal S8 read / BF16 write byte
-    // strides and declines before writes.
-    if (algo4_source != grp_matmul_ntile_flat_parallel_request_source::none) {
-        status_t fast_st = status_t::unimplemented;
-        if (weighted_reduce != nullptr && gated_act != nullptr
-                && fused_moe != nullptr) {
-            fast_st = ntile_flat_parallel::try_execute(layout, transA, transB,
-                    M, N, K, alpha, src, lda, weight, ldb, bias, beta, dst, ldc,
-                    is_weights_const, params, weighted_reduce, gated_act,
-                    fused_moe);
-        }
-        static const bool s_algo4_log
-                = zendnnl::error_handling::apilog_verbose_enabled();
-        if (s_algo4_log) {
-            const char *result = fast_st == status_t::success
-                    ? "triggered"
-                    : (fast_st == status_t::unimplemented ? "eligibility_failed"
-                                                          : "execution_error");
-            const char *fallback = "none";
-            if (fast_st == status_t::unimplemented) {
-                fallback = algo4_source
-                                == grp_matmul_ntile_flat_parallel_request_source::
-                                        global
-                        ? "generic_auto"
-                        : (call_phase == grp_matmul_phase::decode
-                                          ? "decode_default_policy"
-                                          : "prompt_default_policy");
-            }
-            zendnnl::error_handling::apilog_verbose(
-                    "[GRP_MATMUL.ALGO4] source=",
-                    grp_matmul_ntile_flat_parallel_request_source_name(
-                            algo4_source),
-                    " phase=", grp_matmul_phase_name(call_phase),
-                    " fast_path=", result, " fallback=", fallback);
-        }
-        if (fast_st == status_t::success) {
-            execution_path = "ntile_flat_parallel";
-            return finish_success();
-        } else if (fast_st != status_t::unimplemented) {
-            return fast_st;
-        }
+    // ALGO 4 runs the calls of two or more operations of the phases it is
+    // requested for, or fails them.  It reads the caller's `params` as they
+    // are, before the per-call copies below.
+    const auto algo4 = [](const grp_matmul_phase p) {
+        return resolve_grp_matmul_ntile_flat_parallel_request(p)
+                != grp_matmul_ntile_flat_parallel_request_source::none;
+    };
+    const bool run_gated_act = (gated_act != nullptr
+            && gated_act->act != grp_matmul_gated_act_t::none);
+    if (src.size() != 1 && num_ops >= 2
+            && algo4(classify_grp_matmul_phase(M, num_ops))) {
+        const status_t st = ntile_flat_parallel::execute_grouped(num_ops,
+                layout, transA, transB, M, N, K, alpha, src, lda, weight, ldb,
+                bias, beta, dst, ldc, is_weights_const, params,
+                run_gated_act ? gated_act->act : grp_matmul_gated_act_t::none,
+                fused_moe, weighted_reduce, num_threads, algo4_since);
+        if (st != status_t::success) { return st; }
+        execution_path = "ntile_flat_parallel";
+        return finish_success();
     }
 
     // ── Active-set + prepack accounting ───────────────────────────────
@@ -1578,10 +1537,37 @@ status_t group_matmul_direct(const std::vector<char> &layout,
         execution_path = "sequential";
     } else {
         // ── Parallel grouped dispatch ─────────────────────────────────────
-        const bool run_gated_act = (gated_act != nullptr
-                && gated_act->act != grp_matmul_gated_act_t::none);
         const data_type_t act_dtype
                 = run_gated_act ? params[0].dtypes.dst : data_type_t::none;
+
+        // ALGO 4 packs its calls' expert weights from the caller's buffers,
+        // so the other phase's calls, and the calls of one operation of an
+        // MoE layer (a fused down projection, a weighted reduce or prepack
+        // extras: not a dense projection's gated activation), must leave
+        // those as they are.
+        if (num_ops < 2
+                && (algo4(grp_matmul_phase::decode)
+                        || algo4(grp_matmul_phase::prompt))
+                && (fused_moe != nullptr || weighted_reduce != nullptr
+                        || (params[0].active_matmul > 0
+                                && params[0].total_matmul
+                                        > params[0].active_matmul))) {
+            for (matmul_params &p : exec_params) {
+                p.weight_cache_type = std::min<int32_t>(p.weight_cache_type, 1);
+            }
+        }
+        if (num_ops >= 2) {
+            const grp_matmul_phase phase
+                    = classify_grp_matmul_phase(M, num_ops);
+            if (algo4(phase == grp_matmul_phase::decode
+                                ? grp_matmul_phase::prompt
+                                : grp_matmul_phase::decode)) {
+                for (matmul_params &p : exec_params) {
+                    p.weight_cache_type
+                            = std::min<int32_t>(p.weight_cache_type, 1);
+                }
+            }
+        }
 
         // ── Ahead-of-time weight pre-pack ─────────────────────────────────
         // Moved out of this dispatcher entirely: each scheduling ALGO's

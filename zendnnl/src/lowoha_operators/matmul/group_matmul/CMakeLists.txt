@@ -40,7 +40,6 @@ set(lowoha_group_matmul_sources
   group_matmul/prepack/prepack_aocl_dlp.cpp
   group_matmul/prepack/prepack_custom_kernel.cpp
   group_matmul/custom_kernel/pack.cpp
-  group_matmul/custom_kernel/w8a8/ntile_flat_parallel_pack.cpp
   group_matmul/custom_kernel/qwen_gemma_llama/bf16_decode_policy.cpp
   group_matmul/custom_kernel/ukernel/bf16_microkernel.cpp
   group_matmul/custom_kernel/qwen_gemma_llama/bf16_decode_microkernel.cpp
@@ -52,6 +51,13 @@ set(lowoha_group_matmul_sources
   group_matmul/custom_kernel/dispatch.cpp
   group_matmul/custom_kernel/ck_enable.cpp
   group_matmul/multi_expert/ntile_flat_parallel/ntile_flat_parallel.cpp
+  group_matmul/multi_expert/ntile_flat_parallel/nr32_pack.cpp
+  group_matmul/multi_expert/ntile_flat_parallel/nr32_tile.cpp
+  group_matmul/multi_expert/ntile_flat_parallel/nr32_ukernel.cpp
+  group_matmul/multi_expert/ntile_flat_parallel/nr32_ukernel_bf16.cpp
+  group_matmul/multi_expert/ntile_flat_parallel/nr32_ukernel_f16.cpp
+  group_matmul/multi_expert/ntile_flat_parallel/nr32_ukernel_s4.cpp
+  group_matmul/multi_expert/ntile_flat_parallel/nr32_ukernel_s8.cpp
   group_matmul/executors/n_tile/prompt_tile/prompt_tile_topology.cpp
   group_matmul/executors/n_tile/prompt_tile/prompt_tile_tunables.cpp
   group_matmul/executors/n_tile/prompt_tile/prompt_tile_executor.cpp)

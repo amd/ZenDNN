@@ -38,6 +38,7 @@
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
 #include "lowoha_operators/matmul/group_matmul/executors/n_tile/group_matmul_n_tile.hpp"
 #include "lowoha_operators/matmul/group_matmul/group_matmul_direct.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/ntile_flat_parallel.hpp"
 #include "lowoha_operators/matmul/group_matmul/prepack/prepack.hpp"
 #include "lowoha_operators/matmul/group_matmul/single_expert/single_expert_route.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
@@ -1235,6 +1236,7 @@ ZENDNNL_API void clear_grp_matmul_weight_caches() {
     custom_kernel::clear_custom_kernel_pack_cache_w4();
     group_matmul_prepack::clear_fingerprint_cache_for_test();
     clear_weight_scale_f32_cache();
+    ntile_flat_parallel::flush();
 }
 
 ZENDNNL_API void clear_matmul_weight_caches() {

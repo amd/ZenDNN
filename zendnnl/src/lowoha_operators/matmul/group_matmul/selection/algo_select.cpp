@@ -61,9 +61,10 @@ namespace {
 // QUALIFIES an operator's decode `AUTO_DECODE_ALGO=5` pin, honouring it only for
 // INT8 (s8) saturated-team decode and declining it (→ decode default) otherwise;
 // with no pin set the invariant is exact.
-// value 4 requests the earlier W8A8 whole-call interceptor; after an
-// eligibility decline it is deliberately NOT a generic pin and this selector
-// runs the inherited phase-default policy.
+// value 4 requests ALGO 4, which runs routed MoE calls and the grouped calls
+// of two or more operations that `group_matmul_direct` sends it before this
+// selector; it is deliberately NOT a generic pin, so a call that reaches this
+// selector under it runs the inherited phase-default policy here.
 //
 // Decision precedence (tightest first):
 //
@@ -126,10 +127,11 @@ namespace {
 //                   Rule 0.7 for the unset case)
 //      A generic non-zero value is returned directly with the same
 //      m_tile_safe / n_tile_safe clamps the global ALGO env path applies in
-//      `group_matmul_algo_select`. Value 4 has already requested W8A8 and, on
-//      decline, behaves as an unset setting here so the inherited default
-//      refinements still run. When the prompt setting does not pin a generic
-//      policy (unset or a declined `4`), Rule 0.7 sends the prompt to ALGO 1.
+//      `group_matmul_algo_select`. Value 4 requests ALGO 4, which serves its
+//      calls before this selector, and behaves as an unset setting here so
+//      the inherited default refinements still run. When the prompt setting does
+//      not pin a generic policy (unset or `4`), Rule 0.7 sends the prompt to
+//      ALGO 1.
 //      This block handles explicit generic/legacy prompt settings.
 //      For decode, the default is ALGO 3 (N-tile rounds + CK).  Set
 //      `AUTO_PROMPT_ALGO=0` for the legacy 3-rule cascade.
@@ -364,8 +366,8 @@ static int auto_select_algo(const std::vector<int> &M,
 
     // Rule 1 — PHASE SETTING. Shared phase classification drives which
     // setting is consulted. A generic non-zero request pins that algo for
-    // the phase; request 4 reaches here only after a BF16 W8A8 hook decline
-    // and exposes the inherited default as its generic effective value, with
+    // the phase; request 4 (ALGO 4, which serves its calls before this selector)
+    // exposes the inherited default as its generic effective value, with
     // `phase_env_pinned=false` so Rules 0.45/0.5/0.6/0.7 above retain their
     // normal authority. Apply the same m_tile_safe / n_tile_safe correctness
     // clamps as the global ALGO env path. Non-tile-safe + ALGO 3 falls to
@@ -528,16 +530,17 @@ int group_matmul_algo_select(const std::vector<char> &layout,
     // bf16 or under-occupied decode), and the `=0` legacy-cascade meaning.
     //
     // `has_explicit_request()` (not `pins_generic_policy()`) is the test, so
-    // a phase `=4` W8A8 request also outranks the global; if that attempt
-    // declines it inherits the phase default policy rather than silently
+    // a phase `=4` ALGO 4 request also outranks the global; a grouped call
+    // under it inherits the phase default policy rather than silently
     // falling back to the global pin.
     const grp_matmul_phase call_phase = classify_grp_matmul_phase(M, M.size());
     const bool phase_knob_set = get_grp_matmul_auto_phase_setting(call_phase)
                                         .has_explicit_request();
 
     // Inspect the raw requested selector so numeric 4 is unmistakably outside
-    // this generic branch. Global 4 has already attempted W8A8 and falls
-    // through to AUTO below.
+    // this generic branch. Global 4 requests ALGO 4, which serves its calls
+    // before this selector, so a call that reaches it falls through to AUTO
+    // below.
     const int requested_algo = get_grp_matmul_requested_algo();
     if (!phase_knob_set && is_grp_matmul_generic_algo(requested_algo)) {
         int algo = requested_algo;

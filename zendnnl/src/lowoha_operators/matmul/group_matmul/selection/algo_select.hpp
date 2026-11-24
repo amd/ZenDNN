@@ -15,7 +15,7 @@
  *******************************************************************************/
 
 /// AUTO algorithm selection: per-phase settings, WC=2 and cross-warm
-/// phase checks, the W8A8 request resolver and `group_matmul_algo_select`.
+/// phase checks, the ALGO 4 request resolver and `group_matmul_algo_select`.
 
 #ifndef ZENDNNL_GROUP_MATMUL_ALGO_SELECT_HPP
 #define ZENDNNL_GROUP_MATMUL_ALGO_SELECT_HPP
@@ -53,18 +53,21 @@ namespace matmul {
 // scheduler identities beyond that set:
 //   * 0 restores the legacy 3-rule cascade.
 //   * {1,2,3,5,6} pin that generic scheduler for the matching phase.
-//   * 4 requests the W8A8 whole-call interceptor for the matching phase. If
-//     eligibility declines, generic routing inherits the phase's normal
-//     default policy (including refinements and safety clamps); numeric 4 is
-//     never dispatched as a generic scheduler.
+//   * 4 requests ALGO 4, the N-tile flat-parallel MoE executor, for that
+//     phase's `routed_fused_moe_direct` calls and its `group_matmul_direct`
+//     calls of two or more operations, which `group_matmul_direct` sends to
+//     it before this selector. A call that reaches this selector under it (a
+//     grouped call of one operation) inherits the phase's normal default
+//     policy (including refinements and safety clamps); numeric 4 is never
+//     dispatched as a generic scheduler.
 //
 // PRECEDENCE: an explicitly-set phase knob for the ACTIVE phase outranks the
 // global `ZENDNNL_GRP_MATMUL_ALGO`, whatever the global is set to.  A phase
-// `=4` therefore requests W8A8 even under a global generic pin, and an
+// `=4` therefore requests ALGO 4 even under a global generic pin, and an
 // explicit non-4 phase knob suppresses a global `=4` for that phase.  The
 // global only applies when the matching phase knob is unset.
-// Any `unimplemented` attempt may fall through to generic fused-MoE; actual
-// ALGO4 allocation/execution errors remain terminal in `group_matmul_direct`.
+// A call ALGO 4 owns and cannot serve fails with `unimplemented` (or a
+// memory status) before writing anything; it does not run elsewhere.
 //
 // Strict integer parsing is preserved. Unset, malformed, and out-of-range
 // values inherit the documented default and do not count as an explicit
@@ -106,7 +109,7 @@ struct grp_matmul_auto_phase_setting {
     }
     /// Explicit {0,1,2,3,5,6} overrides the inherited policy. Explicit 0
     /// counts because it deliberately selects the legacy cascade. Phase 4
-    /// does not: after an ALGO4 decline, all default refinements run.
+    /// does not: under ALGO 4, generic calls run all default refinements.
     constexpr bool pins_generic_policy() const {
         return has_explicit_request() && !requests_ntile_flat_parallel();
     }
@@ -232,10 +235,25 @@ inline bool grp_matmul_wc2_global_phase_split_unsupported_for_call(
             || !grp_matmul_wc2_global_phase_split_unsupported()) {
         return false;
     }
+    // While ALGO 4 is requested, `group_matmul_direct` caps the MoE layer
+    // calls it does not run (the other phase's, and calls of one operation
+    // with a fused down projection, a weighted reduce or prepack extras) at
+    // out of place, so they reach this check with no weight to rewrite.
+    const int algo3_layer_prompt
+            = grp_matmul_static_algo_for_phase(grp_matmul_phase::prompt);
+    const int algo3_layer_decode
+            = grp_matmul_static_algo_for_phase(grp_matmul_phase::decode);
+    const bool algo3_layer_split = algo3_layer_prompt == 0
+            || algo3_layer_decode == 0
+            || algo3_layer_prompt != algo3_layer_decode;
     const auto pool_is_hazardous = [&](const std::vector<matmul_params> &pool,
                                            const std::vector<int> &pool_N,
                                            const std::vector<int> &pool_K) {
-        const bool ck_owned = grp_matmul_float_moe_layer(M, pool)
+        const bool float_layer = grp_matmul_float_moe_layer(M, pool)
+                && (algo3_layer_split
+                        || grp_matmul_auto_algo3_family(M, pool_N, pool_K, pool)
+                                != grp_matmul_algo3_family::float_family);
+        const bool ck_owned = float_layer
                 || grp_matmul_single_dense_call(
                         M, pool_N, pool_K, pool, num_threads);
         for (size_t i = 0; i < M.size() && i < pool.size(); ++i) {
@@ -360,14 +378,15 @@ enum class grp_matmul_ntile_flat_parallel_request_source {
     auto_prompt,
 };
 
-/// Resolve whether this call should attempt the W8A8 whole-call interceptor.
+/// Resolve whether this phase requests ALGO 4 (the N-tile flat-parallel MoE
+/// executor).
 ///
 /// PRECEDENCE — the per-phase knob for THIS phase outranks the global
 /// selector, matching `group_matmul_algo_select`.  So:
-///   * phase knob `=4`            → attempt W8A8 for this phase, even when a
+///   * phase knob `=4`            → ALGO 4 for this phase, even when a
 ///                                  global generic pin is set.
 ///   * phase knob explicitly set
-///     to anything else           → no W8A8; the explicit phase choice wins
+///     to anything else           → no ALGO 4; the explicit phase choice wins
 ///                                  over a global `=4`.
 ///   * phase knob unset           → fall back to the global selector.
 ///
@@ -382,8 +401,8 @@ resolve_grp_matmul_ntile_flat_parallel_request(grp_matmul_phase phase) {
                 : grp_matmul_ntile_flat_parallel_request_source::auto_prompt;
     }
     // An explicitly-set non-4 phase knob is a deliberate choice of a generic
-    // scheduler (or of the legacy cascade); it suppresses a global W8A8
-    // attempt for this phase.
+    // scheduler (or of the legacy cascade); it suppresses a global ALGO 4
+    // request for this phase.
     if (phase_setting.has_explicit_request()) {
         return grp_matmul_ntile_flat_parallel_request_source::none;
     }
@@ -393,20 +412,6 @@ resolve_grp_matmul_ntile_flat_parallel_request(grp_matmul_phase phase) {
         return grp_matmul_ntile_flat_parallel_request_source::global;
     }
     return grp_matmul_ntile_flat_parallel_request_source::none;
-}
-
-inline constexpr const char *grp_matmul_ntile_flat_parallel_request_source_name(
-        grp_matmul_ntile_flat_parallel_request_source source) {
-    switch (source) {
-        case grp_matmul_ntile_flat_parallel_request_source::none: return "none";
-        case grp_matmul_ntile_flat_parallel_request_source::global:
-            return "global";
-        case grp_matmul_ntile_flat_parallel_request_source::auto_decode:
-            return "auto_decode";
-        case grp_matmul_ntile_flat_parallel_request_source::auto_prompt:
-            return "auto_prompt";
-    }
-    return "none";
 }
 
 // NOTE: the single-expert policy — the Rule 0.45 knob, the single-expert

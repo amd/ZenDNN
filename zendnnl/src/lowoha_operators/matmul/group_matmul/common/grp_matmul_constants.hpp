@@ -43,7 +43,8 @@ using zendnnl::common::size_of;
 // `matmul_algo_t`: that enum names inner GEMM kernels, while these values name
 // whole-call grouped scheduling/interception modes.
 //
-// Selector 4 is the W8A8 whole-call interceptor; selector 6 owns the generic
+// Selector 4 is ALGO 4, the N-tile flat-parallel MoE executor; selector 6
+// owns the generic
 // multilevel scheduler.
 inline constexpr int kGrpMatmulAlgoAuto = 0;
 inline constexpr int kGrpMatmulAlgoMultilevel = 6;
@@ -113,7 +114,7 @@ inline const char *act_name(grp_matmul_gated_act_t a) {
 inline constexpr int kDecodeMaxM = 64; // per-expert M ≤ this → "decode"
 inline constexpr int kMinNTile = 512; // prompt-path per-thread N
 
-/// Runtime phase used by AUTO group-matmul policy and W8A8 interception.
+/// Runtime phase used by AUTO group-matmul policy and the ALGO 4 request.
 ///
 /// A call is decode when the maximum M in its active operation prefix is at
 /// most `kDecodeMaxM`; otherwise it is prompt. Empty prefixes are decode (their
@@ -134,9 +135,8 @@ inline int max_active_grp_matmul_m(
             M.begin(), M.begin() + static_cast<std::ptrdiff_t>(count));
 }
 
-/// Classify only the first `active_prefix` entries. This overload is used by
-/// `group_matmul_direct`, where trailing M entries may describe prepack-only
-/// experts and must not turn a decode call into prompt.
+/// Classify only the first `active_prefix` entries: trailing M entries may
+/// describe prepack-only experts and must not turn a decode call into prompt.
 inline grp_matmul_phase classify_grp_matmul_phase(
         const std::vector<int> &M, size_t active_prefix) {
     return classify_grp_matmul_phase(max_active_grp_matmul_m(M, active_prefix));

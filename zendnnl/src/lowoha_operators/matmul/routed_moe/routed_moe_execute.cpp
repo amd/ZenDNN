@@ -83,8 +83,6 @@ std::shared_mutex &inplace_storage_lifecycle_mutex() {
     return mutex;
 }
 
-namespace {
-
 // A routed execution holds a shared lock from validation through its final
 // store.  Cache flush takes the exclusive side, so it cannot retire a pack
 // (or return control to a model-unload caller) while any routed call is active.
@@ -92,6 +90,8 @@ std::shared_mutex &execution_lifecycle_mutex() {
     static std::shared_mutex mutex;
     return mutex;
 }
+
+namespace {
 
 #if ZENDNNL_ROUTED_MOE_KERNELS_COMPILED
 
@@ -2056,13 +2056,15 @@ void flush_weight_cache() {
     inplace_store().clear();
     std::vector<int8_t> {}.swap(inplace_restore_scratch());
 #endif
+    // Under the lifecycle lock too, so no routed call starts before ALGO 4's
+    // state is gone.
+    ntile_flat_parallel::flush();
 }
 
 } // namespace routed_moe
 
 void group_matmul_routed_moe_flush_weight_cache() {
     routed_moe::flush_weight_cache();
-    ntile_flat_parallel::flush_packed_weight_cache();
 }
 
 status_t group_matmul_routed_moe_pack_weights(const void *src, void *dst,

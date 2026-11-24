@@ -2821,7 +2821,7 @@ TEST_P(TestGroupMatmulAutoSelectAlgo, MatchesExpected) {
     // Pin ZENDNNL_GRP_MATMUL_ALGO=0 so the auto-select path fires
     // (override is uncached on purpose; an env value lingering from a
     // prior test would shadow our expectation).  `get_grp_matmul_algo`
-    // returns 0 for AUTO, the intercepted W8A8 selector 4, or an invalid
+    // returns 0 for AUTO, ALGO 4's selector 4, or an invalid
     // selector; generic scheduler IDs are {1,2,3,5,6}.
     AlgoEnvGuard reset_algo(0);
     // Explicitly disable the phase env (default PROMPT=2 / DECODE=3) so
@@ -3286,9 +3286,11 @@ TEST(TestGroupMatmulAutoSelectAlgo_DynamicQuant, AcceptsAlgo3ViaHoist) {
 // Set the env to `0` for the legacy 3-rule cascade.  Tests here
 // pin both branches: explicit env=0 reproduces the legacy cascade,
 // env={1,2,3,5,6} is honoured for the matching generic phase, and value 4
-// requests the matching phase's W8A8 whole-call interceptor while mapping to
-// inherited default policy after a decline. Coverage also includes the safety
-// clamps (ALGO 3 on !n_tile_safe) and the legacy cascade's R0 capacity gate.
+// requests ALGO 4 for the matching phase while the calls that reach the
+// selector (grouped calls of one operation) map it to the inherited default
+// policy. Coverage also includes
+// the safety clamps (ALGO 3 on !n_tile_safe) and the legacy cascade's R0
+// capacity gate.
 //
 // All tests use `group_matmul_algo_select` directly with `ALGO=0` so
 // auto-select fires; the phase env is the only thing that varies.
@@ -7024,7 +7026,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, SharedClassifierUsesBoundaryAndActivePrefix) {
 }
 
 TEST(TestGroupMatmulAutoPhaseEnv,
-        W8A8ResolverHonorsPhasePrecedenceAndPhaseIsolation) {
+        Algo4ResolverHonorsPhasePrecedenceAndPhaseIsolation) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     reset_grp_matmul_caches();
@@ -7034,9 +7036,9 @@ TEST(TestGroupMatmulAutoPhaseEnv,
     // even when the global is also 4 — the source identity reports which
     // knob was honoured, and that is now the phase.
     {
-        AlgoEnvGuard global_w8a8(4);
-        AutoPromptAlgoOverride prompt_w8a8(4);
-        AutoDecodeAlgoOverride decode_w8a8(4);
+        AlgoEnvGuard global_algo4(4);
+        AutoPromptAlgoOverride prompt_algo4(4);
+        AutoDecodeAlgoOverride decode_algo4(4);
         EXPECT_EQ(resolve_grp_matmul_ntile_flat_parallel_request(
                           grp_matmul_phase::decode),
                 grp_matmul_ntile_flat_parallel_request_source::auto_decode);
@@ -7046,11 +7048,11 @@ TEST(TestGroupMatmulAutoPhaseEnv,
     }
 
     // A phase `=4` outranks EVERY global generic pin: the operator asked for
-    // W8A8 on this phase specifically, which is the more specific statement.
+    // ALGO 4 on this phase specifically, which is the more specific statement.
     for (const int global : {1, 2, 3, 5, 6}) {
         AlgoEnvGuard global_pin(global);
-        AutoPromptAlgoOverride prompt_w8a8(4);
-        AutoDecodeAlgoOverride decode_w8a8(4);
+        AutoPromptAlgoOverride prompt_algo4(4);
+        AutoDecodeAlgoOverride decode_algo4(4);
         EXPECT_EQ(resolve_grp_matmul_ntile_flat_parallel_request(
                           grp_matmul_phase::decode),
                 grp_matmul_ntile_flat_parallel_request_source::auto_decode)
@@ -7062,10 +7064,10 @@ TEST(TestGroupMatmulAutoPhaseEnv,
     }
 
     // Converse direction: an explicit non-4 phase knob suppresses a global
-    // `=4`, so the global W8A8 attempt does not leak into a phase the
+    // `=4`, so the global ALGO 4 request does not leak into a phase the
     // operator has pinned to a generic scheduler.
     for (const int phase_generic : {1, 2, 3, 5, 6}) {
-        AlgoEnvGuard global_w8a8(4);
+        AlgoEnvGuard global_algo4(4);
         AutoPromptAlgoOverride prompt_pin(phase_generic);
         AutoDecodeAlgoOverride decode_pin(phase_generic);
         EXPECT_EQ(resolve_grp_matmul_ntile_flat_parallel_request(
@@ -7080,7 +7082,7 @@ TEST(TestGroupMatmulAutoPhaseEnv,
 
     // The global still applies when the matching phase knob is UNSET.
     {
-        AlgoEnvGuard global_w8a8(4);
+        AlgoEnvGuard global_algo4(4);
         EXPECT_EQ(resolve_grp_matmul_ntile_flat_parallel_request(
                           grp_matmul_phase::decode),
                 grp_matmul_ntile_flat_parallel_request_source::global);
@@ -7089,11 +7091,11 @@ TEST(TestGroupMatmulAutoPhaseEnv,
                 grp_matmul_ntile_flat_parallel_request_source::global);
     }
 
-    // Under global AUTO, only the matching phase can request W8A8. The
+    // Under global AUTO, only the matching phase can request ALGO 4. The
     // inactive phase remains a normal generic pin (6 here).
     {
         AlgoEnvGuard global_auto(0);
-        AutoPromptAlgoOverride prompt_w8a8(4);
+        AutoPromptAlgoOverride prompt_algo4(4);
         AutoDecodeAlgoOverride decode_multilevel(6);
         EXPECT_EQ(resolve_grp_matmul_ntile_flat_parallel_request(
                           grp_matmul_phase::prompt),
@@ -7112,7 +7114,7 @@ TEST(TestGroupMatmulAutoPhaseEnv,
     {
         AlgoEnvGuard global_auto(0);
         AutoPromptAlgoOverride prompt_multilevel(6);
-        AutoDecodeAlgoOverride decode_w8a8(4);
+        AutoDecodeAlgoOverride decode_algo4(4);
         EXPECT_EQ(resolve_grp_matmul_ntile_flat_parallel_request(
                           grp_matmul_phase::decode),
                 grp_matmul_ntile_flat_parallel_request_source::auto_decode);
@@ -7129,17 +7131,17 @@ TEST(TestGroupMatmulAutoPhaseEnv,
     }
 }
 
-// Phase value 4 is a valid raw W8A8 request, but its generic effective value
+// Phase value 4 is a valid raw ALGO 4 request, but its generic effective value
 // is the inherited phase default. It must not count as a generic policy pin:
-// after an eligibility decline, the default policy runs.
+// grouped calls under it run the default policy.
 TEST(TestGroupMatmulAutoPhaseEnv,
-        PhaseValue4RequestsW8A8AndInheritsDefaultPolicy) {
+        PhaseValue4RequestsAlgo4AndInheritsDefaultPolicy) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     reset_grp_matmul_caches();
     AlgoEnvGuard reset_algo(0);
-    AutoPromptAlgoOverride prompt_w8a8(4);
-    AutoDecodeAlgoOverride decode_w8a8(4);
+    AutoPromptAlgoOverride prompt_algo4(4);
+    AutoDecodeAlgoOverride decode_algo4(4);
 
     const auto prompt = get_grp_matmul_auto_prompt_setting();
     EXPECT_EQ(prompt.requested_algo, 4);
@@ -7164,8 +7166,8 @@ TEST(TestGroupMatmulAutoPhaseEnv,
                       grp_matmul_phase::decode),
             grp_matmul_ntile_flat_parallel_request_source::auto_decode);
 
-    // Request 4 is not a generic pin, so after an ALGO4 decline latest main's
-    // default-only prompt refinement selects ALGO 1.
+    // Request 4 is not a generic pin, so for a grouped call the default-only
+    // prompt refinement selects ALGO 1.
     auto s = build_auto_probe(/*M=*/256, /*K=*/4096, /*N=*/14336,
             /*num_ops=*/8, /*num_threads=*/128);
     apply_shape_rules_probe(s);
@@ -7206,7 +7208,7 @@ TEST(TestGroupMatmulAutoPhaseEnv,
     ASSERT_NE(decode_trace.reason, nullptr);
     EXPECT_EQ(std::string(decode_trace.reason).rfind("auto_rule05_", 0), 0u);
 
-    // A BF16/FP16 layer of several experts runs ALGO 3 after the decline too.
+    // A BF16/FP16 layer of several experts runs ALGO 3 under phase 4 too.
     auto moe = build_auto_probe(/*M=*/256, /*K=*/4096, /*N=*/14336,
             /*num_ops=*/8, /*num_threads=*/128);
     GroupMatmulAlgoTrace moe_trace;
@@ -7214,6 +7216,114 @@ TEST(TestGroupMatmulAutoPhaseEnv,
                       moe.params, moe.num_threads, &moe_trace),
             3);
     EXPECT_STREQ(moe_trace.reason, "auto_algo3");
+}
+
+// Under each ALGO 4 request a grouped call of several experts runs ALGO 4 in
+// a phase the request covers, close to AUTO's output, and otherwise takes
+// AUTO's path and writes AUTO's output.
+TEST(TestGroupMatmulAutoPhaseEnv, GroupedCallsRunAlgo4InTheRequestedPhase) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    // More experts than `kFewExpertsDecodeThreshold`, with the custom kernel
+    // off, keep the decode call out of the few-expert and ALGO-3 MoE-layer
+    // rules, so it reaches the phase setting.  The baseline is AUTO under any
+    // process-wide ALGO.
+    CustomKernelOverride ck_off(false);
+    AlgoEnvGuard global_auto(0);
+    // 7 leaves a phase unset, whatever the environment sets.
+    AutoDecodeAlgoOverride decode_unset(7);
+    AutoPromptAlgoOverride prompt_unset(7);
+    // ALGO 4 serves only weight-cached calls, whatever the process sets.
+    struct weight_cache_pin {
+        zendnnl::common::matmul_config_t &config
+                = zendnnl::common::matmul_config_t::instance();
+        const int32_t previous = config.get_weight_cache();
+        weight_cache_pin() { config.set_weight_cache(1); }
+        ~weight_cache_pin() { config.set_weight_cache(previous); }
+    } cache_mode;
+    const int K = 256, N = 128, num_ops = 2 * kFewExpertsDecodeThreshold;
+    for (const int M : {8, 128}) {
+        SCOPED_TRACE("M=" + std::to_string(M));
+        tensor_factory_t tf;
+        std::vector<tensor_t> src, wei, bias, dst;
+        ASSERT_NO_FATAL_FAILURE(
+                build_int8_dq_inputs(tf, Int8AlgoCustomParam {0, M, num_ops, N},
+                        N, K, src, wei, bias, dst));
+        const std::vector<int> rows(num_ops, M);
+        const size_t per_op = static_cast<size_t>(M) * N;
+        auto run = [&](std::string &mode, std::vector<uint16_t> &out) {
+            reset_grp_matmul_caches();
+            // NaN: an element the call does not write fails the comparison.
+            for (int e = 0; e < num_ops; ++e) {
+                std::memset(dst[e].get_raw_handle_unsafe(), 0xFF,
+                        per_op * sizeof(uint16_t));
+            }
+            ExecutionPathCaptureGuard capture;
+            ASSERT_EQ(group_matmul_kernel_test(src, wei, bias, dst,
+                              matmul_algo_t::aocl_dlp_blocked, 1.0f, 0.0f,
+                              /*weighted_reduce=*/nullptr,
+                              /*gated_act=*/nullptr,
+                              /*pack_format_b=*/ {}, rows, data_type_t::s8),
+                    status_t::success);
+            const char *m
+                    = test_api::s_last_group_matmul_direct_execution_path.load(
+                            std::memory_order_relaxed);
+            mode = m != nullptr ? m : "";
+            out.assign(per_op * num_ops, 0);
+            for (int e = 0; e < num_ops; ++e) {
+                std::memcpy(out.data() + per_op * e,
+                        dst[e].get_raw_handle_unsafe(),
+                        per_op * sizeof(uint16_t));
+            }
+        };
+
+        std::string auto_mode;
+        std::vector<uint16_t> auto_out;
+        ASSERT_NO_FATAL_FAILURE(run(auto_mode, auto_out));
+        ASSERT_FALSE(auto_mode.empty());
+        ASSERT_NE(auto_mode, "ntile_flat_parallel");
+        auto expect = [&](const char *request, const bool algo4) {
+            SCOPED_TRACE(request);
+            std::string mode;
+            std::vector<uint16_t> out;
+            ASSERT_NO_FATAL_FAILURE(run(mode, out));
+            if (!algo4) {
+                EXPECT_EQ(mode, auto_mode);
+                EXPECT_EQ(out, auto_out);
+                return;
+            }
+            EXPECT_EQ(mode, "ntile_flat_parallel");
+            ASSERT_EQ(out.size(), auto_out.size());
+            const auto value = [](const uint16_t h) {
+                return zendnnl::common::bfloat16_t::bf16_to_f32_val(
+                        static_cast<int16_t>(h));
+            };
+            float peak = 0.0f, worst = 0.0f;
+            for (size_t i = 0; i < out.size(); ++i) {
+                const float want = value(auto_out[i]);
+                const float diff = std::fabs(value(out[i]) - want);
+                peak = std::max(peak, std::fabs(want));
+                worst = std::max(worst,
+                        std::isnan(diff)
+                                ? std::numeric_limits<float>::infinity()
+                                : diff);
+            }
+            EXPECT_LE(worst, 0.02f * peak);
+        };
+        const bool decode = M <= kDecodeMaxM;
+        {
+            AlgoEnvGuard global(4);
+            expect("ALGO=4", true);
+        }
+        {
+            AutoDecodeAlgoOverride phase(4);
+            expect("AUTO_DECODE_ALGO=4", decode);
+        }
+        {
+            AutoPromptAlgoOverride phase(4);
+            expect("AUTO_PROMPT_ALGO=4", !decode);
+        }
+    }
 }
 
 // `AUTO_PROMPT_ALGO=2` is a PIN, not a hint: an operator that explicitly
@@ -7366,13 +7476,13 @@ TEST(TestGroupMatmulAutoPhaseEnv, InvalidDecodeValueIsNotAPin) {
                 << "value " << valid << " is a legal pin";
     }
     {
-        AutoDecodeAlgoOverride w8a8_decode(4);
+        AutoDecodeAlgoOverride algo4_decode(4);
         const auto setting = get_grp_matmul_auto_decode_setting();
         EXPECT_TRUE(setting.has_explicit_request());
         EXPECT_TRUE(setting.requests_ntile_flat_parallel());
         EXPECT_FALSE(setting.pins_generic_policy());
         EXPECT_FALSE(grp_matmul_auto_decode_algo_is_set())
-                << "phase 4 is valid for W8A8 but is not a generic pin";
+                << "phase 4 requests ALGO 4 but is not a generic pin";
     }
 }
 

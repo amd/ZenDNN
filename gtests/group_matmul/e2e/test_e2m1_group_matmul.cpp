@@ -1263,18 +1263,17 @@ TEST(GroupMatmulMxfp4, SchedulerPinOtherThanAlgo3FailsTheCall) {
     }
 }
 
-// ALGO 4 is the W8A8 interceptor, not a scheduler: it declines MXFP4, which
-// then runs ALGO 3.
-TEST(GroupMatmulMxfp4, W8A8InterceptorLeavesMxfp4OnAlgo3) {
-    if (!ck::avx512vnni_available()) GTEST_SKIP() << "no AVX-512 VNNI";
+// ALGO 4 runs calls of several experts itself and has no MXFP4 kernels: such
+// a call fails under it.
+TEST(GroupMatmulMxfp4, Algo4FailsTheCall) {
     moe_test_utils::CustomKernelOverride ck_on(true);
-    moe_test_utils::AlgoEnvGuard w8a8(4);
+    moe_test_utils::AlgoEnvGuard algo4(4);
+    // 7 leaves both phases unset, whatever the environment sets.
+    moe_test_utils::AutoDecodeAlgoOverride decode_unset(7);
+    moe_test_utils::AutoPromptAlgoOverride prompt_unset(7);
     reset_grp_matmul_caches();
     Mxfp4Call call({1, 3, 0, 2}, /*K=*/256, /*N=*/128, 41);
-    moe_test_utils::ExecutionPathCaptureGuard capture;
-    ASSERT_EQ(call.run(), status_t::success);
-    expect_custom_kernel_path("ALGO 4");
-    call.expect_matches_reference("ALGO 4");
+    EXPECT_EQ(call.run(), status_t::unimplemented);
 }
 
 namespace {

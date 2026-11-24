@@ -43,8 +43,7 @@ files are listed in `CMakeLists.txt`, with paths relative to
 - `epilogue/` holds the gated activations and the MoE weighted-reduce post-op.
 - `custom_kernel/` holds the custom microkernels, their weight packing and
   their dispatch, and `ck_enable.hpp` holds the custom-kernel enable knobs.
-  `w8a8/` is the ALGO 4 W8A8 pack and microkernel, and `qwen_gemma_llama/`
-  holds the Qwen, Gemma and Llama BF16 decode kernels.
+  `qwen_gemma_llama/` holds the Qwen, Gemma and Llama BF16 decode kernels.
 - `prepack/` holds the weight prepacking for each algorithm.
 
 ## Dependency rules

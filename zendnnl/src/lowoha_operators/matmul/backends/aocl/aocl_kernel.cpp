@@ -440,6 +440,7 @@ std::atomic<uint64_t> g_mutated_source_conflicts {0};
 
 void aocl_mark_weight_buffer_mutated(const void *weights) {
     if (weights == nullptr) { return; }
+    record_weights_rewritten_in_place(weights, weight_rewriter::aocl);
     // SCOPE: grouped AUTO mixed in-place only.  A refusal is actionable only
     // where a caller converts it into a failed call, which today is the
     // grouped dispatcher.  Registering a buffer from an entry point that does
@@ -530,6 +531,7 @@ void clear_aocl_matmul_weight_caches() {
         mutated_wei_conflicts().clear();
         g_mutated_source_conflicts.store(0, std::memory_order_relaxed);
     }
+    forget_weights_rewritten_in_place(weight_rewriter::aocl);
     // Lock only the mutex paired with each cache so clear does not interleave
     // reorderAndCacheWeights* between find_key() and get()/add(), without
     // blocking all dtypes for the entire teardown.

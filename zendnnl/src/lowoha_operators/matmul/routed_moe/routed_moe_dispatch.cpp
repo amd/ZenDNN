@@ -17,7 +17,12 @@
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 
 #include "common/zendnnl_global.hpp"
+#include "lowoha_operators/matmul/group_matmul/common/grp_matmul_constants.hpp"
+#include "lowoha_operators/matmul/group_matmul/custom_kernel/ck_enable.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/ntile_flat_parallel.hpp"
+#include "lowoha_operators/matmul/group_matmul/selection/algo_select.hpp"
+#include "lowoha_operators/matmul/lowoha_common.hpp"
 #include "lowoha_operators/matmul/routed_moe/routed_moe_internal.hpp"
 #include "lowoha_operators/reorder/lowoha_reorder.hpp"
 #include "lowoha_operators/reorder/lowoha_reorder_utils.hpp"
@@ -189,11 +194,40 @@ bool routed_moe_enabled() {
     return value == nullptr || value[0] != '0' || value[1] != '\0';
 }
 
+/// Whether ALGO 4 (`ntile_flat_parallel`) owns the calls of `phase` (decode
+/// while no expert has more than `kDecodeMaxM` rows):
+/// `ZENDNNL_GRP_MATMUL_ALGO=4` requests it for both phases and the
+/// `AUTO_DECODE_ALGO` / `AUTO_PROMPT_ALGO` knobs for their own.  A call it
+/// owns and cannot serve fails.
+bool ntile_flat_parallel_enabled(const grp_matmul_phase phase) {
+    return resolve_grp_matmul_ntile_flat_parallel_request(phase)
+            != grp_matmul_ntile_flat_parallel_request_source::none;
+}
+
 /// Grow-only sizing for the typed token scratch: the producer overwrites
 /// every live element, so a shrink-then-grow must not re-zero the buffer.
 template <typename T>
 void reserve_elements(std::vector<T> &buffer, size_t elements) {
     if (buffer.size() < elements) { buffer.resize(elements); }
+}
+
+/// The router weights as dense `[num_tokens, topk]` rows: the caller's own
+/// buffer when it already is, or unread, else a copy into `dense`.
+const float *dense_topk_weights(const group_matmul_routing_params &routing,
+        const int num_tokens, const int topk, std::vector<float> &dense) {
+    if (routing.skip_weighted || routing.topk_weights_stride == 0
+            || routing.topk_weights_stride == topk) {
+        return routing.topk_weights;
+    }
+    reserve_elements(dense, static_cast<size_t>(num_tokens) * topk);
+    for (int token = 0; token < num_tokens; ++token) {
+        std::memcpy(dense.data() + static_cast<size_t>(token) * topk,
+                routing.topk_weights
+                        + static_cast<size_t>(token)
+                                * routing.topk_weights_stride,
+                static_cast<size_t>(topk) * sizeof(float));
+    }
+    return dense.data();
 }
 
 /// Below this much bulk copy, forking an OpenMP team costs more than the
@@ -796,9 +830,10 @@ status_t build_projection_params(
     // The routed entry point owns a second DA8W8 layout for these weights.
     // Its generic fallback must therefore remain out-of-place: allowing WC=2
     // could replace the row-major bytes before a later routed cache miss.
-    // The routed executor never packs a BF16 weight, so a BF16 projection
-    // keeps the caller's mode.
-    if (grouped_params.dtypes.wei != data_type_t::bf16) {
+    // The routed executor never packs a 16-bit weight, so a BF16 or FP16
+    // projection keeps the caller's mode.
+    if (grouped_params.dtypes.wei != data_type_t::bf16
+            && grouped_params.dtypes.wei != data_type_t::f16) {
         grouped_params.weight_cache_type
                 = std::min<int32_t>(grouped_params.weight_cache_type, 1);
     }
@@ -1167,21 +1202,8 @@ status_t run_fused_grouped(const group_matmul_projection_params &primary,
                         * output_element_size;
     }
 
-    const float *route_weights = routing.topk_weights;
-    if (!routing.skip_weighted && routing.topk_weights_stride != 0
-            && routing.topk_weights_stride != topk) {
-        reserve_elements(
-                desc.dense_weights, static_cast<size_t>(num_tokens) * topk);
-        for (int token = 0; token < num_tokens; ++token) {
-            std::memcpy(desc.dense_weights.data()
-                            + static_cast<size_t>(token) * topk,
-                    routing.topk_weights
-                            + static_cast<size_t>(token)
-                                    * routing.topk_weights_stride,
-                    static_cast<size_t>(topk) * sizeof(float));
-        }
-        route_weights = desc.dense_weights.data();
-    }
+    const float *route_weights
+            = dense_topk_weights(routing, num_tokens, topk, desc.dense_weights);
 
     group_matmul_moe_postop_params postop;
     postop.num_tokens = num_tokens;
@@ -1510,21 +1532,8 @@ status_t finish_output(const grouped_tokens_t &grouped,
         return status_t::success;
     }
 
-    const float *weights = routing.topk_weights;
-    if (!routing.skip_weighted && routing.topk_weights_stride != 0
-            && routing.topk_weights_stride != topk) {
-        reserve_elements(
-                desc.dense_weights, static_cast<size_t>(num_tokens) * topk);
-        for (int m = 0; m < num_tokens; ++m) {
-            std::memcpy(
-                    desc.dense_weights.data() + static_cast<size_t>(m) * topk,
-                    routing.topk_weights
-                            + static_cast<size_t>(m)
-                                    * routing.topk_weights_stride,
-                    static_cast<size_t>(topk) * sizeof(float));
-        }
-        weights = desc.dense_weights.data();
-    }
+    const float *weights
+            = dense_topk_weights(routing, num_tokens, topk, desc.dense_weights);
     group_matmul_moe_postop_params postop;
     postop.num_tokens = num_tokens;
     postop.topk = topk;
@@ -1673,6 +1682,252 @@ status_t run_generic(const char layout_src, const bool trans_src,
             primary.params.num_threads, descriptors);
 }
 
+/// ALGO 4's weight scale groups along K of an s8 or s4 projection: 1 for
+/// `{E, N}` or `{E, 1, N}` s8 scales, G for `{E, G, N}` scales of groups of
+/// whole K quads (s8) or octets (s4); 0 for scales it cannot take.
+int64_t ntile_flat_parallel_weight_groups(
+        const matmul_quantization_params_t::matmul_quant_t &q,
+        const data_type_t wei, const int num_experts, const int input_size,
+        const int output_size) {
+    if (wei == data_type_t::s8
+            && tight_expert_scale(q, num_experts, output_size))
+        return 1;
+    if (q.buff == nullptr
+            || (q.dt != data_type_t::f32 && q.dt != data_type_t::bf16)
+            || q.dims.size() != 3 || q.dims[0] != num_experts || q.dims[1] <= 0
+            || q.dims[2] != output_size || input_size % q.dims[1] != 0) {
+        return 0;
+    }
+    const int64_t group_size = input_size / q.dims[1];
+    return group_size % (wei == data_type_t::s4 ? 8 : 4) == 0 ? q.dims[1] : 0;
+}
+
+/// Whether a routed projection's tokens take one source scale per (token,
+/// weight scale group), `{num_tokens, G}`, rather than one per token.
+bool ntile_flat_parallel_source_groups(const group_matmul_projection_params &p,
+        const int num_tokens, const int num_experts) {
+    const auto &d = p.params.dtypes;
+    if (d.wei != data_type_t::s8 && d.wei != data_type_t::s4) return false;
+    const int64_t groups
+            = ntile_flat_parallel_weight_groups(p.params.quant_params.wei_scale,
+                    d.wei, num_experts, p.input_size, p.output_size);
+    const auto &dims = p.params.quant_params.src_scale.dims;
+    return groups > 1 && dims.size() == 2 && dims[0] == num_tokens
+            && dims[1] == groups;
+}
+
+/// Why ALGO 4 cannot serve a routed projection, or null when it serves it:
+/// constant BF16 or FP16 weights with no scales, or symmetric DA8W8 or W4A8
+/// with per-channel (s8) or per-group weight scales, with source scales per
+/// token or per (token, weight scale group); a BF16, F32 or F16 bias or
+/// none; no destination scale, zero point or post-op; and a weight cache
+/// mode that lets the layer's packs outlive the call.  The entry has already
+/// rejected a null weight and a non-zero beta.
+const char *ntile_flat_parallel_projection_refusal(
+        const group_matmul_projection_params &p, const int num_tokens,
+        const int num_experts) {
+    const auto &q = p.params.quant_params;
+    const auto &d = p.params.dtypes;
+    if (p.bias != nullptr && d.bias != data_type_t::bf16
+            && d.bias != data_type_t::f32 && d.bias != data_type_t::f16) {
+        return "unsupported_bias";
+    }
+    if (effective_weight_cache_type(p.params.weight_cache_type) < 1)
+        return "weight_cache_disabled";
+    if (!p.weight_is_const) return "non_constant_weights";
+    if (p.params.packing.pack_format_b != 0 || p.params.mem_format_b != 'n')
+        return "prepacked_weights";
+    if (p.alpha != 1.0f) return "alpha";
+    if (q.wei_zp.buff != nullptr || q.src_zp.buff != nullptr
+            || q.dst_zp.buff != nullptr) {
+        return "zero_points";
+    }
+    if (q.dst_scale.buff != nullptr) return "destination_scale";
+    if (!p.params.postop_.empty()) return "post_ops";
+    if (d.wei == data_type_t::bf16 || d.wei == data_type_t::f16) {
+        if (d.src != d.wei || d.dst != d.wei) return "unsupported_types";
+        if (p.params.dynamic_quant || q.wei_scale.buff != nullptr
+                || q.src_scale.buff != nullptr) {
+            return "scales_on_16bit_weights";
+        }
+        return nullptr;
+    }
+    if (d.wei != data_type_t::s8 && d.wei != data_type_t::s4)
+        return "unsupported_types";
+    if (d.src != data_type_t::bf16 || d.dst != data_type_t::bf16
+            || d.compute != data_type_t::s8 || !p.params.dynamic_quant) {
+        return "unsupported_types";
+    }
+    if (ntile_flat_parallel_weight_groups(
+                q.wei_scale, d.wei, num_experts, p.input_size, p.output_size)
+            <= 0) {
+        return "unsupported_weight_scale";
+    }
+    const bool per_token = q.src_scale.dims.size() == 2
+            && q.src_scale.dims[0] == num_tokens && q.src_scale.dims[1] == 1;
+    if (!per_token
+            && !ntile_flat_parallel_source_groups(p, num_tokens, num_experts)) {
+        return "unsupported_source_scale";
+    }
+    return nullptr;
+}
+
+/// `projection` for every expert, as ALGO 4 packs it.
+bool ntile_flat_parallel_projection(
+        const group_matmul_projection_params &projection, const int num_experts,
+        ntile_flat_parallel::projection &out) {
+    const int E = num_experts;
+    out.K = projection.input_size;
+    out.N = projection.output_size;
+    out.ldb = projection.ldb;
+    out.trans_weight = projection.trans_weight;
+    out.weight.resize(static_cast<size_t>(E));
+    out.params.assign(static_cast<size_t>(E), projection.params);
+    for (int e = 0; e < E; ++e) {
+        if (slice_expert_quant(out.params[e].quant_params.wei_scale, e, E,
+                    projection.output_size)
+                != status_t::success) {
+            return false;
+        }
+        size_t offset = 0;
+        if (expert_weight_offset(projection, e, offset) != status_t::success) {
+            return false;
+        }
+        out.weight[e]
+                = static_cast<const uint8_t *>(projection.weight) + offset;
+    }
+    return true;
+}
+
+status_t ntile_flat_parallel_declined(const char *reason) {
+    error_handling::apilog_error(
+            "[ROUTED_MOE] ALGO 4 cannot serve the call: reason=", reason);
+    return status_t::unimplemented;
+}
+
+/// Runs a call on ALGO 4 (`ntile_flat_parallel`), or returns `unimplemented`
+/// before writing anything.
+status_t run_ntile_flat_parallel(const char layout_src, const bool trans_src,
+        const void *token_src, const int token_src_ld, const int num_tokens,
+        const int num_experts, const int topk, void *moe_output,
+        const int moe_output_ld, const group_matmul_projection_params &primary,
+        const group_matmul_routing_params &routing,
+        const group_matmul_projection_params &secondary,
+        const grp_matmul_gated_act_t act, const std::vector<int> &local_experts,
+        const std::vector<int> &counts) {
+    // The entry has already checked the source stride and, for a gated
+    // activation, that the gate/up width is twice the down projection's input.
+    // The routed flush waits for this call, which reads the caller's biases
+    // until its last store.
+    std::shared_lock<std::shared_mutex> lifecycle_lock(
+            routed_moe::execution_lifecycle_mutex());
+    const int H = primary.input_size, I = secondary.input_size;
+    if (layout_src != 'r' && layout_src != 'R')
+        return ntile_flat_parallel_declined("column_major_source");
+    if (trans_src) return ntile_flat_parallel_declined("transposed_source");
+    if (!routing.reduce_output)
+        return ntile_flat_parallel_declined("unreduced_output");
+    if (secondary.output_size != H)
+        return ntile_flat_parallel_declined("shape");
+    if (secondary.params.dtypes.wei != primary.params.dtypes.wei)
+        return ntile_flat_parallel_declined("mixed_weight_types");
+    for (const auto *p : {&primary, &secondary}) {
+        const char *refusal = ntile_flat_parallel_projection_refusal(
+                *p, num_tokens, num_experts);
+        if (refusal != nullptr) return ntile_flat_parallel_declined(refusal);
+    }
+
+    const auto key_of = [](const group_matmul_projection_params &p) {
+        ntile_flat_parallel::projection_key k;
+        k.weight = p.weight;
+        k.ldb = p.ldb;
+        k.expert_stride = p.wei_buffer_capacity_bytes;
+        k.trans_weight = p.trans_weight;
+        return k;
+    };
+    ntile_flat_parallel::layer_key key;
+    key.w13 = key_of(primary);
+    key.w2 = key_of(secondary);
+    key.num_experts = num_experts;
+    key.H = H;
+    key.I = I;
+    key.act = act;
+    key.wei = primary.params.dtypes.wei;
+    const auto bias_type = [](const group_matmul_projection_params &p) {
+        return p.bias != nullptr ? p.params.dtypes.bias : data_type_t::none;
+    };
+    key.w13_bias = bias_type(primary);
+    key.w2_bias = bias_type(secondary);
+    key.w13_src_groups = ntile_flat_parallel_source_groups(
+            primary, num_tokens, num_experts);
+    key.w2_src_groups = ntile_flat_parallel_source_groups(
+            secondary, num_tokens, num_experts);
+    ntile_flat_parallel::layer_scales scales;
+    scales.w13 = primary.params.quant_params.wei_scale.buff;
+    scales.w13_dt = primary.params.quant_params.wei_scale.dt;
+    scales.w2 = secondary.params.quant_params.wei_scale.buff;
+    scales.w2_dt = secondary.params.quant_params.wei_scale.dt;
+    const auto scale_groups = [](const group_matmul_projection_params &p) {
+        const auto &dims = p.params.quant_params.wei_scale.dims;
+        return dims.size() == 3 ? dims[1] : int64_t {1};
+    };
+    scales.w13_groups = scale_groups(primary);
+    scales.w2_groups = scale_groups(secondary);
+
+    std::vector<float> &dense_weights
+            = generic_scratch().descriptors.dense_weights;
+    ntile_flat_parallel::moe_call call;
+    call.src = static_cast<const uint16_t *>(token_src);
+    call.src_ld = token_src_ld;
+    call.num_tokens = num_tokens;
+    call.topk = topk;
+    call.local_experts = local_experts.data();
+    call.counts = counts.data();
+    call.topk_weights
+            = dense_topk_weights(routing, num_tokens, topk, dense_weights);
+    call.skip_weighted = routing.skip_weighted;
+    call.w13_bias = primary.bias;
+    call.w2_bias = secondary.bias;
+    call.dst = moe_output;
+    call.dst_ld = moe_output_ld;
+    call.num_threads
+            = routed_moe::effective_num_threads(primary.params.num_threads);
+    // Only a layer's first call, which packs it, reads the caller's weights.
+    // It holds the exclusive side until the call returns, so no routed call
+    // rewrites them meanwhile: a generic call holds the shared side through
+    // its grouped packs, which may land in place at weight cache mode 2, and
+    // the fast executor takes the exclusive side to pack in place.
+    std::unique_lock<std::shared_mutex> pack_lock;
+    return ntile_flat_parallel::execute(key, scales,
+            [&](ntile_flat_parallel::projection &w13,
+                    ntile_flat_parallel::projection &w2) -> const char * {
+        pack_lock = std::unique_lock<std::shared_mutex>(
+                routed_moe::inplace_storage_lifecycle_mutex());
+        // A routed in-place pack replaced the caller's row-major bytes.
+        if (routed_moe::is_inplace_packed_storage(primary.weight)
+                || routed_moe::is_inplace_packed_storage(secondary.weight)) {
+            return "inplace_storage";
+        }
+        if (!ntile_flat_parallel_projection(primary, num_experts, w13)
+                || !ntile_flat_parallel_projection(
+                        secondary, num_experts, w2)) {
+            return "weights_unavailable";
+        }
+        // The prepack reads row-major weights, which an AOCL-DLP or oneDNN
+        // reorder, or a custom-kernel pack, at weight cache mode 2 may have
+        // rewritten in place.
+        for (const auto *proj : {&w13, &w2}) {
+            for (const void *w : proj->weight) {
+                if (weights_rewritten_in_place(w)) return "reordered_in_place";
+                if (custom_kernel::weight_packed_in_place(w))
+                    return "custom_kernel_inplace";
+            }
+        }
+        return nullptr;
+    },
+            call);
+}
+
 } // namespace
 
 status_t routed_fused_moe_direct(const char layout_src, const bool trans_src,
@@ -1712,6 +1967,43 @@ status_t routed_fused_moe_direct(const char layout_src, const bool trans_src,
         }
     };
 
+    const bool decode_shaped
+            = *std::max_element(counts.begin(), counts.end()) <= kDecodeMaxM;
+    const bool algo4_call = ntile_flat_parallel_enabled(decode_shaped
+                    ? grp_matmul_phase::decode
+                    : grp_matmul_phase::prompt);
+    // ALGO 4 packs the layer from the caller's weights on its first call of
+    // either phase, so no other path may rewrite them in place.
+    const bool algo4_layer = algo4_call
+            || ntile_flat_parallel_enabled(decode_shaped
+                            ? grp_matmul_phase::prompt
+                            : grp_matmul_phase::decode);
+    if (algo4_call) {
+        if (secondary == nullptr) {
+            return ntile_flat_parallel_declined("no_down_projection");
+        }
+        if (gated_act == nullptr)
+            return ntile_flat_parallel_declined("not_gated");
+        status = run_ntile_flat_parallel(layout_src, trans_src, token_src,
+                token_src_ld, num_tokens, num_experts, topk, moe_output,
+                moe_output_ld, primary, routing, *secondary, gated_act->act,
+                local_experts, counts);
+        if (status == status_t::success) {
+            if (s_route_log) {
+                error_handling::apilog_info(
+                        "[ROUTED_MOE] path=ntile_flat_parallel wei=",
+                        reorder::reorder_data_type_to_string(
+                                primary.params.dtypes.wei),
+                        " phase=", decode_shaped ? "decode" : "prompt",
+                        " act=", act_name(), " tokens=", num_tokens,
+                        " experts=", num_experts, " topk=", topk,
+                        " hidden=", primary.input_size,
+                        " intermediate=", secondary->input_size);
+            }
+        }
+        return status;
+    }
+
     const char *generic_reason = "disabled";
     if (routed_moe_enabled()) {
         generic_reason = "format";
@@ -1726,10 +2018,16 @@ status_t routed_fused_moe_direct(const char layout_src, const bool trans_src,
                         gate_group_size, down_group_size,
                         w4_per_group_activation);
         if (w8 || w4) {
-            const auto fast_params = make_fast_params(token_src, token_src_ld,
+            auto fast_params = make_fast_params(token_src, token_src_ld,
                     num_tokens, num_experts, topk, moe_output, moe_output_ld,
                     primary, routing, *secondary, gated_act->act, w4,
                     w4_per_group_activation, gate_group_size, down_group_size);
+            if (algo4_layer) {
+                // ALGO 4 reads these weights as given, so the fast executor
+                // must not rewrite them in place.
+                fast_params.gate_up_wei_buffer_capacity_bytes = 0;
+                fast_params.down_wei_buffer_capacity_bytes = 0;
+            }
             status = routed_moe::execute(fast_params);
             if (status == status_t::success) {
                 if (s_route_log) {
@@ -1785,6 +2083,23 @@ status_t routed_fused_moe_direct(const char layout_src, const bool trans_src,
         error_handling::apilog_info("[ROUTED_MOE] path=generic reason=",
                 generic_reason, " act=", act_name(), " tokens=", num_tokens,
                 " experts=", num_experts, " topk=", topk);
+    }
+    if (algo4_layer) {
+        // Packs at weight cache mode 2 would rewrite the weights ALGO 4
+        // packs from.
+        group_matmul_projection_params gate_up = primary;
+        gate_up.params.weight_cache_type
+                = std::min(gate_up.params.weight_cache_type, 1);
+        group_matmul_projection_params down;
+        if (secondary != nullptr) {
+            down = *secondary;
+            down.params.weight_cache_type
+                    = std::min(down.params.weight_cache_type, 1);
+        }
+        return run_generic(layout_src, trans_src, token_src, token_src_ld,
+                num_tokens, num_experts, topk, moe_output, moe_output_ld,
+                gate_up, routing, secondary != nullptr ? &down : nullptr,
+                gated_act, final_width, local_experts, counts);
     }
     return run_generic(layout_src, trans_src, token_src, token_src_ld,
             num_tokens, num_experts, topk, moe_output, moe_output_ld, primary,

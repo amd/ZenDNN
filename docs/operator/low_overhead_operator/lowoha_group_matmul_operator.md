@@ -107,7 +107,7 @@ Per-op vectors must all have length `num_ops = M.size()`, except `src` whose len
 | **1** | Sequential | Experts serial, each GEMM uses all threads. Default for ≤4 experts and large K×N. | None |
 | **2** | Adaptive tile | Per-expert M-tile or N-tile decision. No nested OMP — framework-safe. | Flat |
 | **3** | N-tile | Pure N-tiling with decode-optimized sequential regime. Up to 3.9× for Mixtral. | Flat |
-| **4** | W8A8 fused MoE | Attempts the private symmetric per-channel W8A8 gate/up → SiLU → down fast path for either BF16-dynamic or caller-prequantized S8 input. Global 4 applies to the phase whose knob is unset; a matching phase setting of 4 applies to that phase and outranks the global. | Flat |
+| **4** | N-tile flat-parallel MoE | `routed_fused_moe_direct` calls and grouped calls of two or more operations, of DA8W8, W4A8, BF16 or FP16 experts, on ALGO 4's own packs and kernels (see [Routed fused-MoE direct API](#routed-fused-moe-direct-api)). Requested by a global 4 for each phase whose setting is unset, or by a phase setting of 4; a call it cannot serve fails, and every other call runs as under AUTO. | Flat |
 | **5** | Per-expert | Parallel-for over experts, 1 thread each. Best when experts ≥ threads. | Flat |
 | **6** | Multilevel | CCD-aware nested OMP. Multi-CCD for large M, round-based for small M. | Nested |
 
@@ -119,24 +119,24 @@ Auto-select classifies each call by its largest per-expert M into a **decode** o
 n_tile_safe ALGO-3 MoE layer (bf16/f16/int8/w4a8, ≥ 2 experts), phase unset → ALGO 3 (N-tile)
 num_threads ≤ 1  OR  num_ops == 0      → ALGO 1 (sequential)
 num_ops > 256                          → ALGO 1 (N-tile planner capacity ceiling)
-max_M ≤ 32   (decode phase)            → ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO  (default 3, N-tile)
-max_M > 32   (prompt phase)            → ALGO 1 when the prompt setting is unpinned
+max_M ≤ 64   (decode phase)            → ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO  (default 3, N-tile)
+max_M > 64   (prompt phase)            → ALGO 1 when the prompt setting is unpinned
 ```
 
 A layer of at least two experts whose every active expert is BF16 or FP16 (matching source and weight dtype, not AOCL-prepacked) or a symmetric DQ-INT8 / W4A8 expert the custom kernel and the prompt tile serve (dtypes listed in `ZENDNNL_GRP_MATMUL_MULTI_EXPERT_ALGO3`, default all; `bf16,f16` under an explicit `ZENDNNL_GRP_MATMUL_ALGO=0`), counting the declared `total_matmul` pool, runs both phases on ALGO 3 when ALGO 3 can serve the call (`n_tile_safe`): the custom kernel serves prompt and decode from one family-specific pack, and ALGO 3 runs a call with more than 256 experts as consecutive slices of at most 256 experts. Every other call -- any other dtype, and a single expert of any dtype such as a routed `matmul_direct` -- takes the per-phase defaults and guards above.
 
-Each phase knob accepts `{0,1,2,3,4,5,6}`. Values `{1,2,3,5,6}` pin that generic ALGO for the phase; `0` defers to the legacy 3-rule cascade. Value `4` requests W8A8 for the matching phase. **The phase knob outranks `ZENDNNL_GRP_MATMUL_ALGO`** whatever the global is set to; the global only governs the phase whose knob is unset. If the W8A8 attempt declines, the setting behaves as the inherited default—not as an explicit generic pin—so default-policy refinements still run for both BF16 and caller-prequantized S8.
+Each phase knob accepts `{0,1,2,3,4,5,6}`. Values `{1,2,3,5,6}` pin that generic ALGO for the phase; `0` defers to the legacy 3-rule cascade. Value `4` requests ALGO 4 for that phase's routed MoE calls and its grouped calls of two or more operations. **The phase knob outranks `ZENDNNL_GRP_MATMUL_ALGO`** whatever the global is set to; the global only governs the phase whose knob is unset. For a grouped call of one operation and a sequential chain, which ALGO 4 does not take, a `4` behaves as the inherited default—not as an explicit generic pin—so default-policy refinements still run.
 
 ```
 num_ops ≥ num_threads                  → ALGO 3 (N-tile)
 num_ops ≤ 8                            → ALGO 1 (sequential)
-prompt (max_M > 32)                    → ALGO 1 (sequential)
-decode (max_M ≤ 32)                    → ALGO 3 (N-tile)
+prompt (max_M > 64)                    → ALGO 1 (sequential)
+decode (max_M ≤ 64)                    → ALGO 3 (N-tile)
 ```
 
-**Safety clamps:** ALGO 2 requires `m_tile_safe`; ALGO 3 requires `n_tile_safe`; either failure falls back to **ALGO 1**. When the prompt setting is unpinned (unset or a declined phase-4 request), an ALGO-3 MoE layer (BF16, FP16, symmetric DQ-INT8 or W4A8 experts the custom kernel serves; see `ZENDNNL_GRP_MATMUL_MULTI_EXPERT_ALGO3` in `docs/runtime_env.md`) runs ALGO 3 in both phases; every other multi-expert prompt selects ALGO 1. Decode defaults to ALGO 3. An explicitly set phase knob outranks `ZENDNNL_GRP_MATMUL_ALGO`; the global applies only when that phase knob is unset.
+**Safety clamps:** ALGO 2 requires `m_tile_safe`; ALGO 3 requires `n_tile_safe`; either failure falls back to **ALGO 1**. When the prompt setting is unpinned (unset or `4`), an ALGO-3 MoE layer (BF16, FP16, symmetric DQ-INT8 or W4A8 experts the custom kernel serves; see `ZENDNNL_GRP_MATMUL_MULTI_EXPERT_ALGO3` in `docs/runtime_env.md`) runs ALGO 3 in both phases; every other multi-expert prompt selects ALGO 1. Decode defaults to ALGO 3. An explicitly set phase knob outranks `ZENDNNL_GRP_MATMUL_ALGO`; the global applies only when that phase knob is unset.
 
-**MXFP4 (`f4_e2m1`) calls** always run ALGO 3, the only scheduler that engages the custom kernel, and nothing clamps them: a pin to another scheduler (ALGO 1, 2, 5 or 6), a call ALGO 3 cannot slice, or one the custom kernel refuses fails with the reason instead of falling back (see MXFP4 in `lowoha_matmul_operator.md`). ALGO 4, the W8A8 interceptor, declines an MXFP4 call, which then runs ALGO 3.
+**MXFP4 (`f4_e2m1`) calls** always run ALGO 3, the only scheduler that engages the custom kernel, and nothing clamps them: a pin to another scheduler (ALGO 1, 2, 5 or 6), a call ALGO 3 cannot slice, or one the custom kernel refuses fails with the reason instead of falling back (see MXFP4 in `lowoha_matmul_operator.md`). ALGO 4 has no MXFP4 kernels: an MXFP4 call of two or more operations fails in a phase that requests it.
 
 Tiled algos (2/3) require row-major layout, uniform per-expert dtypes, and standard unpacked A and B (`mem_format_a=='n'`, `mem_format_b=='n'`, `pack_format_b==0`). ALGO 2 (M-tile) additionally supports the full quantization stack (WOQ, static W8A8, and dynamic INT8 with row-local src granularity — `{M, 1}` per-token or `{M, G}` per-group) and most post-ops; it rejects packed B, softmax/pooling, and dynamic-quant with non-row-local src granularity (per-tensor / per-column / per-channel). ALGO 3 (N-tile) supports dynamic or caller-prequantized INT8 when the source scale is row-local (`{M, 1}` per-token or `{M, G}` per-group) and the weight scale resolves the K axis (per-channel `{N}` / `{1, N}` or per-group `{G, N}`). `n_tile_supported` validates the pairing: per-token source works with per-channel or per-group weight scales, while per-group source requires a matching per-group weight scale. Per-group execution uses the AOCL per-tile path rather than the custom INT8 microkernel. Unsupported scale pairings, incompatible zero-points, pre-reordered weights, and unsupported buffer-bearing post-ops fall back safely. See the detailed quantization matrix and `n_tile_supported` for the exact boundaries. Rule 0.7 sends unpinned shape-rule prompts to ALGO 1; ALGO-3 MoE layers (BF16, FP16, symmetric DQ-INT8 or W4A8 experts the custom kernel serves) run ALGO 3 in both phases. Explicit ALGO 2/3 prompt pins remain subject to their safety clamps.
 
@@ -201,12 +201,12 @@ User-facing knobs that affect `group_matmul_direct` behaviour.  All are read onc
 
 | Variable | Default | Effect |
 |---|---|---|
-| `ZENDNNL_GRP_MATMUL_ALGO` | `0` (auto) | Select group matmul execution. `0` = auto. `{1,2,3,5,6}` pin that generic scheduler for any phase whose per-phase knob is unset. `4` attempts the two-mode W8A8 fused-MoE fast path in those phases. An explicit matching phase knob outranks this global, so a phase `4` still requests W8A8 under a global generic pin. Any eligibility decline falls back to generic AUTO; main's generic fused-MoE path supports BF16 and caller-prequantized S8. |
-| `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO` | `3` | Forces the ALGO for the decode phase (`max active M <= 32`). Unset, an ALGO-3 MoE layer (BF16, FP16, symmetric DQ-INT8 or W4A8 experts the custom kernel serves; see `ZENDNNL_GRP_MATMUL_MULTI_EXPERT_ALGO3` in `docs/runtime_env.md`) selects ALGO 3. Outranks `ZENDNNL_GRP_MATMUL_ALGO`. `{1,2,3,5,6}` pin that scheduler; `0` selects the legacy cascade; `4` requests W8A8 for decode. A declined value inherits the decode default (ALGO 3); an n_tile_safe failure clamps ALGO 3 → **ALGO 1**. A `=5` pin is still subject to the ALGO 5 occupancy/dtype qualifier. |
-| `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO` | unset (ALGO 1 for shape-rule prompts) | Forces the ALGO for the prompt phase (`max active M > 32`) and outranks `ZENDNNL_GRP_MATMUL_ALGO`. When unpinned, an ALGO-3 MoE layer (BF16, FP16, symmetric DQ-INT8 or W4A8 experts the custom kernel serves; see `ZENDNNL_GRP_MATMUL_MULTI_EXPERT_ALGO3` in `docs/runtime_env.md`) selects ALGO 3; every other multi-expert prompt selects ALGO 1. `{1,2,3,5,6}` pin that scheduler with tile-safety clamps; `0` selects the legacy cascade; `4` requests W8A8, then inherits the unpinned prompt policy on decline. A declined `5` redirects to ALGO 3, or ALGO 1 when not N-tile-safe. |
+| `ZENDNNL_GRP_MATMUL_ALGO` | `0` (auto) | Select group matmul execution. `0` = auto. `{1,2,3,5,6}` pin that generic scheduler for any phase whose per-phase knob is unset. `4` requests ALGO 4, the N-tile flat-parallel MoE executor, for `routed_fused_moe_direct` calls and grouped calls of two or more operations of both phases (see [Routed fused-MoE direct API](#routed-fused-moe-direct-api)); a grouped call of one operation and a sequential chain run as under AUTO, a call of one operation with a fused down projection, a weighted reduce or prepack extras at weight cache mode `1` at most. An explicit phase knob outranks this global, so a phase `4` still requests ALGO 4 under a global generic pin, and a phase knob other than `4` overrides a global `4` for its phase. |
+| `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO` | `3` | Forces the ALGO for the decode phase (`max active M <= 64`). Unset, an ALGO-3 MoE layer (BF16, FP16, symmetric DQ-INT8 or W4A8 experts the custom kernel serves; see `ZENDNNL_GRP_MATMUL_MULTI_EXPERT_ALGO3` in `docs/runtime_env.md`) selects ALGO 3. Outranks `ZENDNNL_GRP_MATMUL_ALGO`. `{1,2,3,5,6}` pin that scheduler; `0` selects the legacy cascade; `4` requests ALGO 4 for decode-shaped routed MoE calls and grouped calls of two or more operations, and leaves every other decode call on the decode default. A declined value inherits the decode default (ALGO 3); an n_tile_safe failure clamps ALGO 3 → **ALGO 1**. A `=5` pin is still subject to the ALGO 5 occupancy/dtype qualifier. |
+| `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO` | unset (ALGO 1 for shape-rule prompts) | Forces the ALGO for the prompt phase (`max active M > 64`) and outranks `ZENDNNL_GRP_MATMUL_ALGO`. When unpinned, an ALGO-3 MoE layer (BF16, FP16, symmetric DQ-INT8 or W4A8 experts the custom kernel serves; see `ZENDNNL_GRP_MATMUL_MULTI_EXPERT_ALGO3` in `docs/runtime_env.md`) selects ALGO 3; every other multi-expert prompt selects ALGO 1. `{1,2,3,5,6}` pin that scheduler with tile-safety clamps; `0` selects the legacy cascade; `4` requests ALGO 4 for prompt-shaped routed MoE calls and grouped calls of two or more operations, and leaves every other prompt call on the unpinned prompt policy; as an explicit setting it still outranks `ZENDNNL_GRP_MATMUL_ALGO`. A declined `5` redirects to ALGO 3, or ALGO 1 when not N-tile-safe. |
 | `ZENDNNL_GRP_MATMUL_PREPACK` | `1` (ON) | Ahead-of-time weight prepack.  When ON, the first call that observes a given configuration eagerly warms the AOCL DLP and custom-kernel weight caches for all expert slots so timed iterations never pay an on-the-fly reorder cost.  Set `0` for lazy-on-first-touch behaviour. |
-| `ZENDNNL_MATMUL_WEIGHT_CACHE` | `2` (in-place where supported) | Standard weight-reorder cache for AOCL DLP / BRGEMM. Mode `2` lets paths with in-place support (AOCL blocked reorder, BF16/FP16 custom-kernel packs) reuse the caller's weight buffer; every other path keeps caching out-of-place. Under AUTO, grouped calls keep `2` only with prepack, cross-warm, the custom-kernel decode pack and unlimited LRU capacity available, and otherwise fall back to `1` for the process. An ALGO-3 MoE layer (BF16, FP16, symmetric DQ-INT8 or W4A8 experts the custom kernel serves; see `ZENDNNL_GRP_MATMUL_MULTI_EXPERT_ALGO3` in `docs/runtime_env.md`) with neither phase pinned off ALGO 3 reads one family-specific custom-kernel pack in both phases while its AOCL DLP reorders stay out-of-place. Contiguous FP16 weights and BF16 weights with even K may write that pack in place for every expert at prepack. Every other grouped call, and such a layer under a phase pin that splits its phases, lets only the AOCL prompt reorder write in place after warming the decode layouts out of place. Set `1` to force out-of-place everywhere. Mode `2` writes the caller's weight buffer, so it must be writable: pass a per-call `weight_cache_type` of `1` for read-only weights such as a read-only mmap. A call's `matmul_params::weight_cache_type` caps that call to the lower of the process mode and the per-call value on the grouped AUTO policy, ALGO 3's AOCL per-tile path, and the N-tile FP32 weight-scale memo. A call whose experts are all capped below `2` writes no weight in place. Under AUTO, such a capped call also leaves the process mode and the AUTO mixed in-place state as they are. A generic `ZENDNNL_GRP_MATMUL_ALGO` pin (`{1,2,3,5,6}`; the phase knobs do not count) skips the AUTO policy instead: every call, capped or not, clears the mixed in-place state and leaves the process mode as it is. The GGML Q8_0/Q4_0 unpack cache and the W4A8 plain s8 cache that ALGO 3 reads ignore a per-call `0`. Setting `0` disables both lazy and prepack populations — prepack short-circuits to a no-op rather than wasting CPU on entries that won't be cached. The custom-kernel pack path honours the same knob: `0` allocates caller-owned packed buffers per call (no stale pointer hits). A weight the custom kernel packed in place can then be read only by the custom kernel: a later layout of it (the interleaved silu/gelu order, another `pack_nr`) is packed out of place from the raw weight rebuilt out of that buffer, and a call on it that resolves to another ALGO, or that the custom kernel refuses (for example `alpha != 1`), fails instead of reading the packed bytes as the weight. Use `1`, process-wide or as a call's `matmul_params::weight_cache_type`, for weights that also feed such calls. The W8A8 ALGO 4 interceptor instead declines before writes because locally packing both complete expert tensors on every token would be prohibitive; BF16 and caller-prequantized S8 may continue through generic fallback. |
-| `ZENDNNL_GRP_MATMUL_PROMPT_TILE` | `15` (every family) | Prompt tile executor for ALGO 3 prompt calls (`max active M > 32`) on the custom microkernel, as a bitmask of dtype families: `1` BF16, `2` DQ-INT8, `4` W4A8, `8` FP16, `0` off.  Instead of per-round barriers, the call is cut into (expert, M-block, N-slice) tiles that L3-domain thread teams drain from shared queues, stealing from each other when idle.  It reuses the decode `pack_nr` pack, and the output is bitwise identical to the round executor.  Decode, single-active-expert and AOCL-path calls are unaffected.  Clear a family's bit to use the round executor for it. |
+| `ZENDNNL_MATMUL_WEIGHT_CACHE` | `2` (in-place where supported) | Standard weight-reorder cache for AOCL DLP / BRGEMM. Mode `2` lets paths with in-place support (AOCL blocked reorder, BF16/FP16 custom-kernel packs) reuse the caller's weight buffer; every other path keeps caching out-of-place. Under AUTO, grouped calls keep `2` only with prepack, cross-warm, the custom-kernel decode pack and unlimited LRU capacity available, and otherwise fall back to `1` for the process. An ALGO-3 MoE layer (BF16, FP16, symmetric DQ-INT8 or W4A8 experts the custom kernel serves; see `ZENDNNL_GRP_MATMUL_MULTI_EXPERT_ALGO3` in `docs/runtime_env.md`) with neither phase pinned off ALGO 3 reads one family-specific custom-kernel pack in both phases while its AOCL DLP reorders stay out-of-place. Contiguous FP16 weights and BF16 weights with even K may write that pack in place for every expert at prepack. Every other grouped call, and such a layer under a phase pin that splits its phases, lets only the AOCL prompt reorder write in place after warming the decode layouts out of place. Set `1` to force out-of-place everywhere. Mode `2` writes the caller's weight buffer, so it must be writable: pass a per-call `weight_cache_type` of `1` for read-only weights such as a read-only mmap. A call's `matmul_params::weight_cache_type` caps that call to the lower of the process mode and the per-call value on the grouped AUTO policy, ALGO 3's AOCL per-tile path, and the N-tile FP32 weight-scale memo. A call whose experts are all capped below `2` writes no weight in place. Under AUTO, such a capped call also leaves the process mode and the AUTO mixed in-place state as they are. A generic `ZENDNNL_GRP_MATMUL_ALGO` pin (`{1,2,3,5,6}`; the phase knobs do not count) skips the AUTO policy instead: every call, capped or not, clears the mixed in-place state and leaves the process mode as it is. The GGML Q8_0/Q4_0 unpack cache and the W4A8 plain s8 cache that ALGO 3 reads ignore a per-call `0`. Setting `0` disables both lazy and prepack populations — prepack short-circuits to a no-op rather than wasting CPU on entries that won't be cached. The custom-kernel pack path honours the same knob: `0` allocates caller-owned packed buffers per call (no stale pointer hits). A weight the custom kernel packed in place can then be read only by the custom kernel: a later layout of it (the interleaved silu/gelu order, another `pack_nr`) is packed out of place from the raw weight rebuilt out of that buffer, and a call on it that resolves to another ALGO, or that the custom kernel refuses (for example `alpha != 1`), fails instead of reading the packed bytes as the weight. Use `1`, process-wide or as a call's `matmul_params::weight_cache_type`, for weights that also feed such calls. ALGO 4 fails its calls at `0`, as it keeps its packs across calls, and packs out of place at `1` and `2`; while it is requested for either phase, the other phase's grouped calls of two or more operations, and grouped calls of one operation of an MoE layer, are capped at `1`. |
+| `ZENDNNL_GRP_MATMUL_PROMPT_TILE` | `15` (every family) | Prompt tile executor for ALGO 3 prompt calls (`max active M > 64`) on the custom microkernel, as a bitmask of dtype families: `1` BF16, `2` DQ-INT8, `4` W4A8, `8` FP16, `0` off.  Instead of per-round barriers, the call is cut into (expert, M-block, N-slice) tiles that L3-domain thread teams drain from shared queues, stealing from each other when idle.  It reuses the decode `pack_nr` pack, and the output is bitwise identical to the round executor.  Decode, single-active-expert and AOCL-path calls are unaffected.  Clear a family's bit to use the round executor for it. |
 | `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL` | `1` (ON) | Master switch for the in-house AVX-512 custom microkernel under ALGO 3 (`n_tile_execute`).  OFF forces every expert through AOCL DLP / BRGEMM regardless of dtype. |
 | `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_INT8` | `1` (ON) | Sub-toggle for dynamic per-token INT8 (`s8/u8×s8→{bf16,f32}`) and static per-tensor U8×S8 (`u8×s8→{bf16,f32,u8}` with scalar source metadata, scalar/per-channel weight scales, and optional U8 destination requantization). Cascades under the master switch — effective only when `_CUSTOM_KERNEL=1`. |
 | `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_F16` | `1` (ON) | Sub-toggle for the native AVX-512-FP16 custom microkernel (`f16×f16→{f16,f32}`).  Cascades under the master switch.  Even when ON, the FP16 path also needs the host to have AVX-512-FP16 at runtime and a toolchain that compiled the FP16 intrinsics (GCC ≥ 12).  Two distinct outcomes when unavailable: (1) if the **host lacks the AVX-512-FP16 ISA**, `group_matmul_direct` rejects any f16 call upstream with `status_t::isa_unsupported` (the whole call fails — there is no AOCL DLP fallback, because no F16 GEMM backend can run without the ISA); (2) if the **ISA is present but the CK kernels were not compiled** (pre-GCC-12 build) or `_CUSTOM_KERNEL_F16=0`, `prepare_for_call` refuses and the call falls back to the AOCL DLP F16 path. |
@@ -845,7 +845,139 @@ fast-versus-generic dispatch:
 executor. Set it to `0` to skip the fast executor and exercise the same
 internal vector fallback. This does not bypass common validation and does not
 select a grouped algorithm: `ZENDNNL_GRP_MATMUL_ALGO` remains authoritative for
-the fallback, so setting it to `4` requests the W8A8 ALGO 4 interceptor.
+the fallback.
+
+ALGO 4 (`ZENDNNL_GRP_MATMUL_ALGO=4` for both phases, or
+`ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO=4` / `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO=4`
+for one) owns the routed calls of its phases: it runs them on the N-tile
+flat-parallel executor in `group_matmul/multi_expert/ntile_flat_parallel`, with
+its own weight packs and kernels, and a call it cannot serve fails with
+`status_t::unimplemented` and the reason in the API error log instead of running
+on another path. A call is a decode call while no expert has more than 64 rows,
+else a prompt call. It serves DA8W8, W4A8 and BF16 experts, and FP16 experts on
+CPUs with AVX-512 FP16, of any hidden and intermediate size and any expert
+count, under SiLU, GELU and SwiGLU-OAI, with BF16, F32 or F16 biases on either
+projection. DA8W8 takes per-channel or per-group weight scales and W4A8
+per-group ones, in groups of whole K quads (DA8W8) or octets (W4A8) that
+divide K, and each quantized projection takes one source scale per token
+(`src_scale` dims `{num_tokens, 1}`) or one per token and weight scale group
+(`{num_tokens, G}`), which its tokens are quantized to.
+
+Its pack is made from the weights alone: each expert's weight in blocks of 32
+output columns, in the weight's own column order, grouped along K for the
+kernels' dot products, with weight sums and FP32 weight scales per column and
+scale group for DA8W8 and W4A8 (`nr32_pack.hpp`). Nothing about a call (its activation, a bias,
+the source type, the batch) enters the pack, so one pack serves every
+activation: the kernels read SwiGLU-OAI's interleaved (gate, up) pairs from one
+block, and SiLU's and GELU's gate and up halves from blocks `I` columns apart.
+DA8W8 and W4A8 tokens are quantized once and copied to their slots. Each
+expert's rows are cut into blocks of at most 64, and both
+projections into units of whole kernel blocks of columns that every thread
+takes from one queue, W13 before W2: a decode call's units each cover one
+block, and a prompt call's units cover a run of an expert's blocks (a heavily
+routed expert is cut into several runs) and sweep them against one L2-sized
+chunk of columns at a time, so a unit streams each of its weights once. A
+prompt call's queue takes turns between its heaviest and lightest experts'
+units, so compute-bound units run beside weight-streaming ones.
+On CPUs where they pay (AMD family 1Ah models 50h-5Fh), DA8W8 layers run the
+kernels that read source bytes already XOR-ed with 0x80. ALGO 4 keeps one
+pack per expert weight for routed and grouped calls alike. The first routed
+call on a layer, of either phase, takes all of the layer's experts' packs,
+packing only the weights no ALGO 4 call has packed, so a layer whose weights a
+grouped call already read packs nothing; a call with another activation or
+bias type plans its tiles over the same packs. The packs stay until
+`group_matmul_routed_moe_flush_weight_cache()` or
+`clear_grp_matmul_weight_caches()`, either of which drops every ALGO 4 pack.
+The routed flush waits for the routed calls in flight, ALGO 4's included, and
+holds new ones until it returns, so none rewrites the weights it packs or reads
+the caller's biases after it. It doesn't wait for grouped calls, so grouped
+calls on weights the host will reload or free in place must return before
+either flush is called: an ALGO 4 grouped call that reaches
+`group_matmul_direct` after a flush packs the bytes it finds and keeps those
+packs, even when the host made it before the flush. A grouped call already
+inside the API while a flush runs finishes on packs made for it alone and
+leaves none of them, nor its call site, behind. A pack's blocks and sums depend on the weight
+alone: a layer seen with other weight-scale pointers or scale groups keeps
+its weights' packs and gives them its new scales, and each weight keeps the
+last scales a call gave it, so moved scale tensors cost a copy of the scales,
+not a repack. New values at the same addresses are not seen until a
+flush. Calls of a phase ALGO 4 is not requested for follow the policy above.
+A call that requests ALGO 4 fails, with its reason in the API log and before
+writing anything, for weight cache mode 0 (`weight_cache_disabled`),
+non-constant weights (`non_constant_weights`), AOCL-reordered or prepacked
+weights (`prepacked_weights`), alpha other than 1 (`alpha`), zero points
+(`zero_points`), a destination scale (`destination_scale`), post-ops
+(`post_ops`), a bias type other than BF16, F32 or F16 (`unsupported_bias`),
+types other than those above (`unsupported_types`,
+`scales_on_16bit_weights`), weight or source scales other than those above
+(`unsupported_weight_scale`, `unsupported_source_scale`), projections of
+different weight types (`mixed_weight_types`), any slot whose expert is not
+resident (`non_resident_expert`: a negative `expert_map` entry, as under
+expert-parallel sharding), `reduce_output = false` (`unreduced_output`), a
+column-major or transposed source (`column_major_source`,
+`transposed_source`), no down projection (`no_down_projection`) or no gated
+activation (`not_gated`); for a down projection whose output width is not
+the hidden size (`shape`); for weights another path packed or reordered in
+place, by the routed fast executor, AOCL-DLP, oneDNN, the custom kernel or the
+native BRGEMM (`inplace_storage`, `reordered_in_place`,
+`custom_kernel_inplace`, `weights_packed_in_place`), or weights it cannot read
+(`weights_unavailable`, `unsupported_weight`); on a CPU
+without the instructions its kernels for the layer's type use (`no_kernel`:
+AVX-512 BF16 for BF16, AVX-512 FP16 for FP16, AVX-512 VNNI for DA8W8 and
+W4A8), checked before anything is packed; and with `memory_bad_storage` when
+an allocation fails, after which the next call tries again. A layer's later
+calls report the reason its first call found, until an ALGO 4 flush or a
+call with other weight-scale pointers: a backend's weight cache clear alone
+does not serve it again. Weights of either layout
+(`trans_weight` true or false) and a source layout of `'r'` or `'R'` are
+served. While ALGO 4 is requested for either phase, the fast executor and the
+generic route pack the layer's weights out of place, because ALGO 4 packs
+from them.
+
+ALGO 4 also owns the `group_matmul_direct` calls of two or more operations of
+its phases (the phase from the largest M of the active operations), each
+operation's rows standing for an expert's: it runs them on the same engine and
+packs as routed calls, in one parallel region, with the gated activation fused
+into W13 and, when the call
+carries them, the fused-MoE down projection and the weighted reduce, and fails
+a call it cannot serve with `status_t::unimplemented` and the reason in the
+API error log, before writing anything. The operations with rows must share
+their shapes, types and scale layouts. It serves BF16 and FP16 experts; DA8W8
+and W4A8 experts on BF16 rows it quantizes per row or per (row, weight scale
+group), as the dims of the call's `src_scale` (`{M, 1}` or `{M, G}`) say,
+writing the scales to a `src_scale` buffer the call passes, and DA8W8 experts
+on the caller's S8 rows with per-row, per-tensor or per-(row, group) scales;
+with weight scales per tensor, per channel or per group (whole K quads for
+DA8W8, octets for W4A8). A per-group source pairs with the weight's groups;
+a fused call quantizes its intermediate per W2 group when the source is per
+group and W2 has groups, else per row. BF16, F16 or F32 biases; Op1 into the
+caller's `dst` (with a gated activation, the activation's `N / 2` columns of
+each row, at any stride that holds them; the rest of a wider row is not
+written) or, for a fused call, the library's rows; and Op2 into `dst_down` or
+the caller's source rows. It fails a call with post-ops, zero points,
+destination scales, alpha other than 1, beta other than 0, a transposed or
+column-major source, non-constant or pre-packed weights (AOCL-reordered or
+GGML), weight-only S4, F32 types, or MXFP4, under weight cache mode 0, and on
+a CPU without its kernels. Calls of one operation
+and sequential chains run as under AUTO (at weight cache mode `1` at most
+when they carry a fused down projection, a weighted reduce or prepack
+extras). Each expert weight is packed the
+first time an ALGO 4 call of either API reads it, and a grouped call packs its
+prepack extras' weights (`matmul_params::total_matmul`) with its own, DA8W8
+and W4A8 extras that come without their weight scales included: their
+scales join the pack the first time a call gives them. The pack, keyed by
+the weight and its shape, serves every later routed or grouped call of that
+weight and stands for it until either flush above: new values at the same
+addresses are not seen until then; a call with other weight scales replaces
+the scales the pack holds. A grouped call finds its experts' packs and its
+tile plans through its call site, the weights it names (its operations' and
+its extras', in any order) with its activation and source scale form, which a
+later call naming the same weights so finds again; a call that
+gives an expert other scales drops every call site, so no site keeps a pack
+the store has replaced. While ALGO 4 is requested for either phase, the other
+phase's grouped calls of two or more operations, and grouped calls of one
+operation of an MoE layer (a fused down projection, a weighted reduce, or
+prepack extras), write no weight in place.
 
 The generic route preserves the vector API's performance-sensitive contracts,
 not just its numerical behavior. Per-projection `lowoha_algo`, thread count,

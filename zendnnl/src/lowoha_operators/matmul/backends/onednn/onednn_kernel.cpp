@@ -101,6 +101,7 @@ void clear_onednn_matmul_weight_cache() {
     std::lock_guard<std::mutex> lock(get_onednn_blocked_weight_mutex());
     get_onednn_hash_values().clear();
     get_onednn_matmul_weight_cache().clear();
+    forget_weights_rewritten_in_place(weight_rewriter::onednn);
 }
 
 /**
@@ -201,6 +202,8 @@ void getOrCreateBlockedWeights(bool transA, bool transB, int M, int K, int N,
         if (in_place) {
             std::memcpy(dnnl_params.weights.buffer,
                     dnnl_blocked_weight_mem.get_data_handle(), blocked_size);
+            record_weights_rewritten_in_place(
+                    dnnl_params.weights.buffer, weight_rewriter::onednn);
             dnnl_params.weights.mem = dnnl::memory(
                     dnnl_blocked_weight_desc, eng, dnnl_params.weights.buffer);
         } else {

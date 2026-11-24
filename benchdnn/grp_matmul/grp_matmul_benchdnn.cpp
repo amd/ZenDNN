@@ -88,13 +88,14 @@
 /// Env vars (all read by the library, not parsed by this driver):
 ///   ZENDNNL_GRP_MATMUL_ALGO=0|1|2|3|4|5|6 - select whole-call mode
 ///     0=auto, 1=sequential, 2=flat_ccd_m_tile, 3=flat_ccd_n_tile,
-///     4=W8A8_fused_MoE attempt in both phases, 5=per_expert, 6=multilevel
+///     4=ntile_flat_parallel (calls of two or more operations), 5=per_expert,
+///     6=multilevel
 ///   ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO=0..6 - decode setting
-///     (default 3); outranks the global; 4 attempts W8A8, then inherits
-///     decode default policy
+///     (default 3); outranks the global; 4 runs decode calls of two or
+///     more operations on ALGO 4
 ///   ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO=0..6 - prompt setting
-///     (default 2); outranks the global; 4 attempts W8A8, then inherits
-///     prompt default policy
+///     (default 2); outranks the global; 4 runs prompt calls of two or
+///     more operations on ALGO 4
 ///   An explicit phase 4 outranks a global generic ALGO {1,2,3,5,6}.
 ///   An explicit non-4 phase knob suppresses a global 4 for that phase.
 ///   ZENDNNL_GRP_MATMUL_PREPACK=0|1      - master switch for ahead-of-time weight prepack (default 1)
@@ -103,8 +104,7 @@
 ///   ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_N_TILE=N - per-thread N-tile floor override (0 = use default)
 ///   ZENDNNL_GRP_MATMUL_AOCL_STABLE_NTILE=0|1 - stable AOCL DLP cache key under MoE churn (default 1)
 ///   ZENDNNL_MATMUL_ALGO=N               - select inner kernel (default: aocl_dlp_blocked)
-///   ZENDNNL_MATMUL_WEIGHT_CACHE=0|1|2   - global weight-pack mode (default 2);
-///                                          mode 0 makes W8A8 ALGO 4 decline
+///   ZENDNNL_MATMUL_WEIGHT_CACHE=0|1|2   - global weight-pack mode (default 2)
 
 #include "grp_matmul_benchdnn.hpp"
 #include "grp_matmul_utils.hpp"

@@ -67,8 +67,11 @@ struct group_matmul_projection_params {
     /// weight-cache type 2, the routed fast executor also uses a sufficiently
     /// large value as explicit permission to replace each immutable expert
     /// slice with its packed image in place; otherwise it retains the
-    /// out-of-place packed cache.  In both cases this value is the source
-    /// stride between experts.
+    /// out-of-place packed cache.  Whatever this value is, it packs out of
+    /// place while ALGO 4 is requested for either phase
+    /// (`ZENDNNL_GRP_MATMUL_ALGO` or a phase's `AUTO_*_ALGO` knob set to 4),
+    /// since ALGO 4 packs from the caller's weights.  In every case this
+    /// value is the source stride between experts.
     size_t wei_buffer_capacity_bytes = 0;
     int ldb = 0;
     const void *bias = nullptr;
@@ -99,7 +102,12 @@ struct group_matmul_routing_params {
  * Routing duplicates its rows into expert groups internally. Eligible DA8W8
  * and symmetric per-group W4A8 calls use the routed executor for both prefill
  * and decode; unsupported configurations use the vector group-matmul
- * implementation.
+ * implementation.  When `ZENDNNL_GRP_MATMUL_ALGO=4`, or a phase's
+ * `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO` / `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO`
+ * set to 4, requests ALGO 4, the calls of those phases run on its N-tile
+ * flat-parallel executor instead, and a call it cannot serve fails with
+ * `status_t::unimplemented` and the reason in the API log, before writing
+ * anything (see the group matmul operator page for what it serves).
  *
  * `primary.params.num_threads` controls routing and the fast executor.
  * Projection weights and optional biases are tightly stacked by expert.
@@ -412,20 +420,33 @@ ZENDNNL_API status_t group_matmul_routed_moe_validate(
 /**
  * @brief Drop every packed weight held by either whole-MoE fast path.
  *
- * The standalone routed executor and the vector-ABI private ALGO4 executor
- * maintain separate cache representations. This is their canonical shared
- * generation boundary: a host that reloads or frees a model must call it
- * first, so neither cache can retain a pack keyed by recycled storage.
+ * The routed executor and ALGO 4 keep separate cache representations. This is
+ * their canonical shared generation boundary: a host that reloads or frees a
+ * model must call it first, so neither cache can retain a pack keyed by
+ * recycled storage.  For ALGO 4 that is every pack, made for routed or
+ * grouped calls, and every routed layer's state, as
+ * @ref clear_grp_matmul_weight_caches also drops.
  * Caller-owned routed in-place packs are converted back to their logical
  * row-major weights before their cache entries are removed; per-expert slack
- * beyond the logical matrix has unspecified contents after the flush.
+ * beyond the logical matrix has unspecified contents after the flush.  The
+ * grouped caches are left as they are: a weight a grouped call packed in
+ * place at weight cache mode 2, as the generic route may for BF16 and FP16
+ * experts, also needs @ref clear_grp_matmul_weight_caches before its buffer
+ * is reloaded.
  *
  * Safe to call when nothing is cached.  This is a model-lifecycle operation:
  * callers must not invoke it concurrently with ANY routed-MoE execution, not
  * merely executions using the weights being retired.  The implementation
  * serializes flush against active routed calls as a memory-safety backstop;
- * after the function returns, all calls that could reference old packs have
- * completed and the host may release the corresponding weights.
+ * after the function returns, all routed calls that could reference old packs
+ * have completed and the host may release the corresponding weights.  The
+ * flush doesn't wait for grouped calls, so grouped calls on weights the host
+ * will reload or free in place must return before the flush is called: an
+ * ALGO 4 grouped call that reaches @ref group_matmul_direct after the flush
+ * packs the bytes it finds and keeps those packs, even when the host made it
+ * before the flush.  A grouped call already inside the API while the flush
+ * runs finishes on packs made for it alone and leaves none of them, nor its
+ * call site, behind.
  */
 ZENDNNL_API void group_matmul_routed_moe_flush_weight_cache();
 

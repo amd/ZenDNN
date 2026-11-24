@@ -39,6 +39,8 @@
 #include <omp.h>
 
 #include "lowoha_operators/matmul/group_matmul/common/group_matmul_parallel_common.hpp"
+#include "lowoha_operators/matmul/group_matmul/common/grp_matmul_env.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/ntile_flat_parallel.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 #include "lowoha_operators/matmul/routed_moe/routed_moe_internal.hpp"
 
@@ -1502,4 +1504,215 @@ TEST_F(RoutedMoES4Scratch, SmallLargeSmallReuseStaysNumericallyClean) {
             small_problem.params(), small_oracle,
             w4_reduction_path_t::fused_f32, &second_small));
     EXPECT_EQ(second_small, first_small);
+}
+
+/// Requests ALGO 4 for decode calls (`ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO=4`)
+/// with the custom kernel on and weight cache mode 1, and counts the calls it
+/// completes and the layer entries it makes.
+struct algo4_decode_pin {
+    std::atomic<bool> &capture
+            = zendnnl::lowoha::matmul::test_api::s_capture_ntile_flat_parallel;
+    std::atomic<int> &decode_algo = zendnnl::lowoha::matmul::test_api::
+            s_grp_matmul_auto_decode_algo_override;
+    std::atomic<int> &ck = zendnnl::lowoha::matmul::test_api::
+            s_grp_matmul_custom_kernel_override;
+    zendnnl::common::matmul_config_t &config
+            = zendnnl::common::matmul_config_t::instance();
+    int32_t previous_cache = config.get_weight_cache();
+    int previous_ck = ck.exchange(1, std::memory_order_relaxed);
+    int previous_decode_algo
+            = decode_algo.exchange(4, std::memory_order_relaxed);
+    algo4_decode_pin() {
+        config.set_weight_cache(1);
+        capture.store(true, std::memory_order_relaxed);
+    }
+    ~algo4_decode_pin() {
+        capture.store(false, std::memory_order_relaxed);
+        config.set_weight_cache(previous_cache);
+        ck.store(previous_ck, std::memory_order_relaxed);
+        decode_algo.store(previous_decode_algo, std::memory_order_relaxed);
+    }
+    uint64_t calls() const {
+        return zendnnl::lowoha::matmul::test_api::
+                s_ntile_flat_parallel_completed.load(std::memory_order_relaxed);
+    }
+    uint64_t layer_entries() const {
+        return zendnnl::lowoha::matmul::test_api::
+                s_ntile_flat_parallel_layer_entries.load(
+                        std::memory_order_relaxed);
+    }
+};
+
+TEST_F(RoutedMoES4Execute, Algo4DecodeMatchesOracle) {
+    // ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO=4 runs decode calls on ALGO 4's
+    // N-tile flat-parallel decode with the custom kernel, which rounds each W2
+    // row to bf16 and applies the router weight in f32.  At these scales the
+    // gate is O(1), so each activation's output misses the other's oracle.
+    algo4_decode_pin decode_pin;
+
+    const routed_moe_activation_t acts[]
+            = {routed_moe_activation_t::silu_and_mul,
+                    routed_moe_activation_t::gelu_and_mul};
+    for (const routed_moe_activation_t act : acts) {
+        for (const int64_t group : {32, 128}) {
+            for (const int64_t tokens : {1, 8, 16}) {
+                SCOPED_TRACE(
+                        std::string(act == routed_moe_activation_t::silu_and_mul
+                                        ? "silu"
+                                        : "gelu")
+                        + " group=" + std::to_string(group)
+                        + " tokens=" + std::to_string(tokens));
+                // Each case's buffers can reuse its predecessor's addresses.
+                group_matmul_routed_moe_flush_weight_cache();
+                reset_grouped_s4_caches();
+                s4_problem pb;
+                pb.K = 256;
+                pb.N = 128;
+                pb.E = 8;
+                pb.topk = 2;
+                pb.gate_group_size = group;
+                pb.down_group_size = group;
+                pb.threads = 4;
+                pb.activation = act;
+                pb.build(tokens,
+                        0x4a50u + static_cast<uint32_t>(tokens + group));
+                s4_call call(pb);
+                pb.poison_output();
+                const uint64_t before = decode_pin.calls();
+                ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
+                EXPECT_EQ(decode_pin.calls(), before + 1);
+                const std::vector<uint16_t> got = pb.logical_output();
+                expect_output_written(got);
+                oracle_options oracle;
+                oracle.reduction = oracle_reduction_t::grouped_bf16;
+                expect_numerically_close(
+                        got, scalar_s4_moe(pb, oracle), 1.2e-2, 0.04f, 0.04f);
+                s4_problem other = pb;
+                other.activation = act == routed_moe_activation_t::silu_and_mul
+                        ? routed_moe_activation_t::gelu_and_mul
+                        : routed_moe_activation_t::silu_and_mul;
+                EXPECT_GT(rel_mae(got, scalar_s4_moe(other, oracle)), 2e-2);
+            }
+        }
+    }
+}
+
+// A layer whose weight scales are regrouped in the same buffers is captured
+// again with the new groups.
+TEST_F(RoutedMoES4Execute, Algo4RepacksRegroupedWeightScales) {
+    algo4_decode_pin decode_pin;
+    group_matmul_routed_moe_flush_weight_cache();
+    reset_grouped_s4_caches();
+    s4_problem pb;
+    pb.K = 256;
+    pb.N = 128;
+    pb.E = 8;
+    pb.topk = 2;
+    pb.threads = 4;
+    pb.build(8, 0x4a61u);
+    s4_call call(pb);
+    const void *const gate_scales = pb.s13.data();
+    const void *const down_scales = pb.s2.data();
+    oracle_options oracle;
+    oracle.reduction = oracle_reduction_t::grouped_bf16;
+    const uint64_t calls = decode_pin.calls();
+    const uint64_t entries = decode_pin.layer_entries();
+    for (const int64_t group : {32, 128}) {
+        SCOPED_TRACE("group=" + std::to_string(group));
+        // Fewer groups read a prefix of the same scale buffers.
+        pb.gate_group_size = group;
+        pb.down_group_size = group;
+        pb.s13.resize(static_cast<size_t>(pb.E * (pb.K / group) * 2 * pb.N));
+        pb.s2.resize(static_cast<size_t>(pb.E * (pb.N / group) * pb.K));
+        ASSERT_EQ(pb.s13.data(), gate_scales);
+        ASSERT_EQ(pb.s2.data(), down_scales);
+        call.primary.params.quant_params.wei_scale.dims
+                = {pb.E, pb.K / group, 2 * pb.N};
+        call.secondary.params.quant_params.wei_scale.dims
+                = {pb.E, pb.N / group, pb.K};
+        pb.poison_output();
+        ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
+        expect_numerically_close(pb.logical_output(), scalar_s4_moe(pb, oracle),
+                1.2e-2, 0.04f, 0.04f);
+    }
+    EXPECT_EQ(decode_pin.calls() - calls, 2u);
+    EXPECT_EQ(decode_pin.layer_entries() - entries, 2u);
+    group_matmul_routed_moe_flush_weight_cache();
+}
+
+// ALGO 4 takes per-group source scales too, in decode and prompt calls.
+TEST_F(RoutedMoES4Execute, Algo4PerGroupActivationsMatchOracle) {
+    algo4_decode_pin decode_pin;
+    struct prompt_pin_t {
+        std::atomic<int> &slot = zendnnl::lowoha::matmul::test_api::
+                s_grp_matmul_auto_prompt_algo_override;
+        int previous = slot.exchange(4, std::memory_order_relaxed);
+        ~prompt_pin_t() { slot.store(previous, std::memory_order_relaxed); }
+    } prompt_pin;
+    for (const int64_t group : {32, 64}) {
+        for (const int64_t tokens : {1, 8, 300}) {
+            SCOPED_TRACE("group=" + std::to_string(group)
+                    + " tokens=" + std::to_string(tokens));
+            group_matmul_routed_moe_flush_weight_cache();
+            reset_grouped_s4_caches();
+            s4_problem pb;
+            pb.K = 256;
+            pb.N = 128;
+            pb.E = 8;
+            pb.topk = 2;
+            pb.gate_group_size = group;
+            pb.down_group_size = group;
+            pb.activation_per_group = true;
+            pb.threads = 4;
+            pb.build(tokens, 0x4a80u + static_cast<uint32_t>(tokens + group));
+            s4_call call(pb);
+            pb.poison_output();
+            const uint64_t before = decode_pin.calls();
+            ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
+            EXPECT_EQ(decode_pin.calls(), before + 1);
+            oracle_options oracle;
+            oracle.reduction = oracle_reduction_t::grouped_bf16;
+            expect_numerically_close(pb.logical_output(),
+                    scalar_s4_moe(pb, oracle), 1.2e-2, 0.04f, 0.04f);
+        }
+    }
+    group_matmul_routed_moe_flush_weight_cache();
+}
+
+// With ALGO 4 requested for prompts too, W4A8 prompt calls run on it.
+TEST_F(RoutedMoES4Execute, Algo4PromptMatchesOracle) {
+    algo4_decode_pin decode_pin;
+    struct prompt_pin_t {
+        std::atomic<int> &slot = zendnnl::lowoha::matmul::test_api::
+                s_grp_matmul_auto_prompt_algo_override;
+        int previous = slot.exchange(4, std::memory_order_relaxed);
+        ~prompt_pin_t() { slot.store(previous, std::memory_order_relaxed); }
+    } prompt_pin;
+    for (const int64_t group : {32, 128}) {
+        for (const int64_t tokens : {300, 520}) {
+            SCOPED_TRACE("group=" + std::to_string(group)
+                    + " tokens=" + std::to_string(tokens));
+            group_matmul_routed_moe_flush_weight_cache();
+            reset_grouped_s4_caches();
+            s4_problem pb;
+            pb.K = 256;
+            pb.N = 128;
+            pb.E = 8;
+            pb.topk = 2;
+            pb.gate_group_size = group;
+            pb.down_group_size = group;
+            pb.threads = 4;
+            pb.build(tokens, 0x4a70u + static_cast<uint32_t>(tokens + group));
+            s4_call call(pb);
+            pb.poison_output();
+            const uint64_t before = decode_pin.calls();
+            ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
+            EXPECT_EQ(decode_pin.calls(), before + 1);
+            oracle_options oracle;
+            oracle.reduction = oracle_reduction_t::grouped_bf16;
+            expect_numerically_close(pb.logical_output(),
+                    scalar_s4_moe(pb, oracle), 1.2e-2, 0.04f, 0.04f);
+        }
+    }
+    group_matmul_routed_moe_flush_weight_cache();
 }

@@ -31,7 +31,9 @@
  *     `apply_gated_act_inplace`, `apply_swiglu_oai_tile_rows`,
  *     `apply_swiglu_oai_tile_rows_out_of_place`, `group_matmul_fused_moe_execute`
  *     [both overloads], `validate_group_matmul_moe_postop`,
- *     `group_matmul_moe_postop_execute`, and the internal dispatch /
+ *     `group_matmul_moe_postop_execute`,
+ *     `group_matmul_moe_postop_bf16_cols`, `group_matmul_moe_postop_f16_cols`,
+ *     and the internal dispatch /
  *     planner plumbing) are LIBRARY-INTERNAL: they are split across
  *     multiple translation units (group_matmul_direct.cpp,
  *     group_matmul_dispatch.cpp, group_matmul_moe_postop.cpp,
@@ -134,6 +136,17 @@ status_t validate_group_matmul_moe_postop(
 status_t group_matmul_moe_postop_execute(
         const group_matmul_moe_postop_params *postop, int D, int num_threads,
         data_type_t dst_elem);
+
+/// BF16 weighted reduce of columns [d0, d0 + n) of token `t` on the calling
+/// thread, numerically identical to `group_matmul_moe_postop_execute`.  For
+/// callers that are already inside a parallel region: it allocates nothing.
+/// Requires AVX-512.
+void group_matmul_moe_postop_bf16_cols(
+        const group_matmul_moe_postop_params *postop, int t, int d0, int n);
+
+/// `group_matmul_moe_postop_bf16_cols` for an F16 output and F16 rows.
+void group_matmul_moe_postop_f16_cols(
+        const group_matmul_moe_postop_params *postop, int t, int d0, int n);
 
 // --- MoE gated activation: fused act(gate) * up after GEMM ---
 

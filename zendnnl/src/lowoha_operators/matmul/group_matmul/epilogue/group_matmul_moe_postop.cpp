@@ -216,15 +216,96 @@ void moe_weighted_reduce_avx512_f32(
     }
 }
 
+// One (token, column-range) item of `moe_weighted_reduce_avx512_bf16`;
+// `acc` holds at least `n` floats.
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+void moe_weighted_reduce_bf16_item(const group_matmul_moe_postop_params *postop,
+        const int t, const int d0, const int n, float *acc) {
+    auto *out_base = static_cast<uint16_t *>(postop->output);
+    const size_t out_stride = static_cast<size_t>(postop->ldc_output);
+    const int topk = postop->topk;
+    const int n16 = n & ~15;
+    uint16_t *out_row = out_base + static_cast<size_t>(t) * out_stride + d0;
+
+    // k=0: initialize FP32 accumulator with w0 * src0.
+    {
+        const int64_t slot = static_cast<int64_t>(t) * topk;
+        const auto *src_row = static_cast<const uint16_t *>(
+                postop->row_ptrs[static_cast<size_t>(slot)]);
+        src_row += d0;
+        const float w = postop->skip_weighted
+                ? 1.f
+                : postop->topk_weights[static_cast<size_t>(slot)];
+        const __m512 vw = _mm512_set1_ps(w);
+        int d = 0;
+        for (; d < n16; d += 16) {
+            __m256i src_bf16 = _mm256_loadu_si256(
+                    reinterpret_cast<const __m256i *>(src_row + d));
+            __m512 vsrc = _mm512_castsi512_ps(
+                    _mm512_slli_epi32(_mm512_cvtepu16_epi32(src_bf16), 16));
+            _mm512_storeu_ps(acc + d, _mm512_mul_ps(vw, vsrc));
+        }
+        for (; d < n; ++d)
+            acc[d] = w
+                    * bfloat16_t::bf16_to_f32_val(
+                            static_cast<int16_t>(src_row[d]));
+    }
+
+    // k=1..topk-1: FMA into FP32 accumulator (no BF16 truncation).
+    for (int k = 1; k < topk; ++k) {
+        const int64_t slot = static_cast<int64_t>(t) * topk + k;
+        const auto *src_row = static_cast<const uint16_t *>(
+                postop->row_ptrs[static_cast<size_t>(slot)]);
+        src_row += d0;
+        const float w = postop->skip_weighted
+                ? 1.f
+                : postop->topk_weights[static_cast<size_t>(slot)];
+        const __m512 vw = _mm512_set1_ps(w);
+        int d = 0;
+        for (; d < n16; d += 16) {
+            __m256i src_bf16 = _mm256_loadu_si256(
+                    reinterpret_cast<const __m256i *>(src_row + d));
+            __m512 vsrc = _mm512_castsi512_ps(
+                    _mm512_slli_epi32(_mm512_cvtepu16_epi32(src_bf16), 16));
+            __m512 vacc = _mm512_loadu_ps(acc + d);
+            _mm512_storeu_ps(acc + d, _mm512_fmadd_ps(vw, vsrc, vacc));
+        }
+        for (; d < n; ++d)
+            acc[d] += w
+                    * bfloat16_t::bf16_to_f32_val(
+                            static_cast<int16_t>(src_row[d]));
+    }
+
+    // Final: convert FP32 accumulator → BF16 output.
+    // Round-to-nearest-even matching bfloat16_t::f32_to_bf16_avx512:
+    //   lsb = (bits >> 16) & 1; bits += 0x7FFF + lsb; result = bits >> 16
+    // Narrowing via _mm512_cvtepi32_epi16 (vpmovsdw) — same pattern as
+    // bfloat16_t::f32_to_bf16_avx512 in common/bfloat16.cpp.
+    {
+        const __m512i one = _mm512_set1_epi32(1);
+        const __m512i bias = _mm512_set1_epi32(0x7FFF);
+        int d = 0;
+        for (; d < n16; d += 16) {
+            __m512i bits = _mm512_castps_si512(_mm512_loadu_ps(acc + d));
+            __m512i lsb = _mm512_and_si512(_mm512_srli_epi32(bits, 16), one);
+            bits = _mm512_add_epi32(bits, _mm512_add_epi32(bias, lsb));
+            // Arithmetic right shift preserves sign bit, so negative BF16
+            // values (sign bit set) produce negative int32 values that
+            // _mm512_cvtepi32_epi16 narrows without saturation.
+            _mm256_storeu_si256(reinterpret_cast<__m256i *>(out_row + d),
+                    _mm512_cvtepi32_epi16(_mm512_srai_epi32(bits, 16)));
+        }
+        for (; d < n; ++d)
+            out_row[d] = static_cast<uint16_t>(
+                    bfloat16_t::f32_to_bf16_val(acc[d]));
+    }
+}
+
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
 void moe_weighted_reduce_avx512_bf16(
         const group_matmul_moe_postop_params *postop, const int D,
         const int num_threads) {
 
-    auto *out_base = static_cast<uint16_t *>(postop->output);
-    const size_t out_stride = static_cast<size_t>(postop->ldc_output);
-
-    const int topk = postop->topk;
     const reduce_split_t split
             = make_reduce_split(postop->num_tokens, D, num_threads);
 
@@ -243,86 +324,7 @@ void moe_weighted_reduce_avx512_bf16(
             const int d0 = static_cast<int>(it % split.chunks) * split.span;
             if (d0 >= D) continue;
             const int n = std::min(D, d0 + split.span) - d0;
-            const int n16 = n & ~15;
-            uint16_t *out_row
-                    = out_base + static_cast<size_t>(t) * out_stride + d0;
-            float *acc = acc_buf.data();
-
-            // k=0: initialize FP32 accumulator with w0 * src0.
-            {
-                const int64_t slot = static_cast<int64_t>(t) * topk;
-                const auto *src_row = static_cast<const uint16_t *>(
-                        postop->row_ptrs[static_cast<size_t>(slot)]);
-                src_row += d0;
-                const float w = postop->skip_weighted
-                        ? 1.f
-                        : postop->topk_weights[static_cast<size_t>(slot)];
-                const __m512 vw = _mm512_set1_ps(w);
-                int d = 0;
-                for (; d < n16; d += 16) {
-                    __m256i src_bf16 = _mm256_loadu_si256(
-                            reinterpret_cast<const __m256i *>(src_row + d));
-                    __m512 vsrc = _mm512_castsi512_ps(_mm512_slli_epi32(
-                            _mm512_cvtepu16_epi32(src_bf16), 16));
-                    _mm512_storeu_ps(acc + d, _mm512_mul_ps(vw, vsrc));
-                }
-                for (; d < n; ++d)
-                    acc[d] = w
-                            * bfloat16_t::bf16_to_f32_val(
-                                    static_cast<int16_t>(src_row[d]));
-            }
-
-            // k=1..topk-1: FMA into FP32 accumulator (no BF16 truncation).
-            for (int k = 1; k < topk; ++k) {
-                const int64_t slot = static_cast<int64_t>(t) * topk + k;
-                const auto *src_row = static_cast<const uint16_t *>(
-                        postop->row_ptrs[static_cast<size_t>(slot)]);
-                src_row += d0;
-                const float w = postop->skip_weighted
-                        ? 1.f
-                        : postop->topk_weights[static_cast<size_t>(slot)];
-                const __m512 vw = _mm512_set1_ps(w);
-                int d = 0;
-                for (; d < n16; d += 16) {
-                    __m256i src_bf16 = _mm256_loadu_si256(
-                            reinterpret_cast<const __m256i *>(src_row + d));
-                    __m512 vsrc = _mm512_castsi512_ps(_mm512_slli_epi32(
-                            _mm512_cvtepu16_epi32(src_bf16), 16));
-                    __m512 vacc = _mm512_loadu_ps(acc + d);
-                    _mm512_storeu_ps(acc + d, _mm512_fmadd_ps(vw, vsrc, vacc));
-                }
-                for (; d < n; ++d)
-                    acc[d] += w
-                            * bfloat16_t::bf16_to_f32_val(
-                                    static_cast<int16_t>(src_row[d]));
-            }
-
-            // Final: convert FP32 accumulator → BF16 output.
-            // Round-to-nearest-even matching bfloat16_t::f32_to_bf16_avx512:
-            //   lsb = (bits >> 16) & 1; bits += 0x7FFF + lsb; result = bits >> 16
-            // Narrowing via _mm512_cvtepi32_epi16 (vpmovsdw) — same pattern as
-            // bfloat16_t::f32_to_bf16_avx512 in common/bfloat16.cpp.
-            {
-                const __m512i one = _mm512_set1_epi32(1);
-                const __m512i bias = _mm512_set1_epi32(0x7FFF);
-                int d = 0;
-                for (; d < n16; d += 16) {
-                    __m512i bits
-                            = _mm512_castps_si512(_mm512_loadu_ps(acc + d));
-                    __m512i lsb = _mm512_and_si512(
-                            _mm512_srli_epi32(bits, 16), one);
-                    bits = _mm512_add_epi32(bits, _mm512_add_epi32(bias, lsb));
-                    // Arithmetic right shift preserves sign bit, so negative BF16
-                    // values (sign bit set) produce negative int32 values that
-                    // _mm512_cvtepi32_epi16 narrows without saturation.
-                    _mm256_storeu_si256(
-                            reinterpret_cast<__m256i *>(out_row + d),
-                            _mm512_cvtepi32_epi16(_mm512_srai_epi32(bits, 16)));
-                }
-                for (; d < n; ++d)
-                    out_row[d] = static_cast<uint16_t>(
-                            bfloat16_t::f32_to_bf16_val(acc[d]));
-            }
+            moe_weighted_reduce_bf16_item(postop, t, d0, n, acc_buf.data());
         }
     }
 }
@@ -343,15 +345,95 @@ void moe_weighted_reduce_avx512_bf16(
 // this path on the same widely-available intrinsic set as
 // `common/float16.cpp` and off the `avx512fp16`-only `_mm512_cvtxph_ps`
 // / `_mm512_cvtxps_ph` forms.
+// One (token, column-range) item of `moe_weighted_reduce_avx512_f16`;
+// `acc` holds at least `n` floats.
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+void moe_weighted_reduce_f16_item(const group_matmul_moe_postop_params *postop,
+        const int t, const int d0, const int n, float *acc) {
+    auto *out_base = static_cast<uint16_t *>(postop->output);
+    const size_t out_stride = static_cast<size_t>(postop->ldc_output);
+    const int topk = postop->topk;
+    const int n16 = n & ~15;
+    uint16_t *out_row = out_base + static_cast<size_t>(t) * out_stride + d0;
+
+    // k=0: initialize FP32 accumulator with w0 * src0.
+    {
+        const int64_t slot = static_cast<int64_t>(t) * topk;
+        const auto *src_row = static_cast<const uint16_t *>(
+                postop->row_ptrs[static_cast<size_t>(slot)]);
+        src_row += d0;
+        const float w = postop->skip_weighted
+                ? 1.f
+                : postop->topk_weights[static_cast<size_t>(slot)];
+        const __m512 vw = _mm512_set1_ps(w);
+        int d = 0;
+        for (; d < n16; d += 16) {
+            // Load 16 × F16 (256-bit) and cvt to 16 × F32 (512-bit).
+            __m256i src_f16 = _mm256_loadu_si256(
+                    reinterpret_cast<const __m256i *>(src_row + d));
+            __m512 vsrc = _mm512_cvtph_ps(src_f16);
+            _mm512_storeu_ps(acc + d, _mm512_mul_ps(vw, vsrc));
+        }
+        for (; d < n; ++d) {
+            acc[d] = w * float16_t::f16_to_f32_val(src_row[d]);
+        }
+    }
+
+    // k=1..topk-1: FMA into FP32 accumulator (no F16 truncation between
+    // iterations).
+    for (int k = 1; k < topk; ++k) {
+        const int64_t slot = static_cast<int64_t>(t) * topk + k;
+        const auto *src_row = static_cast<const uint16_t *>(
+                postop->row_ptrs[static_cast<size_t>(slot)]);
+        src_row += d0;
+        const float w = postop->skip_weighted
+                ? 1.f
+                : postop->topk_weights[static_cast<size_t>(slot)];
+        const __m512 vw = _mm512_set1_ps(w);
+        int d = 0;
+        for (; d < n16; d += 16) {
+            __m256i src_f16 = _mm256_loadu_si256(
+                    reinterpret_cast<const __m256i *>(src_row + d));
+            __m512 vsrc = _mm512_cvtph_ps(src_f16);
+            __m512 vacc = _mm512_loadu_ps(acc + d);
+            _mm512_storeu_ps(acc + d, _mm512_fmadd_ps(vw, vsrc, vacc));
+        }
+        for (; d < n; ++d) {
+            acc[d] += w * float16_t::f16_to_f32_val(src_row[d]);
+        }
+    }
+
+    // Final: convert FP32 accumulator → F16 output via the AVX-512F
+    // `VCVTPS2PH` intrinsic (`_mm512_cvtps_ph`).  The explicit
+    // `_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC` immediate pins
+    // round-to-nearest-even independent of the runtime MXCSR mode,
+    // matching the rounding semantics of `float16_t::f32_to_f16_val`
+    // (and `cvt_f32_to_f16_vec`) in common/float16.cpp.
+    //
+    // Saturation note: `vcvtps2ph` saturates inputs outside F16's
+    // ±65504 normal range to ±inf.  This is the documented IEEE 754
+    // binary16 round-toward-nearest behaviour and matches the scalar
+    // `f32_to_f16_val` path; callers that need finite outputs for
+    // very large weighted sums must already bound their inputs.
+    {
+        int d = 0;
+        for (; d < n16; d += 16) {
+            __m512 vacc = _mm512_loadu_ps(acc + d);
+            __m256i out_f16 = _mm512_cvtps_ph(
+                    vacc, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+            _mm256_storeu_si256(
+                    reinterpret_cast<__m256i *>(out_row + d), out_f16);
+        }
+        for (; d < n; ++d) {
+            out_row[d] = float16_t::f32_to_f16_val(acc[d]);
+        }
+    }
+}
+
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
 void moe_weighted_reduce_avx512_f16(
         const group_matmul_moe_postop_params *postop, const int D,
         const int num_threads) {
-
-    auto *out_base = static_cast<uint16_t *>(postop->output);
-    const size_t out_stride = static_cast<size_t>(postop->ldc_output);
-
-    const int topk = postop->topk;
     const reduce_split_t split
             = make_reduce_split(postop->num_tokens, D, num_threads);
 
@@ -371,83 +453,7 @@ void moe_weighted_reduce_avx512_f16(
             const int d0 = static_cast<int>(it % split.chunks) * split.span;
             if (d0 >= D) continue;
             const int n = std::min(D, d0 + split.span) - d0;
-            const int n16 = n & ~15;
-            uint16_t *out_row
-                    = out_base + static_cast<size_t>(t) * out_stride + d0;
-            float *acc = acc_buf.data();
-
-            // k=0: initialize FP32 accumulator with w0 * src0.
-            {
-                const int64_t slot = static_cast<int64_t>(t) * topk;
-                const auto *src_row = static_cast<const uint16_t *>(
-                        postop->row_ptrs[static_cast<size_t>(slot)]);
-                src_row += d0;
-                const float w = postop->skip_weighted
-                        ? 1.f
-                        : postop->topk_weights[static_cast<size_t>(slot)];
-                const __m512 vw = _mm512_set1_ps(w);
-                int d = 0;
-                for (; d < n16; d += 16) {
-                    // Load 16 × F16 (256-bit) and cvt to 16 × F32 (512-bit).
-                    __m256i src_f16 = _mm256_loadu_si256(
-                            reinterpret_cast<const __m256i *>(src_row + d));
-                    __m512 vsrc = _mm512_cvtph_ps(src_f16);
-                    _mm512_storeu_ps(acc + d, _mm512_mul_ps(vw, vsrc));
-                }
-                for (; d < n; ++d) {
-                    acc[d] = w * float16_t::f16_to_f32_val(src_row[d]);
-                }
-            }
-
-            // k=1..topk-1: FMA into FP32 accumulator (no F16 truncation between
-            // iterations).
-            for (int k = 1; k < topk; ++k) {
-                const int64_t slot = static_cast<int64_t>(t) * topk + k;
-                const auto *src_row = static_cast<const uint16_t *>(
-                        postop->row_ptrs[static_cast<size_t>(slot)]);
-                src_row += d0;
-                const float w = postop->skip_weighted
-                        ? 1.f
-                        : postop->topk_weights[static_cast<size_t>(slot)];
-                const __m512 vw = _mm512_set1_ps(w);
-                int d = 0;
-                for (; d < n16; d += 16) {
-                    __m256i src_f16 = _mm256_loadu_si256(
-                            reinterpret_cast<const __m256i *>(src_row + d));
-                    __m512 vsrc = _mm512_cvtph_ps(src_f16);
-                    __m512 vacc = _mm512_loadu_ps(acc + d);
-                    _mm512_storeu_ps(acc + d, _mm512_fmadd_ps(vw, vsrc, vacc));
-                }
-                for (; d < n; ++d) {
-                    acc[d] += w * float16_t::f16_to_f32_val(src_row[d]);
-                }
-            }
-
-            // Final: convert FP32 accumulator → F16 output via the AVX-512F
-            // `VCVTPS2PH` intrinsic (`_mm512_cvtps_ph`).  The explicit
-            // `_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC` immediate pins
-            // round-to-nearest-even independent of the runtime MXCSR mode,
-            // matching the rounding semantics of `float16_t::f32_to_f16_val`
-            // (and `cvt_f32_to_f16_vec`) in common/float16.cpp.
-            //
-            // Saturation note: `vcvtps2ph` saturates inputs outside F16's
-            // ±65504 normal range to ±inf.  This is the documented IEEE 754
-            // binary16 round-toward-nearest behaviour and matches the scalar
-            // `f32_to_f16_val` path; callers that need finite outputs for
-            // very large weighted sums must already bound their inputs.
-            {
-                int d = 0;
-                for (; d < n16; d += 16) {
-                    __m512 vacc = _mm512_loadu_ps(acc + d);
-                    __m256i out_f16 = _mm512_cvtps_ph(vacc,
-                            _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-                    _mm256_storeu_si256(
-                            reinterpret_cast<__m256i *>(out_row + d), out_f16);
-                }
-                for (; d < n; ++d) {
-                    out_row[d] = float16_t::f32_to_f16_val(acc[d]);
-                }
-            }
+            moe_weighted_reduce_f16_item(postop, t, d0, n, acc_buf.data());
         }
     }
 }
@@ -582,6 +588,32 @@ status_t group_matmul_moe_postop_execute(
 
     log_error("group_matmul_moe_postop_execute: unsupported dst element type");
     return status_t::failure;
+}
+
+namespace {
+// A multiple of 16, so the chunks of a column range take the vector and
+// scalar paths column for column as one pass over it would.
+constexpr int kReduceColsChunk = 256;
+} // namespace
+
+void group_matmul_moe_postop_bf16_cols(
+        const group_matmul_moe_postop_params *postop, const int t, const int d0,
+        const int n) {
+    float acc[kReduceColsChunk];
+    for (int c = 0; c < n; c += kReduceColsChunk) {
+        moe_weighted_reduce_bf16_item(
+                postop, t, d0 + c, std::min(kReduceColsChunk, n - c), acc);
+    }
+}
+
+void group_matmul_moe_postop_f16_cols(
+        const group_matmul_moe_postop_params *postop, const int t, const int d0,
+        const int n) {
+    float acc[kReduceColsChunk];
+    for (int c = 0; c < n; c += kReduceColsChunk) {
+        moe_weighted_reduce_f16_item(
+                postop, t, d0 + c, std::min(kReduceColsChunk, n - c), acc);
+    }
 }
 
 } // namespace matmul

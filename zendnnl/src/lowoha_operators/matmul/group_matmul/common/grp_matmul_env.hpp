@@ -68,16 +68,18 @@ inline bool parse_env_int_strict(const char *e, int &out) {
 }
 
 /// ZENDNNL_GRP_MATMUL_ALGO selects AUTO (0), a generic scheduler
-/// ({1,2,3,5,6}), or the W8A8 whole-call interceptor (4). Single-digit
+/// ({1,2,3,5,6}), or the N-tile flat-parallel MoE executor, ALGO 4 (4).
+/// Single-digit
 /// parsing preserves the historical first-byte behaviour: e.g. `"5xyz"`
 /// returns 5 because only the first byte is inspected.
 ///
 /// Cached + override pattern (matches `get_grp_matmul_auto_prompt_algo`).
-/// Return the process-requested group-matmul selector, including W8A8 ALGO 4.
+/// Return the process-requested group-matmul selector, including ALGO 4.
 ///
-/// ALGO 4 is an additive W8A8 fused-MoE fast-path request. Generic group
-/// matmul sees it as AUTO (0) after an eligibility decline. Main's generic
-/// fused-MoE path accepts both BF16 and caller-prequantized S8.
+/// ALGO 4 requests the N-tile flat-parallel MoE executor, which runs
+/// `routed_fused_moe_direct` calls and `group_matmul_direct` calls of two or
+/// more operations of the phases it is requested for. The generic scheduler
+/// selection sees it as AUTO (0).
 ///
 /// The cached `static const` snapshot of `std::getenv` is taken on the first
 /// call; the override atomic (sentinel `-1` = no override) lets gtests flip
@@ -115,19 +117,13 @@ inline bool get_grp_matmul_algo_legacy() {
 }
 
 /// Generic scheduler selection. ALGO 4 is deliberately normalized to AUTO:
-/// it selects only the private W8A8 MoE hook and is not a sixth generic
-/// scheduler.
+/// it selects the N-tile flat-parallel MoE executor, which
+/// `group_matmul_direct` runs before this selection, and is not a sixth
+/// generic scheduler.
 inline int get_grp_matmul_algo() {
     const int requested = get_grp_matmul_requested_algo();
     return requested == kGrpMatmulAlgoNTileFlatParallel ? kGrpMatmulAlgoAuto
                                                         : requested;
-}
-
-/// Legacy global-only predicate retained for tests and callers that only need
-/// to inspect `ZENDNNL_GRP_MATMUL_ALGO`. Production interception uses the
-/// phase-aware resolver below.
-inline bool get_grp_matmul_ntile_flat_parallel() {
-    return get_grp_matmul_requested_algo() == kGrpMatmulAlgoNTileFlatParallel;
 }
 
 // ZENDNNL_GRP_MATMUL_N_ROUNDS = { 0, 1, 2, 3 } — cached, default 1.
@@ -210,7 +206,7 @@ inline std::atomic<int> s_grp_matmul_custom_kernel_nr_override {-1};
 
 // Sentinel `-1` = no override. Settable values: 0 (explicit legacy
 // 3-rule cascade), {1,2,3,5,6} (force the matching generic ALGO), and 4
-// (request the matching phase's W8A8 whole-call attempt). Override semantics
+// (request ALGO 4 for the matching phase). Override semantics
 // live in the unified `grp_matmul_auto_phase_setting` getters:
 //   * any negative value (including the `-1` sentinel) → fall
 //     through to the cached env path (which itself applies the
@@ -220,7 +216,7 @@ inline std::atomic<int> s_grp_matmul_custom_kernel_nr_override {-1};
 //                  behaviour use this (or the env equivalent
 //                  `AUTO_*_ALGO=0`).
 //   * 1,2,3,5,6  — adopted as the override value.
-//   * 4          — retained as the raw W8A8 request while generic routing
+//   * 4          — retained as the raw ALGO 4 request while generic routing
 //                  sees the inherited default (2 prompt / 3 decode).
 //   * > 6        — invalid: inherits the default and is not a policy pin.
 inline std::atomic<int> s_grp_matmul_auto_prompt_algo_override {-1};
@@ -251,7 +247,7 @@ inline std::atomic<int> s_grp_matmul_kblock_override {-1};
 
 // Sentinel `-1` = no override (use cached env path).  Settable values
 // 0..6 mirror the requested selector surface (`0` = AUTO,
-// `{1,2,3,5,6}` = forced generic ALGO_N, `4` = W8A8 whole-call hook,
+// `{1,2,3,5,6}` = forced generic ALGO_N, `4` = ALGO 4 (N-tile flat-parallel MoE executor),
 // invalid values clamped to AUTO by the getter).  The
 // `AlgoEnvGuard` RAII helper in `gtests/group_matmul/moe_test_utils.hpp`
 // sets the env-var AND stores into this atomic so that any gtest using

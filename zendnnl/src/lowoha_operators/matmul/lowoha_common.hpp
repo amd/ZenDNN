@@ -21,12 +21,15 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <limits>
+#include <mutex>
 #include "common/op_config.hpp"
 #include "common/post_op.hpp"
 #include "lowoha_operators/matmul/lru_cache/lru_cache.hpp"
 #include "lowoha_operators/matmul/lru_cache/zendnnl_key.hpp"
 #include "memory/memory_utils.hpp"
+#include <unordered_map>
 
 namespace zendnnl {
 namespace lowoha {
@@ -550,6 +553,51 @@ private:
 
 static inline bool is_grp_auto_mutation_tracking_active() {
     return tls_grp_auto_track_inplace_mutation;
+}
+
+/// The backends whose reorder at weight cache mode 2 rewrites a caller's
+/// weight buffer in place.
+enum class weight_rewriter : uint8_t { aocl = 1, onednn = 2 };
+
+/// Weight buffers a backend's reorder at weight cache mode 2 rewrote in place,
+/// whichever call ran it, each with the backends that did, until that
+/// backend's matmul weight cache is cleared.  It only reports: unlike AOCL's
+/// registry for grouped AUTO calls, it refuses nothing.  Packers that read
+/// the caller's raw weights check it.
+struct rewritten_weights_t {
+    std::mutex mutex;
+    std::unordered_map<const void *, uint8_t> buffers;
+};
+
+inline rewritten_weights_t &rewritten_weights() {
+    static auto *registry = new rewritten_weights_t;
+    return *registry;
+}
+
+inline void record_weights_rewritten_in_place(
+        const void *weights, const weight_rewriter by) {
+    if (weights == nullptr) return;
+    rewritten_weights_t &r = rewritten_weights();
+    std::lock_guard<std::mutex> lock(r.mutex);
+    r.buffers[weights] |= static_cast<uint8_t>(by);
+}
+
+inline bool weights_rewritten_in_place(const void *weights) {
+    if (weights == nullptr) return false;
+    rewritten_weights_t &r = rewritten_weights();
+    std::lock_guard<std::mutex> lock(r.mutex);
+    return r.buffers.count(weights) != 0;
+}
+
+/// With `by`'s weight cache, its records: a later allocation may reuse an
+/// address.  The other backends' stay, as their caches do.
+inline void forget_weights_rewritten_in_place(const weight_rewriter by) {
+    rewritten_weights_t &r = rewritten_weights();
+    std::lock_guard<std::mutex> lock(r.mutex);
+    for (auto it = r.buffers.begin(); it != r.buffers.end();) {
+        it->second &= static_cast<uint8_t>(~static_cast<uint8_t>(by));
+        it = it->second == 0 ? r.buffers.erase(it) : std::next(it);
+    }
 }
 
 } // namespace matmul
