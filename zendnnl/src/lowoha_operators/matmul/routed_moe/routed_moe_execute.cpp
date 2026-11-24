@@ -2056,8 +2056,8 @@ void flush_weight_cache() {
     inplace_store().clear();
     std::vector<int8_t> {}.swap(inplace_restore_scratch());
 #endif
-    // Under the lifecycle lock too, so no routed call starts before ALGO 4's
-    // state is gone.
+    // Under the lifecycle lock too, so no routed call starts before N-tile flat
+    // parallel's state is gone.
     ntile_flat_parallel::flush();
 }
 

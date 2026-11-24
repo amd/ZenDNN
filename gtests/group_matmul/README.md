@@ -18,7 +18,7 @@ consume, and which bug class does each test lock down".
 
 | Question | Answer |
 |---|---|
-| What gets tested? | `group_matmul_direct(...)` plus the routed-MoE W8/W4 APIs: scheduler ALGOs `{1,2,3,5,6}`, the ALGO 4 MoE executor (routed and grouped calls), native routed execution, custom microkernels, fused-MoE, gated activations, weighted reduction, prepack, and quantization. |
+| What gets tested? | `group_matmul_direct(...)` plus the routed-MoE W8/W4 APIs: scheduler ALGOs `{1,2,3,5,6}`, the N-tile flat parallel MoE executor (routed and grouped calls), native routed execution, custom microkernels, fused-MoE, gated activations, weighted reduction, prepack, and quantization. |
 | What isn't tested here? | Operator-agnostic infrastructure tests (`test_matmul.cpp`, `test_batchmatmul.cpp`, etc.) live at the parent `gtests/` level. The AI-gtests framework (`ai_gtests/`) is its own subsystem. |
 | Single binary? | Yes. All test files in this folder compile into the same `gtests` executable produced by the parent CMakeLists. Filter via `--gtest_filter=*Prepack*`, `--gtest_filter=*FusedMoE*`, etc. |
 | Helpers reuse policy? | One sibling header (`moe_test_utils.hpp`) for cross-file helpers; one helper TU (`group_matmul_test_helpers.{hpp,cpp}`) for the dispatch shim + quant fixture. File-local helpers stay in anonymous namespaces inside their owning `.cpp`. |
@@ -109,12 +109,12 @@ gtests/group_matmul/
   multi_expert/
     test_multi_expert_policy.cpp    ALGO 3 MoE layer policy (MoeAlgo3Quant)
   multi_expert/ntile_flat_parallel/
-    test_nr32.cpp                   ALGO 4 packs and tiles against a scalar
+    test_nr32.cpp                   N-tile flat parallel packs and tiles against a scalar
                                     reference (Nr32Pack, Nr32Tile)
-    test_grouped.cpp                ALGO 4 on group_matmul_direct calls against
+    test_grouped.cpp                N-tile flat parallel on group_matmul_direct calls against
                                     AUTO: types, activations, fused output
                                     modes, reduce, scale groups, phases,
-                                    refusals, prepack extras (Algo4Grouped)
+                                    refusals, prepack extras (NTileFlatParallelGrouped)
   custom_kernel/                    Direct-surface tests for the CK stack (dispatcher,
                                     resolve_variant, prepare_for_call, pack, per-tile
                                     microkernels).  One dtype family per *_bf16 / *_int8 /
@@ -150,7 +150,7 @@ gtests/group_matmul/
     test_single_expert_route.cpp    matmul_direct route: FORCE_CK N gate, narrow quantized
                                     prompt/decode switch, env strings in a child process
   routed_moe/
-    test_routed_moe.cpp             routed W8, validation, cache, generic fallback, and ALGO 4
+    test_routed_moe.cpp             routed W8, validation, cache, generic fallback, and N-tile flat parallel
     test_routed_moe_s4.cpp          routed W4 scalar-oracle and branch coverage
 ```
 
@@ -276,7 +276,7 @@ Covered by `[11] TestFusedMoEActiveMatmul`, `[14] TestFusedMoEActiveTotalEdge`,
 and the entire prepack section.
 
 ### 4.5 Group MatMul selector identities
-Selector 4 is ALGO 4, the N-tile flat-parallel MoE executor that runs
+Selector 4 is the N-tile flat-parallel MoE executor that runs
 `routed_fused_moe_direct` calls and `group_matmul_direct` calls of two or more
 operations of the phases that request it; the generic multilevel scheduler
 that older revisions exposed as 4 moved to selector 6.
@@ -286,7 +286,7 @@ Grouped calls of one operation run AUTO under a 4.
 - 1 `sequential_execute`            — covered by `[7]` and `[8]` in `test_algos.cpp`
 - 2 `m_tile_execute`                   — covered by `[7]` and `[8]`
 - 3 `n_tile_execute`                   — covered by `[7]`, `[8]`, `[18]`-`[28]` (the prepack module's hot path is ALGO 3)
-- 4 `ntile_flat_parallel::execute` and `execute_grouped` — covered by `RoutedMoEAlgo4` and `RoutedMoES4Execute.Algo4*` in `routed_moe/`, by `Nr32Pack`, `Nr32Tile` and `Algo4Grouped` in `multi_expert/ntile_flat_parallel/`, and by `TestGroupMatmulAutoPhaseEnv` (request precedence, and grouped calls of two or more operations running ALGO 4 in the requested phase)
+- 4 `ntile_flat_parallel::execute` and `execute_grouped` — covered by `RoutedMoENTileFlatParallel` and `RoutedMoES4Execute.NTileFlatParallel*` in `routed_moe/`, by `Nr32Pack`, `Nr32Tile` and `NTileFlatParallelGrouped` in `multi_expert/ntile_flat_parallel/`, and by `TestGroupMatmulAutoPhaseEnv` (request precedence, and grouped calls of two or more operations running N-tile flat parallel in the requested phase)
 - 5 `expert_parallel_execute`           — covered by `[7]` and `[8]`
 - 6 `hierarchical_execute`           — covered by `[7]` and `[8]`
 
@@ -399,9 +399,9 @@ the first read for the process lifetime.
 
 | Env var | Default | Cached? | What it gates |
 |---|---|---|---|
-| `ZENDNNL_GRP_MATMUL_ALGO` | auto | yes (test override available) | Select generic ALGO `{1,2,3,5,6}`, or ALGO 4 for routed MoE calls and grouped calls of two or more operations, when the active phase knob is unset |
-| `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO` | 3 | yes (test override available) | AUTO decode setting. Unset, an ALGO-3 MoE layer (BF16, FP16, symmetric DQ-INT8 or W4A8 experts the custom kernel serves; see `ZENDNNL_GRP_MATMUL_MULTI_EXPERT_ALGO3` in `docs/runtime_env.md`) runs ALGO 3. Value 4 requests ALGO 4 for routed MoE decode calls and grouped decode calls of two or more operations; grouped calls of one operation inherit the complete decode default policy. |
-| `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO` | unset (ALGO 1 for shape-rule prompts) | yes (test override available) | AUTO prompt setting. Unset, an ALGO-3 MoE layer (BF16, FP16, symmetric DQ-INT8 or W4A8 experts the custom kernel serves; see `ZENDNNL_GRP_MATMUL_MULTI_EXPERT_ALGO3` in `docs/runtime_env.md`) runs ALGO 3; every other multi-expert prompt uses ALGO 1. Value 4 requests ALGO 4 for routed MoE prompt calls and grouped prompt calls of two or more operations; grouped calls of one operation run the unpinned prompt policy. |
+| `ZENDNNL_GRP_MATMUL_ALGO` | auto | yes (test override available) | Select generic ALGO `{1,2,3,5,6}`, or N-tile flat parallel for routed MoE calls and grouped calls of two or more operations, when the active phase knob is unset |
+| `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO` | 3 | yes (test override available) | AUTO decode setting. Unset, an ALGO-3 MoE layer (BF16, FP16, symmetric DQ-INT8 or W4A8 experts the custom kernel serves; see `ZENDNNL_GRP_MATMUL_MULTI_EXPERT_ALGO3` in `docs/runtime_env.md`) runs ALGO 3. Value 4 requests N-tile flat parallel for routed MoE decode calls and grouped decode calls of two or more operations; grouped calls of one operation inherit the complete decode default policy. |
+| `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO` | unset (ALGO 1 for shape-rule prompts) | yes (test override available) | AUTO prompt setting. Unset, an ALGO-3 MoE layer (BF16, FP16, symmetric DQ-INT8 or W4A8 experts the custom kernel serves; see `ZENDNNL_GRP_MATMUL_MULTI_EXPERT_ALGO3` in `docs/runtime_env.md`) runs ALGO 3; every other multi-expert prompt uses ALGO 1. Value 4 requests N-tile flat parallel for routed MoE prompt calls and grouped prompt calls of two or more operations; grouped calls of one operation run the unpinned prompt policy. |
 | `ZENDNNL_GRP_MATMUL_MULTI_EXPERT_ALGO3` | all (`bf16,f16` under an explicit ALGO 0) | yes (`test_api::s_grp_matmul_multi_expert_algo3_override`) | Dtype set of the MoE layers AUTO keeps on ALGO 3 in both phases (see `docs/runtime_env.md`). |
 | `ZENDNNL_GRP_MATMUL_PREPACK` | ON | yes | Master prepack switch (PR-443) |
 | `ZENDNNL_GRP_MATMUL_CROSS_WARM` | ON | yes | Opportunistic CK-aware cross-regime warm in `prepack/prepack.cpp::cross_warm` (eliminates decode-first-call spike when prompt-only warmup runs) |
@@ -420,8 +420,8 @@ the first read for the process lifetime.
 | `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_N_TILE` | 0 (off) | yes | Override outer N-tile minimum |
 | `ZENDNNL_GRP_MATMUL_PROMPT_TILE` | 15 (every family) | yes (test override `prompt_tile::test_api::ScopedOverride` / `PromptTileOverride`) | Family bitmask (1 BF16, 2 INT8, 4 W4A8, 8 FP16; 0 off): ALGO 3 CK prompt calls of a set family with two or more active experts use the prompt tile executor instead of the round executor (bitwise identical output) |
 | `ZENDNNL_GRP_MATMUL_PROMPT_TILE_<KNOB>`, `ZENDNNL_GRP_MATMUL_PROMPT_TILE_PROFILE` | see `executors/n_tile/prompt_tile/prompt_tile_tunables.hpp` | yes (`ScopedOverride`) | Prompt tile sizes, cost model, tile order, team layout and stealing; the profile sets knobs per shape |
-| `ZENDNNL_MATMUL_WEIGHT_CACHE` | 2 | runtime-mutable via `set_weight_cache(...)` | AOCL DLP/custom pack policy; under grouped AUTO, BF16 and FP16 layers of several experts share one ALGO 3 pack across phases and keep AOCL layouts out-of-place. Eligible BF16/FP16 packs may use the caller's buffer. Other calls may use the AOCL prompt reorder in place. Mode 0 short-circuits prepack warming and makes ALGO 4 fail its calls without packing. |
-| `ZENDNNL_LRU_CACHE_CAPACITY` | UINT32_MAX | yes (matmul_config) | Capacity for the AOCL DLP reorder LRU. Caps its populated entries; no effect on the custom-kernel pack arena (intentionally eviction-immune) or on ALGO 4's layer state. |
+| `ZENDNNL_MATMUL_WEIGHT_CACHE` | 2 | runtime-mutable via `set_weight_cache(...)` | AOCL DLP/custom pack policy; under grouped AUTO, BF16 and FP16 layers of several experts share one ALGO 3 pack across phases and keep AOCL layouts out-of-place. Eligible BF16/FP16 packs may use the caller's buffer. Other calls may use the AOCL prompt reorder in place. Mode 0 short-circuits prepack warming and makes N-tile flat parallel fail its calls without packing. |
+| `ZENDNNL_LRU_CACHE_CAPACITY` | UINT32_MAX | yes (matmul_config) | Capacity for the AOCL DLP reorder LRU. Caps its populated entries; no effect on the custom-kernel pack arena (intentionally eviction-immune) or on N-tile flat parallel's layer state. |
 | `ZENDNNL_DIAGNOSTICS_ENABLE` | ON (set `=0` to disable) | yes | Wraps `validate_group_matmul_direct_inputs` (Phase B-G + log_error).  Default-enabled so contract violations are surfaced; the `[15]` subprocess test re-asserts the knob explicitly via `setenv(..., "1")` to exercise the diagnostic-mode reject paths for `am > M.size()` / `tm < am`. |
 
 WC=2 deliberately rejects a BF16/FP16 multi-expert call when a phase override

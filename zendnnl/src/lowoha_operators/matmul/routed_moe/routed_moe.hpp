@@ -68,10 +68,10 @@ struct group_matmul_projection_params {
     /// large value as explicit permission to replace each immutable expert
     /// slice with its packed image in place; otherwise it retains the
     /// out-of-place packed cache.  Whatever this value is, it packs out of
-    /// place while ALGO 4 is requested for either phase
+    /// place while N-tile flat parallel is requested for either phase
     /// (`ZENDNNL_GRP_MATMUL_ALGO` or a phase's `AUTO_*_ALGO` knob set to 4),
-    /// since ALGO 4 packs from the caller's weights.  In every case this
-    /// value is the source stride between experts.
+    /// since N-tile flat parallel packs from the caller's weights.  In every
+    /// case this value is the source stride between experts.
     size_t wei_buffer_capacity_bytes = 0;
     int ldb = 0;
     const void *bias = nullptr;
@@ -104,8 +104,8 @@ struct group_matmul_routing_params {
  * and decode; unsupported configurations use the vector group-matmul
  * implementation.  When `ZENDNNL_GRP_MATMUL_ALGO=4`, or a phase's
  * `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO` / `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO`
- * set to 4, requests ALGO 4, the calls of those phases run on its N-tile
- * flat-parallel executor instead, and a call it cannot serve fails with
+ * set to 4, requests the N-tile flat-parallel executor, the calls of those
+ * phases run on it instead, and a call it cannot serve fails with
  * `status_t::unimplemented` and the reason in the API log, before writing
  * anything (see the group matmul operator page for what it serves).
  *
@@ -420,11 +420,11 @@ ZENDNNL_API status_t group_matmul_routed_moe_validate(
 /**
  * @brief Drop every packed weight held by either whole-MoE fast path.
  *
- * The routed executor and ALGO 4 keep separate cache representations. This is
- * their canonical shared generation boundary: a host that reloads or frees a
- * model must call it first, so neither cache can retain a pack keyed by
- * recycled storage.  For ALGO 4 that is every pack, made for routed or
- * grouped calls, and every routed layer's state, as
+ * The routed executor and N-tile flat parallel keep separate cache
+ * representations. This is their canonical shared generation boundary: a host
+ * that reloads or frees a model must call it first, so neither cache can retain
+ * a pack keyed by recycled storage.  For N-tile flat parallel that is every
+ * pack, made for routed or grouped calls, and every routed layer's state, as
  * @ref clear_grp_matmul_weight_caches also drops.
  * Caller-owned routed in-place packs are converted back to their logical
  * row-major weights before their cache entries are removed; per-expert slack
@@ -442,11 +442,11 @@ ZENDNNL_API status_t group_matmul_routed_moe_validate(
  * have completed and the host may release the corresponding weights.  The
  * flush doesn't wait for grouped calls, so grouped calls on weights the host
  * will reload or free in place must return before the flush is called: an
- * ALGO 4 grouped call that reaches @ref group_matmul_direct after the flush
- * packs the bytes it finds and keeps those packs, even when the host made it
- * before the flush.  A grouped call already inside the API while the flush
- * runs finishes on packs made for it alone and leaves none of them, nor its
- * call site, behind.
+ * N-tile flat parallel grouped call that reaches @ref group_matmul_direct after
+ * the flush packs the bytes it finds and keeps those packs, even when the host
+ * made it before the flush.  A grouped call already inside the API while the
+ * flush runs finishes on packs made for it alone and leaves none of them, nor
+ * its call site, behind.
  */
 ZENDNNL_API void group_matmul_routed_moe_flush_weight_cache();
 

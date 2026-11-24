@@ -931,9 +931,10 @@ status_t group_matmul_direct(const std::vector<char> &layout,
         const group_matmul_moe_postop_params *weighted_reduce,
         const grp_matmul_gated_act_params *gated_act,
         const grp_matmul_fused_moe_params *fused_moe) {
-    // First: ALGO 4 publishes no pack for a call that a flush overlaps from
-    // here on.
-    const uint64_t algo4_since = ntile_flat_parallel::flush_count();
+    // First: N-tile flat parallel publishes no pack for a call that a flush
+    // overlaps from here on.
+    const uint64_t ntile_flat_parallel_since
+            = ntile_flat_parallel::flush_count();
     auto &flush_after_entry = zendnnl::lowoha::matmul::test_api::
             s_ntile_flat_parallel_flush_after_entry;
     if (flush_after_entry.load(std::memory_order_relaxed)
@@ -1422,22 +1423,24 @@ status_t group_matmul_direct(const std::vector<char> &layout,
         return status_t::success;
     };
 
-    // ALGO 4 runs the calls of two or more operations of the phases it is
-    // requested for, or fails them.  It reads the caller's `params` as they
-    // are, before the per-call copies below.
-    const auto algo4 = [](const grp_matmul_phase p) {
+    // N-tile flat parallel runs the calls of two or more operations of the
+    // phases it is requested for, or fails them.  It reads the caller's
+    // `params` as they are, before the per-call copies below.
+    const auto ntile_flat_parallel_requested = [](const grp_matmul_phase p) {
         return resolve_grp_matmul_ntile_flat_parallel_request(p)
                 != grp_matmul_ntile_flat_parallel_request_source::none;
     };
     const bool run_gated_act = (gated_act != nullptr
             && gated_act->act != grp_matmul_gated_act_t::none);
     if (src.size() != 1 && num_ops >= 2
-            && algo4(classify_grp_matmul_phase(M, num_ops))) {
+            && ntile_flat_parallel_requested(
+                    classify_grp_matmul_phase(M, num_ops))) {
         const status_t st = ntile_flat_parallel::execute_grouped(num_ops,
                 layout, transA, transB, M, N, K, alpha, src, lda, weight, ldb,
                 bias, beta, dst, ldc, is_weights_const, params,
                 run_gated_act ? gated_act->act : grp_matmul_gated_act_t::none,
-                fused_moe, weighted_reduce, num_threads, algo4_since);
+                fused_moe, weighted_reduce, num_threads,
+                ntile_flat_parallel_since);
         if (st != status_t::success) { return st; }
         execution_path = "ntile_flat_parallel";
         return finish_success();
@@ -1540,14 +1543,15 @@ status_t group_matmul_direct(const std::vector<char> &layout,
         const data_type_t act_dtype
                 = run_gated_act ? params[0].dtypes.dst : data_type_t::none;
 
-        // ALGO 4 packs its calls' expert weights from the caller's buffers,
-        // so the other phase's calls, and the calls of one operation of an
-        // MoE layer (a fused down projection, a weighted reduce or prepack
-        // extras: not a dense projection's gated activation), must leave
-        // those as they are.
+        // N-tile flat parallel packs its calls' expert weights from the
+        // caller's buffers, so the other phase's calls, and the calls of one
+        // operation of an MoE layer (a fused down projection, a weighted reduce
+        // or prepack extras: not a dense projection's gated activation), must
+        // leave those as they are.
         if (num_ops < 2
-                && (algo4(grp_matmul_phase::decode)
-                        || algo4(grp_matmul_phase::prompt))
+                && (ntile_flat_parallel_requested(grp_matmul_phase::decode)
+                        || ntile_flat_parallel_requested(
+                                grp_matmul_phase::prompt))
                 && (fused_moe != nullptr || weighted_reduce != nullptr
                         || (params[0].active_matmul > 0
                                 && params[0].total_matmul
@@ -1559,7 +1563,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
         if (num_ops >= 2) {
             const grp_matmul_phase phase
                     = classify_grp_matmul_phase(M, num_ops);
-            if (algo4(phase == grp_matmul_phase::decode
+            if (ntile_flat_parallel_requested(phase == grp_matmul_phase::decode
                                 ? grp_matmul_phase::prompt
                                 : grp_matmul_phase::decode)) {
                 for (matmul_params &p : exec_params) {

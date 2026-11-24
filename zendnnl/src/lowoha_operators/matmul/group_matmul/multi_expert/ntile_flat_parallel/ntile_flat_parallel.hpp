@@ -14,7 +14,7 @@
  * limitations under the License.
  *******************************************************************************/
 
-/// ALGO 4 — N-tile flat-parallel MoE.
+/// N-tile flat parallel: the MoE executor `ZENDNNL_GRP_MATMUL_ALGO=4` selects.
 ///
 /// Library-internal.  Runs one call of an MoE layer (W13 with its gated
 /// activation, W2, and the top-k weighted reduce) in a single parallel region
@@ -75,12 +75,13 @@
 /// thread exits or calls `reset_thread_local_scratch()`; a call that needs
 /// more than 1 GiB frees its scratch when it returns.
 ///
-/// Reached from `routed_fused_moe_direct` when ALGO 4 is requested for the
-/// call's phase (`resolve_grp_matmul_ntile_flat_parallel_request`): a decode
-/// call while no expert has more than `kDecodeMaxM` rows, else a prompt call.
-/// `group_matmul_direct` sends a call of two or more operations in such a
-/// phase to `execute_grouped`, which runs it on the same engine and packs
-/// with the operations as the experts.
+/// Reached from `routed_fused_moe_direct` when N-tile flat parallel is
+/// requested for the call's phase
+/// (`resolve_grp_matmul_ntile_flat_parallel_request`): a decode call while no
+/// expert has more than `kDecodeMaxM` rows, else a prompt call.
+/// `group_matmul_direct` sends a call of two or more operations in such a phase
+/// to `execute_grouped`, which runs it on the same engine and packs with the
+/// operations as the experts.
 
 #ifndef ZENDNNL_GROUP_MATMUL_NTILE_FLAT_PARALLEL_HPP
 #define ZENDNNL_GROUP_MATMUL_NTILE_FLAT_PARALLEL_HPP
@@ -299,12 +300,18 @@ inline std::atomic<uint64_t> s_ntile_flat_parallel_u8_src_calls {0};
 /// first: -1 leaves it to the team size, 0 forces queue order, 1 own units.
 inline std::atomic<int> s_ntile_flat_parallel_own_units_override {-1};
 
+/// The last call's unit queue, while `s_capture_ntile_flat_parallel` is
+/// set: its units, and whether they swept L2-sized column chunks.
+inline std::atomic<int> s_ntile_flat_parallel_last_units {0};
+inline std::atomic<bool> s_ntile_flat_parallel_last_sweep {false};
+
 /// Test-only: while `s_pause_ntile_flat_parallel` is set, a routed call waits
 /// at the start of `execute`, after setting `s_ntile_flat_parallel_paused`.
 inline std::atomic<bool> s_pause_ntile_flat_parallel {false};
 inline std::atomic<bool> s_ntile_flat_parallel_paused {false};
-/// Test-only: while set, the next pack lookup flushes ALGO 4's state between
-/// finding its weights and publishing their packs, and clears the flag.
+/// Test-only: while set, the next pack lookup flushes N-tile flat parallel's
+/// state between finding its weights and publishing their packs, and clears the
+/// flag.
 inline std::atomic<bool> s_ntile_flat_parallel_flush_before_publish {false};
 /// Test-only: while set, the next `group_matmul_direct` call flushes ALGO
 /// 4's state right after it reads the flush count, and clears the flag.
@@ -321,7 +328,8 @@ size_t ntile_flat_parallel_layers();
 
 /// How many expert weights have packs.
 size_t ntile_flat_parallel_packs();
-/// The grouped call sites ALGO 4 keeps the packs of (see `execute_grouped`).
+/// The grouped call sites N-tile flat parallel keeps the packs of (see
+/// `execute_grouped`).
 size_t ntile_flat_parallel_call_sites();
 /// The projection pools whose prepack extras grouped calls have packed.
 size_t ntile_flat_parallel_warmed_pools();

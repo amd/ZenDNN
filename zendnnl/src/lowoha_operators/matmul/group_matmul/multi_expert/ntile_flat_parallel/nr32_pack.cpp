@@ -39,21 +39,6 @@ namespace nr32 {
 
 namespace {
 
-/// Bytes one column takes in one block row, and the K elements that row
-/// covers.
-int row_k(data_type_t wei) {
-    switch (wei) {
-        case data_type_t::bf16: return 2;
-        case data_type_t::f16: return 1;
-        case data_type_t::s8: return 4;
-        case data_type_t::s4: return 8;
-        default: return 0;
-    }
-}
-int row_bytes_per_col(data_type_t wei) {
-    return wei == data_type_t::f16 ? 2 : 4;
-}
-
 /// Element (k, col) of the caller's weight, as its raw bit pattern.
 template <typename T>
 T element(const T *w, const weight_desc &d, int k, int col) {
@@ -106,8 +91,9 @@ void fill_scales(const pack_layout &layout, const void *scales,
 // K, rather than the block's rows at one K, keeps a row stride of a multiple
 // of 4 KiB from mapping every read of a step to the same cache sets.
 
-void pack_bf16(const uint16_t *w, const weight_desc &d, int n_pad,
-        uint8_t *blocks, size_t bb) {
+void pack_bf16(const void *weight, const weight_desc &d, int n_pad,
+        uint8_t *blocks, size_t bb, int32_t *) {
+    const auto *w = static_cast<const uint16_t *>(weight);
     const int K_pair = (d.K + 1) / 2;
     for (int b = 0; b < n_pad / kNr; ++b) {
         auto *dst = reinterpret_cast<uint16_t *>(blocks + b * bb);
@@ -124,8 +110,9 @@ void pack_bf16(const uint16_t *w, const weight_desc &d, int n_pad,
     }
 }
 
-void pack_f16(const uint16_t *w, const weight_desc &d, int n_pad,
-        uint8_t *blocks, size_t bb) {
+void pack_f16(const void *weight, const weight_desc &d, int n_pad,
+        uint8_t *blocks, size_t bb, int32_t *) {
+    const auto *w = static_cast<const uint16_t *>(weight);
     for (int b = 0; b < n_pad / kNr; ++b) {
         auto *dst = reinterpret_cast<uint16_t *>(blocks + b * bb);
         for (int n = 0; n < kNr; ++n) {
@@ -138,8 +125,9 @@ void pack_f16(const uint16_t *w, const weight_desc &d, int n_pad,
     }
 }
 
-void pack_s8(const int8_t *w, const weight_desc &d, int n_pad, uint8_t *blocks,
-        size_t bb, int32_t *comp) {
+void pack_s8(const void *weight, const weight_desc &d, int n_pad,
+        uint8_t *blocks, size_t bb, int32_t *comp) {
+    const auto *w = static_cast<const int8_t *>(weight);
     const int K_quad = (d.K + 3) / 4;
     const int full_quads = d.K / 4;
     // A quad never straddles a scale group.
@@ -195,8 +183,9 @@ inline uint32_t s4_octet(uint32_t raw, int32_t &sum) {
     return out;
 }
 
-void pack_s4(const int8_t *w, const weight_desc &d, int n_pad, uint8_t *blocks,
-        size_t bb, int32_t *comp) {
+void pack_s4(const void *weight, const weight_desc &d, int n_pad,
+        uint8_t *blocks, size_t bb, int32_t *comp) {
+    const auto *w = static_cast<const int8_t *>(weight);
     const int K_oct = d.K / 8;
     const int oct_per_group = d.group_size / 8;
     // [N, K] rows of an even length start on a byte: a column's octets are
@@ -243,6 +232,38 @@ void pack_s4(const int8_t *w, const weight_desc &d, int n_pad, uint8_t *blocks,
     }
 }
 
+/// Writes expert weight `weight`'s blocks for a pack of `d` and, for a
+/// quantized format, adds its sums to `comp` (`[G][n_pad]`, zeroed).
+using pack_fn = void (*)(const void *weight, const weight_desc &d, int n_pad,
+        uint8_t *blocks, size_t bb, int32_t *comp);
+
+struct packer_t {
+    data_type_t wei;
+    pack_fn pack;
+};
+
+constexpr packer_t kPackers[] = {
+        {data_type_t::bf16, pack_bf16},
+        {data_type_t::f16, pack_f16},
+        {data_type_t::s8, pack_s8},
+        {data_type_t::s4, pack_s4},
+};
+
+constexpr pack_fn packer_of(const data_type_t wei) {
+    for (const packer_t &p : kPackers)
+        if (p.wei == wei) return p.pack;
+    return nullptr;
+}
+
+constexpr bool packers_match_formats() {
+    for (const format_desc &f : kFormats)
+        if (packer_of(f.wei) == nullptr) return false;
+    return std::size(kPackers) == static_cast<size_t>(kFormatCount);
+}
+static_assert(packers_match_formats(),
+        "every N-tile flat parallel format has one packer, and every packer a "
+        "format");
+
 } // namespace
 
 int padded_cols(const int N) {
@@ -250,21 +271,19 @@ int padded_cols(const int N) {
 }
 
 size_t block_bytes(const weight_desc &d) {
-    const int g = row_k(d.wei);
-    if (g == 0) return 0;
-    const size_t rows = static_cast<size_t>((d.K + g - 1) / g);
-    return rows * kNr * row_bytes_per_col(d.wei);
+    const format_desc *f = format_of(d.wei);
+    if (f == nullptr) return 0;
+    const size_t rows
+            = static_cast<size_t>((d.K + f->k_per_word - 1) / f->k_per_word);
+    return rows * kNr * f->word_bytes;
 }
 
 bool packable(const weight_desc &d) {
-    if (row_k(d.wei) == 0 || d.K <= 0 || d.N <= 0) return false;
+    const format_desc *f = format_of(d.wei);
+    if (f == nullptr || d.K <= 0 || d.N <= 0) return false;
     if (d.ldb < (d.trans ? d.K : d.N)) return false;
-    if (d.wei == data_type_t::s4) {
-        return d.group_size > 0 && d.K % 8 == 0 && d.group_size % 8 == 0
-                && d.K % d.group_size == 0;
-    }
-    if (d.wei == data_type_t::s8 && d.group_size != 0) {
-        return d.group_size > 0 && d.group_size % 4 == 0
+    if (f->always_grouped || (f->quantized && d.group_size != 0)) {
+        return d.group_size > 0 && d.group_size % f->k_per_word == 0
                 && d.K % d.group_size == 0;
     }
     return d.group_size == 0;
@@ -273,6 +292,7 @@ bool packable(const weight_desc &d) {
 pack_layout layout_of(const weight_desc &desc) {
     pack_layout layout;
     layout.desc = desc;
+    layout.fmt = format_of(desc.wei);
     layout.n_pad = padded_cols(desc.N);
     layout.groups = desc.group_size > 0 ? desc.K / desc.group_size : 1;
     layout.block_bytes = block_bytes(desc);
@@ -295,8 +315,8 @@ status_t prepack(const weight_desc &desc,
         const int num_threads, packed_weights &out) {
     out = packed_weights {};
     const int E = static_cast<int>(weights.size());
-    const bool quantized
-            = desc.wei == data_type_t::s8 || desc.wei == data_type_t::s4;
+    const format_desc *f = format_of(desc.wei);
+    const bool quantized = f != nullptr && f->quantized;
     const bool scaled = quantized && !scales.empty();
     if (!packable(desc) || E == 0
             || (scaled
@@ -316,6 +336,7 @@ status_t prepack(const weight_desc &desc,
     const size_t expert_bytes = pw.block_bytes * (pw.n_pad / kNr);
     const size_t cols = static_cast<size_t>(pw.groups) * pw.n_pad;
 
+    const pack_fn pack = packer_of(desc.wei);
     std::atomic<bool> failed {false};
     // No exception may leave the region: an allocation that fails fails the
     // pack.
@@ -335,30 +356,14 @@ status_t prepack(const weight_desc &desc,
             }
             px.blocks = std::shared_ptr<uint8_t>(static_cast<uint8_t *>(raw),
                     [](uint8_t *p) { zendnnl_aligned_free(p); });
-            uint8_t *blocks = px.blocks.get();
-            switch (desc.wei) {
-                case data_type_t::bf16:
-                    pack_bf16(static_cast<const uint16_t *>(weights[e]), desc,
-                            pw.n_pad, blocks, pw.block_bytes);
-                    break;
-                case data_type_t::f16:
-                    pack_f16(static_cast<const uint16_t *>(weights[e]), desc,
-                            pw.n_pad, blocks, pw.block_bytes);
-                    break;
-                default: {
-                    auto comp = std::make_shared<std::vector<int32_t>>(cols, 0);
-                    if (scaled) fill_scales(pw, scales[e], scale_dt, px);
-                    if (desc.wei == data_type_t::s8) {
-                        pack_s8(static_cast<const int8_t *>(weights[e]), desc,
-                                pw.n_pad, blocks, pw.block_bytes, comp->data());
-                    } else {
-                        pack_s4(static_cast<const int8_t *>(weights[e]), desc,
-                                pw.n_pad, blocks, pw.block_bytes, comp->data());
-                    }
-                    px.comp = std::move(comp);
-                    break;
-                }
+            std::shared_ptr<std::vector<int32_t>> comp;
+            if (quantized) {
+                comp = std::make_shared<std::vector<int32_t>>(cols, 0);
+                if (scaled) fill_scales(pw, scales[e], scale_dt, px);
             }
+            pack(weights[e], desc, pw.n_pad, px.blocks.get(), pw.block_bytes,
+                    comp != nullptr ? comp->data() : nullptr);
+            px.comp = std::move(comp);
         } catch (const std::bad_alloc &) {
             failed.store(true, std::memory_order_relaxed);
         }
@@ -372,8 +377,7 @@ status_t with_scales(const pack_layout &layout, const packed_expert &bare,
         const void *scales, const data_type_t scale_dt, packed_expert &out) {
     if (scales == nullptr
             || (scale_dt != data_type_t::f32 && scale_dt != data_type_t::bf16)
-            || (layout.desc.wei != data_type_t::s8
-                    && layout.desc.wei != data_type_t::s4)) {
+            || layout.fmt == nullptr || !layout.fmt->quantized) {
         return status_t::unimplemented;
     }
     out.blocks = bare.blocks;
@@ -384,41 +388,31 @@ status_t with_scales(const pack_layout &layout, const packed_expert &bare,
 
 void unpack(const packed_weights &pw, const int e, void *dst, const int ld) {
     const weight_desc &d = pw.desc;
+    const format_desc &f = *pw.fmt;
     const uint8_t *blocks = pw.blocks(e);
     const size_t ldz = static_cast<size_t>(ld);
+    const size_t es = static_cast<size_t>(f.elem_bits / 8);
     for (int col = 0; col < d.N; ++col) {
         const uint8_t *blk = blocks + (col / kNr) * pw.block_bytes;
         const int n = col % kNr;
         for (int k = 0; k < d.K; ++k) {
-            switch (d.wei) {
-                case data_type_t::bf16:
-                    static_cast<uint16_t *>(dst)[col * ldz + k]
-                            = reinterpret_cast<const uint16_t *>(
-                                    blk)[((k / 2) * kNr + n) * 2 + k % 2];
-                    break;
-                case data_type_t::f16:
-                    static_cast<uint16_t *>(dst)[col * ldz + k]
-                            = reinterpret_cast<const uint16_t *>(
-                                    blk)[static_cast<size_t>(k) * kNr + n];
-                    break;
-                case data_type_t::s8:
-                    static_cast<int8_t *>(dst)[col * ldz + k]
-                            = reinterpret_cast<const int8_t *>(
-                                    blk)[((k / 4) * kNr + n) * 4 + k % 4];
-                    break;
-                default: {
-                    const int q = k % 8;
-                    const uint8_t byte = blk[((k / 8) * kNr + n) * 4 + (q & 3)];
-                    const uint8_t raw = static_cast<uint8_t>(
-                            ((q < 4 ? byte : byte >> 4) & 0x0Fu) ^ 0x08u);
-                    const size_t idx = col * ldz + k;
-                    auto *out = static_cast<uint8_t *>(dst) + (idx >> 1);
-                    *out = (idx & 1u) == 0u
-                            ? static_cast<uint8_t>((*out & 0xF0u) | raw)
-                            : static_cast<uint8_t>((*out & 0x0Fu) | (raw << 4));
-                    break;
-                }
+            const uint8_t *word = blk
+                    + (static_cast<size_t>(k / f.k_per_word) * kNr + n)
+                            * f.word_bytes;
+            const size_t idx = col * ldz + k;
+            if (f.enc == encode::copy) {
+                std::memcpy(static_cast<uint8_t *>(dst) + idx * es,
+                        word + (k % f.k_per_word) * es, es);
+                continue;
             }
+            const int q = k % 8;
+            const uint8_t byte = word[q & 3];
+            const uint8_t raw = static_cast<uint8_t>(
+                    ((q < 4 ? byte : byte >> 4) & 0x0Fu) ^ 0x08u);
+            auto *out = static_cast<uint8_t *>(dst) + (idx >> 1);
+            *out = (idx & 1u) == 0u
+                    ? static_cast<uint8_t>((*out & 0xF0u) | raw)
+                    : static_cast<uint8_t>((*out & 0x0Fu) | (raw << 4));
         }
     }
 }

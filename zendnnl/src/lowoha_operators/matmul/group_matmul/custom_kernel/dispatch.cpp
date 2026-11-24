@@ -34,9 +34,8 @@
 #include "lowoha_operators/matmul/aocl_unreorder_cache.hpp"
 #include "lowoha_operators/matmul/group_matmul/common/grp_matmul_constants.hpp"
 #include "lowoha_operators/matmul/group_matmul/common/grp_matmul_env.hpp"
+#include "lowoha_operators/matmul/group_matmul/common/grp_matmul_machine.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
-#include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
-#include "lowoha_operators/matmul/matmul_native/common/native_hw.hpp"
 #include "pack.hpp"
 #include "qwen_gemma_llama/bf16_decode_microkernel.hpp"
 
@@ -313,13 +312,7 @@ int plan_pack_nr(int /*K*/, int N) {
 }
 
 int64_t ck_l2_budget_bytes() {
-    static const int64_t budget = []() {
-        const int64_t l2
-                = zendnnl::lowoha::matmul::native::detect_uarch().l2_bytes;
-        const int64_t safe = (l2 >= 64 * 1024) ? l2 : (256 * 1024);
-        return (safe * 4) / 5;
-    }();
-    return budget;
+    return grp_machine::machine().l2_budget_bytes;
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -2297,12 +2290,7 @@ inline bool dispatch_tile_f16_kblocked(const CallContext &ctx, int expert_idx,
             || ctx.f16_prompt || M != 32)
         return false;
 
-    static const int64_t l2_budget = []() {
-        const int64_t l2
-                = zendnnl::lowoha::matmul::native::detect_uarch().l2_bytes;
-        const int64_t safe = (l2 >= 64 * 1024) ? l2 : (256 * 1024);
-        return (safe * 4) / 5;
-    }();
+    const int64_t l2_budget = grp_machine::machine().l2_budget_bytes;
     const int64_t bytes_per_k
             = static_cast<int64_t>(ctx.pack_nr + M) * sizeof(float16_t);
     if (static_cast<int64_t>(K) * bytes_per_k <= l2_budget) return false;
@@ -2887,12 +2875,7 @@ bool u8_src_pays() {
     const int ovr
             = test_api::s_ck_u8_src_override.load(std::memory_order_relaxed);
     if (ovr >= 0) return ovr != 0;
-    static const bool pays = [] {
-        const native::native_hw_t &hw = native::native_hw();
-        return hw.vendor == "AuthenticAMD" && hw.family == 0x1A
-                && hw.model >= 0x50 && hw.model <= 0x5F;
-    }();
-    return pays;
+    return grp_machine::dot_rates().u8_src_pays;
 }
 
 bool use_u8_src(CallContext &ctx) {

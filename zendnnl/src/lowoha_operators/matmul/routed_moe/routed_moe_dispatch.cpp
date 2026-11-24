@@ -20,6 +20,7 @@
 #include "lowoha_operators/matmul/group_matmul/common/grp_matmul_constants.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/ck_enable.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/nr32_format.hpp"
 #include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/ntile_flat_parallel.hpp"
 #include "lowoha_operators/matmul/group_matmul/selection/algo_select.hpp"
 #include "lowoha_operators/matmul/lowoha_common.hpp"
@@ -194,8 +195,8 @@ bool routed_moe_enabled() {
     return value == nullptr || value[0] != '0' || value[1] != '\0';
 }
 
-/// Whether ALGO 4 (`ntile_flat_parallel`) owns the calls of `phase` (decode
-/// while no expert has more than `kDecodeMaxM` rows):
+/// Whether N-tile flat parallel (`ntile_flat_parallel`) owns the calls of
+/// `phase` (decode while no expert has more than `kDecodeMaxM` rows):
 /// `ZENDNNL_GRP_MATMUL_ALGO=4` requests it for both phases and the
 /// `AUTO_DECODE_ALGO` / `AUTO_PROMPT_ALGO` knobs for their own.  A call it
 /// owns and cannot serve fails.
@@ -1682,15 +1683,17 @@ status_t run_generic(const char layout_src, const bool trans_src,
             primary.params.num_threads, descriptors);
 }
 
-/// ALGO 4's weight scale groups along K of an s8 or s4 projection: 1 for
-/// `{E, N}` or `{E, 1, N}` s8 scales, G for `{E, G, N}` scales of groups of
-/// whole K quads (s8) or octets (s4); 0 for scales it cannot take.
+/// N-tile flat parallel's weight scale groups along K of a projection of a
+/// quantized format's weights: 1 for `{E, N}` or `{E, 1, N}` scales of a format
+/// that need not group them (s8), G for `{E, G, N}` scales of groups of whole
+/// words (s8 quads, s4 octets); 0 for scales it cannot take.
 int64_t ntile_flat_parallel_weight_groups(
         const matmul_quantization_params_t::matmul_quant_t &q,
         const data_type_t wei, const int num_experts, const int input_size,
         const int output_size) {
-    if (wei == data_type_t::s8
-            && tight_expert_scale(q, num_experts, output_size))
+    const ntile_flat_parallel::nr32::format_desc &f
+            = *ntile_flat_parallel::nr32::format_of(wei);
+    if (!f.always_grouped && tight_expert_scale(q, num_experts, output_size))
         return 1;
     if (q.buff == nullptr
             || (q.dt != data_type_t::f32 && q.dt != data_type_t::bf16)
@@ -1699,7 +1702,7 @@ int64_t ntile_flat_parallel_weight_groups(
         return 0;
     }
     const int64_t group_size = input_size / q.dims[1];
-    return group_size % (wei == data_type_t::s4 ? 8 : 4) == 0 ? q.dims[1] : 0;
+    return group_size % f.k_per_word == 0 ? q.dims[1] : 0;
 }
 
 /// Whether a routed projection's tokens take one source scale per (token,
@@ -1707,7 +1710,9 @@ int64_t ntile_flat_parallel_weight_groups(
 bool ntile_flat_parallel_source_groups(const group_matmul_projection_params &p,
         const int num_tokens, const int num_experts) {
     const auto &d = p.params.dtypes;
-    if (d.wei != data_type_t::s8 && d.wei != data_type_t::s4) return false;
+    const ntile_flat_parallel::nr32::format_desc *f
+            = ntile_flat_parallel::nr32::format_of(d.wei);
+    if (f == nullptr || !f->quantized) return false;
     const int64_t groups
             = ntile_flat_parallel_weight_groups(p.params.quant_params.wei_scale,
                     d.wei, num_experts, p.input_size, p.output_size);
@@ -1716,10 +1721,10 @@ bool ntile_flat_parallel_source_groups(const group_matmul_projection_params &p,
             && dims[1] == groups;
 }
 
-/// Why ALGO 4 cannot serve a routed projection, or null when it serves it:
-/// constant BF16 or FP16 weights with no scales, or symmetric DA8W8 or W4A8
-/// with per-channel (s8) or per-group weight scales, with source scales per
-/// token or per (token, weight scale group); a BF16, F32 or F16 bias or
+/// Why N-tile flat parallel cannot serve a routed projection, or null when it
+/// serves it: constant BF16 or FP16 weights with no scales, or symmetric DA8W8
+/// or W4A8 with per-channel (s8) or per-group weight scales, with source scales
+/// per token or per (token, weight scale group); a BF16, F32 or F16 bias or
 /// none; no destination scale, zero point or post-op; and a weight cache
 /// mode that lets the layer's packs outlive the call.  The entry has already
 /// rejected a null weight and a non-zero beta.
@@ -1744,18 +1749,21 @@ const char *ntile_flat_parallel_projection_refusal(
     }
     if (q.dst_scale.buff != nullptr) return "destination_scale";
     if (!p.params.postop_.empty()) return "post_ops";
-    if (d.wei == data_type_t::bf16 || d.wei == data_type_t::f16) {
-        if (d.src != d.wei || d.dst != d.wei) return "unsupported_types";
+    // A 16-bit format's sources and outputs are its own type; a quantized
+    // one's sources bf16 rows the call quantizes to its kernels' s8.
+    const ntile_flat_parallel::nr32::format_desc *f
+            = ntile_flat_parallel::nr32::format_of(d.wei);
+    if (f == nullptr) return "unsupported_types";
+    if (!f->quantized) {
+        if (d.src != f->src || d.dst != f->dst) return "unsupported_types";
         if (p.params.dynamic_quant || q.wei_scale.buff != nullptr
                 || q.src_scale.buff != nullptr) {
             return "scales_on_16bit_weights";
         }
         return nullptr;
     }
-    if (d.wei != data_type_t::s8 && d.wei != data_type_t::s4)
-        return "unsupported_types";
-    if (d.src != data_type_t::bf16 || d.dst != data_type_t::bf16
-            || d.compute != data_type_t::s8 || !p.params.dynamic_quant) {
+    if (d.src != data_type_t::bf16 || d.dst != f->dst || d.compute != f->src
+            || !p.params.dynamic_quant) {
         return "unsupported_types";
     }
     if (ntile_flat_parallel_weight_groups(
@@ -1772,7 +1780,7 @@ const char *ntile_flat_parallel_projection_refusal(
     return nullptr;
 }
 
-/// `projection` for every expert, as ALGO 4 packs it.
+/// `projection` for every expert, as N-tile flat parallel packs it.
 bool ntile_flat_parallel_projection(
         const group_matmul_projection_params &projection, const int num_experts,
         ntile_flat_parallel::projection &out) {
@@ -1801,12 +1809,13 @@ bool ntile_flat_parallel_projection(
 
 status_t ntile_flat_parallel_declined(const char *reason) {
     error_handling::apilog_error(
-            "[ROUTED_MOE] ALGO 4 cannot serve the call: reason=", reason);
+            "[ROUTED_MOE] N-tile flat parallel cannot serve the call: reason=",
+            reason);
     return status_t::unimplemented;
 }
 
-/// Runs a call on ALGO 4 (`ntile_flat_parallel`), or returns `unimplemented`
-/// before writing anything.
+/// Runs a call on N-tile flat parallel (`ntile_flat_parallel`), or returns
+/// `unimplemented` before writing anything.
 status_t run_ntile_flat_parallel(const char layout_src, const bool trans_src,
         const void *token_src, const int token_src_ld, const int num_tokens,
         const int num_experts, const int topk, void *moe_output,
@@ -1969,16 +1978,16 @@ status_t routed_fused_moe_direct(const char layout_src, const bool trans_src,
 
     const bool decode_shaped
             = *std::max_element(counts.begin(), counts.end()) <= kDecodeMaxM;
-    const bool algo4_call = ntile_flat_parallel_enabled(decode_shaped
-                    ? grp_matmul_phase::decode
-                    : grp_matmul_phase::prompt);
-    // ALGO 4 packs the layer from the caller's weights on its first call of
-    // either phase, so no other path may rewrite them in place.
-    const bool algo4_layer = algo4_call
+    const bool ntile_flat_parallel_call = ntile_flat_parallel_enabled(
+            decode_shaped ? grp_matmul_phase::decode
+                          : grp_matmul_phase::prompt);
+    // N-tile flat parallel packs the layer from the caller's weights on its
+    // first call of either phase, so no other path may rewrite them in place.
+    const bool ntile_flat_parallel_layer = ntile_flat_parallel_call
             || ntile_flat_parallel_enabled(decode_shaped
                             ? grp_matmul_phase::prompt
                             : grp_matmul_phase::decode);
-    if (algo4_call) {
+    if (ntile_flat_parallel_call) {
         if (secondary == nullptr) {
             return ntile_flat_parallel_declined("no_down_projection");
         }
@@ -2022,9 +2031,9 @@ status_t routed_fused_moe_direct(const char layout_src, const bool trans_src,
                     num_tokens, num_experts, topk, moe_output, moe_output_ld,
                     primary, routing, *secondary, gated_act->act, w4,
                     w4_per_group_activation, gate_group_size, down_group_size);
-            if (algo4_layer) {
-                // ALGO 4 reads these weights as given, so the fast executor
-                // must not rewrite them in place.
+            if (ntile_flat_parallel_layer) {
+                // N-tile flat parallel reads these weights as given, so the
+                // fast executor must not rewrite them in place.
                 fast_params.gate_up_wei_buffer_capacity_bytes = 0;
                 fast_params.down_wei_buffer_capacity_bytes = 0;
             }
@@ -2084,9 +2093,9 @@ status_t routed_fused_moe_direct(const char layout_src, const bool trans_src,
                 generic_reason, " act=", act_name(), " tokens=", num_tokens,
                 " experts=", num_experts, " topk=", topk);
     }
-    if (algo4_layer) {
-        // Packs at weight cache mode 2 would rewrite the weights ALGO 4
-        // packs from.
+    if (ntile_flat_parallel_layer) {
+        // Packs at weight cache mode 2 would rewrite the weights N-tile flat
+        // parallel packs from.
         group_matmul_projection_params gate_up = primary;
         gate_up.params.weight_cache_type
                 = std::min(gate_up.params.weight_cache_type, 1);

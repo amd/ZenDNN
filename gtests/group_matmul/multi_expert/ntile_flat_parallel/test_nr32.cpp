@@ -16,7 +16,7 @@
 
 /**
  * @file test_nr32.cpp
- * @brief Tests for ALGO 4's NR32 packs and tiles.
+ * @brief Tests for N-tile flat parallel's NR32 packs and tiles.
  *
  * The pack is checked against the weight it came from, element by element,
  * with its padding, sums and scales.  Tiles are checked against a scalar

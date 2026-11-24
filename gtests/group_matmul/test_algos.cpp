@@ -2821,7 +2821,7 @@ TEST_P(TestGroupMatmulAutoSelectAlgo, MatchesExpected) {
     // Pin ZENDNNL_GRP_MATMUL_ALGO=0 so the auto-select path fires
     // (override is uncached on purpose; an env value lingering from a
     // prior test would shadow our expectation).  `get_grp_matmul_algo`
-    // returns 0 for AUTO, ALGO 4's selector 4, or an invalid
+    // returns 0 for AUTO, N-tile flat parallel's selector 4, or an invalid
     // selector; generic scheduler IDs are {1,2,3,5,6}.
     AlgoEnvGuard reset_algo(0);
     // Explicitly disable the phase env (default PROMPT=2 / DECODE=3) so
@@ -3286,9 +3286,9 @@ TEST(TestGroupMatmulAutoSelectAlgo_DynamicQuant, AcceptsAlgo3ViaHoist) {
 // Set the env to `0` for the legacy 3-rule cascade.  Tests here
 // pin both branches: explicit env=0 reproduces the legacy cascade,
 // env={1,2,3,5,6} is honoured for the matching generic phase, and value 4
-// requests ALGO 4 for the matching phase while the calls that reach the
-// selector (grouped calls of one operation) map it to the inherited default
-// policy. Coverage also includes
+// requests N-tile flat parallel for the matching phase while the calls that
+// reach the selector (grouped calls of one operation) map it to the inherited
+// default policy. Coverage also includes
 // the safety clamps (ALGO 3 on !n_tile_safe) and the legacy cascade's R0
 // capacity gate.
 //
@@ -7026,7 +7026,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, SharedClassifierUsesBoundaryAndActivePrefix) {
 }
 
 TEST(TestGroupMatmulAutoPhaseEnv,
-        Algo4ResolverHonorsPhasePrecedenceAndPhaseIsolation) {
+        NTileFlatParallelResolverHonorsPhasePrecedenceAndPhaseIsolation) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     reset_grp_matmul_caches();
@@ -7036,9 +7036,9 @@ TEST(TestGroupMatmulAutoPhaseEnv,
     // even when the global is also 4 — the source identity reports which
     // knob was honoured, and that is now the phase.
     {
-        AlgoEnvGuard global_algo4(4);
-        AutoPromptAlgoOverride prompt_algo4(4);
-        AutoDecodeAlgoOverride decode_algo4(4);
+        AlgoEnvGuard global_ntile_flat_parallel(4);
+        AutoPromptAlgoOverride prompt_ntile_flat_parallel(4);
+        AutoDecodeAlgoOverride decode_ntile_flat_parallel(4);
         EXPECT_EQ(resolve_grp_matmul_ntile_flat_parallel_request(
                           grp_matmul_phase::decode),
                 grp_matmul_ntile_flat_parallel_request_source::auto_decode);
@@ -7048,11 +7048,12 @@ TEST(TestGroupMatmulAutoPhaseEnv,
     }
 
     // A phase `=4` outranks EVERY global generic pin: the operator asked for
-    // ALGO 4 on this phase specifically, which is the more specific statement.
+    // N-tile flat parallel on this phase specifically, which is the more
+    // specific statement.
     for (const int global : {1, 2, 3, 5, 6}) {
         AlgoEnvGuard global_pin(global);
-        AutoPromptAlgoOverride prompt_algo4(4);
-        AutoDecodeAlgoOverride decode_algo4(4);
+        AutoPromptAlgoOverride prompt_ntile_flat_parallel(4);
+        AutoDecodeAlgoOverride decode_ntile_flat_parallel(4);
         EXPECT_EQ(resolve_grp_matmul_ntile_flat_parallel_request(
                           grp_matmul_phase::decode),
                 grp_matmul_ntile_flat_parallel_request_source::auto_decode)
@@ -7064,10 +7065,10 @@ TEST(TestGroupMatmulAutoPhaseEnv,
     }
 
     // Converse direction: an explicit non-4 phase knob suppresses a global
-    // `=4`, so the global ALGO 4 request does not leak into a phase the
-    // operator has pinned to a generic scheduler.
+    // `=4`, so the global N-tile flat parallel request does not leak into a
+    // phase the operator has pinned to a generic scheduler.
     for (const int phase_generic : {1, 2, 3, 5, 6}) {
-        AlgoEnvGuard global_algo4(4);
+        AlgoEnvGuard global_ntile_flat_parallel(4);
         AutoPromptAlgoOverride prompt_pin(phase_generic);
         AutoDecodeAlgoOverride decode_pin(phase_generic);
         EXPECT_EQ(resolve_grp_matmul_ntile_flat_parallel_request(
@@ -7082,7 +7083,7 @@ TEST(TestGroupMatmulAutoPhaseEnv,
 
     // The global still applies when the matching phase knob is UNSET.
     {
-        AlgoEnvGuard global_algo4(4);
+        AlgoEnvGuard global_ntile_flat_parallel(4);
         EXPECT_EQ(resolve_grp_matmul_ntile_flat_parallel_request(
                           grp_matmul_phase::decode),
                 grp_matmul_ntile_flat_parallel_request_source::global);
@@ -7091,11 +7092,11 @@ TEST(TestGroupMatmulAutoPhaseEnv,
                 grp_matmul_ntile_flat_parallel_request_source::global);
     }
 
-    // Under global AUTO, only the matching phase can request ALGO 4. The
-    // inactive phase remains a normal generic pin (6 here).
+    // Under global AUTO, only the matching phase can request N-tile flat
+    // parallel. The inactive phase remains a normal generic pin (6 here).
     {
         AlgoEnvGuard global_auto(0);
-        AutoPromptAlgoOverride prompt_algo4(4);
+        AutoPromptAlgoOverride prompt_ntile_flat_parallel(4);
         AutoDecodeAlgoOverride decode_multilevel(6);
         EXPECT_EQ(resolve_grp_matmul_ntile_flat_parallel_request(
                           grp_matmul_phase::prompt),
@@ -7114,7 +7115,7 @@ TEST(TestGroupMatmulAutoPhaseEnv,
     {
         AlgoEnvGuard global_auto(0);
         AutoPromptAlgoOverride prompt_multilevel(6);
-        AutoDecodeAlgoOverride decode_algo4(4);
+        AutoDecodeAlgoOverride decode_ntile_flat_parallel(4);
         EXPECT_EQ(resolve_grp_matmul_ntile_flat_parallel_request(
                           grp_matmul_phase::decode),
                 grp_matmul_ntile_flat_parallel_request_source::auto_decode);
@@ -7131,17 +7132,17 @@ TEST(TestGroupMatmulAutoPhaseEnv,
     }
 }
 
-// Phase value 4 is a valid raw ALGO 4 request, but its generic effective value
-// is the inherited phase default. It must not count as a generic policy pin:
-// grouped calls under it run the default policy.
+// Phase value 4 is a valid raw N-tile flat parallel request, but its generic
+// effective value is the inherited phase default. It must not count as a
+// generic policy pin: grouped calls under it run the default policy.
 TEST(TestGroupMatmulAutoPhaseEnv,
-        PhaseValue4RequestsAlgo4AndInheritsDefaultPolicy) {
+        PhaseValue4RequestsNTileFlatParallelAndInheritsDefaultPolicy) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     reset_grp_matmul_caches();
     AlgoEnvGuard reset_algo(0);
-    AutoPromptAlgoOverride prompt_algo4(4);
-    AutoDecodeAlgoOverride decode_algo4(4);
+    AutoPromptAlgoOverride prompt_ntile_flat_parallel(4);
+    AutoDecodeAlgoOverride decode_ntile_flat_parallel(4);
 
     const auto prompt = get_grp_matmul_auto_prompt_setting();
     EXPECT_EQ(prompt.requested_algo, 4);
@@ -7218,10 +7219,11 @@ TEST(TestGroupMatmulAutoPhaseEnv,
     EXPECT_STREQ(moe_trace.reason, "auto_algo3");
 }
 
-// Under each ALGO 4 request a grouped call of several experts runs ALGO 4 in
-// a phase the request covers, close to AUTO's output, and otherwise takes
-// AUTO's path and writes AUTO's output.
-TEST(TestGroupMatmulAutoPhaseEnv, GroupedCallsRunAlgo4InTheRequestedPhase) {
+// Under each N-tile flat parallel request a grouped call of several experts
+// runs N-tile flat parallel in a phase the request covers, close to AUTO's
+// output, and otherwise takes AUTO's path and writes AUTO's output.
+TEST(TestGroupMatmulAutoPhaseEnv,
+        GroupedCallsRunNTileFlatParallelInTheRequestedPhase) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     // More experts than `kFewExpertsDecodeThreshold`, with the custom kernel
@@ -7233,7 +7235,8 @@ TEST(TestGroupMatmulAutoPhaseEnv, GroupedCallsRunAlgo4InTheRequestedPhase) {
     // 7 leaves a phase unset, whatever the environment sets.
     AutoDecodeAlgoOverride decode_unset(7);
     AutoPromptAlgoOverride prompt_unset(7);
-    // ALGO 4 serves only weight-cached calls, whatever the process sets.
+    // N-tile flat parallel serves only weight-cached calls, whatever the
+    // process sets.
     struct weight_cache_pin {
         zendnnl::common::matmul_config_t &config
                 = zendnnl::common::matmul_config_t::instance();
@@ -7282,12 +7285,12 @@ TEST(TestGroupMatmulAutoPhaseEnv, GroupedCallsRunAlgo4InTheRequestedPhase) {
         ASSERT_NO_FATAL_FAILURE(run(auto_mode, auto_out));
         ASSERT_FALSE(auto_mode.empty());
         ASSERT_NE(auto_mode, "ntile_flat_parallel");
-        auto expect = [&](const char *request, const bool algo4) {
+        auto expect = [&](const char *request, const bool served) {
             SCOPED_TRACE(request);
             std::string mode;
             std::vector<uint16_t> out;
             ASSERT_NO_FATAL_FAILURE(run(mode, out));
-            if (!algo4) {
+            if (!served) {
                 EXPECT_EQ(mode, auto_mode);
                 EXPECT_EQ(out, auto_out);
                 return;
@@ -7476,13 +7479,14 @@ TEST(TestGroupMatmulAutoPhaseEnv, InvalidDecodeValueIsNotAPin) {
                 << "value " << valid << " is a legal pin";
     }
     {
-        AutoDecodeAlgoOverride algo4_decode(4);
+        AutoDecodeAlgoOverride ntile_flat_parallel_decode(4);
         const auto setting = get_grp_matmul_auto_decode_setting();
         EXPECT_TRUE(setting.has_explicit_request());
         EXPECT_TRUE(setting.requests_ntile_flat_parallel());
         EXPECT_FALSE(setting.pins_generic_policy());
         EXPECT_FALSE(grp_matmul_auto_decode_algo_is_set())
-                << "phase 4 requests ALGO 4 but is not a generic pin";
+                << "phase 4 requests N-tile flat parallel but is not a generic "
+                   "pin";
     }
 }
 

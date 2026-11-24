@@ -2692,9 +2692,9 @@ TEST_P(TestFusedMoEQuantDynINT8, BothPasses) {
 }
 
 /// Row-scaled tolerance of an INT8 fused MoE whose gated activation runs in
-/// registers (the ALGO 3 custom kernel's, ALGO 4's) against a two-call
-/// reference: twice the worst row error these tests measure (1.5% of the
-/// row's peak).
+/// registers (the ALGO 3 custom kernel's, N-tile flat parallel's) against a
+/// two-call reference: twice the worst row error these tests measure (1.5% of
+/// the row's peak).
 constexpr float kInt8FusedActRowFrac = 0.03f;
 
 TEST(TestFusedMoEQuantDynINT8AllAlgos, GroupDynamicQuantBothPasses) {
@@ -2848,8 +2848,8 @@ TEST(TestFusedMoEQuantDynINT8AllAlgos, GroupDynamicQuantBothPasses) {
 
         const std::string label = "Dynamic_INT8_BothPasses_AllAlgos algo="
                 + std::to_string(algo);
-        // ALGO 4 activates the fused call's gate and up in registers, the
-        // reference after rounding them to bf16.
+        // N-tile flat parallel activates the fused call's gate and up in
+        // registers, the reference after rounding them to bf16.
         if (algo == 4) {
             verify_per_expert_2d_row_scaled(d2_test, H, d2_ref, H,
                     std::vector<int>(num_ops, M), H, bool_to_fp_dt(is_bf16),
@@ -4133,8 +4133,8 @@ TEST(TestFusedMoEPreQuantSrc, SharedScaleWorkspaceTracksWeightIdentity) {
 // Absolute correctness of the pre-quantized path against an independent
 // unfused 2-call reference, bit-exact on ALGO 1 / 2 / 5 / 6.  AUTO runs this
 // INT8 layer on ALGO 3, which engages the TIGHT Op1 layout, and `4` on
-// ALGO 4: both fuse the gated activation into Op1's epilogue and round
-// f32 -> bf16 ONCE, while the reference stores bf16 and then activates
+// N-tile flat parallel: both fuse the gated activation into Op1's epilogue and
+// round f32 -> bf16 ONCE, while the reference stores bf16 and then activates
 // those rounded values.  Op2 re-quantizes per token, so one differing element
 // shifts a row's scale and with it the whole row.  Those two compare with a
 // row-scaled tolerance against the AOCL (ALGO 1) reference; ALGO 3 is also

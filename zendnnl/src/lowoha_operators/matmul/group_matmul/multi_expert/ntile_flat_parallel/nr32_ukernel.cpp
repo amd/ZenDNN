@@ -24,76 +24,132 @@ namespace matmul {
 namespace ntile_flat_parallel {
 namespace nr32 {
 
-int max_mr(const data_type_t wei) {
-    switch (wei) {
-        case data_type_t::s8: return 12;
-        case data_type_t::s4: return 6;
-        case data_type_t::bf16:
-        case data_type_t::f16: return 8;
-        default: return 0;
+namespace {
+
+// Each family's selectors take every option; those a family has no variants
+// for are left unread (s4's kernels sum by group whatever the weight's
+// groups).
+
+using narrow_fn = ukernel_fn (*)(
+        int mr, epilogue ep, bool src_u8, bool unaligned, scale_groups groups);
+using wide_fn = ukernel_fn (*)(
+        int mr, epilogue ep, bool src_u8, bool two_chains, scale_groups groups);
+
+ukernel_fn bf16_narrow(const int mr, const epilogue ep, bool,
+        const bool unaligned, scale_groups) {
+    return select_bf16(mr, ep, unaligned);
+}
+
+ukernel_fn bf16_wide(const int mr, const epilogue ep, bool,
+        const bool two_chains, scale_groups) {
+    return select_bf16_wide(mr, ep, two_chains);
+}
+
+ukernel_fn f16_narrow(const int mr, const epilogue ep, bool,
+        const bool unaligned, scale_groups) {
+    return select_f16(mr, ep, unaligned);
+}
+
+ukernel_fn s8_narrow(const int mr, const epilogue ep, const bool src_u8,
+        const bool unaligned, const scale_groups groups) {
+    return groups.any()
+            ? select_s8_groups(mr, ep, src_u8, unaligned, groups.source)
+            : select_s8(mr, ep, src_u8, unaligned);
+}
+
+ukernel_fn s8_wide(const int mr, const epilogue ep, const bool src_u8, bool,
+        const scale_groups groups) {
+    return groups.any() ? select_s8_groups_wide(mr, ep, src_u8, groups.source)
+                        : select_s8_wide(mr, ep, src_u8);
+}
+
+ukernel_fn s4_narrow(const int mr, const epilogue ep, bool,
+        const bool unaligned, const scale_groups groups) {
+    return select_s4(mr, ep, unaligned, groups.source);
+}
+
+ukernel_fn s4_wide(const int mr, const epilogue ep, bool, bool,
+        const scale_groups groups) {
+    return select_s4_wide(mr, ep, groups.source);
+}
+
+/// A format's kernels: narrow, and wide for a format with `max_mr_wide`.
+struct family_t {
+    data_type_t wei;
+    narrow_fn narrow;
+    wide_fn wide;
+};
+
+constexpr family_t kFamilies[] = {
+        {data_type_t::bf16, bf16_narrow, bf16_wide},
+        {data_type_t::f16, f16_narrow, nullptr},
+        {data_type_t::s8, s8_narrow, s8_wide},
+        {data_type_t::s4, s4_narrow, s4_wide},
+};
+
+constexpr const family_t *family_of(const data_type_t wei) {
+    for (const family_t &k : kFamilies)
+        if (k.wei == wei) return &k;
+    return nullptr;
+}
+
+constexpr bool families_match_formats() {
+    for (const format_desc &f : kFormats) {
+        const family_t *k = family_of(f.wei);
+        if (k == nullptr || k->narrow == nullptr
+                || (k->wide != nullptr) != (f.max_mr_wide > 0))
+            return false;
     }
+    return std::size(kFamilies) == static_cast<size_t>(kFormatCount);
+}
+static_assert(families_match_formats(),
+        "every N-tile flat parallel format has one kernel family, wide kernels "
+        "where it "
+        "takes wide rows, and every family a format");
+
+} // namespace
+
+int max_mr(const data_type_t wei) {
+    const format_desc *f = format_of(wei);
+    return f != nullptr ? f->max_mr : 0;
 }
 
 int max_mr_wide(const data_type_t wei) {
-    switch (wei) {
-        case data_type_t::s8:
-        case data_type_t::bf16: return 6;
-        case data_type_t::s4: return 3;
-        default: return 0;
-    }
+    const format_desc *f = format_of(wei);
+    return f != nullptr ? f->max_mr_wide : 0;
 }
 
 ukernel_fn select_wide(const data_type_t wei, const int mr, const epilogue ep,
         const bool src_u8, const bool two_chains, const scale_groups groups) {
-    if (mr < 1 || mr > max_mr_wide(wei) || !split(ep)) return nullptr;
-    if (src_u8 && wei != data_type_t::s8) return nullptr;
-    if (two_chains && (wei != data_type_t::bf16 || mr > 3)) return nullptr;
-    switch (wei) {
-        case data_type_t::s8:
-            return groups.any()
-                    ? select_s8_groups_wide(mr, ep, src_u8, groups.source)
-                    : select_s8_wide(mr, ep, src_u8);
-        case data_type_t::bf16: return select_bf16_wide(mr, ep, two_chains);
-        case data_type_t::s4: return select_s4_wide(mr, ep, groups.source);
-        default: return nullptr;
-    }
-}
-
-int step_cols(const data_type_t wei, const epilogue ep) {
-    if (ep == epilogue::plain) return 32;
-    if (wei == data_type_t::f16 && split(ep)) return 32;
-    return 16;
+    const format_desc *f = format_of(wei);
+    if (f == nullptr || mr < 1 || mr > f->max_mr_wide || !split(ep))
+        return nullptr;
+    if ((src_u8 && !f->u8_src) || (two_chains && mr > f->two_chain_rows))
+        return nullptr;
+    return family_of(wei)->wide(mr, ep, src_u8, two_chains, groups);
 }
 
 bool isa_supported(const data_type_t wei) {
     const auto &cpu = zendnnl::common::zendnnl_platform_info();
-    if (!cpu.get_avx512f_status() || !cpu.get_avx512_bw_vl_status())
+    const format_desc *f = format_of(wei);
+    if (f == nullptr || !cpu.get_avx512f_status()
+            || !cpu.get_avx512_bw_vl_status())
         return false;
-    switch (wei) {
-        case data_type_t::s8:
-        case data_type_t::s4: return cpu.get_avx512_vnni_status();
-        case data_type_t::bf16: return cpu.get_avx512_bf16_status();
-        case data_type_t::f16:
+    switch (f->isa) {
+        case isa_need::vnni: return cpu.get_avx512_vnni_status();
+        case isa_need::bf16: return cpu.get_avx512_bf16_status();
+        case isa_need::fp16:
             return f16_kernels_built() && cpu.get_avx512_f16_status();
-        default: return false;
     }
+    return false;
 }
 
 ukernel_fn select(const data_type_t wei, const int mr, const epilogue ep,
         const bool src_u8, const bool unaligned, const scale_groups groups) {
-    if (mr < 1 || mr > max_mr(wei)) return nullptr;
-    if (src_u8 && wei != data_type_t::s8) return nullptr;
-    switch (wei) {
-        case data_type_t::s8:
-            return groups.any()
-                    ? select_s8_groups(mr, ep, src_u8, unaligned, groups.source)
-                    : select_s8(mr, ep, src_u8, unaligned);
-        case data_type_t::s4:
-            return select_s4(mr, ep, unaligned, groups.source);
-        case data_type_t::bf16: return select_bf16(mr, ep, unaligned);
-        case data_type_t::f16: return select_f16(mr, ep, unaligned);
-        default: return nullptr;
-    }
+    const format_desc *f = format_of(wei);
+    if (f == nullptr || mr < 1 || mr > f->max_mr) return nullptr;
+    if (src_u8 && !f->u8_src) return nullptr;
+    return family_of(wei)->narrow(mr, ep, src_u8, unaligned, groups);
 }
 
 } // namespace nr32

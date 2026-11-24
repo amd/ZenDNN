@@ -14,7 +14,7 @@
  * limitations under the License.
  *******************************************************************************/
 
-/// ALGO 4's microkernels over `nr32_pack.hpp` packs.
+/// N-tile flat parallel's microkernels over `nr32_pack.hpp` packs.
 ///
 /// A call multiplies up to `max_mr` source rows by one step of columns and
 /// stores what the epilogue makes of them.  A step is two vectors of
@@ -50,9 +50,6 @@ namespace matmul {
 namespace ntile_flat_parallel {
 namespace nr32 {
 
-/// Rows the s8 kernels take per call, the most of any type.
-inline constexpr int kMaxMr = 12;
-
 /// How a quantized weight's kernels apply scales along K.
 struct scale_groups {
     /// The weight has more than one scale group (s4 kernels sum by group
@@ -65,7 +62,8 @@ struct scale_groups {
     bool any() const { return weight || source; }
 };
 
-/// Rows a call of `wei`'s kernels takes: 12 for s8, 6 for s4, 8 otherwise.
+/// Rows a call of `wei`'s kernels takes (`format_desc::max_mr`): 12 for s8,
+/// 6 for s4, 8 for bf16 and f16.
 int max_mr(data_type_t wei);
 
 /// What a call stores from a step's two vectors.
@@ -137,26 +135,26 @@ struct ukernel_args {
 
 using ukernel_fn = void (*)(const ukernel_args &);
 
-/// Output columns one call of `wei`'s kernels writes for `ep`.
-int step_cols(data_type_t wei, epilogue ep);
-
 /// Whether this CPU, and the build, runs `wei`'s kernels.
 bool isa_supported(data_type_t wei);
 
 /// The kernel for `mr` rows of `wei` with epilogue `ep`, or nullptr.
-/// `src_u8` (s8 only) reads source bytes already XOR-ed with 0x80;
-/// `unaligned` (split epilogues only) assembles misaligned up columns;
-/// `groups` (s8 and s4) says how the scales are grouped along K.
+/// `src_u8` (a format with `u8_src` kernels: s8) reads source bytes already
+/// XOR-ed with 0x80; `unaligned` (split epilogues only) assembles misaligned
+/// up columns; `groups` (quantized formats) says how the scales are grouped
+/// along K.
 ukernel_fn select(data_type_t wei, int mr, epilogue ep, bool src_u8,
         bool unaligned, scale_groups groups = {});
 
-/// Rows a call of `wei`'s wide split kernels takes: 6 for s8 and bf16, 3 for
-/// s4, 0 for a type without them.
+/// Rows a call of `wei`'s wide split kernels takes
+/// (`format_desc::max_mr_wide`): 6 for s8 and bf16, 3 for s4, 0 for a type
+/// without them.
 int max_mr_wide(data_type_t wei);
 
 /// The wide split kernel for `mr` rows of `wei` with split epilogue `ep`, or
-/// nullptr.  `two_chains` (bf16, `mr` <= 3) sums even and odd K pairs in two
-/// accumulators, as the narrow kernels do at three rows or fewer.
+/// nullptr.  `two_chains` (`mr` up to the format's `two_chain_rows`: bf16,
+/// three) sums even and odd K pairs in two accumulators, as the narrow
+/// kernels do at three rows or fewer.
 ukernel_fn select_wide(data_type_t wei, int mr, epilogue ep, bool src_u8,
         bool two_chains, scale_groups groups = {});
 

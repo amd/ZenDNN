@@ -158,10 +158,10 @@ status_t execute(const routed_moe_params &p);
 /// it through the complete generic execution.
 std::shared_mutex &inplace_storage_lifecycle_mutex();
 
-/// Held shared by every routed call, the fast executor's and ALGO 4's, from
-/// validation through its last store, and exclusively by the routed flush, so
-/// the flush returns only after the calls in flight. Taken before
-/// `inplace_storage_lifecycle_mutex()`.
+/// Held shared by every routed call, the fast executor's and N-tile flat
+/// parallel's, from validation through its last store, and exclusively by the
+/// routed flush, so the flush returns only after the calls in flight. Taken
+/// before `inplace_storage_lifecycle_mutex()`.
 std::shared_mutex &execution_lifecycle_mutex();
 
 /// Whether caller-owned storage currently contains the routed packed layout.

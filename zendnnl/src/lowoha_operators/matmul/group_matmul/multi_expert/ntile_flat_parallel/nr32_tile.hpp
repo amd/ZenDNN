@@ -71,16 +71,24 @@ struct tile_plan {
     ukernel_fn wide_kernels[2][kMaxMr + 1] = {};
 };
 
-/// Bytes of L2 a tile's rows and weights may take.
-int64_t l2_budget_bytes();
+/// The L2 bytes a plan's tiles may give their rows and weights, and the
+/// source rows that budget reserves beside the weights.
+struct plan_budget {
+    int64_t l2_bytes = 0;
+    int subtile_rows = 16;
+};
+
+/// The machine view's budget: its L2 budget and 16 rows.
+plan_budget default_budget();
 
 /// The plan for tiles of packs of `layout` with epilogue `ep`, reading
 /// source bytes XOR-ed with 0x80 when `src_u8`, and one source scale per row
 /// and weight scale group when `src_groups` (one per row otherwise, and for a
-/// weight of one group).  False when this CPU has no kernel for it or a gated
-/// epilogue meets an odd N.
+/// weight of one group), its subtiles sized by `budget`.  False when this CPU
+/// has no kernel for it or a gated epilogue meets an odd N.
 bool make_plan(const pack_layout &layout, epilogue ep, bool src_u8,
-        tile_plan &plan, bool src_groups = false);
+        tile_plan &plan, bool src_groups = false,
+        const plan_budget &budget = default_budget());
 
 /// Bytes past a tile's last s8 source row its kernels may read: they read
 /// each row four bytes at a time, and a K that is not a multiple of four

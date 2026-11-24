@@ -35,7 +35,7 @@ files are listed in `CMakeLists.txt`, with paths relative to
 - `multi_expert/` holds the MoE-only policy (`multi_expert_policy.hpp`: the
   AUTO ALGO 3 layer test, the CcdExpertWaves knobs and gate, and the CCD-fill
   knob) and the MoE-only algorithms:
-  `ntile_flat_parallel/` (ALGO 4), `expert_parallel/` (ALGO 5) and
+  `ntile_flat_parallel/` (N-tile flat parallel), `expert_parallel/` (ALGO 5) and
   `multilevel/` (ALGO 6).
 - `fused_moe/` is the fused MoE entry and its vertical-fusion pipeline
   (`vertical_fusion_pipeline.hpp`), which runs W13, the gated activation and

@@ -50,6 +50,9 @@ set(lowoha_group_matmul_sources
   group_matmul/custom_kernel/ukernel/f16_microkernel.cpp
   group_matmul/custom_kernel/dispatch.cpp
   group_matmul/custom_kernel/ck_enable.cpp
+  group_matmul/common/grp_matmul_dot_measure.cpp
+  group_matmul/common/grp_matmul_machine.cpp
+  group_matmul/multi_expert/ntile_flat_parallel/ntile_flat_parallel_config.cpp
   group_matmul/multi_expert/ntile_flat_parallel/ntile_flat_parallel.cpp
   group_matmul/multi_expert/ntile_flat_parallel/nr32_pack.cpp
   group_matmul/multi_expert/ntile_flat_parallel/nr32_tile.cpp

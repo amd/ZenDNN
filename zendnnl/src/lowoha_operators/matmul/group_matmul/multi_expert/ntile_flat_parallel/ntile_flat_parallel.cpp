@@ -33,16 +33,19 @@
 #include <thread>
 #include <vector>
 #include <shared_mutex>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 
+#include "lowoha_operators/matmul/group_matmul/common/grp_matmul_machine.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
 #include "lowoha_operators/matmul/lowoha_common.hpp"
-#include "lowoha_operators/matmul/matmul_native/common/native_hw.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_weight_cache.hpp"
 #include "lowoha_operators/reorder/lowoha_reorder.hpp"
+#include "nr32_format.hpp"
 #include "nr32_pack.hpp"
 #include "nr32_tile.hpp"
+#include "ntile_flat_parallel_config.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -73,44 +76,35 @@ struct layer_key_hash_t {
     }
 };
 
-/// Target depth of the unit queue per thread.
-constexpr int kUnitsPerThread = 2;
-/// Rows a W13 unit copies at a time when it shares a run's gather.
-constexpr int kGatherRows = 16;
-/// Units per thread a prompt call cuts each projection into.
-constexpr int kPromptUnitsPerThread = 6;
-/// Pauses a unit spends waiting for another thread's rows before it starts
-/// yielding the core.
-constexpr int kWaitSpinPauses = 4096;
-/// A thread's scratch above this size is freed when its call returns.  A
-/// prompt's scratch can reach hundreds of MiB, which a later call would
-/// otherwise allocate and zero again.
-constexpr size_t kScratchKeepBytes = size_t {1} << 30;
 /// Bytes past the last s8 row the kernels may read (`nr32::run_tile`).
 constexpr size_t kRowSlack = nr32::kRowReadSlack;
 
 bool quantized_weights(const data_type_t wei) {
-    return wei == data_type_t::s8 || wei == data_type_t::s4;
+    const nr32::format_desc *f = nr32::format_of(wei);
+    return f != nullptr && f->quantized;
 }
 
 float wei_bytes_of(const data_type_t wei) {
-    return wei == data_type_t::s4 ? 0.5f : wei == data_type_t::s8 ? 1.0f : 2.0f;
+    return nr32::format_of(wei)->elem_bits / 8.0f;
 }
 
-/// Whether DA8W8 layers run the kernels that read source bytes XOR-ed with
-/// 0x80, which skip that XOR on every broadcast: on the CPUs where that
-/// outweighs flipping each row once.  W4A8 layers keep the s8-source
-/// kernels, whose decode is the faster.
-bool u8_src_pays() {
+/// Whether layers of `wei` weights for `api` run the kernels that read
+/// source bytes XOR-ed with 0x80, which skip that XOR on every broadcast:
+/// for a format that has them (DA8W8's s8), on the machines where that
+/// outweighs flipping each row once (the machine view's rule), unless the
+/// config says otherwise.  W4A8 layers keep the s8-source kernels, whose
+/// decode is the faster.
+bool u8_src_pays(const data_type_t wei, const api_kind api) {
+    if (!nr32::format_of(wei)->u8_src) return false;
     const int pin = test_api::s_ntile_flat_parallel_u8_src_override.load(
             std::memory_order_relaxed);
     if (pin >= 0) return pin != 0;
-    static const bool pays = [] {
-        const native::native_hw_t &hw = native::native_hw();
-        return hw.vendor == "AuthenticAMD" && hw.family == 0x1A
-                && hw.model >= 0x50 && hw.model <= 0x5F;
-    }();
-    return pays;
+    return u8_src(wei, api);
+}
+
+/// The budget plans of `wei` weights for `api` size their subtiles by.
+nr32::plan_budget budget_for(const data_type_t wei, const api_kind api) {
+    return {l2_budget_bytes(wei, api), plan_knobs_for(wei, api).subtile_rows};
 }
 
 nr32::epilogue epilogue_of(const grp_matmul_gated_act_t act) {
@@ -135,19 +129,23 @@ nr32::bias_kind bias_kind_of(const data_type_t dt) {
 }
 
 status_t decline(const char *reason) {
-    apilog_error("[GRP_MATMUL.ALGO4] cannot serve the call: reason=", reason);
+    apilog_error(
+            "[GRP_MATMUL.NTILE_FLAT_PARALLEL] cannot serve the call: reason=",
+            reason);
     return status_t::unimplemented;
 }
 
 /// Why a call fails when an allocation does.
 constexpr const char *kOutOfMemory = "out_of_memory";
 
-/// The status of a call ALGO 4 fails for `reason`: `memory_bad_storage` when
-/// an allocation failed, else `unimplemented`.
+/// The status of a call N-tile flat parallel fails for `reason`:
+/// `memory_bad_storage` when an allocation failed, else `unimplemented`.
 status_t refuse(const char *reason) {
     if (reason == kOutOfMemory) {
         apilog_error(
-                "[GRP_MATMUL.ALGO4] cannot serve the call: reason=", reason);
+                "[GRP_MATMUL.NTILE_FLAT_PARALLEL] cannot serve the call: "
+                "reason=",
+                reason);
         return status_t::memory_bad_storage;
     }
     return decline(reason);
@@ -343,31 +341,34 @@ struct scale_form_t {
 };
 
 /// The form of weight scales `dims` of type `dt` for a `K` x `N` weight of
-/// type `wei`; false for one a pack cannot take.
+/// quantized type `wei`; false for one a pack cannot take.
 bool scale_form(const std::vector<int64_t> &dims, const data_type_t dt,
         const data_type_t wei, const int K, const int N, scale_form_t &out) {
     out = scale_form_t {};
     out.dt = dt;
     out.dims = dims;
+    const nr32::format_desc &f = *nr32::format_of(wei);
     const int64_t count = element_count(dims);
     if (!scale_type(dt) || count <= 0) return false;
     if (count == 1 || count == N) {
         out.per_tensor = count == 1 && N != 1;
-        // One group along K, which an s4 pack takes in whole octets.
-        return wei != data_type_t::s4 || K % 8 == 0;
+        // One group along K, which a format that always groups its scales
+        // (s4) takes in whole words.
+        return !f.always_grouped || K % f.k_per_word == 0;
     }
     if (count % N != 0) return false;
     out.groups = count / N;
-    // A group holds whole K groups of the kernels' dot products.
-    const int64_t unit = wei == data_type_t::s4 ? 8 : 4;
-    return K % out.groups == 0 && (K / out.groups) % unit == 0;
+    // A group holds whole words.
+    return K % out.groups == 0 && (K / out.groups) % f.k_per_word == 0;
 }
 
-/// The weight's group size for its pack: s4 always, s8 with several groups.
+/// The weight's group size for its pack: for a format that always groups its
+/// scales (s4), and for another with several groups.
 int pack_group_size(
         const data_type_t wei, const int K, const scale_form_t &scales) {
-    if (wei == data_type_t::s4) return static_cast<int>(K / scales.groups);
-    return scales.groups > 1 ? static_cast<int>(K / scales.groups) : 0;
+    return nr32::format_of(wei)->always_grouped || scales.groups > 1
+            ? static_cast<int>(K / scales.groups)
+            : 0;
 }
 
 /// The store's key of `weight`, a weight of `desc`.
@@ -387,11 +388,9 @@ weight_key key_of(const nr32::weight_desc &desc, const void *weight) {
 size_t weight_bytes(const nr32::weight_desc &desc) {
     const size_t elems = static_cast<size_t>(desc.trans ? desc.N : desc.K)
             * static_cast<size_t>(desc.ldb);
-    switch (desc.wei) {
-        case data_type_t::s4: return (elems + 1) / 2;
-        case data_type_t::s8: return elems;
-        default: return elems * 2;
-    }
+    const size_t bits
+            = static_cast<size_t>(nr32::format_of(desc.wei)->elem_bits);
+    return (elems * bits + 7) / 8;
 }
 
 /// What a scaled pack of the weight scales `scale`, of form `form`, holds.
@@ -651,10 +650,11 @@ struct projection_plan_t {
 /// `p` for all `num_experts` experts, with `groups` weight-scale groups along
 /// K for s8 and s4: in `pp`, the weight and its scales; in `out`, the layout
 /// and the plan of its tiles for epilogue `ep` and, with `src_groups`, one
-/// source scale per row and group.  Null when this CPU runs it, else why not.
+/// source scale per row and group, sized by the routed settings.  Null when
+/// this CPU runs it, else why not.
 const char *plan_projection(projection_state_t &out, projection_plan_t &pp,
         const projection &p, const int num_experts, const data_type_t wei,
-        const int64_t groups, const nr32::epilogue ep, const bool u8_src,
+        const int64_t groups, const nr32::epilogue ep, const bool src_u8,
         const bool src_groups) {
     const int E = num_experts;
     if (static_cast<int>(p.weight.size()) != E
@@ -667,7 +667,9 @@ const char *plan_projection(projection_state_t &out, projection_plan_t &pp,
     desc.N = p.N;
     desc.trans = p.trans_weight;
     desc.ldb = p.ldb;
-    if (wei == data_type_t::s4 || (wei == data_type_t::s8 && groups > 1)) {
+    const nr32::format_desc *f = nr32::format_of(wei);
+    if (f == nullptr) return "unsupported_weight";
+    if (f->always_grouped || (f->quantized && groups > 1)) {
         if (groups <= 0 || p.K % groups != 0) return "unsupported_weight";
         desc.group_size = static_cast<int>(p.K / groups);
     }
@@ -680,8 +682,10 @@ const char *plan_projection(projection_state_t &out, projection_plan_t &pp,
             pp.scales[e] = p.params[e].quant_params.wei_scale.buff;
     }
     out.layout = nr32::layout_of(desc);
-    if (!nr32::make_plan(out.layout, ep, u8_src, out.plan, src_groups))
+    if (!nr32::make_plan(out.layout, ep, src_u8, out.plan, src_groups,
+                budget_for(wei, api_kind::routed))) {
         return "no_kernel";
+    }
     return nullptr;
 }
 
@@ -726,7 +730,7 @@ std::shared_ptr<const layer_state_t> layer_state(const layer_key &key,
         }
     }
     std::call_once(layer->packed, [&] {
-        layer->u8_src = key.wei == data_type_t::s8 && u8_src_pays();
+        layer->u8_src = u8_src_pays(key.wei, api_kind::routed);
         projection w13, w2;
         projection_plan_t pp13, pp2;
         layer->unserved = describe(w13, w2);
@@ -759,8 +763,8 @@ std::shared_ptr<const layer_state_t> layer_state(const layer_key &key,
         }
         static const bool s_log = apilog_info_enabled();
         if (s_log) {
-            apilog_info("[GRP_MATMUL.ALGO4] layer E=", key.num_experts,
-                    " H=", key.H, " I=", key.I,
+            apilog_info("[GRP_MATMUL.NTILE_FLAT_PARALLEL] layer E=",
+                    key.num_experts, " H=", key.H, " I=", key.I,
                     " served=", layer->unserved == nullptr ? 1 : 0);
         }
     });
@@ -825,13 +829,19 @@ struct scratch_t {
     /// A grouped call's packs, by operation.
     std::vector<const nr32::packed_expert *> packs13, packs2;
 
+    /// Bytes every vector above keeps.
     size_t bytes() const {
-        return tok_rows.capacity() + rows.capacity() + q2rows.capacity()
-                + (tok_scale.capacity() + ascale.capacity() + s2rows.capacity())
-                * sizeof(float)
-                + (inter.capacity() + stage.capacity()) * sizeof(uint16_t)
-                + (row_token.capacity() + row_of.capacity()) * sizeof(int)
-                + row_ptrs.capacity() * sizeof(const void *);
+        const auto kept = [](const auto &v) {
+            return v.capacity()
+                    * sizeof(typename std::decay_t<decltype(v)>::value_type);
+        };
+        return kept(offset) + kept(fill) + kept(row_token) + kept(row_of)
+                + kept(blocks) + kept(groups) + kept(runs) + kept(row_ptrs)
+                + kept(tok_rows) + kept(tok_scale) + kept(rows) + kept(q2rows)
+                + kept(ascale) + kept(s2rows) + kept(inter) + kept(stage)
+                + kept(queue) + kept(planned) + kept(left) + kept(ready)
+                + kept(gather_next) + kept(gather_done) + kept(claimed)
+                + kept(packs13) + kept(packs2);
     }
 };
 
@@ -942,11 +952,11 @@ void take_turns(unit_t *units, const int n, std::vector<unit_t> &planned) {
         units[k] = planned[k % 2 == 0 ? k / 2 : n - 1 - k / 2];
 }
 
-/// The widest run of whole `step` columns whose weights fit the kernels'
-/// L2 budget beside one block's rows of `K` elements of `es` bytes.
-int l2_chunk_cols(
-        const int K, const size_t es, const float wei_bytes, const int step) {
-    const double room = static_cast<double>(nr32::l2_budget_bytes())
+/// The widest run of whole `step` columns whose weights fit `l2_budget`
+/// bytes beside one block's rows of `K` elements of `es` bytes.
+int l2_chunk_cols(const int K, const size_t es, const float wei_bytes,
+        const int step, const int64_t l2_budget) {
+    const double room = static_cast<double>(l2_budget)
             - static_cast<double>(kDecodeMaxM) * K * es;
     const int cols = static_cast<int>(room / (K * wei_bytes + 4.0));
     return std::max(cols / step * step, step);
@@ -954,28 +964,37 @@ int l2_chunk_cols(
 
 /// A call's unit queue and how its units sweep their columns.
 struct queue_t {
-    bool sweep = false; // a prompt call's
+    /// The call's phase, which sets its units per thread and their order.
+    bool prompt = false;
+    /// Its units sweep runs of blocks against L2-sized column chunks (by
+    /// default a prompt call's).
+    bool sweep = false;
     int n13 = 0; // W13 units, ahead of the W2 units
     int n_units = 0;
     int num_runs = 0;
     int chunk13 = 0;
     int chunk2 = 0;
+    unit_order order = unit_order::automatic;
 };
 
 /// Plans a call of `n` experts whose `rows[e]` rows start at `S.offset[e]`:
 /// each expert's rows in blocks of at most kDecodeMaxM rows, so an expert of a
-/// decode call is one block and one run.  A prompt call's units each cover a
-/// run of an expert's blocks and sweep them against one L2-sized chunk of
-/// columns at a time, so a unit streams each of its weights once.  A W2 unit
-/// waits only for its runs' W13 units.  The unit queue: every W13 unit, then
-/// (with `p2`) every W2 unit, heaviest group first, with a prompt call's
-/// taking turns from both ends of each projection's units.  `K13` and `K2`
-/// are the projections' K, `es` their source bytes per element.
+/// decode call is one block and one run.  A sweeping call's units (by default
+/// a prompt call's) each cover a run of an expert's blocks and sweep them
+/// against one L2-sized chunk of columns at a time, so a unit streams each of
+/// its weights once.  A W2 unit waits only for its runs' W13 units.  The unit
+/// queue: every W13 unit, then (with `p2`) every W2 unit, heaviest group
+/// first, with a sweeping call's taking turns from both ends of each
+/// projection's units.  `K13` and `K2` are the projections' K, `es` their
+/// source bytes per element; `phase` the call's, `k` its settings and
+/// `l2_budget` its weights' L2 bytes.
 queue_t plan_queue(scratch_t &S, const int *rows, const int n,
         const nr32::tile_plan &p13, const int K13, const nr32::tile_plan *p2,
         const int K2, const size_t es, const float wei_bytes,
-        const int num_threads) {
-    const bool sweep = *std::max_element(rows, rows + n) > kDecodeMaxM;
+        const int num_threads, const grp_matmul_phase phase,
+        const call_knobs &k, const int64_t l2_budget) {
+    const bool prompt = phase == grp_matmul_phase::prompt;
+    const bool sweep = *std::max_element(rows, rows + n) > k.sweep_rows;
     S.blocks.clear();
     S.groups.clear();
     for (int e = 0; e < n; ++e) {
@@ -997,11 +1016,13 @@ queue_t plan_queue(scratch_t &S, const int *rows, const int n,
             [](const block_group_t &a, const block_group_t &b) {
         return a.rows > b.rows;
     });
-    const int target
-            = (sweep ? kPromptUnitsPerThread : kUnitsPerThread) * num_threads;
+    const int target = (prompt ? k.prompt_units : k.units) * num_threads;
     queue_t q;
+    q.prompt = prompt;
     q.sweep = sweep;
-    q.chunk13 = sweep ? l2_chunk_cols(K13, es, wei_bytes, p13.step) : p13.cols;
+    q.order = k.order;
+    q.chunk13 = sweep ? l2_chunk_cols(K13, es, wei_bytes, p13.step, l2_budget)
+                      : p13.cols;
     plan_runs(S.runs, S.groups, p13.cols, p13.step, wei_bytes, target, sweep);
     q.num_runs = static_cast<int>(S.runs.size());
     S.queue.clear();
@@ -1009,13 +1030,13 @@ queue_t plan_queue(scratch_t &S, const int *rows, const int n,
             /*merge_runs=*/false);
     q.n13 = static_cast<int>(S.queue.size());
     if (p2 != nullptr) {
-        q.chunk2
-                = sweep ? l2_chunk_cols(K2, es, wei_bytes, p2->step) : p2->cols;
+        q.chunk2 = sweep ? l2_chunk_cols(K2, es, wei_bytes, p2->step, l2_budget)
+                         : p2->cols;
         plan_units(S.queue, S.groups, p2->cols, p2->step, wei_bytes, target,
                 sweep);
     }
     q.n_units = static_cast<int>(S.queue.size());
-    if (sweep) {
+    if (sweep && k.heavy_light) {
         take_turns(S.queue.data(), q.n13, S.planned);
         take_turns(S.queue.data() + q.n13, q.n_units - q.n13, S.planned);
     }
@@ -1040,13 +1061,21 @@ queue_t plan_queue(scratch_t &S, const int *rows, const int n,
     }
     for (int u = 0; u < q.n_units; ++u)
         S.claimed[u].store(0, std::memory_order_relaxed);
+    if (test_api::s_capture_ntile_flat_parallel.load(
+                std::memory_order_relaxed)) {
+        test_api::s_ntile_flat_parallel_last_units.store(
+                q.n_units, std::memory_order_relaxed);
+        test_api::s_ntile_flat_parallel_last_sweep.store(
+                q.sweep, std::memory_order_relaxed);
+    }
     return q;
 }
 
 /// Waits, pausing and then yielding, until `flag` reaches `value`.
 void wait_for(const std::atomic<int> &flag, const int value) {
+    const int spins = limits().wait_spins;
     for (int spin = 0; flag.load(std::memory_order_acquire) < value; ++spin) {
-        if (spin < kWaitSpinPauses) {
+        if (spin < spins) {
             spin_pause();
         } else {
             std::this_thread::yield();
@@ -1062,22 +1091,23 @@ void wait_for(const std::atomic<int> &flag, const int value) {
 /// balanced when one of its cores runs slow; the rule reads only the team
 /// size, so a small team spread over several L3s takes queue order, and a
 /// team of SMT threads on one L3 with more threads than its cores, its own
-/// units.  `test_api::s_ntile_flat_parallel_own_units_override` pins it.
-bool own_units_first(const int team) {
+/// units; `test_api::s_ntile_flat_parallel_own_units_override` pins the rule.
+/// A prompt call takes queue order.  The `unit_order` setting `order`
+/// replaces both.
+bool own_units_first(
+        const int team, const bool prompt, const unit_order order) {
+    if (order != unit_order::automatic) return order == unit_order::own;
+    if (prompt) return false;
     const int pin = test_api::s_ntile_flat_parallel_own_units_override.load(
             std::memory_order_relaxed);
     if (pin >= 0) return pin != 0;
-    static const int l3_cores = [] {
-        const native::native_hw_t &hw = native::native_hw();
-        return hw.l3_domain_threads / std::max(hw.smt, 1);
-    }();
+    const int l3_cores = grp_machine::machine().l3_domain_cores;
     return l3_cores <= 0 || team > l3_cores;
 }
 
 /// Runs, with every thread of the calling parallel region, each unit of the
-/// queue `q` once through `run(u)`.  A prompt call's threads, and a decode
-/// call's within one L3, take units in queue order.  Otherwise a decode
-/// call's thread t of T first runs its own units, those u with u % T == t,
+/// queue `q` once through `run(u)`, in queue order, or (`own_units_first`)
+/// each thread t of T first running its own units, those u with u % T == t,
 /// its W13 units before its W2 units, so a call repeated with the same plan
 /// gives each unit the thread, and the L3, that ran it last; then every
 /// thread runs the units still unclaimed.  A W2 unit's wait is on W13 units
@@ -1087,7 +1117,7 @@ template <typename Run>
 void run_units(scratch_t &S, const queue_t &q, std::atomic<int> &next_unit,
         const Run &run) {
     const int T = omp_get_num_threads(), t = omp_get_thread_num();
-    if (q.sweep || !own_units_first(T)) {
+    if (!own_units_first(T, q.prompt, q.order)) {
         for (;;) {
             const int u = next_unit.fetch_add(1, std::memory_order_relaxed);
             if (u >= q.n_units) break;
@@ -1158,10 +1188,13 @@ void quantize_row(const uint16_t *in, int8_t *out, float *scale, const int len,
 
 /// What the engine runs: `n` experts, expert e's `rows[e]` rows from
 /// `S.offset[e]` on, through W13 with its plan's epilogue and, when `fused`,
-/// W2; then the weighted `reduce` of `reduce_cols` columns, if any.
+/// W2; then the weighted `reduce` of `reduce_cols` columns, if any.  `wei`
+/// and `api` pick the call's settings.
 struct engine_t {
     int n = 0;
     const int *rows = nullptr;
+    data_type_t wei = data_type_t::none;
+    api_kind api = api_kind::routed;
     bool quantized = false;
     bool fused = false;
     bool u8_src = false;
@@ -1193,8 +1226,12 @@ template <typename Front>
 status_t run_engine(const engine_t &E, const Front &front) {
     scratch_t &S = scratch();
     const size_t es = E.quantized ? 1 : sizeof(uint16_t);
+    const int max_rows = *std::max_element(E.rows, E.rows + E.n);
+    const grp_matmul_phase phase = classify_grp_matmul_phase(max_rows);
+    const call_knobs &knobs = call_knobs_for(phase, E.wei, E.api);
     const queue_t q = plan_queue(S, E.rows, E.n, *E.p13, E.K13,
-            E.fused ? E.p2 : nullptr, E.K2, es, E.wei_bytes, E.num_threads);
+            E.fused ? E.p2 : nullptr, E.K2, es, E.wei_bytes, E.num_threads,
+            phase, knobs, l2_budget_bytes(E.wei, E.api));
     std::atomic<int> next_unit {0};
 
     // The region reaches the calling thread's buffers through `S`, a
@@ -1289,7 +1326,7 @@ status_t run_engine(const engine_t &E, const Front &front) {
             }
         }
     }
-    if (S.bytes() > kScratchKeepBytes) { S = scratch_t {}; }
+    if (S.bytes() > limits().scratch_keep_bytes) { S = scratch_t {}; }
     return status_t::success;
 }
 
@@ -1334,11 +1371,12 @@ struct routed_front {
         const int first = S.blocks[run.block].row;
         const int count = tail.row + tail.rows - first;
         uint8_t *const rows = S.rows.data();
+        const int gather = limits().gather_rows;
         for (;;) {
             const int i = S.gather_next[r].fetch_add(
-                    kGatherRows, std::memory_order_relaxed);
+                    gather, std::memory_order_relaxed);
             if (i >= count) break;
-            const int n = std::min(kGatherRows, count - i);
+            const int n = std::min(gather, count - i);
             for (int row = first + i; row < first + i + n; ++row) {
                 const int t = S.row_token[row];
                 if (quantized) {
@@ -1465,6 +1503,8 @@ status_t run_call(const layer_key &key, const layer_scales &scales,
     engine_t en;
     en.n = E;
     en.rows = counts;
+    en.wei = key.wei;
+    en.api = api_kind::routed;
     en.quantized = quantized;
     en.fused = true;
     en.u8_src = L.u8_src;
@@ -1480,7 +1520,7 @@ status_t run_call(const layer_key &key, const layer_scales &scales,
     en.packs2 = L.w2.raw.data();
     en.reduce = &reduce;
     en.reduce_cols = H;
-    en.reduce_f16 = key.wei == data_type_t::f16;
+    en.reduce_f16 = nr32::format_of(key.wei)->dst == data_type_t::f16;
     en.num_threads = num_threads;
     const status_t status = run_engine(en, front);
     if (test_api::s_capture_ntile_flat_parallel.load(
@@ -1585,25 +1625,27 @@ bool all_null(const std::vector<void *> &ptrs, const grouped_args &a) {
     return true;
 }
 
-/// Null when ALGO 4 runs the grouped call `a` with rows, `s` then describing
-/// it; else why not.
+/// Null when N-tile flat parallel runs the grouped call `a` with rows, `s` then
+/// describing it; else why not.
 const char *check_grouped(const grouped_args &a, grouped_spec_t &s) {
     const int n = a.num_ops;
     const matmul_params &p0 = a.params[s.first];
     s.wei = p0.dtypes.wei;
     s.src = p0.dtypes.src;
     s.dst = p0.dtypes.dst;
-    s.quantized = quantized_weights(s.wei);
-    if (s.wei == data_type_t::bf16 || s.wei == data_type_t::f16) {
-        if (s.src != s.wei || s.dst != s.wei || p0.dynamic_quant)
-            return "unsupported_types";
-    } else if (!s.quantized || s.dst != data_type_t::bf16) {
+    // A 16-bit format's sources and outputs are its own type; a quantized
+    // one's sources bf16 rows the call quantizes to its kernels' s8, or
+    // where its kernels take them the caller's s8 rows.
+    const nr32::format_desc *f = nr32::format_of(s.wei);
+    s.quantized = f != nullptr && f->quantized;
+    if (f == nullptr || s.dst != f->dst) {
         return "unsupported_types";
-    } else if (s.src == data_type_t::s8 && s.wei == data_type_t::s8
-            && !p0.dynamic_quant) {
+    } else if (!f->quantized) {
+        if (s.src != f->src || p0.dynamic_quant) return "unsupported_types";
+    } else if (f->s8_rows && s.src == data_type_t::s8 && !p0.dynamic_quant) {
         s.src_s8 = true;
     } else if (s.src != data_type_t::bf16 || !p0.dynamic_quant
-            || p0.dtypes.compute != data_type_t::s8) {
+            || p0.dtypes.compute != f->src) {
         return "unsupported_types";
     }
     s.ep = epilogue_of(a.act);
@@ -1737,7 +1779,7 @@ const char *check_grouped(const grouped_args &a, grouped_spec_t &s) {
             }
         }
     }
-    s.u8_src = s.wei == data_type_t::s8 && u8_src_pays();
+    s.u8_src = u8_src_pays(s.wei, api_kind::grouped);
     s.num_packs = n;
     const matmul_params &lead = a.params[0];
     if (lead.active_matmul > 0 && lead.total_matmul > lead.active_matmul) {
@@ -1820,9 +1862,6 @@ size_t extras_fingerprint(const nr32::weight_desc &desc,
     return h;
 }
 
-/// Pool fingerprints kept before they are all dropped.
-constexpr size_t kMaxWarmedPools = 4096;
-
 /// The packs of a grouped call's operations with rows (null for the others),
 /// from `find_packs` for a call that began at flush count `since`;
 /// `weight(e)` and `scales(e)` give expert e's weight (null when the call
@@ -1868,7 +1907,8 @@ const char *call_packs(const grouped_args &a, const grouped_spec_t &s,
     if (unserved != nullptr) return unserved;
     std::unique_lock<std::shared_mutex> lock(store_mutex());
     if (!may_publish(since)) return nullptr;
-    if (warmed_extras().size() >= kMaxWarmedPools) warmed_extras().clear();
+    if (warmed_extras().size() >= limits().warmed_pools)
+        warmed_extras().clear();
     warmed_extras().insert(fingerprint);
     return nullptr;
 }
@@ -1908,6 +1948,9 @@ std::shared_mutex &sites_mutex() {
     return *mutex;
 }
 
+/// The call sites.  A site holds its weights' pack pointers and scales, and
+/// keeps alive only packs the store holds: the store replacing a scaled pack
+/// drops every site.  Past `limits().call_sites` sites they are all dropped.
 std::unordered_map<size_t, std::shared_ptr<const call_site_t>> &sites() {
     static auto *sites = new std::unordered_map<size_t,
             std::shared_ptr<const call_site_t>>;
@@ -1926,11 +1969,6 @@ void drop_call_sites() {
     sites().clear();
     ++site_epoch();
 }
-
-/// Sites kept before they are all dropped.  A site holds its weights' pack
-/// pointers and scales, and keeps alive only packs the store holds: the store
-/// replacing a scaled pack drops every site.
-constexpr size_t kMaxCallSites = 1024;
 
 /// Expert `e`'s W13 and W2 weights, null where the call doesn't pack them.
 const void *weight13(const grouped_args &a, const grouped_spec_t &s, int e) {
@@ -2192,11 +2230,12 @@ status_t run_grouped(
         const nr32::pack_layout l2
                 = fused ? nr32::layout_of(s.w2) : nr32::pack_layout {};
         nr32::tile_plan p13, p2;
+        const nr32::plan_budget budget = budget_for(s.wei, api_kind::grouped);
         if (!nr32::make_plan(l13, s.ep, s.u8_src, p13,
-                    s.source == source_scales::per_group)
+                    s.source == source_scales::per_group, budget)
                 || (fused
                         && !nr32::make_plan(l2, nr32::epilogue::plain, s.u8_src,
-                                p2, s.per_group2))) {
+                                p2, s.per_group2, budget))) {
             return decline("no_kernel");
         }
         const char *unserved
@@ -2219,7 +2258,7 @@ status_t run_grouped(
         site = make_site(a, s, l13, l2, p13, p2);
         std::unique_lock<std::shared_mutex> lock(sites_mutex());
         if (site_epoch() == epoch && may_publish(since)) {
-            if (sites().size() >= kMaxCallSites) sites().clear();
+            if (sites().size() >= limits().call_sites) sites().clear();
             sites()[key] = site;
         }
     }
@@ -2249,6 +2288,8 @@ status_t run_grouped(
     engine_t en;
     en.n = n;
     en.rows = a.M.data();
+    en.wei = s.wei;
+    en.api = api_kind::grouped;
     en.quantized = s.quantized;
     en.fused = fused;
     en.u8_src = s.u8_src;

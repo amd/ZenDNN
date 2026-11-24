@@ -375,7 +375,7 @@ The two types have one role each: `f4_e2m1` is a weight type and `f8_e8m0` the w
 
 **Backend: the group-matmul custom kernel only.** Grouped calls run ALGO 3; `matmul_direct` sends every MXFP4 call through its one-op grouped route, so dense layers reach the same kernel (a prompt reaches its prompt-tile executor). No other backend reads `f4_e2m1`, and a call the custom kernel cannot serve fails instead of falling back:
 
-- a grouped scheduler pinned to ALGO 1, 2, 5 or 6 (`ZENDNNL_GRP_MATMUL_ALGO`, or `ZENDNNL_GRP_MATMUL_AUTO_{PROMPT,DECODE}_ALGO` for the call's phase). ALGO 4, the W8A8 interceptor, declines MXFP4, which then runs ALGO 3;
+- a grouped scheduler pinned to ALGO 1, 2, 5 or 6 (`ZENDNNL_GRP_MATMUL_ALGO`, or `ZENDNNL_GRP_MATMUL_AUTO_{PROMPT,DECODE}_ALGO` for the call's phase). N-tile flat parallel, the W8A8 interceptor, declines MXFP4, which then runs ALGO 3;
 - `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=0`, or a CPU without AVX-512 VNNI (`status_t::isa_unsupported`);
 - more than 256 active experts, `transA`, `alpha != 1`, `beta != 0`, or an `N` that the kernel's pack width (32 or 64) does not divide;
 - a NaN scale, or any refusal the kernel can only make while preparing the call (`execution_path = error_mxfp4_no_ck`);

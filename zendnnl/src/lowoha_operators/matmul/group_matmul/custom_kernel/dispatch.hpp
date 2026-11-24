@@ -886,10 +886,11 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
         const void *wei_zp = nullptr);
 
 /// Whether the u8-source DQ-INT8 kernels repay their source copy on this
-/// CPU.  The per-broadcast XOR they drop measured ~15% of the NR32 K-loop on
-/// AMD family 1Ah models 50h-5Fh (Zen 6 server, Venice) and nothing on Zen 4
-/// or Zen 5 (which includes family 1Ah models 60h-7Fh), where the copy costs
-/// 1-3%.
+/// CPU: the group matmul machine view's rule (`grp_machine::dot_rates_t::
+/// u8_src_pays`).  The per-broadcast XOR they drop measured ~15% of the NR32
+/// K-loop on AMD family 1Ah models 50h-5Fh (Zen 6 server, Venice) and nothing
+/// on Zen 4 or Zen 5 (which includes family 1Ah models 60h-7Fh), where the
+/// copy costs 1-3%.
 bool u8_src_pays();
 
 /// Whether `use_u8_src()` can switch this prepared call, on a CPU where it

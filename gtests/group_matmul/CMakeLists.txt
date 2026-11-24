@@ -75,6 +75,8 @@ target_sources(gtests
     ${CMAKE_CURRENT_SOURCE_DIR}/single_expert/test_single_expert_route.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/single_expert/test_single_expert_executor.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/multi_expert/test_multi_expert_policy.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/multi_expert/ntile_flat_parallel/test_config.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/multi_expert/ntile_flat_parallel/test_format.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/multi_expert/ntile_flat_parallel/test_grouped.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/multi_expert/ntile_flat_parallel/test_nr32.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/routed_moe/test_routed_moe.cpp

@@ -239,10 +239,10 @@ status_t native_brgemm_refusal(const char layout, const bool transA,
  *                         (honoring ZENDNNL_GRP_MATMUL_ALGO), Pass 2 runs
  *                         Op2 via the same dispatcher. When moe_postop is
  *                         also provided, the weighted reduce runs afterward
- *                         in its own pass. Under an ALGO 4 request (see
- *                         ZENDNNL_GRP_MATMUL_ALGO), a call of two or more
- *                         operations of the requested phase runs Op1, the
- *                         activation, Op2 and the reduce in one parallel
+ *                         in its own pass. Under an N-tile flat parallel
+ *                         request (see ZENDNNL_GRP_MATMUL_ALGO), a call of two
+ *                         or more operations of the requested phase runs Op1,
+ *                         the activation, Op2 and the reduce in one parallel
  *                         region instead, or fails as below.
  *                         nullptr disables (default).
  *
@@ -251,12 +251,12 @@ status_t native_brgemm_refusal(const char layout, const bool transA,
  *       weight whose @c lowoha_algo is native_brgemm.
  *
  * @return status_t::success if all operations succeed, status_t::failure if
- *         any operation fails. Under an ALGO 4 request, a call of two or more
- *         operations of the requested phase that ALGO 4 cannot serve returns
- *         status_t::unimplemented, with the reason in the API log, before
- *         writing anything; and one for which an allocation fails returns
- *         status_t::memory_bad_size or status_t::memory_bad_storage, after
- *         which the next call packs again.
+ *         any operation fails. Under an N-tile flat parallel request, a call of
+ *         two or more operations of the requested phase that N-tile flat
+ *         parallel cannot serve returns status_t::unimplemented, with the
+ *         reason in the API log, before writing anything; and one for which an
+ *         allocation fails returns status_t::memory_bad_size or
+ *         status_t::memory_bad_storage, after which the next call packs again.
  */
 ZENDNNL_API status_t group_matmul_direct(const std::vector<char> &layout,
         const std::vector<bool> &transA, const std::vector<bool> &transB,
@@ -339,8 +339,8 @@ ZENDNNL_API void clear_matmul_native_weight_caches();
  * that re-warm: its ALGO 3 path records a fingerprint for both the
  * custom-kernel pack and the AOCL per-tile reorder.
  *
- * Also drops every ALGO 4 pack, made for routed or grouped calls, and
- * every routed layer's ALGO 4 state, as
+ * Also drops every N-tile flat parallel pack, made for routed or grouped calls,
+ * and every routed layer's N-tile flat parallel state, as
  * @ref group_matmul_routed_moe_flush_weight_cache does.
  *
  * Does not clear the routed fast executor's packed weights
@@ -365,9 +365,9 @@ ZENDNNL_API void clear_grp_matmul_weight_caches();
  * sentinels. Call only after replacing or releasing those weights; reusing
  * an already-packed buffer after this call would repack the packed bytes.
  *
- * Also drops the prepack fingerprint, and every ALGO 4 pack and routed
- * layer state, via @ref clear_grp_matmul_weight_caches. Does not clear the
- * routed fast executor's packed weights
+ * Also drops the prepack fingerprint, and every N-tile flat parallel pack and
+ * routed layer state, via @ref clear_grp_matmul_weight_caches. Does not clear
+ * the routed fast executor's packed weights
  * (@ref group_matmul_routed_moe_flush_weight_cache) or LibXSMM blocked
  * weights.
  *

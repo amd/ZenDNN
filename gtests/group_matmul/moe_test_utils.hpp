@@ -975,7 +975,7 @@ struct NTileStrategyOverride {
 //            documented per-phase default (PROMPT=2, DECODE=3) via
 //            the cached getter, NOT to 0.
 //   * 1,2,3,5,6 — force the matching generic ALGO for that phase.
-//   * 4    — request ALGO 4 (the N-tile flat-parallel MoE executor) for
+//   * 4    — request the N-tile flat-parallel MoE executor for
 //            that phase's routed calls and grouped calls of two or more
 //            operations.
 //            Generic routing inherits the phase default policy; 4 itself

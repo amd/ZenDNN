@@ -43,7 +43,7 @@ using zendnnl::common::size_of;
 // `matmul_algo_t`: that enum names inner GEMM kernels, while these values name
 // whole-call grouped scheduling/interception modes.
 //
-// Selector 4 is ALGO 4, the N-tile flat-parallel MoE executor; selector 6
+// Selector 4 is the N-tile flat-parallel MoE executor; selector 6
 // owns the generic
 // multilevel scheduler.
 inline constexpr int kGrpMatmulAlgoAuto = 0;
@@ -114,7 +114,8 @@ inline const char *act_name(grp_matmul_gated_act_t a) {
 inline constexpr int kDecodeMaxM = 64; // per-expert M ≤ this → "decode"
 inline constexpr int kMinNTile = 512; // prompt-path per-thread N
 
-/// Runtime phase used by AUTO group-matmul policy and the ALGO 4 request.
+/// Runtime phase used by AUTO group-matmul policy and the N-tile flat parallel
+/// request.
 ///
 /// A call is decode when the maximum M in its active operation prefix is at
 /// most `kDecodeMaxM`; otherwise it is prompt. Empty prefixes are decode (their

@@ -1263,11 +1263,11 @@ TEST(GroupMatmulMxfp4, SchedulerPinOtherThanAlgo3FailsTheCall) {
     }
 }
 
-// ALGO 4 runs calls of several experts itself and has no MXFP4 kernels: such
-// a call fails under it.
-TEST(GroupMatmulMxfp4, Algo4FailsTheCall) {
+// N-tile flat parallel runs calls of several experts itself and has no MXFP4
+// kernels: such a call fails under it.
+TEST(GroupMatmulMxfp4, NTileFlatParallelFailsTheCall) {
     moe_test_utils::CustomKernelOverride ck_on(true);
-    moe_test_utils::AlgoEnvGuard algo4(4);
+    moe_test_utils::AlgoEnvGuard pin(4);
     // 7 leaves both phases unset, whatever the environment sets.
     moe_test_utils::AutoDecodeAlgoOverride decode_unset(7);
     moe_test_utils::AutoPromptAlgoOverride prompt_unset(7);

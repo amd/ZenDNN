@@ -14,7 +14,7 @@
  * limitations under the License.
  *******************************************************************************/
 
-/// ALGO 4's weight packs.
+/// N-tile flat parallel's weight packs.
 ///
 /// A pack is built from a weight and its metadata alone: its type, shape,
 /// layout and weight scales.  Nothing about the call that will read it (the
@@ -24,7 +24,8 @@
 ///
 /// Each expert's weight is stored as blocks of `kNr` output columns, in the
 /// weight's own column order.  A block holds its columns' weights for every
-/// K group of the type's dot-product width:
+/// K group of the type's dot-product width, one word of its format
+/// (`nr32_format.hpp`) per column and group:
 ///
 ///   bf16: [ceil(K/2)][32][2]    the VDPBF16PS pair order
 ///   f16:  [K][32]               one K element per lane
@@ -55,6 +56,7 @@
 #include <vector>
 
 #include "../../common/group_matmul_parallel_common.hpp"
+#include "nr32_format.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -62,12 +64,9 @@ namespace matmul {
 namespace ntile_flat_parallel {
 namespace nr32 {
 
-/// Output columns per pack block.
-inline constexpr int kNr = 32;
-
 /// A weight as a pack reads it.
 struct weight_desc {
-    /// bf16, f16, s8 or s4.
+    /// A type of `kFormats`.
     data_type_t wei = data_type_t::none;
     int K = 0;
     int N = 0;
@@ -86,10 +85,11 @@ int padded_cols(int N);
 /// Bytes of one block of a pack of `desc`.
 size_t block_bytes(const weight_desc &desc);
 
-/// Whether `desc` is a weight ALGO 4 packs: a supported type, a positive
-/// shape, a leading dimension that holds a row, and scale groups that hold
-/// whole K groups of the type's dot products and divide K: a group size that
-/// is a multiple of 8 for s4 and, when an s8 weight has one, of 4.
+/// Whether `desc` is a weight N-tile flat parallel packs: a format's type, a
+/// positive shape, a leading dimension that holds a row, and scale groups that
+/// hold whole words and divide K, which a format that always groups its scales
+/// needs and another quantized one may have: a group size that is a multiple
+/// of 8 for s4 and, when an s8 weight has one, of 4.
 bool packable(const weight_desc &desc);
 
 /// One expert's pack.
@@ -107,6 +107,8 @@ struct packed_expert {
 /// What the packs of every expert of a weight share.
 struct pack_layout {
     weight_desc desc;
+    /// `desc.wei`'s format.
+    const format_desc *fmt = nullptr;
     int n_pad = 0;
     /// Scale groups along K: K / group_size with a group size, else 1.
     int groups = 1;

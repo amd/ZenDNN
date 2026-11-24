@@ -41,6 +41,7 @@
 #include "lowoha_operators/matmul/group_matmul/common/group_matmul_parallel_common.hpp"
 #include "lowoha_operators/matmul/group_matmul/common/grp_matmul_env.hpp"
 #include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/ntile_flat_parallel.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/ntile_flat_parallel_config.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 #include "lowoha_operators/matmul/routed_moe/routed_moe_internal.hpp"
 
@@ -1506,10 +1507,11 @@ TEST_F(RoutedMoES4Scratch, SmallLargeSmallReuseStaysNumericallyClean) {
     EXPECT_EQ(second_small, first_small);
 }
 
-/// Requests ALGO 4 for decode calls (`ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO=4`)
-/// with the custom kernel on and weight cache mode 1, and counts the calls it
-/// completes and the layer entries it makes.
-struct algo4_decode_pin {
+/// Requests N-tile flat parallel for decode calls
+/// (`ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO=4`) with the custom kernel on and
+/// weight cache mode 1, and counts the calls it completes and the layer entries
+/// it makes.
+struct ntile_flat_parallel_decode_pin {
     std::atomic<bool> &capture
             = zendnnl::lowoha::matmul::test_api::s_capture_ntile_flat_parallel;
     std::atomic<int> &decode_algo = zendnnl::lowoha::matmul::test_api::
@@ -1522,11 +1524,11 @@ struct algo4_decode_pin {
     int previous_ck = ck.exchange(1, std::memory_order_relaxed);
     int previous_decode_algo
             = decode_algo.exchange(4, std::memory_order_relaxed);
-    algo4_decode_pin() {
+    ntile_flat_parallel_decode_pin() {
         config.set_weight_cache(1);
         capture.store(true, std::memory_order_relaxed);
     }
-    ~algo4_decode_pin() {
+    ~ntile_flat_parallel_decode_pin() {
         capture.store(false, std::memory_order_relaxed);
         config.set_weight_cache(previous_cache);
         ck.store(previous_ck, std::memory_order_relaxed);
@@ -1543,12 +1545,12 @@ struct algo4_decode_pin {
     }
 };
 
-TEST_F(RoutedMoES4Execute, Algo4DecodeMatchesOracle) {
-    // ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO=4 runs decode calls on ALGO 4's
-    // N-tile flat-parallel decode with the custom kernel, which rounds each W2
-    // row to bf16 and applies the router weight in f32.  At these scales the
+TEST_F(RoutedMoES4Execute, NTileFlatParallelDecodeMatchesOracle) {
+    // ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO=4 runs decode calls on N-tile flat
+    // parallel, which rounds each W2 row to bf16 and applies the router weight
+    // in f32.  At these scales the
     // gate is O(1), so each activation's output misses the other's oracle.
-    algo4_decode_pin decode_pin;
+    ntile_flat_parallel_decode_pin decode_pin;
 
     const routed_moe_activation_t acts[]
             = {routed_moe_activation_t::silu_and_mul,
@@ -1599,8 +1601,8 @@ TEST_F(RoutedMoES4Execute, Algo4DecodeMatchesOracle) {
 
 // A layer whose weight scales are regrouped in the same buffers is captured
 // again with the new groups.
-TEST_F(RoutedMoES4Execute, Algo4RepacksRegroupedWeightScales) {
-    algo4_decode_pin decode_pin;
+TEST_F(RoutedMoES4Execute, NTileFlatParallelRepacksRegroupedWeightScales) {
+    ntile_flat_parallel_decode_pin decode_pin;
     group_matmul_routed_moe_flush_weight_cache();
     reset_grouped_s4_caches();
     s4_problem pb;
@@ -1640,9 +1642,10 @@ TEST_F(RoutedMoES4Execute, Algo4RepacksRegroupedWeightScales) {
     group_matmul_routed_moe_flush_weight_cache();
 }
 
-// ALGO 4 takes per-group source scales too, in decode and prompt calls.
-TEST_F(RoutedMoES4Execute, Algo4PerGroupActivationsMatchOracle) {
-    algo4_decode_pin decode_pin;
+// N-tile flat parallel takes per-group source scales too, in decode and prompt
+// calls.
+TEST_F(RoutedMoES4Execute, NTileFlatParallelPerGroupActivationsMatchOracle) {
+    ntile_flat_parallel_decode_pin decode_pin;
     struct prompt_pin_t {
         std::atomic<int> &slot = zendnnl::lowoha::matmul::test_api::
                 s_grp_matmul_auto_prompt_algo_override;
@@ -1679,9 +1682,10 @@ TEST_F(RoutedMoES4Execute, Algo4PerGroupActivationsMatchOracle) {
     group_matmul_routed_moe_flush_weight_cache();
 }
 
-// With ALGO 4 requested for prompts too, W4A8 prompt calls run on it.
-TEST_F(RoutedMoES4Execute, Algo4PromptMatchesOracle) {
-    algo4_decode_pin decode_pin;
+// With N-tile flat parallel requested for prompts too, W4A8 prompt calls run on
+// it.
+TEST_F(RoutedMoES4Execute, NTileFlatParallelPromptMatchesOracle) {
+    ntile_flat_parallel_decode_pin decode_pin;
     struct prompt_pin_t {
         std::atomic<int> &slot = zendnnl::lowoha::matmul::test_api::
                 s_grp_matmul_auto_prompt_algo_override;
@@ -1712,6 +1716,61 @@ TEST_F(RoutedMoES4Execute, Algo4PromptMatchesOracle) {
             oracle.reduction = oracle_reduction_t::grouped_bf16;
             expect_numerically_close(pb.logical_output(),
                     scalar_s4_moe(pb, oracle), 1.2e-2, 0.04f, 0.04f);
+        }
+    }
+    group_matmul_routed_moe_flush_weight_cache();
+}
+
+// The settings change how a routed call's work is cut, ordered and staged,
+// not what it writes: W4A8 decode and prompt calls write the same bytes
+// under each, through the shared gather of the source rows too.
+TEST_F(RoutedMoES4Execute, NTileFlatParallelSettingsWriteTheSameBytes) {
+    namespace mm = zendnnl::lowoha::matmul;
+    ntile_flat_parallel_decode_pin decode_pin;
+    struct prompt_pin_t {
+        std::atomic<int> &slot
+                = mm::test_api::s_grp_matmul_auto_prompt_algo_override;
+        int previous = slot.exchange(4, std::memory_order_relaxed);
+        ~prompt_pin_t() { slot.store(previous, std::memory_order_relaxed); }
+    } prompt_pin;
+    struct config_restore {
+        ~config_restore() {
+            mm::test_api::set_ntile_flat_parallel_config(nullptr);
+        }
+    } restore;
+    const char *const configs[]
+            = {"", "gather_rows=1", "sweep_rows=1", "sweep_rows=100000",
+                    "l2_frac=0.25", "subtile_rows=1", "units=1,prompt_units=1",
+                    "unit_order=own", "unit_order=queue", "heavy_light=off"};
+    for (const int64_t tokens : {int64_t {8}, int64_t {300}}) {
+        std::vector<uint16_t> first;
+        for (const char *config : configs) {
+            SCOPED_TRACE(::testing::Message()
+                    << "tokens=" << tokens << " config='" << config << "'");
+            group_matmul_routed_moe_flush_weight_cache();
+            reset_grouped_s4_caches();
+            mm::test_api::set_ntile_flat_parallel_config(config);
+            s4_problem pb;
+            pb.K = 256;
+            pb.N = 128;
+            pb.E = 8;
+            pb.topk = 2;
+            pb.gate_group_size = 32;
+            pb.down_group_size = 32;
+            pb.threads = 4;
+            pb.build(tokens, 0x4a90u + static_cast<uint32_t>(tokens));
+            s4_call call(pb);
+            pb.poison_output();
+            const uint64_t before = decode_pin.calls();
+            ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
+            EXPECT_EQ(decode_pin.calls(), before + 1);
+            const std::vector<uint16_t> got = pb.logical_output();
+            expect_output_written(got);
+            if (first.empty()) {
+                first = got;
+            } else {
+                EXPECT_EQ(got, first);
+            }
         }
     }
     group_matmul_routed_moe_flush_weight_cache();

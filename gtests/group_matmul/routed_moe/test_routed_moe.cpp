@@ -54,6 +54,7 @@
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/dispatch.hpp"
 #include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/nr32_pack.hpp"
 #include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/ntile_flat_parallel.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/ntile_flat_parallel_config.hpp"
 #include "lowoha_operators/matmul/group_matmul/prepack/prepack.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 #include "lowoha_operators/matmul/routed_moe/routed_moe_internal.hpp"
@@ -599,12 +600,13 @@ struct selector_pin {
     ~selector_pin() { slot.store(previous, std::memory_order_relaxed); }
 };
 
-/// Requests ALGO 4 for decode calls (the
+/// Requests N-tile flat parallel for decode calls (the
 /// `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO=4` override) for its scope, with the
 /// global selector on AUTO, the prompt setting unset (7), weight cache mode 1
 /// and the custom-kernel switches on, whatever the environment sets, and
-/// counts the calls ALGO 4 completes and the routed layer entries it makes.
-struct algo4_decode_guard {
+/// counts the calls N-tile flat parallel completes and the routed layer entries
+/// it makes.
+struct ntile_flat_parallel_decode_guard {
     selector_pin global_algo {
             zendnnl::lowoha::matmul::test_api_algo_override(), 0};
     selector_pin prompt_algo {zendnnl::lowoha::matmul::test_api::
@@ -627,12 +629,14 @@ struct algo4_decode_guard {
     std::atomic<uint64_t> &captured = zendnnl::lowoha::matmul::test_api::
             s_ntile_flat_parallel_layer_entries;
 
-    algo4_decode_guard() {
+    ntile_flat_parallel_decode_guard() {
         completed.store(0, std::memory_order_relaxed);
         captured.store(0, std::memory_order_relaxed);
         capture.store(true, std::memory_order_relaxed);
     }
-    ~algo4_decode_guard() { capture.store(false, std::memory_order_relaxed); }
+    ~ntile_flat_parallel_decode_guard() {
+        capture.store(false, std::memory_order_relaxed);
+    }
     uint64_t calls() const { return completed.load(std::memory_order_relaxed); }
     uint64_t layer_entries() const {
         return captured.load(std::memory_order_relaxed);
@@ -649,8 +653,8 @@ struct RoutedMoESuperset : routed_moe_isa_test {};
 struct RoutedMoEGeneric : routed_moe_test {};
 /// Pins the selectors these tests assume, whatever the environment sets: the
 /// global selector on AUTO and both phase settings unset (7), so the routes
-/// they compare ALGO 4 with are the defaults.
-struct RoutedMoEAlgo4 : routed_moe_isa_test {
+/// they compare N-tile flat parallel with are the defaults.
+struct RoutedMoENTileFlatParallel : routed_moe_isa_test {
     selector_pin global_algo {
             zendnnl::lowoha::matmul::test_api_algo_override(), 0};
     selector_pin prompt_algo {zendnnl::lowoha::matmul::test_api::
@@ -2996,10 +3000,11 @@ TEST_F(RoutedMoEGeneric, ReusedScratchSurvivesShrinkingAndGrowingShapes) {
 }
 
 // ===========================================================================
-// ALGO 4 decode (ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO=4)
+// N-tile flat parallel decode (ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO=4)
 // ===========================================================================
 
-TEST_F(RoutedMoEAlgo4, MatchesReferenceAcrossGeometriesAndDecodeTokens) {
+TEST_F(RoutedMoENTileFlatParallel,
+        MatchesReferenceAcrossGeometriesAndDecodeTokens) {
     for (const geometry &g : kGeometries) {
         for (const int64_t M : {1, 2, 3, 8, 31}) {
             SCOPED_TRACE(std::string(g.name) + " M=" + std::to_string(M));
@@ -3010,7 +3015,7 @@ TEST_F(RoutedMoEAlgo4, MatchesReferenceAcrossGeometriesAndDecodeTokens) {
             pb.build(M, g.K, g.N, g.E, g.topk,
                     0x5a00u + static_cast<uint32_t>(M));
             da8w8_call call(pb);
-            algo4_decode_guard guard;
+            ntile_flat_parallel_decode_guard guard;
             poison(pb.dst);
             ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
             EXPECT_EQ(guard.calls(), 1u);
@@ -3020,12 +3025,12 @@ TEST_F(RoutedMoEAlgo4, MatchesReferenceAcrossGeometriesAndDecodeTokens) {
     }
 }
 
-TEST_F(RoutedMoEAlgo4, OneExpertOwnsEveryRowAndTheRestAreInactive) {
+TEST_F(RoutedMoENTileFlatParallel, OneExpertOwnsEveryRowAndTheRestAreInactive) {
     moe_problem pb;
     pb.build(19, 128, 64, 8, 2, 0x5b01u);
     std::fill(pb.ids.begin(), pb.ids.end(), 3);
     da8w8_call call(pb);
-    algo4_decode_guard guard;
+    ntile_flat_parallel_decode_guard guard;
     poison(pb.dst);
     ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
     EXPECT_EQ(guard.calls(), 1u);
@@ -3035,7 +3040,7 @@ TEST_F(RoutedMoEAlgo4, OneExpertOwnsEveryRowAndTheRestAreInactive) {
 
 // A call is decode-shaped while no expert has more than kDecodeMaxM rows,
 // whatever its token count.
-TEST_F(RoutedMoEAlgo4, DecodeShapeEndsAtTheDecodeRowLimit) {
+TEST_F(RoutedMoENTileFlatParallel, DecodeShapeEndsAtTheDecodeRowLimit) {
     const int limit = zendnnl::lowoha::matmul::kDecodeMaxM;
     for (const int rows : {limit, limit + 1}) {
         SCOPED_TRACE("rows=" + std::to_string(rows));
@@ -3045,7 +3050,7 @@ TEST_F(RoutedMoEAlgo4, DecodeShapeEndsAtTheDecodeRowLimit) {
         pb.build(rows, 128, 64, 2, 1, 0x5b0eu);
         std::fill(pb.ids.begin(), pb.ids.end(), 0);
         da8w8_call call(pb);
-        algo4_decode_guard guard;
+        ntile_flat_parallel_decode_guard guard;
         poison(pb.dst);
         ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
         EXPECT_EQ(guard.calls(), rows <= limit ? 1u : 0u);
@@ -3054,8 +3059,9 @@ TEST_F(RoutedMoEAlgo4, DecodeShapeEndsAtTheDecodeRowLimit) {
     }
 }
 
-// ALGO 4 keeps one pack per expert, so a layer of any expert count runs on it.
-TEST_F(RoutedMoEAlgo4, ServesLayersOfAnyExpertCount) {
+// N-tile flat parallel keeps one pack per expert, so a layer of any expert
+// count runs on it.
+TEST_F(RoutedMoENTileFlatParallel, ServesLayersOfAnyExpertCount) {
     for (const int experts : {1, 256, 257, 300}) {
         SCOPED_TRACE("experts=" + std::to_string(experts));
         group_matmul_routed_moe_flush_weight_cache();
@@ -3063,7 +3069,7 @@ TEST_F(RoutedMoEAlgo4, ServesLayersOfAnyExpertCount) {
         moe_problem pb;
         pb.build(8, 128, 64, experts, std::min(experts, 8), 0x5b0fu);
         da8w8_call call(pb);
-        algo4_decode_guard guard;
+        ntile_flat_parallel_decode_guard guard;
         poison(pb.dst);
         ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
         EXPECT_EQ(guard.calls(), 1u);
@@ -3083,7 +3089,7 @@ int64_t max_expert_rows(const moe_problem &pb) {
 // Hidden and intermediate sizes off the kernels' blocks: W2's columns end
 // inside a block, W13's up columns start inside a kernel vector, and K ends
 // inside a dot-product group.
-TEST_F(RoutedMoEAlgo4, UnalignedShapesMatchTheReference) {
+TEST_F(RoutedMoENTileFlatParallel, UnalignedShapesMatchTheReference) {
     struct shape_t {
         int64_t K, N;
     };
@@ -3109,7 +3115,7 @@ TEST_F(RoutedMoEAlgo4, UnalignedShapesMatchTheReference) {
                 pb.unit_gate();
                 pb.act = act;
                 da8w8_call call(pb);
-                algo4_decode_guard guard;
+                ntile_flat_parallel_decode_guard guard;
                 selector_pin prompt(
                         zendnnl::lowoha::matmul::test_api::
                                 s_grp_matmul_auto_prompt_algo_override,
@@ -3127,7 +3133,7 @@ TEST_F(RoutedMoEAlgo4, UnalignedShapesMatchTheReference) {
 
 // With `unit_gate()` the gate is O(1), where SiLU and GELU differ enough
 // that each output misses the other activation's reference.
-TEST_F(RoutedMoEAlgo4, GatedActivationsMatchTheirReference) {
+TEST_F(RoutedMoENTileFlatParallel, GatedActivationsMatchTheirReference) {
     const routed_moe_activation_t acts[]
             = {routed_moe_activation_t::silu_and_mul,
                     routed_moe_activation_t::gelu_and_mul};
@@ -3140,7 +3146,7 @@ TEST_F(RoutedMoEAlgo4, GatedActivationsMatchTheirReference) {
         pb.unit_gate();
         pb.act = act;
         da8w8_call call(pb);
-        algo4_decode_guard guard;
+        ntile_flat_parallel_decode_guard guard;
         poison(pb.dst);
         ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
         EXPECT_EQ(guard.calls(), 1u);
@@ -3155,7 +3161,7 @@ TEST_F(RoutedMoEAlgo4, GatedActivationsMatchTheirReference) {
 }
 
 // The routed reference has no SwiGLU-OAI, so the default route is the oracle.
-TEST_F(RoutedMoEAlgo4, SwigluOaiMatchesTheDefaultRoute) {
+TEST_F(RoutedMoENTileFlatParallel, SwigluOaiMatchesTheDefaultRoute) {
     moe_problem pb;
     pb.build(8, 256, 96, 32, 8, 0x5b09u);
     pb.unit_gate();
@@ -3167,7 +3173,7 @@ TEST_F(RoutedMoEAlgo4, SwigluOaiMatchesTheDefaultRoute) {
     group_matmul_routed_moe_flush_weight_cache();
     reset_grp_matmul_caches();
 
-    algo4_decode_guard guard;
+    ntile_flat_parallel_decode_guard guard;
     poison(pb.dst);
     ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
     EXPECT_EQ(guard.calls(), 1u);
@@ -3176,10 +3182,10 @@ TEST_F(RoutedMoEAlgo4, SwigluOaiMatchesTheDefaultRoute) {
 }
 
 // Biases on both projections under each gated activation, as in GPT-OSS, and
-// on the down projection alone: ALGO 4 serves them in decode and prompt calls
-// and matches the reference, or for SwiGLU-OAI, which the reference lacks,
-// the default route; the same call without biases misses it.
-TEST_F(RoutedMoEAlgo4, BiasesMatchTheDefaultRoute) {
+// on the down projection alone: N-tile flat parallel serves them in decode and
+// prompt calls and matches the reference, or for SwiGLU-OAI, which the
+// reference lacks, the default route; the same call without biases misses it.
+TEST_F(RoutedMoENTileFlatParallel, BiasesMatchTheDefaultRoute) {
     using zendnnl::lowoha::matmul::grp_matmul_gated_act_t;
     struct bias_case {
         const char *name;
@@ -3252,7 +3258,7 @@ TEST_F(RoutedMoEAlgo4, BiasesMatchTheDefaultRoute) {
         group_matmul_routed_moe_flush_weight_cache();
         reset_grp_matmul_caches();
 
-        algo4_decode_guard guard;
+        ntile_flat_parallel_decode_guard guard;
         selector_pin prompt(zendnnl::lowoha::matmul::test_api::
                                     s_grp_matmul_auto_prompt_algo_override,
                 4);
@@ -3278,9 +3284,10 @@ TEST_F(RoutedMoEAlgo4, BiasesMatchTheDefaultRoute) {
 }
 
 // Each phase follows its own knob, which outranks the global selector, and a
-// prompt call ALGO 4 does not serve keeps the routed executor's output bit
-// for bit.
-TEST_F(RoutedMoEAlgo4, EachAlgo4RequestServesItsPhases) {
+// prompt call N-tile flat parallel does not serve keeps the routed executor's
+// output bit for bit.
+TEST_F(RoutedMoENTileFlatParallel,
+        EachNTileFlatParallelRequestServesItsPhases) {
     namespace mm = zendnnl::lowoha::matmul;
     struct request {
         const char *name;
@@ -3304,7 +3311,7 @@ TEST_F(RoutedMoEAlgo4, EachAlgo4RequestServesItsPhases) {
     std::vector<uint16_t> prompt_routed;
     for (const request &r : requests) {
         SCOPED_TRACE(r.name);
-        algo4_decode_guard guard;
+        ntile_flat_parallel_decode_guard guard;
         selector_pin global(mm::test_api_algo_override(), r.global);
         selector_pin prompt(
                 mm::test_api::s_grp_matmul_auto_prompt_algo_override, r.prompt);
@@ -3335,7 +3342,7 @@ TEST_F(RoutedMoEAlgo4, EachAlgo4RequestServesItsPhases) {
 
 // Prompt calls cut each expert's rows into blocks of at most kDecodeMaxM rows;
 // a one-row tail block and an expert owning every row included.
-TEST_F(RoutedMoEAlgo4, PromptCallsMatchTheReference) {
+TEST_F(RoutedMoENTileFlatParallel, PromptCallsMatchTheReference) {
     namespace mm = zendnnl::lowoha::matmul;
     struct shape_t {
         int64_t tokens, K, N, E, topk;
@@ -3362,7 +3369,7 @@ TEST_F(RoutedMoEAlgo4, PromptCallsMatchTheReference) {
             if (s.one_expert) { std::fill(pb.ids.begin(), pb.ids.end(), 3); }
             ASSERT_GT(max_expert_rows(pb), mm::kDecodeMaxM);
             da8w8_call call(pb);
-            algo4_decode_guard guard;
+            ntile_flat_parallel_decode_guard guard;
             selector_pin prompt(
                     mm::test_api::s_grp_matmul_auto_prompt_algo_override, 4);
             poison(pb.dst);
@@ -3499,7 +3506,7 @@ std::vector<uint16_t> reference_moe_grouped(
 // DA8W8 with per-group weight scales, against source scales per token and
 // per (token, group), in decode and prompt calls.  Source magnitudes that
 // alternate by group make the two source scalings differ.
-TEST_F(RoutedMoEAlgo4, PerGroupScalesMatchTheReference) {
+TEST_F(RoutedMoENTileFlatParallel, PerGroupScalesMatchTheReference) {
     namespace mm = zendnnl::lowoha::matmul;
     uint32_t seed = 0x5c10u;
     for (const bool src_groups : {false, true}) {
@@ -3525,7 +3532,7 @@ TEST_F(RoutedMoEAlgo4, PerGroupScalesMatchTheReference) {
             gs.build(pb, 32, 32, src_groups, seed++);
             da8w8_call call(pb);
             gs.apply(pb, call);
-            algo4_decode_guard guard;
+            ntile_flat_parallel_decode_guard guard;
             selector_pin prompt(
                     mm::test_api::s_grp_matmul_auto_prompt_algo_override, 4);
             poison(pb.dst);
@@ -3543,11 +3550,11 @@ TEST_F(RoutedMoEAlgo4, PerGroupScalesMatchTheReference) {
 }
 
 // A layer's prompt and decode calls share one layer entry and its packs.
-TEST_F(RoutedMoEAlgo4, PromptAndDecodeCallsShareOneLayerEntry) {
+TEST_F(RoutedMoENTileFlatParallel, PromptAndDecodeCallsShareOneLayerEntry) {
     namespace mm = zendnnl::lowoha::matmul;
     moe_problem pb;
     pb.build(200, 128, 64, 4, 2, 0x5b48u);
-    algo4_decode_guard guard;
+    ntile_flat_parallel_decode_guard guard;
     selector_pin prompt(
             mm::test_api::s_grp_matmul_auto_prompt_algo_override, 4);
     {
@@ -3572,13 +3579,13 @@ TEST_F(RoutedMoEAlgo4, PromptAndDecodeCallsShareOneLayerEntry) {
 // A prompt unit sweeps its expert's blocks one L2-sized chunk of columns at a
 // time.  With a 1 MiB L2 one thread's full-width W13 units span two chunks and
 // sixteen threads' units one; both write the same bytes.
-TEST_F(RoutedMoEAlgo4, PromptUnitsWriteTheSameAcrossTeamSizes) {
+TEST_F(RoutedMoENTileFlatParallel, PromptUnitsWriteTheSameAcrossTeamSizes) {
     namespace mm = zendnnl::lowoha::matmul;
     moe_problem pb;
     pb.build(320, 4096, 128, 32, 8, 0x5b51u);
     ASSERT_GT(max_expert_rows(pb), mm::kDecodeMaxM);
     da8w8_call call(pb);
-    algo4_decode_guard guard;
+    ntile_flat_parallel_decode_guard guard;
     selector_pin prompt(
             mm::test_api::s_grp_matmul_auto_prompt_algo_override, 4);
     std::vector<uint16_t> out[2];
@@ -3596,17 +3603,18 @@ TEST_F(RoutedMoEAlgo4, PromptUnitsWriteTheSameAcrossTeamSizes) {
     group_matmul_routed_moe_flush_weight_cache();
 }
 
-// Where the kernels that read source bytes XOR-ed with 0x80 pay, ALGO 4 runs
-// them and flips its s8 rows; decode and prompt calls write what the s8-source
-// kernels write.
-TEST_F(RoutedMoEAlgo4, U8SourceKernelsWriteWhatS8SourceKernelsWrite) {
+// Where the kernels that read source bytes XOR-ed with 0x80 pay, N-tile flat
+// parallel runs them and flips its s8 rows; decode and prompt calls write what
+// the s8-source kernels write.
+TEST_F(RoutedMoENTileFlatParallel,
+        U8SourceKernelsWriteWhatS8SourceKernelsWrite) {
     namespace mm = zendnnl::lowoha::matmul;
     for (const int64_t tokens : {8, 200}) {
         SCOPED_TRACE(::testing::Message() << "tokens=" << tokens);
         moe_problem pb;
         pb.build(tokens, 256, 128, 4, 2, 0x5b52u);
         da8w8_call call(pb);
-        algo4_decode_guard guard;
+        ntile_flat_parallel_decode_guard guard;
         selector_pin prompt(
                 mm::test_api::s_grp_matmul_auto_prompt_algo_override, 4);
         std::vector<uint16_t> out[2];
@@ -3630,11 +3638,11 @@ TEST_F(RoutedMoEAlgo4, U8SourceKernelsWriteWhatS8SourceKernelsWrite) {
     group_matmul_routed_moe_flush_weight_cache();
 }
 
-TEST_F(RoutedMoEAlgo4, ReusesItsPacksUntilTheRoutedFlush) {
+TEST_F(RoutedMoENTileFlatParallel, ReusesItsPacksUntilTheRoutedFlush) {
     moe_problem pb;
     pb.build(8, 256, 96, 32, 8, 0x5b03u);
     da8w8_call call(pb);
-    algo4_decode_guard guard;
+    ntile_flat_parallel_decode_guard guard;
     ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
     ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
     EXPECT_EQ(guard.calls(), 2u);
@@ -3660,13 +3668,13 @@ TEST_F(RoutedMoEAlgo4, ReusesItsPacksUntilTheRoutedFlush) {
 // Scales at a new address with new values, as a host that reloads them: the
 // call reads the new values, the layer keeps one entry, and the experts keep
 // one pack each.
-TEST_F(RoutedMoEAlgo4, MovedWeightScalesReplaceTheLayersState) {
+TEST_F(RoutedMoENTileFlatParallel, MovedWeightScalesReplaceTheLayersState) {
     namespace mm = zendnnl::lowoha::matmul;
     group_matmul_routed_moe_flush_weight_cache();
     moe_problem pb;
     pb.build(8, 128, 64, 16, 2, 0x5b05u);
     da8w8_call call(pb);
-    algo4_decode_guard guard;
+    ntile_flat_parallel_decode_guard guard;
     ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
     std::vector<std::vector<float>> moved;
     moved.reserve(6);
@@ -3695,7 +3703,8 @@ TEST_F(RoutedMoEAlgo4, MovedWeightScalesReplaceTheLayersState) {
 // A pack that runs out of memory fails its call with a memory status and
 // writes nothing; the layer is not marked unserved, so the next call packs
 // and runs.
-TEST_F(RoutedMoEAlgo4, RunningOutOfMemoryWhilePackingFailsOnlyThatCall) {
+TEST_F(RoutedMoENTileFlatParallel,
+        RunningOutOfMemoryWhilePackingFailsOnlyThatCall) {
     namespace mm = zendnnl::lowoha::matmul;
     struct pack_failure_pin {
         std::atomic<bool> &fails = mm::ntile_flat_parallel::nr32::test_api::
@@ -3707,7 +3716,7 @@ TEST_F(RoutedMoEAlgo4, RunningOutOfMemoryWhilePackingFailsOnlyThatCall) {
     moe_problem pb;
     pb.build(8, 128, 64, 8, 2, 0x5b0au);
     da8w8_call call(pb);
-    algo4_decode_guard guard;
+    ntile_flat_parallel_decode_guard guard;
     std::vector<uint16_t> out(pb.dst.size());
     poison(out);
     const std::vector<uint16_t> untouched = out;
@@ -3725,9 +3734,9 @@ TEST_F(RoutedMoEAlgo4, RunningOutOfMemoryWhilePackingFailsOnlyThatCall) {
     group_matmul_routed_moe_flush_weight_cache();
 }
 
-// The routed flush waits for an ALGO 4 call in flight, which reads the
-// layer's packs and the caller's buffers until it returns.
-TEST_F(RoutedMoEAlgo4, RoutedFlushWaitsForACallInFlight) {
+// The routed flush waits for an N-tile flat parallel call in flight, which
+// reads the layer's packs and the caller's buffers until it returns.
+TEST_F(RoutedMoENTileFlatParallel, RoutedFlushWaitsForACallInFlight) {
     namespace mm = zendnnl::lowoha::matmul;
     struct pause_pin {
         std::atomic<bool> &pause = mm::test_api::s_pause_ntile_flat_parallel;
@@ -3740,7 +3749,7 @@ TEST_F(RoutedMoEAlgo4, RoutedFlushWaitsForACallInFlight) {
     moe_problem pb;
     pb.build(8, 128, 64, 8, 2, 0x5b0bu);
     da8w8_call call(pb);
-    algo4_decode_guard guard;
+    ntile_flat_parallel_decode_guard guard;
     ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
     status_t status = status_t::failure;
     std::atomic<bool> flushed {false};
@@ -3773,11 +3782,12 @@ TEST_F(RoutedMoEAlgo4, RoutedFlushWaitsForACallInFlight) {
 
 // Weights stored [in, out] (`trans_weight = false`), and the 'R' layout, are
 // served like the default call, byte for byte.
-TEST_F(RoutedMoEAlgo4, UntransposedWeightsAndLayoutRMatchTheDefaultCall) {
+TEST_F(RoutedMoENTileFlatParallel,
+        UntransposedWeightsAndLayoutRMatchTheDefaultCall) {
     moe_problem pb;
     pb.build(8, 128, 64, 8, 2, 0x5b0du);
     da8w8_call call(pb);
-    algo4_decode_guard guard;
+    ntile_flat_parallel_decode_guard guard;
     std::vector<uint16_t> want(pb.dst.size()), out(pb.dst.size());
     poison(want);
     ASSERT_EQ(call.run(pb, want.data()), status_t::success);
@@ -3823,7 +3833,8 @@ TEST_F(RoutedMoEAlgo4, UntransposedWeightsAndLayoutRMatchTheDefaultCall) {
 
 // Calls on the same buffers with opposite `trans_weight`, at strides that fit
 // either layout, are two layers: the second writes what it writes alone.
-TEST_F(RoutedMoEAlgo4, OppositeTranspositionsOfOneBufferAreTwoLayers) {
+TEST_F(RoutedMoENTileFlatParallel,
+        OppositeTranspositionsOfOneBufferAreTwoLayers) {
     namespace mm = zendnnl::lowoha::matmul;
     group_matmul_routed_moe_flush_weight_cache();
     // H = 2I, so W13's rows hold H values either way; W2's are padded to H.
@@ -3845,7 +3856,7 @@ TEST_F(RoutedMoEAlgo4, OppositeTranspositionsOfOneBufferAreTwoLayers) {
     other.primary.trans_weight = false;
     other.primary.ldb = static_cast<int>(2 * I);
     other.secondary.trans_weight = false;
-    algo4_decode_guard guard;
+    ntile_flat_parallel_decode_guard guard;
     std::vector<uint16_t> out(pb.dst.size()), alone(pb.dst.size());
     ASSERT_EQ(call.run(pb, out.data()), status_t::success);
     poison(out);
@@ -3860,12 +3871,13 @@ TEST_F(RoutedMoEAlgo4, OppositeTranspositionsOfOneBufferAreTwoLayers) {
 }
 
 // Both decode schedules, at every team size, write the same bytes.
-TEST_F(RoutedMoEAlgo4, DecodeSchedulesAndTeamSizesWriteTheSameBytes) {
+TEST_F(RoutedMoENTileFlatParallel,
+        DecodeSchedulesAndTeamSizesWriteTheSameBytes) {
     namespace mm = zendnnl::lowoha::matmul;
     moe_problem pb;
     pb.build(8, 256, 96, 32, 8, 0x5b0eu);
     da8w8_call call(pb);
-    algo4_decode_guard guard;
+    ntile_flat_parallel_decode_guard guard;
     std::vector<uint16_t> first;
     for (const int threads : {1, 3, 7}) {
         for (const int own : {0, 1}) {
@@ -3892,9 +3904,58 @@ TEST_F(RoutedMoEAlgo4, DecodeSchedulesAndTeamSizesWriteTheSameBytes) {
     group_matmul_routed_moe_flush_weight_cache();
 }
 
+/// Restores the environment's N-tile flat-parallel config when it goes.
+struct config_restore {
+    ~config_restore() {
+        zendnnl::lowoha::matmul::test_api::set_ntile_flat_parallel_config(
+                nullptr);
+    }
+};
+
+// The settings change how a routed call's work is cut, ordered and staged,
+// not what it writes: DA8W8 decode and prompt calls write the same bytes
+// under each, through the shared gather of the source rows too.
+TEST_F(RoutedMoENTileFlatParallel, SettingsWriteTheSameBytes) {
+    namespace mm = zendnnl::lowoha::matmul;
+    const char *const configs[] = {"", "gather_rows=1", "sweep_rows=1",
+            "sweep_rows=100000", "l2_frac=0.25", "subtile_rows=1", "u8_src=on",
+            "u8_src=off", "units=1,prompt_units=1", "unit_order=own",
+            "unit_order=queue", "heavy_light=off"};
+    const config_restore restore;
+    for (const int64_t tokens : {int64_t {8}, int64_t {300}}) {
+        moe_problem pb;
+        pb.build(
+                tokens, 256, 96, 8, 2, 0x5b60u + static_cast<uint32_t>(tokens));
+        ASSERT_EQ(max_expert_rows(pb) > mm::kDecodeMaxM, tokens > 8);
+        da8w8_call call(pb);
+        ntile_flat_parallel_decode_guard guard;
+        selector_pin prompt(
+                mm::test_api::s_grp_matmul_auto_prompt_algo_override, 4);
+        std::vector<uint16_t> first;
+        for (const char *config : configs) {
+            SCOPED_TRACE(::testing::Message()
+                    << "tokens=" << tokens << " config='" << config << "'");
+            group_matmul_routed_moe_flush_weight_cache();
+            mm::test_api::set_ntile_flat_parallel_config(config);
+            std::vector<uint16_t> out(pb.dst.size());
+            poison(out);
+            ASSERT_EQ(call.run(pb, out.data()), status_t::success);
+            expect_output_written(out);
+            if (first.empty()) {
+                first = out;
+                EXPECT_LT(rel_mae(first, reference_moe(pb)), 3e-3);
+            } else {
+                EXPECT_EQ(out, first);
+            }
+        }
+        EXPECT_EQ(guard.calls(), std::size(configs));
+    }
+    group_matmul_routed_moe_flush_weight_cache();
+}
+
 // Source and output rows with padding past their K values: the padding of
 // the source is never read, and that of the output never written.
-TEST_F(RoutedMoEAlgo4, PaddedRowsMatchTheUnpaddedCall) {
+TEST_F(RoutedMoENTileFlatParallel, PaddedRowsMatchTheUnpaddedCall) {
     namespace mm = zendnnl::lowoha::matmul;
     for (const int64_t tokens : {8, 300}) {
         SCOPED_TRACE(::testing::Message() << "tokens=" << tokens);
@@ -3903,7 +3964,7 @@ TEST_F(RoutedMoEAlgo4, PaddedRowsMatchTheUnpaddedCall) {
         pb.build(tokens, 128, 64, 4, 2, 0x5b0cu);
         if (tokens > 8) { ASSERT_GT(max_expert_rows(pb), mm::kDecodeMaxM); }
         da8w8_call call(pb);
-        algo4_decode_guard guard;
+        ntile_flat_parallel_decode_guard guard;
         selector_pin prompt(
                 mm::test_api::s_grp_matmul_auto_prompt_algo_override, 4);
         std::vector<uint16_t> want(pb.dst.size());
@@ -3939,13 +4000,13 @@ TEST_F(RoutedMoEAlgo4, PaddedRowsMatchTheUnpaddedCall) {
 }
 
 // With `skip_weighted` the top-1 router weights are not applied.
-TEST_F(RoutedMoEAlgo4, SkipWeightedLeavesTheRouterWeightsOut) {
+TEST_F(RoutedMoENTileFlatParallel, SkipWeightedLeavesTheRouterWeightsOut) {
     moe_problem pb;
     pb.build(8, 128, 64, 8, 1, 0x5b0fu);
     std::fill(pb.weights.begin(), pb.weights.end(), 0.37f);
     da8w8_call call(pb);
     call.routing.skip_weighted = true;
-    algo4_decode_guard guard;
+    ntile_flat_parallel_decode_guard guard;
     poison(pb.dst);
     ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
     EXPECT_EQ(guard.calls(), 1u);
@@ -4051,7 +4112,7 @@ status_t run_layer_grouped(const moe_problem &pb, std::vector<uint16_t> &out) {
 // A routed layer and a grouped call of the same experts run on one set of
 // packs, whichever call packs them, and write the same output; either flush
 // drops every pack and the routed layer's state.
-TEST_F(RoutedMoEAlgo4, RoutedAndGroupedCallsShareOnePackPerWeight) {
+TEST_F(RoutedMoENTileFlatParallel, RoutedAndGroupedCallsShareOnePackPerWeight) {
     namespace mm = zendnnl::lowoha::matmul;
     moe_problem pb;
     pb.build(8, 256, 96, 8, 2, 0x5b07u);
@@ -4061,7 +4122,7 @@ TEST_F(RoutedMoEAlgo4, RoutedAndGroupedCallsShareOnePackPerWeight) {
         pb.ids[t * 2 + 1] = static_cast<int32_t>((t + 3) % pb.E);
     }
     da8w8_call call(pb);
-    algo4_decode_guard guard;
+    ntile_flat_parallel_decode_guard guard;
     std::atomic<uint64_t> &grouped
             = mm::test_api::s_ntile_flat_parallel_grouped_completed;
     grouped.store(0, std::memory_order_relaxed);
@@ -4101,13 +4162,13 @@ TEST_F(RoutedMoEAlgo4, RoutedAndGroupedCallsShareOnePackPerWeight) {
 
 // A layer called with a second activation keeps a second routed state, with
 // its own plans, over the packs the first one made.
-TEST_F(RoutedMoEAlgo4, ASecondActivationReusesTheLayersPacks) {
+TEST_F(RoutedMoENTileFlatParallel, ASecondActivationReusesTheLayersPacks) {
     namespace mm = zendnnl::lowoha::matmul;
     moe_problem pb;
     pb.build(8, 128, 64, 16, 2, 0x5b09u);
     pb.unit_gate();
     da8w8_call call(pb);
-    algo4_decode_guard guard;
+    ntile_flat_parallel_decode_guard guard;
     group_matmul_routed_moe_flush_weight_cache();
     ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
     EXPECT_LT(rel_mae(pb.dst, reference_moe(pb)), 3e-3);
@@ -4126,11 +4187,11 @@ TEST_F(RoutedMoEAlgo4, ASecondActivationReusesTheLayersPacks) {
     group_matmul_routed_moe_flush_weight_cache();
 }
 
-// A call ALGO 4 owns and cannot serve fails before it writes anything, rather
-// than running elsewhere; the control row shows the setup is one ALGO 4
-// serves.  Weights a caller may change between calls without a flush are
-// among them.
-TEST_F(RoutedMoEAlgo4, CallsItCannotServeFail) {
+// A call N-tile flat parallel owns and cannot serve fails before it writes
+// anything, rather than running elsewhere; the control row shows the setup is
+// one N-tile flat parallel serves.  Weights a caller may change between calls
+// without a flush are among them.
+TEST_F(RoutedMoENTileFlatParallel, CallsItCannotServeFail) {
     const auto unchanged = [](da8w8_call &) {};
     const auto non_constant = [](da8w8_call &c) {
         c.primary.weight_is_const = false;
@@ -4192,6 +4253,11 @@ TEST_F(RoutedMoEAlgo4, CallsItCannotServeFail) {
             {"alpha", 1, [](da8w8_call &c) { c.primary.alpha = 2.0f; }},
             {"weight zero point", 1, weight_zero_point},
             {"post-op", 1, post_op},
+            {"a compute type other than the kernels' s8", 1,
+                    [](da8w8_call &c) {
+        c.primary.params.dtypes.compute = data_type_t::bf16;
+        c.secondary.params.dtypes.compute = data_type_t::bf16;
+    }},
     };
     for (const unserved_case &c : cases) {
         SCOPED_TRACE(c.name);
@@ -4202,7 +4268,7 @@ TEST_F(RoutedMoEAlgo4, CallsItCannotServeFail) {
         pb.build(8, 128, 64, 8, 2, 0x5b06u);
         da8w8_call call(pb);
         c.edit(call);
-        algo4_decode_guard guard;
+        ntile_flat_parallel_decode_guard guard;
         weight_cache_mode_pin mode(c.cache_mode);
         // Room for an unreduced output's row per routed slot.
         std::vector<uint16_t> out(pb.dst.size() * pb.topk);
@@ -4230,7 +4296,7 @@ TEST_F(RoutedMoEAlgo4, CallsItCannotServeFail) {
     pb.build(8, 128, 64, 8, 2, 0x5b06u);
     da8w8_call call(pb);
     call.primary.output_size /= 2;
-    algo4_decode_guard guard;
+    ntile_flat_parallel_decode_guard guard;
     std::vector<uint16_t> out(pb.dst.size());
     poison(out);
     const std::vector<uint16_t> untouched = out;
@@ -4247,7 +4313,7 @@ TEST_F(RoutedMoEAlgo4, CallsItCannotServeFail) {
 
 // Packing a layer warms no other weight layout: no AOCL-DLP or custom-kernel
 // prepack runs for it, even under `ZENDNNL_GRP_MATMUL_ALGO=0`.
-TEST_F(RoutedMoEAlgo4, PackingWarmsNoOtherWeightLayout) {
+TEST_F(RoutedMoENTileFlatParallel, PackingWarmsNoOtherWeightLayout) {
     using zendnnl::lowoha::matmul::test_api_algo_legacy_override;
     using zendnnl::lowoha::matmul::test_api_algo_override;
     namespace prepack_api
@@ -4266,7 +4332,7 @@ TEST_F(RoutedMoEAlgo4, PackingWarmsNoOtherWeightLayout) {
     moe_problem pb;
     pb.build(8, 128, 64, 8, 2, 0x5b0bu);
     da8w8_call call(pb);
-    algo4_decode_guard guard;
+    ntile_flat_parallel_decode_guard guard;
     ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
     EXPECT_EQ(guard.calls(), 1u);
     EXPECT_FALSE(prepack_api::get_last_invocation_stats().valid);
@@ -4275,14 +4341,14 @@ TEST_F(RoutedMoEAlgo4, PackingWarmsNoOtherWeightLayout) {
 // A one-thread team, in process and under an OpenMP thread limit.  The limit
 // takes effect only when the runtime starts, so that call runs in a
 // re-executed child process.
-TEST_F(RoutedMoEAlgo4, OneThreadTeamMatchesReference) {
+TEST_F(RoutedMoENTileFlatParallel, OneThreadTeamMatchesReference) {
     const auto one_thread_call = [] {
         moe_problem pb;
         pb.build(8, 256, 96, 32, 8, 0x5b07u);
         da8w8_call call(pb);
         call.primary.params.num_threads = 1;
         call.secondary.params.num_threads = 1;
-        algo4_decode_guard guard;
+        ntile_flat_parallel_decode_guard guard;
         poison(pb.dst);
         return call.run(pb, pb.dst.data()) == status_t::success
                 && guard.calls() == 1
@@ -4318,10 +4384,11 @@ TEST_F(RoutedMoEAlgo4, OneThreadTeamMatchesReference) {
 }
 
 // At weight cache mode 2 a DA8W8 layer that declares its buffer capacity is
-// packed in place by the fast executor, except while ALGO 4 owns its decode
-// calls: then a prompt leaves the weights raw for ALGO 4 to pack, whichever
-// way the custom kernel's switches are set.
-TEST_F(RoutedMoEAlgo4, PromptLeavesTheWeightsRawWhileAlgo4OwnsTheDecode) {
+// packed in place by the fast executor, except while N-tile flat parallel owns
+// its decode calls: then a prompt leaves the weights raw for N-tile flat
+// parallel to pack, whichever way the custom kernel's switches are set.
+TEST_F(RoutedMoENTileFlatParallel,
+        PromptLeavesTheWeightsRawWhileNTileFlatParallelOwnsTheDecode) {
     for (const bool int8_kernel : {true, false}) {
         SCOPED_TRACE(int8_kernel ? "INT8 kernel on" : "INT8 kernel off");
         group_matmul_routed_moe_flush_weight_cache();
@@ -4367,7 +4434,7 @@ TEST_F(RoutedMoEAlgo4, PromptLeavesTheWeightsRawWhileAlgo4OwnsTheDecode) {
         const auto original_w13 = padded_w13;
 
         // The decode guard restores the INT8 override it pinned.
-        algo4_decode_guard guard;
+        ntile_flat_parallel_decode_guard guard;
         guard.ck_int8.slot.store(int8_kernel ? 1 : 0);
         routed_weight_cache_mode_guard cache_mode_guard;
         routed_cache_flush_guard cache_guard;
@@ -4599,7 +4666,7 @@ const char *half_name(data_type_t dt) {
         } \
     } while (0)
 
-TEST_F(RoutedMoEAlgo4,
+TEST_F(RoutedMoENTileFlatParallel,
         Bf16AndFp16MatchReferenceAcrossGeometriesAndDecodeTokens) {
     SKIP_WITHOUT_HALF_CUSTOM_KERNEL();
     weight_cache_mode_pin cache_mode(1);
@@ -4626,7 +4693,7 @@ TEST_F(RoutedMoEAlgo4,
                     ASSERT_EQ(pb.run(routed, threads), status_t::success);
                     group_matmul_routed_moe_flush_weight_cache();
 
-                    algo4_decode_guard guard;
+                    ntile_flat_parallel_decode_guard guard;
                     std::vector<uint16_t> out(expected.size());
                     poison(out);
                     ASSERT_EQ(pb.run(out, threads), status_t::success);
@@ -4641,7 +4708,8 @@ TEST_F(RoutedMoEAlgo4,
     }
 }
 
-TEST_F(RoutedMoEAlgo4, Bf16AndFp16GatedActivationsMatchTheirReference) {
+TEST_F(RoutedMoENTileFlatParallel,
+        Bf16AndFp16GatedActivationsMatchTheirReference) {
     SKIP_WITHOUT_HALF_CUSTOM_KERNEL();
     using zendnnl::lowoha::matmul::grp_matmul_gated_act_t;
     weight_cache_mode_pin cache_mode(1);
@@ -4663,7 +4731,7 @@ TEST_F(RoutedMoEAlgo4, Bf16AndFp16GatedActivationsMatchTheirReference) {
                     : grp_matmul_gated_act_t::gelu_and_mul;
             const auto other_expected = reference_moe_half(other);
 
-            algo4_decode_guard guard;
+            ntile_flat_parallel_decode_guard guard;
             std::vector<uint16_t> out;
             ASSERT_EQ(pb.run(out), status_t::success);
             expect_output_written(out);
@@ -4681,7 +4749,7 @@ TEST_F(RoutedMoEAlgo4, Bf16AndFp16GatedActivationsMatchTheirReference) {
         std::vector<uint16_t> routed, out;
         ASSERT_EQ(pb.run(routed), status_t::success);
         group_matmul_routed_moe_flush_weight_cache();
-        algo4_decode_guard guard;
+        ntile_flat_parallel_decode_guard guard;
         ASSERT_EQ(pb.run(out), status_t::success);
         expect_output_written(out);
         EXPECT_EQ(guard.calls(), 1u);
@@ -4690,10 +4758,11 @@ TEST_F(RoutedMoEAlgo4, Bf16AndFp16GatedActivationsMatchTheirReference) {
     }
 }
 
-// SwiGLU-OAI with biases on both projections, as in GPT-OSS: ALGO 4 matches
-// the default route in decode and prompt calls, which the same call without
-// biases misses.
-TEST_F(RoutedMoEAlgo4, Bf16AndFp16SwigluOaiBiasesMatchTheDefaultRoute) {
+// SwiGLU-OAI with biases on both projections, as in GPT-OSS: N-tile flat
+// parallel matches the default route in decode and prompt calls, which the same
+// call without biases misses.
+TEST_F(RoutedMoENTileFlatParallel,
+        Bf16AndFp16SwigluOaiBiasesMatchTheDefaultRoute) {
     SKIP_WITHOUT_HALF_CUSTOM_KERNEL();
     namespace mm = zendnnl::lowoha::matmul;
     weight_cache_mode_pin cache_mode(1);
@@ -4714,7 +4783,7 @@ TEST_F(RoutedMoEAlgo4, Bf16AndFp16SwigluOaiBiasesMatchTheDefaultRoute) {
             pb.add_biases(0x5b26u);
             ASSERT_EQ(pb.run(routed), status_t::success);
             group_matmul_routed_moe_flush_weight_cache();
-            algo4_decode_guard guard;
+            ntile_flat_parallel_decode_guard guard;
             selector_pin prompt(
                     mm::test_api::s_grp_matmul_auto_prompt_algo_override, 4);
             ASSERT_EQ(pb.run(out), status_t::success);
@@ -4727,10 +4796,11 @@ TEST_F(RoutedMoEAlgo4, Bf16AndFp16SwigluOaiBiasesMatchTheDefaultRoute) {
     }
 }
 
-TEST_F(RoutedMoEAlgo4, Bf16AndFp16PromptShapedCallsKeepTheGenericRoute) {
+TEST_F(RoutedMoENTileFlatParallel,
+        Bf16AndFp16PromptShapedCallsKeepTheGenericRoute) {
     SKIP_WITHOUT_HALF_CUSTOM_KERNEL();
     // Two experts and 200 tokens put more than kDecodeMaxM rows on an expert,
-    // and ALGO 4 is requested for decode calls only.
+    // and N-tile flat parallel is requested for decode calls only.
     weight_cache_mode_pin cache_mode(1);
     for (const data_type_t dt : served_half_types()) {
         SCOPED_TRACE(half_name(dt));
@@ -4740,7 +4810,7 @@ TEST_F(RoutedMoEAlgo4, Bf16AndFp16PromptShapedCallsKeepTheGenericRoute) {
         std::vector<uint16_t> routed, out;
         ASSERT_EQ(pb.run(routed), status_t::success);
         group_matmul_routed_moe_flush_weight_cache();
-        algo4_decode_guard guard;
+        ntile_flat_parallel_decode_guard guard;
         ASSERT_EQ(pb.run(out), status_t::success);
         expect_output_written(out);
         EXPECT_EQ(guard.calls(), 0u);
@@ -4749,8 +4819,9 @@ TEST_F(RoutedMoEAlgo4, Bf16AndFp16PromptShapedCallsKeepTheGenericRoute) {
     }
 }
 
-// With ALGO 4 requested for prompts, 16-bit prompt calls run on it.
-TEST_F(RoutedMoEAlgo4, Bf16AndFp16PromptCallsMatchTheReference) {
+// With N-tile flat parallel requested for prompts, 16-bit prompt calls run on
+// it.
+TEST_F(RoutedMoENTileFlatParallel, Bf16AndFp16PromptCallsMatchTheReference) {
     SKIP_WITHOUT_HALF_CUSTOM_KERNEL();
     namespace mm = zendnnl::lowoha::matmul;
     weight_cache_mode_pin cache_mode(1);
@@ -4767,7 +4838,7 @@ TEST_F(RoutedMoEAlgo4, Bf16AndFp16PromptCallsMatchTheReference) {
             pb.build(dt, 200, 256, 128, 4, 2, 0x5b49u);
             pb.act = act;
             const auto expected = reference_moe_half(pb);
-            algo4_decode_guard guard;
+            ntile_flat_parallel_decode_guard guard;
             selector_pin prompt(
                     mm::test_api::s_grp_matmul_auto_prompt_algo_override, 4);
             std::vector<uint16_t> out;
@@ -4781,9 +4852,9 @@ TEST_F(RoutedMoEAlgo4, Bf16AndFp16PromptCallsMatchTheReference) {
 }
 
 // At weight cache mode 2 a 16-bit prompt would pack the layer in place; while
-// ALGO 4 owns the decode the prompt leaves the weights raw for ALGO 4 to pack.
-// Whichever phase runs first, both stay correct.
-TEST_F(RoutedMoEAlgo4, Bf16AndFp16PhasesShareAWeightCache2Layer) {
+// N-tile flat parallel owns the decode, the prompt leaves the weights raw for
+// it to pack.  Whichever phase runs first, both stay correct.
+TEST_F(RoutedMoENTileFlatParallel, Bf16AndFp16PhasesShareAWeightCache2Layer) {
     SKIP_WITHOUT_HALF_CUSTOM_KERNEL();
     // A global pin of 3 holds the prompt on ALGO 3 while decode requests 4.
     struct order_t {
@@ -4814,7 +4885,7 @@ TEST_F(RoutedMoEAlgo4, Bf16AndFp16PhasesShareAWeightCache2Layer) {
                 pb.ids = from.ids;
                 pb.weights = from.weights;
             };
-            algo4_decode_guard guard;
+            ntile_flat_parallel_decode_guard guard;
             routed_weight_cache_mode_guard cache_mode_guard;
             std::vector<uint16_t> out;
             const auto run_decode = [&] {
@@ -4841,7 +4912,7 @@ TEST_F(RoutedMoEAlgo4, Bf16AndFp16PhasesShareAWeightCache2Layer) {
 
 // A layer's first decode waits for a generic call in flight before it packs
 // the layer from the weights, which that call leaves raw.
-TEST_F(RoutedMoEAlgo4, FirstCallWaitsForAGenericCallInFlight) {
+TEST_F(RoutedMoENTileFlatParallel, FirstCallWaitsForAGenericCallInFlight) {
     SKIP_WITHOUT_HALF_CUSTOM_KERNEL();
     namespace rm_api = zendnnl::lowoha::matmul::routed_moe::test_api;
     for (const data_type_t dt : served_half_types()) {
@@ -4856,7 +4927,7 @@ TEST_F(RoutedMoEAlgo4, FirstCallWaitsForAGenericCallInFlight) {
         const auto decode_expected = reference_moe_half(decode);
         decode.weights_owner = &prompt;
 
-        algo4_decode_guard guard;
+        ntile_flat_parallel_decode_guard guard;
         routed_weight_cache_mode_guard cache_mode_guard;
         struct pause_guard {
             std::atomic<bool> &pause
@@ -4904,9 +4975,11 @@ TEST_F(RoutedMoEAlgo4, FirstCallWaitsForAGenericCallInFlight) {
 }
 
 // A prompt pinned to ALGO 1 runs AOCL-DLP, whose reorder would land in the
-// caller's 16-bit buffers at weight cache mode 2; while ALGO 4 owns the
-// decode it reorders out of place, and the decode packs the raw weights.
-TEST_F(RoutedMoEAlgo4, Bf16AndFp16DecodeAfterAnAoclPromptMatchesReference) {
+// caller's 16-bit buffers at weight cache mode 2; while N-tile flat parallel
+// owns the decode it reorders out of place, and the decode packs the raw
+// weights.
+TEST_F(RoutedMoENTileFlatParallel,
+        Bf16AndFp16DecodeAfterAnAoclPromptMatchesReference) {
     SKIP_WITHOUT_HALF_CUSTOM_KERNEL();
     namespace mm = zendnnl::lowoha::matmul;
     for (const data_type_t dt : served_half_types()) {
@@ -4917,7 +4990,7 @@ TEST_F(RoutedMoEAlgo4, Bf16AndFp16DecodeAfterAnAoclPromptMatchesReference) {
             half_moe_problem pb;
             pb.build(dt, 200, 256, 128, 4, 2, 0x5b31u);
             half_moe_problem raw = pb;
-            algo4_decode_guard guard;
+            ntile_flat_parallel_decode_guard guard;
             routed_weight_cache_mode_guard cache_mode_guard;
             cache_mode_guard.config.set_grp_auto_mixed_inplace(mixed);
             selector_pin prompt_algo(
@@ -4941,9 +5014,10 @@ TEST_F(RoutedMoEAlgo4, Bf16AndFp16DecodeAfterAnAoclPromptMatchesReference) {
     }
 }
 
-// Weights another path packed in place before ALGO 4 was requested no longer
-// hold the layer's weights: ALGO 4 refuses the layer rather than read them.
-TEST_F(RoutedMoEAlgo4, Bf16AndFp16RefuseWeightsPackedInPlace) {
+// Weights another path packed in place before N-tile flat parallel was
+// requested no longer hold the layer's weights: N-tile flat parallel refuses
+// the layer rather than read them.
+TEST_F(RoutedMoENTileFlatParallel, Bf16AndFp16RefuseWeightsPackedInPlace) {
     SKIP_WITHOUT_HALF_CUSTOM_KERNEL();
     namespace mm = zendnnl::lowoha::matmul;
     for (const data_type_t dt : served_half_types()) {
@@ -4965,7 +5039,7 @@ TEST_F(RoutedMoEAlgo4, Bf16AndFp16RefuseWeightsPackedInPlace) {
         }
         ASSERT_FALSE(pb.w13 == raw.w13) << "the prompt must pack in place";
 
-        algo4_decode_guard guard;
+        ntile_flat_parallel_decode_guard guard;
         pb.keep_tokens(8);
         out.assign(static_cast<size_t>(pb.M) * pb.K, 0);
         poison(out);
@@ -4979,7 +5053,8 @@ TEST_F(RoutedMoEAlgo4, Bf16AndFp16RefuseWeightsPackedInPlace) {
 }
 
 // The same for an AOCL-DLP reorder into the caller's buffers.
-TEST_F(RoutedMoEAlgo4, Bf16AndFp16RefuseWeightsAoclReorderedInPlace) {
+TEST_F(RoutedMoENTileFlatParallel,
+        Bf16AndFp16RefuseWeightsAoclReorderedInPlace) {
     SKIP_WITHOUT_HALF_CUSTOM_KERNEL();
     namespace mm = zendnnl::lowoha::matmul;
     for (const data_type_t dt : served_half_types()) {
@@ -4999,7 +5074,7 @@ TEST_F(RoutedMoEAlgo4, Bf16AndFp16RefuseWeightsAoclReorderedInPlace) {
         }
         ASSERT_FALSE(pb.w13 == raw.w13) << "the prompt must reorder in place";
 
-        algo4_decode_guard guard;
+        ntile_flat_parallel_decode_guard guard;
         pb.keep_tokens(8);
         EXPECT_EQ(pb.run(out), status_t::unimplemented);
         std::vector<uint16_t> untouched(out.size());
@@ -5013,7 +5088,7 @@ TEST_F(RoutedMoEAlgo4, Bf16AndFp16RefuseWeightsAoclReorderedInPlace) {
 
 // An FP16 layer on a host without AVX512-FP16 fails before anything is
 // packed.
-TEST_F(RoutedMoEAlgo4, Fp16WithoutItsKernelsFailsBeforePacking) {
+TEST_F(RoutedMoENTileFlatParallel, Fp16WithoutItsKernelsFailsBeforePacking) {
     namespace mm = zendnnl::lowoha::matmul;
     if (mm::custom_kernel::avx512f16_available()) {
         GTEST_SKIP() << "this host has the FP16 kernels";
@@ -5021,7 +5096,7 @@ TEST_F(RoutedMoEAlgo4, Fp16WithoutItsKernelsFailsBeforePacking) {
     group_matmul_routed_moe_flush_weight_cache();
     half_moe_problem pb;
     pb.build(data_type_t::f16, 8, 256, 128, 4, 2, 0x5b34u);
-    algo4_decode_guard guard;
+    ntile_flat_parallel_decode_guard guard;
     std::vector<uint16_t> out;
     EXPECT_EQ(pb.run(out), status_t::unimplemented);
     std::vector<uint16_t> untouched(out.size());
@@ -5033,7 +5108,7 @@ TEST_F(RoutedMoEAlgo4, Fp16WithoutItsKernelsFailsBeforePacking) {
 
 // 16-bit source and output rows with padding past their K values: the
 // padding of the source is never read, and that of the output never written.
-TEST_F(RoutedMoEAlgo4, Bf16AndFp16PaddedRowsMatchTheUnpaddedCall) {
+TEST_F(RoutedMoENTileFlatParallel, Bf16AndFp16PaddedRowsMatchTheUnpaddedCall) {
     SKIP_WITHOUT_HALF_CUSTOM_KERNEL();
     namespace mm = zendnnl::lowoha::matmul;
     for (const data_type_t dt : served_half_types()) {
@@ -5043,7 +5118,7 @@ TEST_F(RoutedMoEAlgo4, Bf16AndFp16PaddedRowsMatchTheUnpaddedCall) {
             group_matmul_routed_moe_flush_weight_cache();
             half_moe_problem pb;
             pb.build(dt, tokens, 256, 128, 4, 2, 0x5b36u);
-            algo4_decode_guard guard;
+            ntile_flat_parallel_decode_guard guard;
             selector_pin prompt(
                     mm::test_api::s_grp_matmul_auto_prompt_algo_override, 4);
             std::vector<uint16_t> want, out;

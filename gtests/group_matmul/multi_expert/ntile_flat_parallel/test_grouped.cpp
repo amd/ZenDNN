@@ -15,9 +15,9 @@
  *******************************************************************************/
 
 /// @file test_grouped.cpp
-/// @brief ALGO 4 on grouped `group_matmul_direct` calls: each expert type,
-/// activation, fused down projection and weighted reduce against the AUTO
-/// path; the phases it serves; the calls it refuses; its packs.
+/// @brief N-tile flat parallel on grouped `group_matmul_direct` calls: each
+/// expert type, activation, fused down projection and weighted reduce against
+/// the AUTO path; the phases it serves; the calls it refuses; its packs.
 
 #include <gtest/gtest.h>
 
@@ -37,6 +37,7 @@
 #include "lowoha_operators/matmul/group_matmul/common/group_matmul_parallel_common.hpp"
 #include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/nr32_pack.hpp"
 #include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/ntile_flat_parallel.hpp"
+#include "lowoha_operators/matmul/group_matmul/multi_expert/ntile_flat_parallel/ntile_flat_parallel_config.hpp"
 #include "lowoha_operators/matmul/lowoha_common.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_weight_cache.hpp"
@@ -288,7 +289,8 @@ struct call_args {
     std::vector<void *> &dst;
     std::vector<mm::matmul_params> &params;
     mm::grp_matmul_fused_moe_params &fused;
-    /// Call ALGO 4's grouped executor itself rather than the public API.
+    /// Call N-tile flat parallel's grouped executor itself rather than the
+    /// public API.
     bool &direct;
 };
 
@@ -554,19 +556,19 @@ std::string activation_label(const act_t act) {
     }
 }
 
-/// Runs `c` under ALGO 4 and under AUTO and compares them.  FP16 needs
-/// AVX-512-FP16, without which the case passes untested.
+/// Runs `c` under N-tile flat parallel and under AUTO and compares them.  FP16
+/// needs AVX-512-FP16, without which the case passes untested.
 void check_against_auto(const grouped_case &c) {
     if (c.wei == data_type_t::f16 && !fp16_host()) return;
     const grouped_inputs in = make_inputs(c);
     reset_grp_matmul_caches();
-    grouped_result algo4;
+    grouped_result requested;
     {
         AlgoEnvGuard pin(4);
-        algo4 = run(c, in);
+        requested = run(c, in);
     }
-    ASSERT_EQ(algo4.status, status_t::success);
-    EXPECT_EQ(algo4.path, "ntile_flat_parallel");
+    ASSERT_EQ(requested.status, status_t::success);
+    EXPECT_EQ(requested.path, "ntile_flat_parallel");
     reset_grp_matmul_caches();
     grouped_result automatic;
     {
@@ -579,19 +581,19 @@ void check_against_auto(const grouped_case &c) {
     // fused quantized call quantizes a slightly different intermediate.
     const bool requantized = c.fused && quantized(c);
     const double tol = c.wei == data_type_t::f16 || requantized ? 0.03 : 0.02;
-    expect_close(algo4, automatic, tol);
+    expect_close(requested, automatic, tol);
     if (!automatic.op1.empty()) {
         // Op1's rows in the caller's `dst` are AUTO's too.
         grouped_result got, want;
-        got.values = algo4.op1;
+        got.values = requested.op1;
         want.values = automatic.op1;
         expect_close(got, want, 0.02);
     }
     // Rows the call quantizes get the scales AUTO gives them, per row or per
     // (row, group).
-    ASSERT_EQ(algo4.src_scales.size(), automatic.src_scales.size());
-    for (size_t i = 0; i < algo4.src_scales.size(); ++i) {
-        EXPECT_NEAR(algo4.src_scales[i], automatic.src_scales[i],
+    ASSERT_EQ(requested.src_scales.size(), automatic.src_scales.size());
+    for (size_t i = 0; i < requested.src_scales.size(); ++i) {
+        EXPECT_NEAR(requested.src_scales[i], automatic.src_scales[i],
                 1e-6f * std::fabs(automatic.src_scales[i]))
                 << "source scale " << i;
     }
@@ -621,18 +623,18 @@ grouped_case case_of(const type_case &t) {
 
 /// Pins what these tests assume of the process, whatever its environment
 /// sets: weight cache mode 1 and no phase setting.
-class Algo4Grouped : public ::testing::Test {
+class NTileFlatParallelGrouped : public ::testing::Test {
 protected:
     zendnnl::common::matmul_config_t &config_
             = zendnnl::common::matmul_config_t::instance();
     const int32_t mode_ = config_.get_weight_cache();
     AutoDecodeAlgoOverride decode_ {7};
     AutoPromptAlgoOverride prompt_ {7};
-    Algo4Grouped() { config_.set_weight_cache(1); }
-    ~Algo4Grouped() override { config_.set_weight_cache(mode_); }
+    NTileFlatParallelGrouped() { config_.set_weight_cache(1); }
+    ~NTileFlatParallelGrouped() override { config_.set_weight_cache(mode_); }
 };
 
-TEST_F(Algo4Grouped, MatchesAutoForEachTypeAndActivation) {
+TEST_F(NTileFlatParallelGrouped, MatchesAutoForEachTypeAndActivation) {
     for (const type_case &t : kTypes) {
         for (const act_t act : {act_t::none, act_t::silu_and_mul,
                      act_t::gelu_and_mul, act_t::swiglu_oai_mul}) {
@@ -649,7 +651,7 @@ TEST_F(Algo4Grouped, MatchesAutoForEachTypeAndActivation) {
     }
 }
 
-TEST_F(Algo4Grouped, MatchesAutoWithBiasAndPromptRows) {
+TEST_F(NTileFlatParallelGrouped, MatchesAutoWithBiasAndPromptRows) {
     for (const type_case &t : kTypes) {
         SCOPED_TRACE(t.name);
         grouped_case c = case_of(t);
@@ -659,7 +661,7 @@ TEST_F(Algo4Grouped, MatchesAutoWithBiasAndPromptRows) {
     }
 }
 
-TEST_F(Algo4Grouped, FusedMatchesAutoInEveryOutputMode) {
+TEST_F(NTileFlatParallelGrouped, FusedMatchesAutoInEveryOutputMode) {
     for (const type_case &t : kTypes) {
         // 0: the caller's rows for both outputs; 1: the library's Op1 rows;
         // 2: the library's Op1 rows and Op2 into the source rows.
@@ -684,7 +686,7 @@ TEST_F(Algo4Grouped, FusedMatchesAutoInEveryOutputMode) {
     }
 }
 
-TEST_F(Algo4Grouped, WeightedReduceMatchesAuto) {
+TEST_F(NTileFlatParallelGrouped, WeightedReduceMatchesAuto) {
     for (const type_case &t : kTypes) {
         for (const bool fused : {false, true}) {
             SCOPED_TRACE(std::string(t.name) + (fused ? " fused" : ""));
@@ -700,7 +702,7 @@ TEST_F(Algo4Grouped, WeightedReduceMatchesAuto) {
 
 // Per-group weight scales on s8 and s4, against one source scale per row and
 // one per (row, weight group), plain and fused.
-TEST_F(Algo4Grouped, MatchesAutoWithScaleGroups) {
+TEST_F(NTileFlatParallelGrouped, MatchesAutoWithScaleGroups) {
     for (const type_case &t : kTypes) {
         if (t.wei != data_type_t::s8 && t.wei != data_type_t::s4) continue;
         for (const bool src_groups : {false, true}) {
@@ -721,7 +723,7 @@ TEST_F(Algo4Grouped, MatchesAutoWithScaleGroups) {
 }
 
 // Gate and up values past SwiGLU-OAI's clamp limit.
-TEST_F(Algo4Grouped, MatchesAutoWhereTheActivationClamps) {
+TEST_F(NTileFlatParallelGrouped, MatchesAutoWhereTheActivationClamps) {
     for (const type_case &t : kTypes) {
         for (const bool fused : {false, true}) {
             SCOPED_TRACE(std::string(t.name) + (fused ? " fused" : ""));
@@ -741,7 +743,7 @@ TEST_F(Algo4Grouped, MatchesAutoWhereTheActivationClamps) {
 
 // Up halves that are not a multiple of 16 columns, and widths that are not a
 // multiple of the 32-column blocks.
-TEST_F(Algo4Grouped, MatchesAutoOnUnalignedWidths) {
+TEST_F(NTileFlatParallelGrouped, MatchesAutoOnUnalignedWidths) {
     for (const type_case &t : kTypes) {
         if (t.wei == data_type_t::s4) continue;
         for (const int N : {200, 104}) {
@@ -757,7 +759,7 @@ TEST_F(Algo4Grouped, MatchesAutoOnUnalignedWidths) {
 
 // A tight Op1 output (stride N / 2) holds what a wide one holds in its first
 // N / 2 columns.
-TEST_F(Algo4Grouped, TightOutputMatchesWide) {
+TEST_F(NTileFlatParallelGrouped, TightOutputMatchesWide) {
     AlgoEnvGuard pin(4);
     for (const type_case &t : kTypes) {
         if (t.wei == data_type_t::f16 && !fp16_host()) continue;
@@ -777,9 +779,9 @@ TEST_F(Algo4Grouped, TightOutputMatchesWide) {
     reset_grp_matmul_caches();
 }
 
-// Each phase request sends that phase's calls to ALGO 4 and leaves the other
-// phase's, and calls of one operation, on AUTO.
-TEST_F(Algo4Grouped, RunsOnlyTheRequestedPhase) {
+// Each phase request sends that phase's calls to N-tile flat parallel and
+// leaves the other phase's, and calls of one operation, on AUTO.
+TEST_F(NTileFlatParallelGrouped, RunsOnlyTheRequestedPhase) {
     grouped_case decode;
     decode.wei = data_type_t::s8;
     decode.M = {2, 1, 4, 3};
@@ -814,9 +816,9 @@ TEST_F(Algo4Grouped, RunsOnlyTheRequestedPhase) {
     reset_grp_matmul_caches();
 }
 
-// Calls ALGO 4 cannot serve fail under it and leave their outputs as they
-// were, next to a call it serves.
-TEST_F(Algo4Grouped, RefusesWhatItCannotServeWithoutWriting) {
+// Calls N-tile flat parallel cannot serve fail under it and leave their outputs
+// as they were, next to a call it serves.
+TEST_F(NTileFlatParallelGrouped, RefusesWhatItCannotServeWithoutWriting) {
     AlgoEnvGuard pin(4);
     reset_grp_matmul_caches();
     mm::matmul_post_op relu;
@@ -836,6 +838,8 @@ TEST_F(Algo4Grouped, RefusesWhatItCannotServeWithoutWriting) {
     grouped_case weight_only = bf16;
     weight_only.wei = data_type_t::s4;
     weight_only.dynamic_quant = false;
+    grouped_case s4_rows = weight_only;
+    s4_rows.src_s8 = true;
     grouped_case uncached = s8;
     uncached.weight_cache = 0;
     grouped_case biased = s8;
@@ -862,6 +866,7 @@ TEST_F(Algo4Grouped, RefusesWhatItCannotServeWithoutWriting) {
             {"control", s8, {}},
             {"post-op", post_op, {}},
             {"weight-only s4", weight_only, {}},
+            {"s4 weights with the caller's s8 rows", s4_rows, {}},
             {"weight cache mode 0", uncached, {}},
             {"alpha", s8,
                     second([](call_args &a, int i) { a.alpha[i] = 2.0f; })},
@@ -935,7 +940,7 @@ TEST_F(Algo4Grouped, RefusesWhatItCannotServeWithoutWriting) {
             EXPECT_EQ(r.path, "ntile_flat_parallel");
             continue;
         }
-        // ALGO 4's own refusal, not an upstream check's.
+        // N-tile flat parallel's own refusal, not an upstream check's.
         EXPECT_EQ(r.status, status_t::unimplemented);
         if (u.c.op2_internal) {
             // Op2 writes into the source rows: they hold the source still.
@@ -968,7 +973,7 @@ TEST_F(Algo4Grouped, RefusesWhatItCannotServeWithoutWriting) {
 
 // The first call packs its experts and the prepack extras; a call of other
 // experts of the same weights packs nothing; the flush drops every pack.
-TEST_F(Algo4Grouped, PacksTheExtrasOnceAndFlushes) {
+TEST_F(NTileFlatParallelGrouped, PacksTheExtrasOnceAndFlushes) {
     grouped_case c;
     c.wei = data_type_t::s8;
     c.fused = true;
@@ -995,7 +1000,7 @@ TEST_F(Algo4Grouped, PacksTheExtrasOnceAndFlushes) {
 // Calls that name the same weights, in any order and with other experts
 // given rows, share one call site, and write what calls through the store
 // alone write.
-TEST_F(Algo4Grouped, CallsNamingTheSameWeightsShareOneSite) {
+TEST_F(NTileFlatParallelGrouped, CallsNamingTheSameWeightsShareOneSite) {
     for (const data_type_t wei : {data_type_t::bf16, data_type_t::s8}) {
         SCOPED_TRACE(wei == data_type_t::s8 ? "da8w8" : "bf16");
         grouped_case c;
@@ -1023,7 +1028,7 @@ TEST_F(Algo4Grouped, CallsNamingTheSameWeightsShareOneSite) {
 // Extras named without their weight scales, as frameworks pass them, are
 // packed on the first call all the same; an extra that later gets rows
 // packs nothing more, and both calls write what AUTO writes.
-TEST_F(Algo4Grouped, PacksExtrasThatComeWithoutTheirScales) {
+TEST_F(NTileFlatParallelGrouped, PacksExtrasThatComeWithoutTheirScales) {
     for (const data_type_t wei : {data_type_t::s8, data_type_t::s4}) {
         SCOPED_TRACE(wei == data_type_t::s8 ? "da8w8" : "w4a8");
         grouped_case c;
@@ -1032,21 +1037,21 @@ TEST_F(Algo4Grouped, PacksExtrasThatComeWithoutTheirScales) {
         c.M = {2, 3, 4, 1};
         const grouped_inputs in = make_inputs(c);
         reset_grp_matmul_caches();
-        std::vector<grouped_result> algo4;
+        std::vector<grouped_result> requested;
         {
             AlgoEnvGuard pin(4);
-            algo4.push_back(run(c, in, {0, 1, 2, 3}, 2, true));
-            ASSERT_EQ(algo4.back().status, status_t::success);
-            EXPECT_EQ(algo4.back().path, "ntile_flat_parallel");
+            requested.push_back(run(c, in, {0, 1, 2, 3}, 2, true));
+            ASSERT_EQ(requested.back().status, status_t::success);
+            EXPECT_EQ(requested.back().path, "ntile_flat_parallel");
             EXPECT_EQ(mm::test_api::ntile_flat_parallel_packs(), 8u);
-            algo4.push_back(run(c, in, {2, 3, 0, 1}, 2, true));
-            ASSERT_EQ(algo4.back().status, status_t::success);
+            requested.push_back(run(c, in, {2, 3, 0, 1}, 2, true));
+            ASSERT_EQ(requested.back().status, status_t::success);
             EXPECT_EQ(mm::test_api::ntile_flat_parallel_packs(), 8u);
         }
         reset_grp_matmul_caches();
         AlgoEnvGuard pin(0);
-        expect_close(algo4[0], run(c, in, {0, 1, 2, 3}, 2, true), 0.03);
-        expect_close(algo4[1], run(c, in, {2, 3, 0, 1}, 2, true), 0.03);
+        expect_close(requested[0], run(c, in, {0, 1, 2, 3}, 2, true), 0.03);
+        expect_close(requested[1], run(c, in, {2, 3, 0, 1}, 2, true), 0.03);
         reset_grp_matmul_caches();
     }
 }
@@ -1062,7 +1067,7 @@ bool unwritten(const grouped_result &r) {
 
 // DA8W8 calls write what AUTO writes with either source kernel, and run the
 // one pinned.
-TEST_F(Algo4Grouped, MatchesAutoWithEitherDa8w8SourceKernel) {
+TEST_F(NTileFlatParallelGrouped, MatchesAutoWithEitherDa8w8SourceKernel) {
     auto &u8_calls = mm::test_api::s_ntile_flat_parallel_u8_src_calls;
     for (const bool src_s8 : {false, true}) {
         for (const int u8 : {0, 1}) {
@@ -1089,7 +1094,7 @@ TEST_F(Algo4Grouped, MatchesAutoWithEitherDa8w8SourceKernel) {
 }
 
 // Both decode schedules, at every team size, write the same bytes.
-TEST_F(Algo4Grouped, DecodeSchedulesAndTeamSizesWriteTheSameBytes) {
+TEST_F(NTileFlatParallelGrouped, DecodeSchedulesAndTeamSizesWriteTheSameBytes) {
     AlgoEnvGuard pin(4);
     for (const type_case &t : kTypes) {
         if (t.wei == data_type_t::f16 && !fp16_host()) continue;
@@ -1121,9 +1126,123 @@ TEST_F(Algo4Grouped, DecodeSchedulesAndTeamSizesWriteTheSameBytes) {
     reset_grp_matmul_caches();
 }
 
+/// Reads `text` as N-tile flat parallel's config and drops every plan made
+/// under the last.
+void use_ntile_flat_parallel_config(const char *text) {
+    mm::test_api::set_ntile_flat_parallel_config(text);
+    mm::ntile_flat_parallel::flush();
+    reset_grp_matmul_caches();
+}
+
+/// Reads the environment's config again when it goes, as a test that
+/// `ASSERT`s out of its loop still must.
+struct config_restore {
+    ~config_restore() { use_ntile_flat_parallel_config(nullptr); }
+};
+
+// Every N-tile flat parallel setting changes only how a call's work is cut,
+// ordered and staged, so each writes the same bytes as the defaults, in both
+// phases.
+TEST_F(NTileFlatParallelGrouped, SettingsWriteTheSameBytes) {
+    AlgoEnvGuard pin(4);
+    const config_restore restore;
+    const char *const configs[] = {
+            "units=1,prompt_units=1",
+            "units=8,prompt_units=12",
+            "sweep_rows=1",
+            "sweep_rows=100000",
+            "unit_order=queue",
+            "unit_order=own",
+            "heavy_light=off",
+            "l2_frac=0.25,subtile_rows=4",
+            "l2_frac=1",
+            "u8_src=on",
+            "u8_src=off",
+            "wait_spins=0",
+    };
+    for (const type_case &t : kTypes) {
+        if (t.wei == data_type_t::f16 && !fp16_host()) continue;
+        for (const bool prompt : {false, true}) {
+            SCOPED_TRACE(
+                    std::string(t.name) + (prompt ? " prompt" : " decode"));
+            grouped_case c = case_of(t);
+            c.fused = true;
+            if (prompt) c.M = {70, 3, 0, 129};
+            const grouped_inputs in = make_inputs(c);
+            use_ntile_flat_parallel_config("");
+            const grouped_result first = run(c, in);
+            ASSERT_EQ(first.status, status_t::success);
+            for (const char *config : configs) {
+                SCOPED_TRACE(config);
+                use_ntile_flat_parallel_config(config);
+                EXPECT_TRUE(mm::test_api::ntile_flat_parallel_config_warnings()
+                                    .empty());
+                const grouped_result r = run(c, in);
+                ASSERT_EQ(r.status, status_t::success);
+                EXPECT_EQ(r.path, "ntile_flat_parallel");
+                EXPECT_EQ(r.values, first.values);
+            }
+        }
+    }
+}
+
+// The call settings reach the unit queue: units per thread in decode and in
+// prompt, which follow the call's phase whatever sweeps, and the rows above
+// which units sweep.
+TEST_F(NTileFlatParallelGrouped, CallSettingsReachTheQueue) {
+    AlgoEnvGuard pin(4);
+    const config_restore restore;
+    hook_pin capture(mm::test_api::s_capture_ntile_flat_parallel, true);
+    const auto queue_of = [](const char *config, const grouped_case &c) {
+        use_ntile_flat_parallel_config(config);
+        const grouped_result r = run(c, make_inputs(c));
+        EXPECT_EQ(r.status, status_t::success);
+        return std::make_pair(
+                mm::test_api::s_ntile_flat_parallel_last_units.load(),
+                mm::test_api::s_ntile_flat_parallel_last_sweep.load());
+    };
+    grouped_case decode;
+    decode.wei = data_type_t::bf16;
+    decode.threads = 8;
+    grouped_case prompt = decode;
+    prompt.M = {70, 3, 0, 129};
+    const auto d1 = queue_of("units=1", decode);
+    const auto d8 = queue_of("units=8", decode);
+    EXPECT_FALSE(d1.second);
+    EXPECT_LT(d1.first, d8.first);
+    EXPECT_TRUE(queue_of("sweep_rows=1", decode).second);
+    const auto p1 = queue_of("prompt_units=1", prompt);
+    const auto p12 = queue_of("prompt_units=12", prompt);
+    EXPECT_TRUE(p1.second);
+    EXPECT_LT(p1.first, p12.first);
+    EXPECT_FALSE(queue_of("sweep_rows=1000", prompt).second);
+    EXPECT_LT(queue_of("sweep_rows=1,units=1,prompt_units=12", decode).first,
+            queue_of("sweep_rows=1,units=8,prompt_units=12", decode).first);
+    EXPECT_LT(queue_of("sweep_rows=1000,units=12,prompt_units=1", prompt).first,
+            queue_of("sweep_rows=1000,units=12,prompt_units=12", prompt).first);
+}
+
+// Where no test pin does, the u8_src setting picks DA8W8's source kernels.
+TEST_F(NTileFlatParallelGrouped, TheU8SourceSettingPicksTheKernels) {
+    AlgoEnvGuard pin(4);
+    const config_restore restore;
+    auto &u8_calls = mm::test_api::s_ntile_flat_parallel_u8_src_calls;
+    for (const bool on : {false, true}) {
+        SCOPED_TRACE(on ? "u8_src=on" : "u8_src=off");
+        use_ntile_flat_parallel_config(on ? "u8_src=on" : "u8_src=off");
+        hook_pin capture(mm::test_api::s_capture_ntile_flat_parallel, true);
+        const uint64_t before = u8_calls.load();
+        grouped_case c;
+        c.wei = data_type_t::s8;
+        const grouped_result r = run(c, make_inputs(c));
+        ASSERT_EQ(r.status, status_t::success);
+        EXPECT_EQ(u8_calls.load() - before, on ? 1u : 0u);
+    }
+}
+
 // New scale buffers for weights already packed give the call their values;
 // the weights' packs stay.
-TEST_F(Algo4Grouped, MovedScalesKeepTheWeightPacks) {
+TEST_F(NTileFlatParallelGrouped, MovedScalesKeepTheWeightPacks) {
     for (const type_case &t : kTypes) {
         if (!quantized(case_of(t))) continue;
         SCOPED_TRACE(t.name);
@@ -1170,7 +1289,7 @@ TEST_F(Algo4Grouped, MovedScalesKeepTheWeightPacks) {
 // A call site serves an expert only with the scales its pack holds: a call
 // that moves one projection's scales, the other's staying, writes what it
 // writes on fresh packs.
-TEST_F(Algo4Grouped, ACallSiteServesOnlyTheScalesItWasMadeWith) {
+TEST_F(NTileFlatParallelGrouped, ACallSiteServesOnlyTheScalesItWasMadeWith) {
     for (const type_case &t : kTypes) {
         if (!quantized(case_of(t))) continue;
         // 0: a call without a down projection moves W13's scales; 1 and 2: a
@@ -1222,7 +1341,7 @@ TEST_F(Algo4Grouped, ACallSiteServesOnlyTheScalesItWasMadeWith) {
 // Calls that name only their experts with rows, each pair in turn, with the
 // scales in other buffers every time: the store keeps one scaled pack per
 // weight, and no call site keeps one the store replaced.
-TEST_F(Algo4Grouped, MovedScalesLeaveOneScaledPackPerWeight) {
+TEST_F(NTileFlatParallelGrouped, MovedScalesLeaveOneScaledPackPerWeight) {
     grouped_case c;
     c.wei = data_type_t::s8;
     c.fused = true;
@@ -1265,7 +1384,7 @@ TEST_F(Algo4Grouped, MovedScalesLeaveOneScaledPackPerWeight) {
 
 // At most 1,024 call sites and 4,096 pools whose prepack extras were packed
 // are kept: one more drops them all.
-TEST_F(Algo4Grouped, CallSitesAndPoolFingerprintsAreBounded) {
+TEST_F(NTileFlatParallelGrouped, CallSitesAndPoolFingerprintsAreBounded) {
     grouped_case c;
     c.act = act_t::none;
     c.K = 32;
@@ -1311,7 +1430,7 @@ TEST_F(Algo4Grouped, CallSitesAndPoolFingerprintsAreBounded) {
 // with another activation, other source kernels or source scales of other
 // groups make a second site, and the second call writes what it writes on
 // fresh packs.
-TEST_F(Algo4Grouped, ACallSiteServesOnlyTheCallsOfItsPlans) {
+TEST_F(NTileFlatParallelGrouped, ACallSiteServesOnlyTheCallsOfItsPlans) {
     auto &u8 = mm::test_api::s_ntile_flat_parallel_u8_src_override;
     for (const int change : {0, 1, 2}) {
         SCOPED_TRACE(change == 0      ? "activation"
@@ -1351,7 +1470,7 @@ TEST_F(Algo4Grouped, ACallSiteServesOnlyTheCallsOfItsPlans) {
 // One set of weight buffers read at two shapes, [K, N] and then [N, K] with K
 // and N swapped, makes two call sites: the second call writes what it writes
 // on fresh packs.
-TEST_F(Algo4Grouped, OneSetOfBuffersAtTwoShapesMakesTwoCallSites) {
+TEST_F(NTileFlatParallelGrouped, OneSetOfBuffersAtTwoShapesMakesTwoCallSites) {
     grouped_case wide;
     wide.K = 192;
     wide.N = 256;
@@ -1384,7 +1503,8 @@ TEST_F(Algo4Grouped, OneSetOfBuffersAtTwoShapesMakesTwoCallSites) {
 
 // A pack that runs out of memory fails its call with a memory status and
 // writes nothing; the next call packs and runs.
-TEST_F(Algo4Grouped, RunningOutOfMemoryWhilePackingFailsOnlyThatCall) {
+TEST_F(NTileFlatParallelGrouped,
+        RunningOutOfMemoryWhilePackingFailsOnlyThatCall) {
     grouped_case c;
     c.wei = data_type_t::s8;
     c.fused = true;
@@ -1407,10 +1527,10 @@ TEST_F(Algo4Grouped, RunningOutOfMemoryWhilePackingFailsOnlyThatCall) {
     reset_grp_matmul_caches();
 }
 
-// At weight cache mode 2, while ALGO 4 is requested for a phase, the calls it
-// does not serve (one operation of an MoE layer, or the other phase) leave the
-// caller's weights raw, and its own calls are served.
-TEST_F(Algo4Grouped, OtherCallsLeaveTheWeightsRawAtCacheMode2) {
+// At weight cache mode 2, while N-tile flat parallel is requested for a phase,
+// the calls it does not serve (one operation of an MoE layer, or the other
+// phase) leave the caller's weights raw, and its own calls are served.
+TEST_F(NTileFlatParallelGrouped, OtherCallsLeaveTheWeightsRawAtCacheMode2) {
     config_.set_weight_cache(2);
     struct setting {
         const char *name;
@@ -1529,9 +1649,9 @@ void rewrite_with_native(const grouped_case &c, std::vector<uint8_t> &w) {
 }
 
 // Weights another path rewrote into the caller's buffers no longer hold the
-// operation's weights: ALGO 4 refuses them rather than read them, also after
-// another backend's weight cache is cleared.
-TEST_F(Algo4Grouped, RefusesWeightsPackedInPlace) {
+// operation's weights: N-tile flat parallel refuses them rather than read them,
+// also after another backend's weight cache is cleared.
+TEST_F(NTileFlatParallelGrouped, RefusesWeightsPackedInPlace) {
     enum class rewriter { aocl, custom_kernel, onednn, native };
     const std::pair<const char *, rewriter> rewriters[] = {
             {"AOCL-DLP", rewriter::aocl},
@@ -1575,7 +1695,7 @@ TEST_F(Algo4Grouped, RefusesWeightsPackedInPlace) {
 }
 
 // FP16 calls on a host without AVX512-FP16 fail before anything is packed.
-TEST_F(Algo4Grouped, RefusesFp16WithoutItsKernelsBeforePacking) {
+TEST_F(NTileFlatParallelGrouped, RefusesFp16WithoutItsKernelsBeforePacking) {
     if (fp16_host()) GTEST_SKIP() << "this host has the FP16 kernels";
     AlgoEnvGuard pin(4);
     reset_grp_matmul_caches();
@@ -1593,7 +1713,7 @@ TEST_F(Algo4Grouped, RefusesFp16WithoutItsKernelsBeforePacking) {
 
 // A W4A8 down projection whose depth is not whole octets, with one scale per
 // column, has no kernel: the call fails before anything is packed.
-TEST_F(Algo4Grouped, RefusesW4a8ScalesNoKernelReadsBeforePacking) {
+TEST_F(NTileFlatParallelGrouped, RefusesW4a8ScalesNoKernelReadsBeforePacking) {
     AlgoEnvGuard pin(4);
     reset_grp_matmul_caches();
     grouped_case c;
@@ -1616,7 +1736,7 @@ TEST_F(Algo4Grouped, RefusesW4a8ScalesNoKernelReadsBeforePacking) {
 // A fused call without its down widths or an output's strides fails rather
 // than read past them, whether or not the public API's diagnostics check it
 // first.  The emptied vectors own no storage, so a read past them faults.
-TEST_F(Algo4Grouped, RefusesAFusedCallWithoutItsWidthsOrStrides) {
+TEST_F(NTileFlatParallelGrouped, RefusesAFusedCallWithoutItsWidthsOrStrides) {
     AlgoEnvGuard pin(4);
     reset_grp_matmul_caches();
     grouped_case c;
@@ -1659,7 +1779,7 @@ TEST_F(Algo4Grouped, RefusesAFusedCallWithoutItsWidthsOrStrides) {
 
 // The caller's s8 rows with one source scale, in a buffer of that scale
 // alone, write what they write with that scale given to every row.
-TEST_F(Algo4Grouped, OneSourceScaleForS8RowsMatchesThePerRowForm) {
+TEST_F(NTileFlatParallelGrouped, OneSourceScaleForS8RowsMatchesThePerRowForm) {
     AlgoEnvGuard pin(4);
     for (const bool fused : {false, true}) {
         SCOPED_TRACE(fused ? "fused" : "plain");
@@ -1694,10 +1814,11 @@ TEST_F(Algo4Grouped, OneSourceScaleForS8RowsMatchesThePerRowForm) {
     reset_grp_matmul_caches();
 }
 
-// A dense projection's gated call is no MoE call: while ALGO 4 is
+// A dense projection's gated call is no MoE call: while N-tile flat parallel is
 // requested, it packs its weight in place at weight cache mode 2 as it does
-// without ALGO 4.
-TEST_F(Algo4Grouped, DenseGatedProjectionsPackAsWithoutAlgo4) {
+// without N-tile flat parallel.
+TEST_F(NTileFlatParallelGrouped,
+        DenseGatedProjectionsPackAsWithoutNTileFlatParallel) {
     config_.set_weight_cache(2);
     const int M = 1, K = 512, N = 2048;
     std::mt19937 rng(23);
@@ -1730,14 +1851,15 @@ TEST_F(Algo4Grouped, DenseGatedProjectionsPackAsWithoutAlgo4) {
         in_place.push_back(w != raw);
         reset_grp_matmul_caches();
     }
-    EXPECT_TRUE(in_place[0]) << "the call packs in place without ALGO 4";
+    EXPECT_TRUE(in_place[0])
+            << "the call packs in place without N-tile flat parallel";
     EXPECT_EQ(in_place[1], in_place[0]);
 }
 
 // Calls of one layer that give rows to other experts, named as zentorch
 // names them (those with rows first, the rest as extras without their
 // scales), keep one pool per projection and one call site.
-TEST_F(Algo4Grouped, RotatingActiveExpertsKeepOnePoolEach) {
+TEST_F(NTileFlatParallelGrouped, RotatingActiveExpertsKeepOnePoolEach) {
     grouped_case c;
     c.wei = data_type_t::s8;
     c.fused = true;
@@ -1759,7 +1881,7 @@ TEST_F(Algo4Grouped, RotatingActiveExpertsKeepOnePoolEach) {
 // Per-tensor and F16 weight scales write what per-column F32 scales of the
 // same values write, and one buffer given as per-tensor scales and then as
 // per-column ones gives the per-column result.
-TEST_F(Algo4Grouped, PerTensorAndF16ScalesMatchPerColumnF32Scales) {
+TEST_F(NTileFlatParallelGrouped, PerTensorAndF16ScalesMatchPerColumnF32Scales) {
     AlgoEnvGuard pin(4);
     for (const data_type_t wei : {data_type_t::s8, data_type_t::s4}) {
         for (const bool fused : {false, true}) {
@@ -1857,7 +1979,7 @@ TEST_F(Algo4Grouped, PerTensorAndF16ScalesMatchPerColumnF32Scales) {
 // packs, leaves the call packs of its own: it succeeds, writing what it
 // writes alone, and leaves no pack or call site behind, so the host may
 // reload the weights in place once both return.
-TEST_F(Algo4Grouped, AFlushDuringACallLeavesNothingBehind) {
+TEST_F(NTileFlatParallelGrouped, AFlushDuringACallLeavesNothingBehind) {
     for (const bool after_entry : {false, true}) {
         SCOPED_TRACE(after_entry ? "flush after the call read the flush count"
                                  : "flush before the call publishes");
@@ -1925,7 +2047,7 @@ void call_during_flush() {
 // A call made while a flush runs, after the flush has dropped the store,
 // packs its weights for itself: it writes what it writes alone and leaves no
 // pack or call site behind.
-TEST_F(Algo4Grouped, ACallDuringAFlushLeavesNothingBehind) {
+TEST_F(NTileFlatParallelGrouped, ACallDuringAFlushLeavesNothingBehind) {
     grouped_case c;
     c.wei = data_type_t::s8;
     c.fused = true;

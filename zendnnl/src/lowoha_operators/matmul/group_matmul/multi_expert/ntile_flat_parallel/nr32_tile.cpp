@@ -19,7 +19,7 @@
 #include <algorithm>
 #include <limits>
 
-#include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
+#include "lowoha_operators/matmul/group_matmul/common/grp_matmul_machine.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -29,50 +29,39 @@ namespace nr32 {
 
 namespace {
 
-/// Rows a subtile is sized for: the most a decode tile has.
-constexpr int kSubtileRows = 16;
-
-bool quantized(const data_type_t wei) {
-    return wei == data_type_t::s8 || wei == data_type_t::s4;
-}
-
-/// Columns, a multiple of `kNr`, whose weights fit the L2 budget beside
-/// `kSubtileRows` source rows of `K` elements.
+/// Columns, a multiple of `kNr`, whose weights fit `b`'s L2 budget beside
+/// its subtile rows of `K` elements.
 int l2_subtile_cols(const int K, const int src_bytes, const int wei_bytes,
-        const int extra_bytes_per_col) {
-    const int64_t budget = l2_budget_bytes();
-    const int64_t input = static_cast<int64_t>(kSubtileRows) * K * src_bytes;
+        const int extra_bytes_per_col, const plan_budget &b) {
+    const int64_t input = static_cast<int64_t>(b.subtile_rows) * K * src_bytes;
     const int64_t per_col
             = static_cast<int64_t>(K) * wei_bytes + extra_bytes_per_col;
-    if (budget <= input) return kNr;
-    const int64_t cols = (budget - input) / per_col;
+    if (b.l2_bytes <= input) return kNr;
+    const int64_t cols = (b.l2_bytes - input) / per_col;
     return std::max(static_cast<int>(cols / kNr * kNr), kNr);
 }
 
 } // namespace
 
-int64_t l2_budget_bytes() {
-    static const int64_t budget = [] {
-        const int64_t l2 = native::detect_uarch().l2_bytes;
-        return (l2 >= 64 * 1024 ? l2 : 256 * 1024) * 4 / 5;
-    }();
-    return budget;
+plan_budget default_budget() {
+    return {grp_machine::machine().l2_budget_bytes, 16};
 }
 
 bool make_plan(const pack_layout &layout, const epilogue ep, const bool src_u8,
-        tile_plan &plan, const bool src_groups) {
+        tile_plan &plan, const bool src_groups, const plan_budget &budget) {
     const weight_desc &d = layout.desc;
     plan = tile_plan {};
     if (!isa_supported(d.wei) || (gated(ep) && d.N % 2 != 0)) return false;
+    const format_desc &f = *layout.fmt;
     plan.ep = ep;
     plan.src_u8 = src_u8;
-    plan.src_groups = quantized(d.wei) && src_groups && layout.groups > 1;
+    plan.src_groups = f.quantized && src_groups && layout.groups > 1;
     const scale_groups groups {
-            d.wei == data_type_t::s8 && layout.groups > 1, plan.src_groups};
-    const bool f16_split = d.wei == data_type_t::f16 && split(ep);
-    plan.step = f16_split ? 2 * kNr : kNr;
+            f.quantized && layout.groups > 1, plan.src_groups};
+    // A split step is a gate vector and an up vector.
+    const int vec = f.vec_cols();
+    plan.step = split(ep) ? 2 * vec : kNr;
     if (split(ep)) {
-        const int vec = f16_split ? kNr : kNr / 2;
         plan.up = d.N / 2;
         plan.unaligned = plan.up % vec != 0;
         plan.cols = 2 * ((plan.up + vec - 1) / vec * vec);
@@ -81,35 +70,32 @@ bool make_plan(const pack_layout &layout, const epilogue ep, const bool src_u8,
         plan.cols = layout.n_pad;
         plan.out_cols = gated(ep) ? d.N / 2 : d.N;
     }
-    plan.max_mr = max_mr(d.wei);
+    plan.max_mr = f.max_mr;
     for (int mr = 1; mr <= plan.max_mr; ++mr) {
         plan.kernels[mr]
                 = select(d.wei, mr, ep, src_u8, plan.unaligned, groups);
         if (plan.kernels[mr] == nullptr) return false;
     }
-    if (split(ep) && !f16_split && plan.up % kNr == 0
-            && max_mr_wide(d.wei) > 0) {
+    if (split(ep) && plan.up % kNr == 0 && f.max_mr_wide > 0) {
         plan.wide = true;
         plan.step = 2 * kNr;
-        plan.wide_max_mr = max_mr_wide(d.wei);
-        // s4's wide kernels take 3 rows; taller tiles keep the 6-row ones.
-        plan.wide_rows = d.wei == data_type_t::s4
-                ? plan.wide_max_mr
-                : std::numeric_limits<int>::max();
+        plan.wide_max_mr = f.max_mr_wide;
+        // Wide kernels of fewer rows than the narrow ones (s4's take 3)
+        // leave taller tiles to the narrow ones.
+        plan.wide_rows = f.wide_rows > 0 ? f.wide_rows
+                                         : std::numeric_limits<int>::max();
         for (int mr = 1; mr <= plan.wide_max_mr; ++mr) {
             for (const bool two : {false, true}) {
                 plan.wide_kernels[two][mr]
                         = select_wide(d.wei, mr, ep, src_u8, two, groups);
             }
             if (plan.wide_kernels[0][mr] == nullptr) return false;
-            if (d.wei == data_type_t::bf16 && mr <= 3
-                    && plan.wide_kernels[1][mr] == nullptr) {
+            if (mr <= f.two_chain_rows && plan.wide_kernels[1][mr] == nullptr)
                 return false;
-            }
         }
     }
-    const bool q = quantized(d.wei);
-    const int sub = l2_subtile_cols(d.K, q ? 1 : 2, q ? 1 : 2, q ? 4 : 0);
+    const int sub = l2_subtile_cols(
+            d.K, f.src_bytes(), f.whole_bytes(), f.quantized ? 4 : 0, budget);
     plan.subtile = std::max(sub / plan.step * plan.step, plan.step);
     return true;
 }
@@ -119,10 +105,10 @@ void run_tile(const tile_plan &plan, const pack_layout &layout,
         const float *src_scale, const void *bias, const bias_kind bias_t,
         void *dst, const int ldc, const int col, const int width) {
     const weight_desc &d = layout.desc;
+    const format_desc &f = *layout.fmt;
     const uint8_t *const blocks = px.blocks.get();
     const size_t bb = layout.block_bytes;
-    const bool f16 = d.wei == data_type_t::f16;
-    const size_t src_es = quantized(d.wei) ? 1 : 2;
+    const size_t src_es = static_cast<size_t>(f.src_bytes());
     const size_t bias_es = bias_t == bias_kind::f32 ? 4 : 2;
     const char *const bias_bytes = static_cast<const char *>(bias);
     const int32_t *const comp = px.comp == nullptr || px.comp->empty()
@@ -131,15 +117,17 @@ void run_tile(const tile_plan &plan, const pack_layout &layout,
     const float *const scale = px.scale.empty() ? nullptr : px.scale.data();
     auto *const out = static_cast<uint16_t *>(dst);
 
-    // A split step's vectors are 16 columns (32 for f16): half a block, or
-    // a block.  Its up vector starts `shift` columns into vector q and runs
-    // into vector q + 1, which a step whose up columns all lie in q may not
-    // have; any vector stands in for it then.
-    const int vec = f16 ? kNr : kNr / 2;
+    // A split step's vectors are one 64-byte line of a block row each, 16
+    // columns (32 for f16): half a block, or a block.  Its up vector starts
+    // `shift` columns into vector q and runs into vector q + 1, which a step
+    // whose up columns all lie in q may not have; any vector stands in for
+    // it then.
+    const int vec = f.vec_cols();
+    const int per_block = kNr / vec;
     const int last_vec = layout.n_pad / vec - 1;
     const auto vector_at = [&](const int q) {
-        return f16 ? blocks + static_cast<size_t>(q) * bb
-                   : blocks + static_cast<size_t>(q / 2) * bb + (q % 2) * 64;
+        return blocks + static_cast<size_t>(q / per_block) * bb
+                + (q % per_block) * 64;
     };
 
     // A wide plan's narrow kernels take half its steps.
@@ -175,7 +163,7 @@ void run_tile(const tile_plan &plan, const pack_layout &layout,
             w0 = v;
             out0 = gated(plan.ep) ? v / 2 : v;
             a.b = blocks + static_cast<size_t>(v / kNr) * bb;
-            a.b_next = f16 ? 0 : 64;
+            a.b_next = per_block > 1 ? 64 : 0;
             a.col_next = 16;
             a.cols = gated(plan.ep) ? std::min(kNr / 2, (d.N - v) / 2)
                                     : std::min(kNr, d.N - v);
@@ -206,7 +194,7 @@ void run_tile(const tile_plan &plan, const pack_layout &layout,
     const int stride = wide ? plan.step : narrow;
     // The narrow bf16 kernels sum in two chains at three rows or fewer, which
     // a tile of more rows never cuts into.
-    const bool two_chains = wide && d.wei == data_type_t::bf16 && M <= 3;
+    const bool two_chains = wide && M <= f.two_chain_rows;
     const int n_calls = (M + call_mr - 1) / call_mr;
     const int mr_base = M / n_calls;
     const int n_big = M - mr_base * n_calls;
