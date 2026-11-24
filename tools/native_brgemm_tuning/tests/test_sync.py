@@ -42,8 +42,8 @@ from native_brgemm_tuning import schema as S  # noqa: E402
 PROBLEMS = [P.Problem(d, m, 4096, 4096, group=128 if d == "s4" else 0)
             for d in P.DTYPES for m in (8, 2048)]
 # The schema members that do not depend on the machine of the dump.
-SHARED = ("format", "version", "keys", "match_keys", "features", "rule_ops", "tuning_file", "plan_line",
-          "plan_line_gemv")
+SHARED = ("format", "version", "keys", "match_keys", "features", "rule_ops", "formats", "families", "tuning_file",
+          "plan_line", "plan_line_gemv")
 
 
 def schemas():

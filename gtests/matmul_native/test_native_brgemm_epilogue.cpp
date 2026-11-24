@@ -33,6 +33,7 @@
 #include <vector>
 
 #include <omp.h>
+#include <xmmintrin.h>
 
 #include "common/bfloat16.hpp"
 #include "common/data_types.hpp"
@@ -973,10 +974,25 @@ TEST(NativeBrgemmEpilogue, StoresRoundHalfToEven) {
     }
 }
 
-// An epilogue with only the store (an f32 or bf16 dst, alpha 1, beta 0,
+/// Sets the MXCSR rounding mode while it lives.
+class rounding_mode_pin_t {
+public:
+    explicit rounding_mode_pin_t(unsigned mode) : csr_(_mm_getcsr()) {
+        _MM_SET_ROUNDING_MODE(mode);
+    }
+    ~rounding_mode_pin_t() { _mm_setcsr(csr_); }
+    rounding_mode_pin_t(const rounding_mode_pin_t &) = delete;
+    rounding_mode_pin_t &operator=(const rounding_mode_pin_t &) = delete;
+
+private:
+    unsigned csr_;
+};
+
+// An epilogue with only the store (an f32, bf16 or f16 dst, alpha 1, beta 0,
 // nothing else to apply) stores what the general path stores, byte for byte:
 // NaNs, infinities, signed zeros, subnormals and rounding ties included, at
-// every width and tail and scratch stride, and nothing outside the tile.
+// every width and tail and scratch stride, and nothing outside the tile;
+// also with the MXCSR rounding toward zero, where both round to nearest even.
 TEST(NativeBrgemmEpilogue, StoreOnlyStoresTheGeneralPathsBytes) {
     SKIP_WITHOUT_AVX512();
     const float b = 1.0f / 256.0f;
@@ -998,45 +1014,59 @@ TEST(NativeBrgemmEpilogue, StoreOnlyStoresTheGeneralPathsBytes) {
     }
     std::mt19937 rng(20261028);
     std::uniform_real_distribution<float> any(-4.0f, 4.0f);
-    for (const data_type_t dt : {data_type_t::bf16, data_type_t::f32})
-        for (const int nr : {1, 15, 16, 17, 31, 32, 48, 64})
-            for (const int mr : {1, 3}) {
-                SCOPED_TRACE(::testing::Message()
-                        << zendnnl::common::dtype_info(dt) << " nr " << nr
-                        << " mr " << mr);
-                constexpr int M = 5, N = 80, m0 = 1, n0 = 8;
-                const int ld = nr + 3;
-                std::vector<float> acc(static_cast<size_t>(mr) * ld);
-                for (size_t i = 0; i < acc.size(); ++i)
-                    acc[i] = i % 3 == 0 ? specials[(i / 3) % specials.size()]
-                                        : any(rng);
-                std::vector<float> acc2(acc);
-                const size_t bytes = static_cast<size_t>(M) * N * size_of(dt);
-                std::vector<uint8_t> fast(bytes, 0xA5), slow(bytes, 0xA5);
-                mm::matmul_params p;
-                p.dtypes.dst = dt;
-                nat::GemmDescriptor d;
-                d.M = M;
-                d.N = N;
-                d.ldc = N;
-                d.dst_dt = dt;
-                nat::native_epilogue_t e1, e2;
-                ASSERT_EQ(nat::prepare_epilogue(
-                                  d, p, nullptr, fast.data(), false, e1),
-                        status_t::success);
-                ASSERT_EQ(nat::prepare_epilogue(
-                                  d, p, nullptr, slow.data(), false, e2),
-                        status_t::success);
-                ASSERT_TRUE(e1.store_only);
-                e2.store_only = false;
-                nat::apply_epilogue_tile(e1, acc.data(), ld, m0, mr, n0, nr);
-                nat::apply_epilogue_tile(e2, acc2.data(), ld, m0, mr, n0, nr);
-                EXPECT_TRUE(fast == slow);
-                size_t written = 0;
-                for (size_t i = 0; i < bytes; ++i)
-                    written += fast[i] != 0xA5 ? 1 : 0;
-                EXPECT_LE(written, static_cast<size_t>(mr) * nr * size_of(dt));
-            }
+    const auto stores_alike = [&] {
+        for (const data_type_t dt :
+                {data_type_t::bf16, data_type_t::f32, data_type_t::f16})
+            for (const int nr : {1, 15, 16, 17, 31, 32, 48, 64})
+                for (const int mr : {1, 3}) {
+                    SCOPED_TRACE(::testing::Message()
+                            << zendnnl::common::dtype_info(dt) << " nr " << nr
+                            << " mr " << mr);
+                    constexpr int M = 5, N = 80, m0 = 1, n0 = 8;
+                    const int ld = nr + 3;
+                    std::vector<float> acc(static_cast<size_t>(mr) * ld);
+                    for (size_t i = 0; i < acc.size(); ++i)
+                        acc[i] = i % 3 == 0
+                                ? specials[(i / 3) % specials.size()]
+                                : any(rng);
+                    std::vector<float> acc2(acc);
+                    const size_t bytes
+                            = static_cast<size_t>(M) * N * size_of(dt);
+                    std::vector<uint8_t> fast(bytes, 0xA5), slow(bytes, 0xA5);
+                    mm::matmul_params p;
+                    p.dtypes.dst = dt;
+                    nat::GemmDescriptor d;
+                    d.M = M;
+                    d.N = N;
+                    d.ldc = N;
+                    d.dst_dt = dt;
+                    nat::native_epilogue_t e1, e2;
+                    ASSERT_EQ(nat::prepare_epilogue(
+                                      d, p, nullptr, fast.data(), false, e1),
+                            status_t::success);
+                    ASSERT_EQ(nat::prepare_epilogue(
+                                      d, p, nullptr, slow.data(), false, e2),
+                            status_t::success);
+                    ASSERT_TRUE(e1.store_only);
+                    e2.store_only = false;
+                    nat::apply_epilogue_tile(
+                            e1, acc.data(), ld, m0, mr, n0, nr);
+                    nat::apply_epilogue_tile(
+                            e2, acc2.data(), ld, m0, mr, n0, nr);
+                    EXPECT_TRUE(fast == slow);
+                    size_t written = 0;
+                    for (size_t i = 0; i < bytes; ++i)
+                        written += fast[i] != 0xA5 ? 1 : 0;
+                    EXPECT_LE(written,
+                            static_cast<size_t>(mr) * nr * size_of(dt));
+                }
+    };
+    stores_alike();
+    {
+        SCOPED_TRACE("MXCSR toward zero");
+        const rounding_mode_pin_t toward_zero(_MM_ROUND_TOWARD_ZERO);
+        stores_alike();
+    }
     // Anything to apply, or another dst type, takes the general path.
     const auto store_only = [](nat::GemmDescriptor d, mm::matmul_params p,
                                     const void *bias, bool paired) {
@@ -1073,7 +1103,11 @@ TEST(NativeBrgemmEpilogue, StoreOnlyStoresTheGeneralPathsBytes) {
     a.dst_dt = data_type_t::f16;
     mm::matmul_params f16 = p;
     f16.dtypes.dst = data_type_t::f16;
-    EXPECT_FALSE(store_only(a, f16, nullptr, false));
+    EXPECT_TRUE(store_only(a, f16, nullptr, false));
+    a.dst_dt = data_type_t::s32;
+    mm::matmul_params s32 = p;
+    s32.dtypes.dst = data_type_t::s32;
+    EXPECT_FALSE(store_only(a, s32, nullptr, false));
     // A gated activation, of interleaved pairs or of halves on paired
     // tiles.
     a = d;

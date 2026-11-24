@@ -25,7 +25,9 @@
 #include <immintrin.h>
 
 #include "common/zendnnl_compat.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/native_decode.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/avx512_math.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_format.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -234,25 +236,11 @@ constexpr auto kNv2Signed
 constexpr int kMaxGroupMrNv1 = kMaxMr;
 constexpr int kMaxGroupMrNv2 = 6;
 
-/// 16 values of S (f32, bf16 or f16) at p as f32; exact.
-template <data_type_t S>
-ZENDNNL_TARGET("avx512f")
-inline __m512 scales_as_f32(const char *p) {
-    if constexpr (S == data_type_t::f32) {
-        return _mm512_loadu_ps(reinterpret_cast<const float *>(p));
-    } else {
-        const __m256i h
-                = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(p));
-        if constexpr (S == data_type_t::bf16)
-            return avx512_bf16_to_f32(h);
-        else
-            return _mm512_cvtph_ps(h);
-    }
-}
-
-/// The group kernel for weight scales of type S, over an s8 source, or a u8
-/// source with U8, whose zero-point term is in int64 with Wide.
-template <int MR, int NV, data_type_t S, bool U8, bool Wide>
+/// The group kernel of a weight of format F, for weight scales of type S,
+/// over an s8 source (the weight read by F's decode), or a u8 source with U8,
+/// whose zero-point term is in int64 with Wide.
+template <native_format_t F, int MR, int NV, native_scale_t S, bool U8,
+        bool Wide>
 ZENDNNL_TARGET_NOINLINE("avx512f,avx512bw,avx512vl,avx512dq,avx512vnni")
 void native_int8_group_ukernel(const native_int8_group_ukernel_args_t &p) {
     static_assert(U8 || !Wide, "only a u8 source has a zero point");
@@ -269,9 +257,11 @@ void native_int8_group_ukernel(const native_int8_group_ukernel_args_t &p) {
                                    : _mm512_setzero_ps();
     }
 
-    // An s8 source reads the weight as w + 128; a u8 source reads it as it
-    // is and sums its columns against a u8 one in every byte.
-    const __m512i flip = _mm512_set1_epi32(static_cast<int32_t>(0x80808080u));
+    // An s8 source reads the weight by its format's decode, as w + 128; a
+    // u8 source reads it as it is and sums its columns against a u8 one in
+    // every byte.
+    using decode = native_decode_of<F>;
+    const __m512i flip = _mm512_set1_epi32(decode::kFlip);
     const __m512i ones = _mm512_set1_epi8(1);
     if constexpr (U8)
         (void)flip;
@@ -286,7 +276,7 @@ void native_int8_group_ukernel(const native_int8_group_ukernel_args_t &p) {
     const int8_t *b = p.B;
     const int32_t *shift = p.shift;
     const float *src_scale = p.src_scale;
-    constexpr size_t wei_scale_esz = S == data_type_t::f32 ? 4 : 2;
+    constexpr size_t wei_scale_esz = native_scale_bytes(S);
     const char *wei_scale = static_cast<const char *>(p.wei_scale);
     const size_t wei_scale_step
             = static_cast<size_t>(p.wei_scale_step) * wei_scale_esz;
@@ -336,7 +326,7 @@ void native_int8_group_ukernel(const native_int8_group_ukernel_args_t &p) {
                         col[s][v] = _mm512_dpbusd_epi32(col[s][v], ones, bv[v]);
                         ZENDNNL_NATIVE_INT8_ACC_BARRIER(col[s][v]);
                     } else {
-                        bv[v] = _mm512_xor_si512(
+                        bv[v] = decode::bytes(
                                 _mm512_loadu_si512(bq + v * b_second), flip);
                     }
                 }
@@ -367,7 +357,7 @@ void native_int8_group_ukernel(const native_int8_group_ukernel_args_t &p) {
                     col[0][v] = _mm512_dpbusd_epi32(col[0][v], ones, bv[v]);
                     ZENDNNL_NATIVE_INT8_ACC_BARRIER(col[0][v]);
                 } else {
-                    bv[v] = _mm512_xor_si512(
+                    bv[v] = decode::bytes(
                             _mm512_loadu_si512(bq + v * b_second), flip);
                 }
             }
@@ -430,7 +420,7 @@ void native_int8_group_ukernel(const native_int8_group_ukernel_args_t &p) {
         __m512 ws[NV];
         ZENDNNL_NATIVE_INT8_UNROLL(4)
         for (int v = 0; v < NV; ++v)
-            ws[v] = scales_as_f32<S>(wei_scale + v * scale_second);
+            ws[v] = native_scales_as_f32<S>(wei_scale + v * scale_second);
         ZENDNNL_NATIVE_INT8_UNROLL(12)
         for (int m = 0; m < MR; ++m) {
             const __m512 sa = _mm512_set1_ps(src_scale[m * p.src_scale_ld]);
@@ -485,37 +475,91 @@ void native_int8_group_ukernel(const native_int8_group_ukernel_args_t &p) {
 
 /// The instance of the call's weight scale type, picked once per call: the
 /// batch loop tests no type.
-template <int MR, int NV, bool U8, bool Wide>
-void native_int8_group_ukernel_of_dt(
+template <native_format_t F, int MR, int NV, bool U8, bool Wide>
+void native_int8_group_ukernel_of_scale(
         const native_int8_group_ukernel_args_t &p) {
-    if (p.wei_scale_dt == data_type_t::f32)
-        native_int8_group_ukernel<MR, NV, data_type_t::f32, U8, Wide>(p);
-    else if (p.wei_scale_dt == data_type_t::bf16)
-        native_int8_group_ukernel<MR, NV, data_type_t::bf16, U8, Wide>(p);
-    else {
-        assert(p.wei_scale_dt == data_type_t::f16);
-        native_int8_group_ukernel<MR, NV, data_type_t::f16, U8, Wide>(p);
+    switch (p.wei_scale_type) {
+        case native_scale_t::f32:
+            native_int8_group_ukernel<F, MR, NV, native_scale_t::f32, U8, Wide>(
+                    p);
+            return;
+        case native_scale_t::bf16:
+            native_int8_group_ukernel<F, MR, NV, native_scale_t::bf16, U8,
+                    Wide>(p);
+            return;
+        case native_scale_t::f16:
+        case native_scale_t::none: break;
     }
+    assert(p.wei_scale_type == native_scale_t::f16);
+    native_int8_group_ukernel<F, MR, NV, native_scale_t::f16, U8, Wide>(p);
 }
 
-template <int NV, bool U8, bool Wide, int... I>
+template <native_format_t F, int NV, bool U8, bool Wide, int... I>
 constexpr std::array<native_int8_group_ukernel_fn_t, sizeof...(I)>
 make_group_table(std::integer_sequence<int, I...>) {
-    return {{&native_int8_group_ukernel_of_dt<I + 1, NV, U8, Wide>...}};
+    return {{&native_int8_group_ukernel_of_scale<F, I + 1, NV, U8, Wide>...}};
 }
 
-constexpr auto kGroupNv1 = make_group_table<1, false, false>(
-        std::make_integer_sequence<int, kMaxGroupMrNv1> {});
-constexpr auto kGroupNv2 = make_group_table<2, false, false>(
-        std::make_integer_sequence<int, kMaxGroupMrNv2> {});
-constexpr auto kGroupNv1U8 = make_group_table<1, true, false>(
-        std::make_integer_sequence<int, kMaxGroupMrNv1> {});
-constexpr auto kGroupNv2U8 = make_group_table<2, true, false>(
-        std::make_integer_sequence<int, kMaxGroupMrNv2> {});
-constexpr auto kGroupNv1U8Wide = make_group_table<1, true, true>(
-        std::make_integer_sequence<int, kMaxGroupMrNv1> {});
-constexpr auto kGroupNv2U8Wide = make_group_table<2, true, true>(
-        std::make_integer_sequence<int, kMaxGroupMrNv2> {});
+/// The group kernels of a weight of format F by row count, at one and two
+/// vectors, over an s8 source, a u8 one and a u8 one in the wide form.
+template <native_format_t F>
+struct int8_group_kernels_t {
+    static constexpr auto kNv1 = make_group_table<F, 1, false, false>(
+            std::make_integer_sequence<int, kMaxGroupMrNv1> {});
+    static constexpr auto kNv2 = make_group_table<F, 2, false, false>(
+            std::make_integer_sequence<int, kMaxGroupMrNv2> {});
+    static constexpr auto kNv1U8 = make_group_table<F, 1, true, false>(
+            std::make_integer_sequence<int, kMaxGroupMrNv1> {});
+    static constexpr auto kNv2U8 = make_group_table<F, 2, true, false>(
+            std::make_integer_sequence<int, kMaxGroupMrNv2> {});
+    static constexpr auto kNv1U8Wide = make_group_table<F, 1, true, true>(
+            std::make_integer_sequence<int, kMaxGroupMrNv1> {});
+    static constexpr auto kNv2U8Wide = make_group_table<F, 2, true, true>(
+            std::make_integer_sequence<int, kMaxGroupMrNv2> {});
+};
+
+/// One format's tables of int8_group_kernels_t.
+struct int8_group_tables_t {
+    const native_int8_group_ukernel_fn_t *nv1, *nv2, *nv1_u8, *nv2_u8,
+            *nv1_u8_wide, *nv2_u8_wide;
+};
+
+template <native_format_t F>
+constexpr int8_group_tables_t int8_group_tables_of() {
+    using k = int8_group_kernels_t<F>;
+    return {k::kNv1.data(), k::kNv2.data(), k::kNv1U8.data(), k::kNv2U8.data(),
+            k::kNv1U8Wide.data(), k::kNv2U8Wide.data()};
+}
+
+/// The formats of the routes on these kernels, which the group kernels are
+/// instantiated for, and their tables in the same order.
+constexpr auto kFormats = native_family_formats<native_kernel_kind_t::int8>();
+
+template <size_t... I>
+constexpr std::array<int8_group_tables_t, sizeof...(I)> make_group_tables(
+        std::index_sequence<I...>) {
+    return {{int8_group_tables_of<kFormats[I]>()...}};
+}
+
+constexpr auto kGroupTables
+        = make_group_tables(std::make_index_sequence<kFormats.size()> {});
+
+/// The group tables of format; nullptr for a format of no route on these
+/// kernels.
+const int8_group_tables_t *group_tables_of(native_format_t format) {
+    for (size_t i = 0; i < kFormats.size(); ++i)
+        if (kFormats[i] == format) return &kGroupTables[i];
+    return nullptr;
+}
+
+/// Whether the per-channel kernels serve format: a format of a route on
+/// these kernels whose decode reads each byte as the weight plus 128, which
+/// they take as the same sums of the weight's bytes as they are and the
+/// source plus 128.
+bool channel_kernels_take(native_format_t format) {
+    return group_tables_of(format) != nullptr
+            && native_format(format).decode == native_decode_t::byte_offset;
+}
 
 } // namespace
 
@@ -524,8 +568,10 @@ int native_int8_ukernel_max_mr(int nv) {
 }
 
 native_int8_ukernel_fn_t select_native_int8_ukernel(
-        int mr, int nv, bool src_signed) {
-    if (mr < 1 || mr > native_int8_ukernel_max_mr(nv)) return nullptr;
+        native_format_t format, int mr, int nv, bool src_signed) {
+    if (!channel_kernels_take(format) || mr < 1
+            || mr > native_int8_ukernel_max_mr(nv))
+        return nullptr;
     if (nv == 1) return (src_signed ? kNv1Signed : kNv1)[mr - 1];
     return (src_signed ? kNv2Signed : kNv2)[mr - 1];
 }
@@ -535,13 +581,25 @@ int native_int8_group_ukernel_max_mr(int nv) {
 }
 
 native_int8_group_ukernel_fn_t select_native_int8_group_ukernel(
-        int mr, int nv, bool src_u8, bool wide_zp) {
-    if (mr < 1 || mr > native_int8_group_ukernel_max_mr(nv)) return nullptr;
+        native_format_t format, int mr, int nv, bool src_u8, bool wide_zp) {
+    const int8_group_tables_t *t = group_tables_of(format);
+    if (t == nullptr || mr < 1 || mr > native_int8_group_ukernel_max_mr(nv))
+        return nullptr;
     if (nv == 1)
-        return (src_u8 ? (wide_zp ? kGroupNv1U8Wide : kGroupNv1U8)
-                       : kGroupNv1)[mr - 1];
-    return (src_u8 ? (wide_zp ? kGroupNv2U8Wide : kGroupNv2U8)
-                   : kGroupNv2)[mr - 1];
+        return (src_u8 ? (wide_zp ? t->nv1_u8_wide : t->nv1_u8)
+                       : t->nv1)[mr - 1];
+    return (src_u8 ? (wide_zp ? t->nv2_u8_wide : t->nv2_u8) : t->nv2)[mr - 1];
+}
+
+bool native_int8_kernels_serve(
+        native_format_t format, native_int8_scheme_t scheme, int mr, int nv) {
+    if (scheme == native_int8_scheme_t::per_group)
+        return select_native_int8_group_ukernel(format, mr, nv, false)
+                != nullptr
+                && select_native_int8_group_ukernel(format, mr, nv, true)
+                != nullptr;
+    return select_native_int8_ukernel(format, mr, nv, false) != nullptr
+            && select_native_int8_ukernel(format, mr, nv, true) != nullptr;
 }
 
 } // namespace native

@@ -27,6 +27,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from helpers import MACHINE, SCHEMA, UARCH, session_records  # noqa: E402
@@ -420,6 +421,46 @@ class TestCalibration(unittest.TestCase):
         cal = calibrate(Ceilings(ceilings_doc()))
         self.assertEqual(sorted(calibration.configs(cal, ["bf16", "s4", "f16", "f32"])), ["bf16", "f16", "s4"])
         self.assertNotIn("cm_l2_bytes", calibration.configs(cal, ["bf16"], calibration.DEFAULT_KEYS)["bf16"])
+
+    def test_type_conditions_of_the_formats(self):
+        from native_brgemm_tuning.rules import eval_rules
+
+        # The conditions and splits of the dump's formats; each type's conditions hold for its
+        # problems and no other type's, and the tree gives each type its own leaf.
+        self.assertEqual(calibration.TYPE_WHEN, {
+            "s4": [["esz", "<=", 0.75]], "s8": [["esz", ">", 0.75], ["esz", "<=", 1.5]],
+            "bf16": [["esz", ">", 1.5], ["bf16", ">", 0.5]],
+            "f16": [["esz", ">", 1.5], ["bf16", "<=", 0.5], ["esz", "<=", 3.0]], "f32": [["esz", ">", 3.0]]})
+        self.assertEqual(calibration.TYPE_SPLITS, {
+            "feature": "esz", "le": 1.5, "then": {"feature": "esz", "le": 0.75, "then": "s4", "else": "s8"},
+            "else": {"feature": "bf16", "le": 0.5, "then": {"feature": "esz", "le": 3.0, "then": "f16", "else": "f32"},
+                     "else": "bf16"}})
+        dtypes = problems_mod.DTYPES
+        probs = {d: Problem(d, 8, 4096, 4096, group=128 if problems_mod.FORMATS[d]["grouped"] else 0) for d in dtypes}
+        for d, when in calibration.TYPE_WHEN.items():
+            only = {"kind": "ordered", "list": [{"when": when, "config": {"nr": 16}}]}
+            for o, p in probs.items():
+                self.assertEqual(eval_rules(only, features(p)), {"nr": 16} if o == d else None, (d, o))
+        every = {d: {"cm_fma_lat": 3 + i} for i, d in enumerate(dtypes)}
+        tree = {"kind": "tree", "root": calibration.type_tree(every)}
+        for d in dtypes:
+            self.assertEqual(eval_rules(tree, features(probs[d])), every[d], d)
+        # A format another matches in esz and bf16 has no conditions, nor a leaf of its own: a
+        # calibration of either is refused, of another type kept.
+        formats = list(problems_mod.FORMATS.values())
+        twin = dict(problems_mod.FORMATS["s4"], name="x4")
+        when = calibration.type_when(formats + [twin])
+        self.assertEqual(when, {d: w for d, w in calibration.TYPE_WHEN.items() if d != "s4"})
+        splits = calibration.type_splits(formats + [twin])
+        self.assertEqual(splits["then"]["then"], ["s4", "x4"])
+        with unittest.mock.patch.object(calibration, "TYPE_WHEN", when), \
+                unittest.mock.patch.object(calibration, "TYPE_SPLITS", splits):
+            kept = calibration.with_rules(None, {"s8": {"cm_fma_lat": 4}}, 32)
+            self.assertEqual(eval_rules(kept, features(probs["s8"])), {"cm_fma_lat": 4})
+            self.assertEqual(eval_rules(kept, features(probs["s4"])), {})
+            for rules in (None, {"kind": "ordered", "list": []}):
+                with self.assertRaises(ValueError):
+                    calibration.with_rules(rules, {"s4": {"cm_fma_lat": 4}}, 32)
 
     def test_plans_and_verify_under_rules(self):
         probs = [CHANGED[0], UNCHANGED[0]]

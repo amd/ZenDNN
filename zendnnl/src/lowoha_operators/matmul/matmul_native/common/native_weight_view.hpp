@@ -57,7 +57,7 @@ using zendnnl::error_handling::status_t;
 /// others, so that its column t < nr / 2 and column nr / 2 + t pair up.
 /// Every run of 16 tile columns from a multiple of 16 lies inside one block;
 /// a kernel call of 32 columns takes its second 16 from wherever they lie
-/// (the up run of a tile of 32).
+/// (the up run of a tile of 32), or each run takes a call of 16 columns.
 struct native_weight_view_t {
     const uint8_t *base = nullptr;
     data_type_t wei_dt = data_type_t::none;
@@ -141,8 +141,8 @@ struct native_weight_view_t {
 /// more pair whole blocks of each half.  A plan of narrower tiles pairs
 /// whole blocks at 64 columns where those tiles deal out evenly over the
 /// team or number 8 per thread, else runs of 16 columns of each half in
-/// tiles of 32, whose kernel calls read the up run at a second address:
-/// the tile count its plan was balanced for (half of it for tiles of 16).
+/// tiles of 32, whose kernel calls read the up run where it lies: the tile
+/// count its plan was balanced for (half of it for tiles of 16).
 inline int native_paired_width(int N, int nr, int m_blocks, int threads) {
     if (nr <= 0 || nr % 16 != 0 || N % 32 != 0) return 0;
     if (nr >= 64) return nr;

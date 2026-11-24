@@ -22,10 +22,15 @@
 #include <iterator>
 #include <set>
 #include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
 
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/gemv/native_gemv_ukernel.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/native_int4_ukernel.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/native_int8_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/native_kernel_registry.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_int8_call.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_tuning_file.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_format.hpp"
@@ -37,11 +42,13 @@
 
 namespace {
 
+namespace mm = zendnnl::lowoha::matmul;
 namespace nat = zendnnl::lowoha::matmul::native;
 namespace nt = native_brgemm_test;
 using nat::native_format_t;
 using nat::native_kernel_kind_t;
 using zendnnl::memory::data_type_t;
+using zendnnl::memory::status_t;
 
 constexpr int kNr = nat::kNativeLayoutPackNr;
 
@@ -207,6 +214,51 @@ TEST(NativeFormat, EveryRefusalHasItsReason) {
     f = s4;
     f.contract.layout_k_refusal = nullptr;
     EXPECT_FALSE(nat::native_refusals_have_reasons(f));
+    f = s8;
+    f.contract.wei_zp_refusal = nullptr;
+    EXPECT_FALSE(nat::native_refusals_have_reasons(f));
+    f = s4;
+    f.contract.ungrouped_refusal = nullptr;
+    EXPECT_FALSE(nat::native_refusals_have_reasons(f));
+}
+
+// An INT8 call takes the route of its plan (prepare_int8_call is given it):
+// its format's route whose kernels serve its scheme, one group over K of a
+// format of group scales only the kernels of one group; the tiles take the
+// group or the channel tile by the route's class.  The group shifts cancel
+// each format's decode offset, and the tiles read every format's scales in
+// place.
+TEST(NativeFormat, Int8CallsTakeTheRouteOfTheirScheme) {
+    using nat::native_route_t;
+    nat::native_problem_t p;
+    p.M = 4;
+    p.N = 64;
+    p.K = 256;
+    p.pack_nr = 32;
+    p.threads = 1;
+    p.src_dt = data_type_t::s8;
+    p.dst_dt = data_type_t::f32;
+    p.wei_dt = data_type_t::s8;
+    EXPECT_EQ(p.route(), native_route_t::s8_channel);
+    p.int8_scheme = nat::native_int8_scheme_t::per_group;
+    EXPECT_EQ(p.route(), native_route_t::s8_group);
+    p.wei_dt = data_type_t::s4;
+    for (const int gs : {64, 128, 0, 256}) {
+        p.wei_group_size = gs;
+        EXPECT_EQ(p.route(),
+                gs % 256 != 0 ? native_route_t::s4_group
+                              : native_route_t::s4_one_group)
+                << "group " << gs;
+    }
+    for (const native_route_t r : {native_route_t::s8_group,
+                 native_route_t::s4_group, native_route_t::s4_one_group})
+        EXPECT_TRUE(nat::native_of_class<nat::native_route_class_t::group>(r));
+    EXPECT_FALSE(nat::native_of_class<nat::native_route_class_t::group>(
+            native_route_t::s8_channel));
+    EXPECT_EQ(nat::kNativeGroupedTypes, nat::native_type_bit(data_type_t::s4));
+    EXPECT_EQ(nat::native_format(native_format_t::s8).offset_bits, 7);
+    EXPECT_EQ(nat::native_format(native_format_t::s4).offset_bits, 3);
+    EXPECT_TRUE(nat::native_scales_at(nat::native_place_t::caller));
 }
 
 // The formats are the tuning file's weight types, and the families the
@@ -226,48 +278,184 @@ TEST(NativeFormat, NamesAreThoseOfTheTuningFileAndThePlanLine) {
         EXPECT_STREQ(nat::kNativeFamilies[i].name, kinds[i]);
 }
 
-// The registry holds kernels for every route whose family's instruction set
-// the CPU has, at nr 16 and 32, and none outside the routes.
+// The registry lists, by route and then by width, the kernels of every route
+// whose family's instruction set the CPU has, and nothing else: at nr 16 and
+// 32 (F16_PH also 64) the route table's rows, which are the row counts the
+// selectors serve, and tiles of several slabs up to 128 columns with the rows
+// of the slab; each entry carries its route, the route's family and its INT8
+// scheme.
 TEST(NativeFormat, RoutesAreTheRegistrysKernels) {
     if (!nat::native_base_isa()) GTEST_SKIP() << "no AVX-512 base ISA";
-    const nat::native_kernel_registry_t &reg = nat::native_kernel_registry();
-    const nat::native_int8_scheme_t schemes[]
-            = {nat::native_int8_scheme_t::per_channel,
-                    nat::native_int8_scheme_t::per_group};
+    std::vector<nat::native_kernel_caps_t> want;
     for (const nat::native_route_desc_t &r : nat::kNativeRoutes) {
-        const nat::native_family_desc_t &fam = nat::native_family(r.family);
-        SCOPED_TRACE(std::string(fam.name) + " for "
-                + nat::native_format(r.format).name);
         const bool runs = r.family == native_kernel_kind_t::f16_ph
                 ? nt::f16_ph_kernels_registered()
-                : has_isa(fam.isa);
-        for (const int nr : {16, 32}) {
-            const nat::native_kernel_caps_t *caps = reg.caps(r.family, nr);
-            for (const nat::native_int8_scheme_t s : schemes)
-                if (r.schemes == nat::native_int8_scheme_bit(s))
-                    caps = reg.caps(r.family, nr, s);
-            EXPECT_EQ(caps != nullptr, runs) << "nr " << nr;
+                : has_isa(nat::native_family(r.family).isa);
+        for (const int nr : {16, 32, 64, 128}) {
+            const uint32_t rows = nt::route_kernel_rows(r.id, nr);
+            nat::native_kernel_caps_t c;
+            c.route = r.id;
+            c.kind = r.family;
+            c.nr = nr;
+            while (c.max_mr < 12 && ((rows >> c.max_mr) & 1u) != 0)
+                ++c.max_mr;
+            c.int8_schemes = r.schemes;
+            if (runs && c.max_mr > 0) want.push_back(c);
         }
     }
-    for (const nat::native_family_desc_t &fam : nat::kNativeFamilies)
-        for (const int nr : {16, 32}) {
-            SCOPED_TRACE(std::string(fam.name) + " nr " + std::to_string(nr));
-            const nat::native_kernel_caps_t *caps = reg.caps(fam.id, nr);
-            if (caps == nullptr) continue;
-            uint8_t routed = 0;
-            bool float_route = false;
-            for (const nat::native_route_desc_t &r : nat::kNativeRoutes)
-                if (r.family == fam.id) {
-                    routed |= r.schemes;
-                    float_route = float_route || r.schemes == 0;
-                }
-            if (caps->int8_schemes == 0) { EXPECT_TRUE(float_route); }
-            for (const nat::native_int8_scheme_t s : schemes) {
-                if (reg.caps(fam.id, nr, s) != nullptr) {
-                    EXPECT_NE(routed & nat::native_int8_scheme_bit(s), 0);
-                }
-            }
+    const std::vector<nat::native_kernel_caps_t> &all
+            = nat::native_kernel_registry().all();
+    ASSERT_EQ(all.size(), want.size());
+    for (size_t i = 0; i < all.size(); ++i) {
+        SCOPED_TRACE(std::string(nat::native_family(want[i].kind).name)
+                + " for "
+                + nat::native_format(nat::native_route(want[i].route).format)
+                          .name
+                + " nr " + std::to_string(want[i].nr));
+        EXPECT_EQ(all[i].route, want[i].route);
+        EXPECT_EQ(all[i].kind, want[i].kind);
+        EXPECT_EQ(all[i].nr, want[i].nr);
+        EXPECT_EQ(all[i].max_mr, want[i].max_mr);
+        EXPECT_EQ(all[i].max_mr,
+                nat::native_route_rows(nat::native_route(want[i].route),
+                        nat::native_tile_slab_cols(want[i].kind, want[i].nr)
+                                / 16));
+        EXPECT_EQ(all[i].int8_schemes, want[i].int8_schemes);
+    }
+}
+
+// The kernels of the INT8 tile and the GEMV take their format: each selector
+// has kernels for a format of a route on its family and none for another,
+// the per-channel kernels (which read the bytes as they are against a source
+// plus 128) for a format of the byte_offset decode, the INT4 group GEMV for
+// an s8 source only.  The weight scales' types are today's three.
+TEST(NativeFormat, KernelsTakeTheirFormat) {
+    using nat::native_kernel_kind_t;
+    using nat::native_scale_t;
+    using order_t = nat::native_int8_order_t;
+    for (const nat::native_format_desc_t &f : nat::kNativeFormats) {
+        SCOPED_TRACE(f.name);
+        const bool int8
+                = nat::native_family_takes<native_kernel_kind_t::int8>(f.id);
+        const bool int4
+                = nat::native_family_takes<native_kernel_kind_t::int4>(f.id);
+        const bool bytes
+                = int8 && f.decode == nat::native_decode_t::byte_offset;
+        EXPECT_EQ(nat::select_native_int8_ukernel(f.id, 1, 1, true) != nullptr,
+                bytes);
+        EXPECT_EQ(nat::select_native_int8_group_ukernel(f.id, 1, 2, false)
+                        != nullptr,
+                int8);
+        EXPECT_EQ(nat::select_native_int4_group_ukernel(
+                          f.id, 1, 2, order_t::fused, true)
+                        != nullptr,
+                int4);
+        EXPECT_EQ(nat::select_native_int4_one_group_ukernel(
+                          f.id, 12, 2, order_t::reference)
+                        != nullptr,
+                int4);
+        EXPECT_EQ(nat::select_native_s8_gemv(1, false, f.id, true) != nullptr,
+                bytes);
+        EXPECT_EQ(nat::select_native_s8_fused_gemv(2, true, f.id, false)
+                        != nullptr,
+                bytes);
+        EXPECT_EQ(
+                nat::select_native_group_gemv(1, false, f.id, false) != nullptr,
+                int8 || int4);
+        EXPECT_EQ(nat::select_native_group_gemv(2, true, f.id, true) != nullptr,
+                int8);
+        for (const nat::native_int8_scheme_t s :
+                {nat::native_int8_scheme_t::per_channel,
+                        nat::native_int8_scheme_t::per_group}) {
+            EXPECT_EQ(nat::native_int8_kernels_serve(f.id, s, 6, 2), int8);
+            EXPECT_EQ(nat::native_int4_kernels_serve(f.id, s, 6, 2), int4);
         }
+        EXPECT_EQ(f.contract.scale_types != 0, f.quantized());
+    }
+    EXPECT_EQ(nat::native_scale_of(data_type_t::f32), native_scale_t::f32);
+    EXPECT_EQ(nat::native_scale_of(data_type_t::bf16), native_scale_t::bf16);
+    EXPECT_EQ(nat::native_scale_of(data_type_t::f16), native_scale_t::f16);
+    EXPECT_EQ(nat::native_scale_of(data_type_t::s8), native_scale_t::none);
+    EXPECT_EQ(nat::native_scale_bytes(native_scale_t::f32), 4u);
+    EXPECT_EQ(nat::native_scale_bytes(native_scale_t::bf16), 2u);
+    EXPECT_EQ(nat::native_scale_bytes(native_scale_t::f16), 2u);
+    EXPECT_EQ(nat::kNativeFloatScales,
+            nat::native_scale_bit(native_scale_t::f32)
+                    | nat::native_scale_bit(native_scale_t::bf16)
+                    | nat::native_scale_bit(native_scale_t::f16));
+}
+
+// The INT8 call checks take weight scales of a data type exactly when it is
+// a scale type of the weight's format's contract (native_contract_t::
+// scale_types): an s8 weight's per column, per group and under an {M, G}
+// source scale, an s4 weight's per group.
+TEST(NativeFormat, CallChecksTakeTheContractsScaleTypes) {
+    const int M = 4, N = 32, K = 256, G = 2;
+    struct scheme_t {
+        const char *name;
+        data_type_t wei;
+        std::vector<int64_t> wei_dims, src_dims;
+    };
+    const scheme_t schemes[] = {
+            {"s8 per column", data_type_t::s8, {1, N}, {1, 1}},
+            {"s8 per group", data_type_t::s8, {G, N}, {1, 1}},
+            {"s8 under source groups", data_type_t::s8, {1, N}, {M, G}},
+            {"s4 per group", data_type_t::s4, {G, N}, {1, 1}},
+    };
+    // The checks read no buffer.
+    const float any = 1.0f;
+    for (const scheme_t &s : schemes) {
+        const nat::native_format_desc_t &f = nat::native_format(s.wei);
+        for (int t = 0; t <= static_cast<int>(data_type_t::f8_e8m0); ++t) {
+            const data_type_t dt = static_cast<data_type_t>(t);
+            SCOPED_TRACE(std::string(s.name) + ", weight scales of data type "
+                    + std::to_string(t));
+            nat::GemmDescriptor d;
+            d.M = M;
+            d.N = N;
+            d.K = K;
+            d.src_dt = data_type_t::s8;
+            d.wei_dt = s.wei;
+            d.dst_dt = data_type_t::f32;
+            mm::matmul_params p;
+            p.dtypes.src = data_type_t::s8;
+            p.dtypes.wei = s.wei;
+            p.dtypes.dst = data_type_t::f32;
+            p.quant_params.src_scale.buff = &any;
+            p.quant_params.src_scale.dt = data_type_t::f32;
+            p.quant_params.src_scale.dims = s.src_dims;
+            p.quant_params.wei_scale.buff = &any;
+            p.quant_params.wei_scale.dt = dt;
+            p.quant_params.wei_scale.dims = s.wei_dims;
+            const bool takes
+                    = (f.contract.scale_types
+                              & nat::native_scale_bit(nat::native_scale_of(dt)))
+                    != 0;
+            EXPECT_EQ(nat::check_int8_call(
+                              d, p, nat::decide_int8_call(d, p, nullptr))
+                            == status_t::success,
+                    takes);
+        }
+    }
+}
+
+// The data type of each scale type of a format's contract (native_scale_dt,
+// which plan_dump gives a call's weight scales) gives it back and has its
+// bytes.
+TEST(NativeFormat, ScaleTypesHaveTheirDataTypes) {
+    for (const nat::native_format_desc_t &f : nat::kNativeFormats) {
+        for (unsigned i = 0; i < 8 * sizeof(f.contract.scale_types); ++i) {
+            if ((f.contract.scale_types & (1u << i)) == 0) continue;
+            const auto s = static_cast<nat::native_scale_t>(i);
+            const data_type_t dt = nat::native_scale_dt(s);
+            SCOPED_TRACE(
+                    std::string(f.name) + ", scale type " + std::to_string(i));
+            EXPECT_EQ(nat::native_scale_of(dt), s);
+            EXPECT_EQ(nat::native_scale_bytes(s), zendnnl::common::size_of(dt));
+        }
+    }
+    EXPECT_EQ(
+            nat::native_scale_dt(nat::native_scale_t::none), data_type_t::none);
 }
 
 } // namespace

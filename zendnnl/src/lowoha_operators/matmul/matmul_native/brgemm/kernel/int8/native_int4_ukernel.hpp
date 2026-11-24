@@ -23,6 +23,7 @@
 
 #include "common/data_types.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_int8_scheme.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_types.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -42,8 +43,9 @@ inline constexpr int kMaxNativeInt4K
         = std::numeric_limits<int32_t>::max() / 8 * 8;
 
 /// A batch-reduce kernel over one MR x NR tile (NR = 16 * nv) of an s8
-/// source and an s4 weight in the native layout (native_weight_view_t): a
-/// batch of K groups, each reduced exactly in int32, then taken into f32
+/// source and a weight of two nibble planes in the native layout
+/// (native_weight_view_t), each nibble read by its format's decode: a batch
+/// of K groups, each reduced exactly in int32, then taken into f32
 /// accumulators that stay in registers across the batch; C enters before
 /// the first group and leaves after the last.
 struct native_int4_group_ukernel_args_t {
@@ -70,7 +72,7 @@ struct native_int4_group_ukernel_args_t {
     // group, which cancels what reading the weight as w + 8 adds.  The
     // scales are src_scale[m * src_scale_ld + g * src_scale_step] and the
     // NR weight scales from element g * wei_scale_step of wei_scale on, of
-    // type wei_scale_dt (f32, bf16 or f16), each read exactly as f32.  The
+    // type wei_scale_type (f32, bf16 or f16), each read exactly as f32.  The
     // row strides are size_t: m times the groups of a large K exceeds an
     // int.
     const int32_t *shift = nullptr;
@@ -81,7 +83,7 @@ struct native_int4_group_ukernel_args_t {
     int src_scale_step = 0;
     const void *wei_scale = nullptr;
     int wei_scale_step = 0;
-    data_type_t wei_scale_dt = data_type_t::f32;
+    native_scale_t wei_scale_type = native_scale_t::f32;
     /// The f32 tile, ldc apart.  With accumulate it holds the sum of the
     /// groups before this batch; else the sum starts at +0.0.
     float *C = nullptr;
@@ -132,10 +134,13 @@ using native_int4_group_ukernel_fn_t
 /// broadcast source quads and the nibble mask fit the 32 vector registers.
 int native_int4_group_ukernel_max_mr(int nv);
 
-/// nullptr outside MR 1 .. native_int4_group_ukernel_max_mr(nv); src_groups:
-/// the fused order over source scales per group.
+/// The kernel of a weight of format, by its decode; src_groups: the fused
+/// order over source scales per group; nullptr outside MR 1 ..
+/// native_int4_group_ukernel_max_mr(nv) and for a format of no route on
+/// these kernels.
 native_int4_group_ukernel_fn_t select_native_int4_group_ukernel(
-        int mr, int nv, native_int8_order_t order, bool src_groups = false);
+        native_format_t format, int mr, int nv, native_int8_order_t order,
+        bool src_groups = false);
 
 /// K octets between the octet the kernels of one group read and the octet
 /// whose weight lines they request (the distance; request_limit_octets is
@@ -156,10 +161,20 @@ int native_int4_one_group_ukernel_max_mr(int nv);
 /// of the group kernel's operations and bits whose int32 sums are the only
 /// accumulators across the K loop, K passes included; with
 /// request_limit_octets that one requests each K octet's weight lines
-/// kNativeInt4PrefetchOctets octets before it reads them.  nullptr outside
-/// MR 1 .. native_int4_one_group_ukernel_max_mr(nv).
+/// kNativeInt4PrefetchOctets octets before it reads them.  Of a weight of
+/// format, by its decode; nullptr outside MR 1 ..
+/// native_int4_one_group_ukernel_max_mr(nv) and for a format of no route on
+/// these kernels.
 native_int4_group_ukernel_fn_t select_native_int4_one_group_ukernel(
-        int mr, int nv, native_int8_order_t order);
+        native_format_t format, int mr, int nv, native_int8_order_t order);
+
+/// Whether the kernels of every order a call of scheme over a weight of
+/// format takes exist at mr rows and nv vectors: for per_group the group
+/// kernels in the fused order, over a source scale per row and per group,
+/// and in the reference order; for per_channel (one group over K) the
+/// kernels of one group in both orders.
+bool native_int4_kernels_serve(
+        native_format_t format, native_int8_scheme_t scheme, int mr, int nv);
 
 } // namespace native
 } // namespace matmul

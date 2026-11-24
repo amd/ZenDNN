@@ -125,6 +125,14 @@ status_t run_matmul(const call_t &c);
 zendnnl::lowoha::matmul::native::GemmDescriptor call_descriptor(
         const call_t &c);
 
+/// The route of the plan of the INT8 call of desc and params with decision,
+/// as the looper gives it to prepare_int8_call (native_problem_t::route()).
+zendnnl::lowoha::matmul::native::native_route_t int8_route_of(
+        const zendnnl::lowoha::matmul::native::GemmDescriptor &desc,
+        const mm::matmul_params &params,
+        const zendnnl::lowoha::matmul::native::native_int8_decision_t
+                &decision);
+
 /// The status native_brgemm_refusal gives c (success when the native BRGEMM
 /// serves it or does not take it), with reason its reason.
 status_t refusal_of(const call_t &c, std::string *reason = nullptr);
@@ -214,6 +222,12 @@ bool native_selected(const mm::matmul_params &p);
 /// a CPU with AVX512-FP16, in a build that has them, unless
 /// ZENDNNL_MATMUL_NATIVE_F16_ACCUM is f32 (in any case).
 bool f16_ph_kernels_registered();
+
+/// Bit mr - 1 set for every row count route has a kernel for at nr, a tile
+/// of several slabs at its slab, from the selectors: every kernel its calls
+/// take (both sources of INT8, both orders of INT4, the fused order of the
+/// group kernels also over source groups).
+uint32_t route_kernel_rows(mm::native::native_route_t route, int nr);
 
 /// Records whether the dense calls made while it lives went through the
 /// custom kernel (the group gemm-mode capture).

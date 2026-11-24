@@ -64,17 +64,29 @@ struct native_problem_t {
     /// key a scheme does not apply (native_config_key_t::int8_schemes) is not
     /// applied to it.
     native_int8_scheme_t int8_scheme = native_int8_scheme_t::per_channel;
-    /// An s4 weight: the K values of a group of its weight scales (K for
-    /// one group over K); 0 for any other weight.
-    int wei_group_size = 0;
-    /// An s4 weight: the bytes of one of its weight scales; 0 for any other
+    /// A weight of a format of group scales only (s4): the K values of a
+    /// group of its weight scales (K for one group over K); 0 for any other
     /// weight.
+    int wei_group_size = 0;
+    /// A weight of a format of group scales only: the bytes of one of its
+    /// weight scales; 0 for any other weight.
     int wei_scale_bytes = 0;
 
     /// A weight of format id.
     bool is(native_format_t id) const {
         return wei_dt == native_format(id).wei_dt;
     }
+    /// The format of its weight.
+    native_format_t format() const { return native_format(wei_dt).id; }
+    /// The route of its tiles: its format's; of an f16 weight, the last of
+    /// the format's routes whose family the kernel registry has
+    /// (native_kernel_registry_t::has: F16_PH where it has them, as
+    /// f16_kind() says); of a quantized weight, the format's route of the INT8
+    /// scheme, the kernels of one group over K for one group over K of a
+    /// format of group scales only ({1, N} weight scales; a group of 0 is
+    /// one, as the layout query takes it).  Derived from the fields above,
+    /// which equal problems share.
+    native_route_t route() const;
     bool bf16() const { return is(native_format_t::bf16); }
     bool f32() const { return is(native_format_t::f32); }
     /// An f16 weight: the F16 kernels, whose source rows are widened to f32,
@@ -85,26 +97,19 @@ struct native_problem_t {
     bool int8() const {
         return (native_type_bit(wei_dt) & kNativeQuantizedTypes) != 0;
     }
-    /// An s4 weight: the INT4 kernels, of one group over K
-    /// (int4_one_group()) or the group kernels (native_int4_scheme);
-    /// int8_scheme is per_group for every s4 weight.
-    bool int4() const { return is(native_format_t::s4); }
-    /// An s4 weight of one group over K ({1, N} weight scales; a group of 0
-    /// is one, as the layout query and the cost model take it): the INT4
-    /// kernels of one group, which take more rows per call.
+    /// A route of the INT4 kernels (an s4 weight), of one group over K
+    /// (int4_one_group()) or the group kernels; int8_scheme is per_group for
+    /// every s4 weight.
+    bool int4() const {
+        return native_on_family<native_kernel_kind_t::int4>(route());
+    }
+    /// The route of the INT4 kernels of one group over K, which take more
+    /// rows per call.
     bool int4_one_group() const {
-        return int4() && (wei_group_size == 0 || wei_group_size >= K);
+        return route() == native_route_t::s4_one_group;
     }
     bool operator==(const native_problem_t &o) const;
 };
-
-/// The family of INT4 kernels of the s4 problem p, as the kernel registry
-/// tags it: per_channel, the kernels of one group over K, for a weight of
-/// one group; per_group, the group kernels, for any other.
-inline native_int8_scheme_t native_int4_scheme(const native_problem_t &p) {
-    return p.int4_one_group() ? native_int8_scheme_t::per_channel
-                              : native_int8_scheme_t::per_group;
-}
 
 size_t hash_native_problem(const native_problem_t &p) noexcept;
 
@@ -138,9 +143,12 @@ struct native_plan_t {
     /// BF16 and FP32 K per pass; BF16 even and F16_PH whole blocks of
     /// kNativeF16AccumBlockK unless it covers K
     int kc = 0;
-    /// The kernels of the tiles, by the weight's type; for an f16 weight the
-    /// registry's f16_kind(): F16_PH where it has them, else F16.
+    /// The kernels of the tiles, the family of the problem's route
+    /// (native_problem_t::route): for an f16 weight F16_PH where the
+    /// registry has them, else F16.
     native_kernel_kind_t kind = native_kernel_kind_t::bf16;
+    /// That route, which the call's tiles and GEMV kernels run.
+    native_route_t route = native_route_t::bf16;
     int threads = 1; ///< compute team
     int col_groups = 0; ///< 0: slice schedule; > 0: row-group schedule
     /// > 0: the blocks schedule (col_groups 0): units of a row block by

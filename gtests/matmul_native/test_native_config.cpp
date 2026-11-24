@@ -223,13 +223,28 @@ int64_t field_value(const heuristic_params_t &p) {
     return static_cast<int64_t>(p.*field);
 }
 
+/// The families of the routes of the float formats (the rules of BF16) or of
+/// the quantized ones (the INT8 tile), a mask of bits 1 << family.
+constexpr uint32_t route_families(bool quantized) {
+    uint32_t families = 0;
+    for (const native_route_desc_t &r : kNativeRoutes)
+        if (native_format(r.format).quantized() == quantized)
+            families |= 1u << static_cast<int>(r.family);
+    return families;
+}
+
+constexpr uint32_t kFloatFamilies = route_families(false);
+constexpr uint32_t kInt8Families = route_families(true);
+constexpr uint32_t kAllFamilies = kFloatFamilies | kInt8Families;
+
 /// What the schema dump says of a key besides its type and range: the
-/// problems it applies to, whether every value keeps the output bits of the
-/// built-in plan, whether it pins a decision (else it is a constant of a
-/// rule), and its built-in value as text and in heuristic_params_t.
+/// families of the problems it applies to, whether every value keeps the
+/// output bits of the built-in plan, whether it pins a decision (else it is
+/// a constant of a rule), and its built-in value as text and in
+/// heuristic_params_t.
 struct key_doc_t {
     const char *name;
-    const char *applies; ///< both, bf16 or int8
+    uint32_t families;
     bool same_bits;
     bool pin;
     const char *builtin;
@@ -240,149 +255,151 @@ using hp_t = heuristic_params_t;
 
 /// In the order of native_config_keys().
 const key_doc_t kKeyDocs[] = {
-        {"nr", "both", true, true, "auto", &field_value<int, &hp_t::nr>},
-        {"mr", "both", true, true, "auto", &field_value<int, &hp_t::mr>},
-        {"mb", "both", true, true, "auto", &field_value<int, &hp_t::mb>},
-        {"nb", "both", true, true, "auto", &field_value<int, &hp_t::nb>},
-        {"kc", "bf16", true, true, "auto", &field_value<int, &hp_t::kc>},
-        {"col_groups", "both", true, true, "auto",
+        {"nr", kAllFamilies, true, true, "auto", &field_value<int, &hp_t::nr>},
+        {"mr", kAllFamilies, true, true, "auto", &field_value<int, &hp_t::mr>},
+        {"mb", kAllFamilies, true, true, "auto", &field_value<int, &hp_t::mb>},
+        {"nb", kAllFamilies, true, true, "auto", &field_value<int, &hp_t::nb>},
+        {"kc", kFloatFamilies, true, true, "auto",
+                &field_value<int, &hp_t::kc>},
+        {"col_groups", kAllFamilies, true, true, "auto",
                 &field_value<int, &hp_t::col_groups>},
-        {"schedule", "both", true, true, "auto",
+        {"schedule", kAllFamilies, true, true, "auto",
                 &field_value<native_schedule_t, &hp_t::schedule>},
-        {"traversal", "both", true, true, "m_inner",
+        {"traversal", kAllFamilies, true, true, "m_inner",
                 &field_value<native_traversal_t, &hp_t::traversal>},
-        {"unit_tiles", "both", true, true, "auto",
+        {"unit_tiles", kAllFamilies, true, true, "auto",
                 &field_value<int, &hp_t::unit_tiles>},
-        {"threads_cap", "both", true, false, "none",
+        {"threads_cap", kAllFamilies, true, false, "none",
                 &field_value<int, &hp_t::threads_cap>},
-        {"min_tiles_per_thread", "both", true, false, "1",
+        {"min_tiles_per_thread", kAllFamilies, true, false, "1",
                 &field_value<int, &hp_t::min_tiles_per_thread>},
-        {"row_unit", "both", true, true, "auto",
+        {"row_unit", kAllFamilies, true, true, "auto",
                 &field_value<int, &hp_t::row_unit>},
-        {"tile_rows", "both", true, false, "6",
+        {"tile_rows", kAllFamilies, true, false, "6",
                 &field_value<int, &hp_t::tile_rows>},
-        {"tall_rows", "bf16", true, false, "12",
+        {"tall_rows", kFloatFamilies, true, false, "12",
                 &field_value<int, &hp_t::tall_rows>},
-        {"block_rows", "both", true, false, "192",
+        {"block_rows", kAllFamilies, true, false, "192",
                 &field_value<int, &hp_t::block_rows>},
-        {"min_tile_cols", "both", true, false, "16",
+        {"min_tile_cols", kAllFamilies, true, false, "16",
                 &field_value<int, &hp_t::min_tile_cols>},
-        {"row_split", "both", true, false, "1",
+        {"row_split", kAllFamilies, true, false, "1",
                 &field_value<bool, &hp_t::row_split>},
-        {"min_pass_k", "both", true, false, "256",
+        {"min_pass_k", kAllFamilies, true, false, "256",
                 &field_value<int, &hp_t::min_pass_k>},
-        {"bf16_l2_pct", "bf16", true, false, "50",
+        {"bf16_l2_pct", kFloatFamilies, true, false, "50",
                 &field_value<int, &hp_t::bf16_l2_pct>},
-        {"kc_split", "bf16", true, false, "budget",
+        {"kc_split", kFloatFamilies, true, false, "budget",
                 &field_value<native_kc_split_t, &hp_t::kc_split>},
-        {"l3_pct", "both", true, false, "100",
+        {"l3_pct", kAllFamilies, true, false, "100",
                 &field_value<int, &hp_t::l3_pct>},
-        {"domain_threads", "both", true, false, "l3_domain_cores",
+        {"domain_threads", kAllFamilies, true, false, "l3_domain_cores",
                 &field_value<int, &hp_t::domain_threads>},
-        {"int8_mr", "int8", true, false, "12",
+        {"int8_mr", kInt8Families, true, false, "12",
                 &field_value<int, &hp_t::int8_mr>},
-        {"int8_cw", "int8", true, false, "32/16",
+        {"int8_cw", kInt8Families, true, false, "32/16",
                 &field_value<uint8_t, &hp_t::int8_cw_mask>},
-        {"int8_l2_pct", "int8", true, false, "50",
+        {"int8_l2_pct", kInt8Families, true, false, "50",
                 &field_value<int, &hp_t::int8_l2_pct>},
-        {"int8_kc", "int8", true, true, "auto",
+        {"int8_kc", kInt8Families, true, true, "auto",
                 &field_value<int, &hp_t::int8_kc>},
-        {"int4_l1_pct", "int8", true, false, "125",
+        {"int4_l1_pct", kInt8Families, true, false, "125",
                 &field_value<int, &hp_t::int4_l1_pct>},
-        {"direct_store", "int8", true, false, "1",
+        {"direct_store", kInt8Families, true, false, "1",
                 &field_value<bool, &hp_t::direct_store>},
         // The bias then follows the dequantization instead of fusing with
         // it in one FMA.
-        {"bias_in_dequant", "int8", false, false, "1",
+        {"bias_in_dequant", kInt8Families, false, false, "1",
                 &field_value<bool, &hp_t::bias_in_dequant>},
-        {"copy_block", "both", true, false, "64",
+        {"copy_block", kAllFamilies, true, false, "64",
                 &field_value<int, &hp_t::copy_block>},
-        {"bf16_copy_par_min", "bf16", true, false, "0",
+        {"bf16_copy_par_min", kFloatFamilies, true, false, "0",
                 &field_value<int64_t, &hp_t::bf16_copy_par_min>},
-        {"int8_copy_par_min", "int8", true, false, "65536",
+        {"int8_copy_par_min", kInt8Families, true, false, "65536",
                 &field_value<int64_t, &hp_t::int8_copy_par_min>},
-        {"makespan", "both", true, false, "1",
+        {"makespan", kAllFamilies, true, false, "1",
                 &field_value<int, &hp_t::makespan>},
-        {"min_gain_pct", "both", true, false, "5",
+        {"min_gain_pct", kAllFamilies, true, false, "5",
                 &field_value<int, &hp_t::min_gain_pct>},
-        {"idle_pct", "both", true, false, "10",
+        {"idle_pct", kAllFamilies, true, false, "10",
                 &field_value<int, &hp_t::idle_pct>},
-        {"decode_m", "both", true, false, "128",
+        {"decode_m", kAllFamilies, true, false, "128",
                 &field_value<int, &hp_t::decode_m>},
-        {"l1_pass", "both", true, false, "1",
+        {"l1_pass", kAllFamilies, true, false, "1",
                 &field_value<int, &hp_t::l1_pass>},
-        {"l1_pct", "both", true, false, "100",
+        {"l1_pct", kAllFamilies, true, false, "100",
                 &field_value<int, &hp_t::l1_pct>},
-        {"l1_pass_max_mb", "both", true, false, "64",
+        {"l1_pass_max_mb", kAllFamilies, true, false, "64",
                 &field_value<int, &hp_t::l1_pass_max_mb>},
-        {"traffic_groups", "both", true, false, "1",
+        {"traffic_groups", kAllFamilies, true, false, "1",
                 &field_value<int, &hp_t::traffic_groups>},
-        {"bf16_alias", "bf16", true, false, "1",
+        {"bf16_alias", kFloatFamilies, true, false, "1",
                 &field_value<int, &hp_t::bf16_alias>},
-        {"bf16_alias_mr", "bf16", true, false, "8",
+        {"bf16_alias_mr", kFloatFamilies, true, false, "8",
                 &field_value<int, &hp_t::bf16_alias_mr>},
-        {"bf16_narrow_n", "bf16", true, false, "1",
+        {"bf16_narrow_n", kFloatFamilies, true, false, "1",
                 &field_value<int, &hp_t::bf16_narrow_n>},
-        {"bf16_narrow_n_min_m", "bf16", true, false, "1024",
+        {"bf16_narrow_n_min_m", kFloatFamilies, true, false, "1024",
                 &field_value<int, &hp_t::bf16_narrow_n_min_m>},
-        {"f16_wide_min_m", "bf16", true, false, "192",
+        {"f16_wide_min_m", kFloatFamilies, true, false, "192",
                 &field_value<int, &hp_t::f16_wide_min_m>},
-        {"blocks", "both", true, false, "1", &field_value<int, &hp_t::blocks>},
-        {"bf16_blocks_min_m", "bf16", true, false, "1024",
+        {"blocks", kAllFamilies, true, false, "1",
+                &field_value<int, &hp_t::blocks>},
+        {"bf16_blocks_min_m", kFloatFamilies, true, false, "1024",
                 &field_value<int, &hp_t::bf16_blocks_min_m>},
-        {"int8_blocks_min_m", "int8", true, false, "3072",
+        {"int8_blocks_min_m", kInt8Families, true, false, "3072",
                 &field_value<int, &hp_t::int8_blocks_min_m>},
-        {"cost_model", "both", true, false, "1",
+        {"cost_model", kAllFamilies, true, false, "1",
                 &field_value<int, &hp_t::cost_model>},
-        {"cm_gain_pct", "both", true, false, "5",
+        {"cm_gain_pct", kAllFamilies, true, false, "5",
                 &field_value<int, &hp_t::cm_gain_pct>},
-        {"cm_short_rows", "both", true, false, "8",
+        {"cm_short_rows", kAllFamilies, true, false, "8",
                 &field_value<int, &hp_t::cm_short_rows>},
-        {"cm_fma_pipes", "both", true, false, "fma_ports",
+        {"cm_fma_pipes", kAllFamilies, true, false, "fma_ports",
                 &field_value<int, &hp_t::cm_fma_pipes>},
-        {"cm_fma_lat", "both", true, false, "6",
+        {"cm_fma_lat", kAllFamilies, true, false, "6",
                 &field_value<int, &hp_t::cm_fma_lat>},
-        {"cm_call_cycles", "both", true, false, "800",
+        {"cm_call_cycles", kAllFamilies, true, false, "800",
                 &field_value<int, &hp_t::cm_call_cycles>},
-        {"cm_tall_pct", "both", true, false, "domain_threads",
+        {"cm_tall_pct", kAllFamilies, true, false, "domain_threads",
                 &field_value<int, &hp_t::cm_tall_pct>},
-        {"cm_l2_bytes", "both", true, false, "16",
+        {"cm_l2_bytes", kAllFamilies, true, false, "16",
                 &field_value<int, &hp_t::cm_l2_bytes>},
-        {"cm_l3_cycles", "both", true, false, "10",
+        {"cm_l3_cycles", kAllFamilies, true, false, "10",
                 &field_value<int, &hp_t::cm_l3_cycles>},
-        {"cm_mem_cycles", "both", true, false, "domain_threads",
+        {"cm_mem_cycles", kAllFamilies, true, false, "domain_threads",
                 &field_value<int, &hp_t::cm_mem_cycles>},
-        {"cm_prefetch_kib", "both", true, false, "4",
+        {"cm_prefetch_kib", kAllFamilies, true, false, "4",
                 &field_value<int, &hp_t::cm_prefetch_kib>},
-        {"cm_overlap_pct", "both", true, false, "20",
+        {"cm_overlap_pct", kAllFamilies, true, false, "20",
                 &field_value<int, &hp_t::cm_overlap_pct>},
-        {"cm_reuse_pct", "both", true, false, "50",
+        {"cm_reuse_pct", kAllFamilies, true, false, "50",
                 &field_value<int, &hp_t::cm_reuse_pct>},
-        {"cm_stream_cycles", "both", true, false, "600",
+        {"cm_stream_cycles", kAllFamilies, true, false, "600",
                 &field_value<int, &hp_t::cm_stream_cycles>},
-        {"cm_sync_tiles", "both", true, false, "5",
+        {"cm_sync_tiles", kAllFamilies, true, false, "5",
                 &field_value<int, &hp_t::cm_sync_tiles>},
-        {"cm_group_slab_pct", "both", true, false, "75",
+        {"cm_group_slab_pct", kAllFamilies, true, false, "75",
                 &field_value<int, &hp_t::cm_group_slab_pct>},
-        {"cm_group_l3_pct", "both", true, false, "75",
+        {"cm_group_l3_pct", kAllFamilies, true, false, "75",
                 &field_value<int, &hp_t::cm_group_l3_pct>},
-        {"cm_group_skew_pct", "both", true, false, "110",
+        {"cm_group_skew_pct", kAllFamilies, true, false, "110",
                 &field_value<int, &hp_t::cm_group_skew_pct>},
-        {"cm_group_rows_pct", "both", true, false, "115",
+        {"cm_group_rows_pct", kAllFamilies, true, false, "115",
                 &field_value<int, &hp_t::cm_group_rows_pct>},
-        {"cm_drift_kib", "bf16", true, false, "4096",
+        {"cm_drift_kib", kFloatFamilies, true, false, "4096",
                 &field_value<int, &hp_t::cm_drift_kib>},
-        {"cm_pass_kib", "bf16", true, false, "128",
+        {"cm_pass_kib", kFloatFamilies, true, false, "128",
                 &field_value<int, &hp_t::cm_pass_kib>},
-        {"cm_pass_calls", "bf16", true, false, "4",
+        {"cm_pass_calls", kFloatFamilies, true, false, "4",
                 &field_value<int, &hp_t::cm_pass_calls>},
-        {"cm_block_kib", "bf16", true, false, "16384",
+        {"cm_block_kib", kFloatFamilies, true, false, "16384",
                 &field_value<int, &hp_t::cm_block_kib>},
-        {"cm_block_k", "bf16", true, false, "2048",
+        {"cm_block_k", kFloatFamilies, true, false, "2048",
                 &field_value<int, &hp_t::cm_block_k>},
-        {"cm_int8_l1_pct", "int8", true, false, "0",
+        {"cm_int8_l1_pct", kInt8Families, true, false, "0",
                 &field_value<int, &hp_t::cm_int8_l1_pct>},
-        {"cm_int4_min_m", "int8", true, false, "48",
+        {"cm_int4_min_m", kInt8Families, true, false, "48",
                 &field_value<int, &hp_t::cm_int4_min_m>},
 };
 
@@ -912,8 +929,9 @@ TEST(NativeConfigValidate, RejectsEachRule) {
     native_problem_t zero = s4;
     zero.wei_group_size = 0;
     EXPECT_TRUE(zero.int4_one_group());
-    EXPECT_EQ(native_int4_scheme(zero), native_int8_scheme_t::per_channel);
-    EXPECT_EQ(native_int4_scheme(s4), native_int8_scheme_t::per_group);
+    EXPECT_EQ(zero.route(), native_route_t::s4_one_group);
+    EXPECT_EQ(s4.route(), native_route_t::s4_group);
+    EXPECT_EQ(gp.route(), native_route_t::s8_group);
     const native_plan_t q0 = heuristic_plan(zero, u, heuristic_params_t {});
     EXPECT_EQ(q0.int8_rows_nv2, 12);
     EXPECT_EQ(validate_native_plan(q0, zero), nullptr);
@@ -1527,6 +1545,30 @@ TEST(NativeConfigTuningFile, Int4Entries) {
     ASSERT_NE(d.table, nullptr);
     EXPECT_EQ(config_of(d.table.get(), int4_problem(8, 4096, 4096, 128)),
             "mb=24");
+}
+
+// The dtype key names every format: an entry of a format's name and an
+// exact n and k (indexed for the key's first four) keys a weight of that
+// format and of no other.
+TEST(NativeConfigTuningFile, DtypeKeysEveryFormat) {
+    const auto mb = [](const native_format_desc_t &f) {
+        return 8 * (1 + static_cast<int>(f.id));
+    };
+    std::string entries;
+    for (const native_format_desc_t &f : kNativeFormats)
+        entries += std::string(entries.empty() ? "" : ", ") + R"({"id": ")"
+                + f.name + R"(", "match": {"dtype": ")" + f.name
+                + R"(", "n": 4096, "k": 4096}, "config": {"mb": )"
+                + std::to_string(mb(f)) + "}}";
+    const native_tuning_sources_t s
+            = load(tuning("\"entries\": [" + entries + "]"));
+    ASSERT_NE(s.table, nullptr);
+    for (const native_format_desc_t &f : kNativeFormats) {
+        native_problem_t p = problem(8, 4096, 4096);
+        p.wei_dt = f.wei_dt;
+        EXPECT_EQ(config_of(s.table.get(), p), "mb=" + std::to_string(mb(f)))
+                << f.name;
+    }
 }
 
 TEST(NativeConfigTuningFile, RuleKeys) {
@@ -2185,28 +2227,7 @@ TEST(NativeConfigCache, ConcurrentHits) {
 
 namespace {
 
-/// Bit mr - 1 set for every row count kind has a kernel for at nr, a tile
-/// of several slabs at its slab (INT8: for both sources).
-uint32_t kernel_rows(native_kernel_kind_t kind, int nr) {
-    const int nv = native_tile_slab_cols(kind, nr) / 16;
-    uint32_t mask = 0;
-    for (int mr = 1; mr <= 12; ++mr) {
-        bool served = false;
-        if (kind == native_kernel_kind_t::bf16)
-            served = select_bf16_brgemm_tall_kernel(mr, 16 * nv) != nullptr;
-        else if (kind == native_kernel_kind_t::f32)
-            served = select_native_fp32_ukernel(mr, nv) != nullptr;
-        else if (kind == native_kernel_kind_t::f16)
-            served = select_native_f16_ukernel(mr, nv) != nullptr;
-        else if (kind == native_kernel_kind_t::f16_ph)
-            served = select_native_f16_ph_ukernel(mr, nv) != nullptr;
-        else
-            served = select_native_int8_ukernel(mr, nv, false) != nullptr
-                    && select_native_int8_ukernel(mr, nv, true) != nullptr;
-        if (served) mask |= 1u << (mr - 1);
-    }
-    return mask;
-}
+using native_brgemm_test::route_kernel_rows;
 
 /// Largest m such that every row count 1 .. m is in mask.
 int full_rows(uint32_t mask) {
@@ -2226,18 +2247,18 @@ TEST(NativeConfigRegistry, MatchesTheSelectors) {
         const native_kernel_caps_t *c = r.caps(native_kernel_kind_t::bf16, nr);
         if (!u.avx512bf16) {
             EXPECT_EQ(c, nullptr);
-            EXPECT_EQ(r.bf16_table(nr), nullptr);
+            EXPECT_EQ(r.table<native_kernel_kind_t::bf16>(nr), nullptr);
             continue;
         }
         ASSERT_NE(c, nullptr) << nr;
         for (int mr = 1; mr <= 12; ++mr)
-            EXPECT_EQ(r.bf16_table(nr)[mr],
+            EXPECT_EQ(r.table<native_kernel_kind_t::bf16>(nr)[mr],
                     select_bf16_brgemm_tall_kernel(mr,
                             native_tile_slab_cols(
                                     native_kernel_kind_t::bf16, nr)))
                     << nr << " " << mr;
         const int max_mr
-                = full_rows(kernel_rows(native_kernel_kind_t::bf16, nr));
+                = full_rows(route_kernel_rows(native_route_t::bf16, nr));
         EXPECT_EQ(c->max_mr, max_mr);
         EXPECT_TRUE(r.covers(native_kernel_kind_t::bf16, max_mr, nr));
         EXPECT_FALSE(r.covers(native_kernel_kind_t::bf16, max_mr + 1, nr));
@@ -2254,14 +2275,16 @@ TEST(NativeConfigRegistry, MatchesTheSelectors) {
         }
         ASSERT_NE(c, nullptr) << nr;
         EXPECT_EQ(c->max_mr,
-                full_rows(kernel_rows(native_kernel_kind_t::int8, nr)));
+                full_rows(route_kernel_rows(native_route_t::s8_channel, nr)));
         EXPECT_EQ(c->max_mr, native_int8_ukernel_max_mr(nv));
         // The per-channel kernels serve per-channel calls, the group kernels
         // per-group calls.
-        const native_kernel_caps_t *g
-                = r.int8_caps(nr, native_int8_scheme_t::per_group);
+        const native_kernel_caps_t *g = r.caps(native_kernel_kind_t::int8, nr,
+                native_int8_scheme_t::per_group);
         ASSERT_NE(g, nullptr) << nr;
-        EXPECT_EQ(r.int8_caps(nr, native_int8_scheme_t::per_channel), c);
+        EXPECT_EQ(r.caps(native_kernel_kind_t::int8, nr,
+                          native_int8_scheme_t::per_channel),
+                c);
         EXPECT_EQ(g->max_mr, native_int8_group_ukernel_max_mr(nv));
         for (const native_kernel_caps_t *k : {c, g}) {
             const native_int8_scheme_t s = k == c
@@ -2271,9 +2294,12 @@ TEST(NativeConfigRegistry, MatchesTheSelectors) {
             EXPECT_FALSE(k->serves(k == c ? native_int8_scheme_t::per_group
                                           : native_int8_scheme_t::per_channel))
                     << nr;
-            EXPECT_TRUE(r.covers_int8(k->max_mr, nr, s)) << nr;
-            EXPECT_FALSE(r.covers_int8(k->max_mr + 1, nr, s)) << nr;
-            EXPECT_FALSE(r.covers_int8(0, nr, s)) << nr;
+            EXPECT_TRUE(r.covers(native_kernel_kind_t::int8, k->max_mr, nr, s))
+                    << nr;
+            EXPECT_FALSE(
+                    r.covers(native_kernel_kind_t::int8, k->max_mr + 1, nr, s))
+                    << nr;
+            EXPECT_FALSE(r.covers(native_kernel_kind_t::int8, 0, nr, s)) << nr;
         }
     }
     // The s4 group kernels, both orders, serve per-group calls.
@@ -2289,7 +2315,8 @@ TEST(NativeConfigRegistry, MatchesTheSelectors) {
         for (int mr = 1; mr <= c->max_mr; ++mr)
             for (const native_int8_order_t order : {native_int8_order_t::fused,
                          native_int8_order_t::reference})
-                EXPECT_NE(select_native_int4_group_ukernel(mr, nv, order),
+                EXPECT_NE(select_native_int4_group_ukernel(
+                                  native_format_t::s4, mr, nv, order),
                         nullptr)
                         << nr << " " << mr;
         EXPECT_TRUE(c->serves(native_int8_scheme_t::per_group)) << nr;
@@ -2297,7 +2324,10 @@ TEST(NativeConfigRegistry, MatchesTheSelectors) {
         EXPECT_TRUE(r.covers(native_kernel_kind_t::int4, c->max_mr, nr)) << nr;
         EXPECT_FALSE(r.covers(native_kernel_kind_t::int4, c->max_mr + 1, nr))
                 << nr;
-        EXPECT_NE(r.int8_caps(nr, native_int8_scheme_t::per_group), c) << nr;
+        EXPECT_NE(r.caps(native_kernel_kind_t::int8, nr,
+                          native_int8_scheme_t::per_group),
+                c)
+                << nr;
         EXPECT_EQ(r.caps(native_kernel_kind_t::int4, nr,
                           native_int8_scheme_t::per_group),
                 c)
@@ -2314,7 +2344,8 @@ TEST(NativeConfigRegistry, MatchesTheSelectors) {
         for (int mr = 1; mr <= one->max_mr; ++mr)
             for (const native_int8_order_t order : {native_int8_order_t::fused,
                          native_int8_order_t::reference})
-                EXPECT_NE(select_native_int4_one_group_ukernel(mr, nv, order),
+                EXPECT_NE(select_native_int4_one_group_ukernel(
+                                  native_format_t::s4, mr, nv, order),
                         nullptr)
                         << nr << " " << mr;
         EXPECT_TRUE(one->serves(native_int8_scheme_t::per_channel)) << nr;
@@ -2332,7 +2363,9 @@ TEST(NativeConfigRegistry, MatchesTheSelectors) {
                           native_int8_scheme_t::per_group),
                 c->max_mr >= 7)
                 << nr;
-        EXPECT_NE(r.int8_caps(nr, native_int8_scheme_t::per_channel), one)
+        EXPECT_NE(r.caps(native_kernel_kind_t::int8, nr,
+                          native_int8_scheme_t::per_channel),
+                one)
                 << nr;
     }
     // FP32 tiles of 16 or 32 columns, and of 32-column slabs, every row
@@ -2342,15 +2375,16 @@ TEST(NativeConfigRegistry, MatchesTheSelectors) {
         const native_kernel_caps_t *c = r.caps(native_kernel_kind_t::f32, nr);
         if (!u.avx512f) {
             EXPECT_EQ(c, nullptr);
-            EXPECT_EQ(r.f32_table(nr), nullptr);
+            EXPECT_EQ(r.table<native_kernel_kind_t::f32>(nr), nullptr);
             continue;
         }
         ASSERT_NE(c, nullptr) << nr;
         for (int mr = 1; mr <= 12; ++mr)
-            EXPECT_EQ(r.f32_table(nr)[mr], select_native_fp32_ukernel(mr, nv))
+            EXPECT_EQ(r.table<native_kernel_kind_t::f32>(nr)[mr],
+                    select_native_fp32_ukernel(mr, nv))
                     << nr << " " << mr;
         EXPECT_EQ(c->max_mr,
-                full_rows(kernel_rows(native_kernel_kind_t::f32, nr)));
+                full_rows(route_kernel_rows(native_route_t::f32, nr)));
         EXPECT_EQ(c->max_mr, native_fp32_ukernel_max_mr(nv));
         EXPECT_EQ(c->max_mr, 12);
         EXPECT_TRUE(r.covers(native_kernel_kind_t::f32, 12, nr));
@@ -2363,8 +2397,8 @@ TEST(NativeConfigRegistry, MatchesTheSelectors) {
         EXPECT_EQ(r.caps(native_kernel_kind_t::int8, nr), nullptr) << nr;
         EXPECT_EQ(r.caps(native_kernel_kind_t::int4, nr), nullptr) << nr;
         EXPECT_EQ(r.caps(native_kernel_kind_t::f32, nr), nullptr) << nr;
-        EXPECT_EQ(r.bf16_table(nr), nullptr) << nr;
-        EXPECT_EQ(r.f32_table(nr), nullptr) << nr;
+        EXPECT_EQ(r.table<native_kernel_kind_t::bf16>(nr), nullptr) << nr;
+        EXPECT_EQ(r.table<native_kernel_kind_t::f32>(nr), nullptr) << nr;
     }
     // A tile of several slabs has the caps of its slab, and for INT8 and
     // INT4 those of each scheme.
@@ -2396,8 +2430,8 @@ TEST(NativeConfigRegistry, MatchesTheSelectors) {
     }
     EXPECT_FALSE(r.covers(native_kernel_kind_t::int8, 0, 16));
     if (u.avx512bf16 && u.avx512vnni) {
-        EXPECT_EQ(kernel_rows(native_kernel_kind_t::bf16, 16), 0x3fu);
-        EXPECT_EQ(kernel_rows(native_kernel_kind_t::bf16, 32), 0xfffu);
+        EXPECT_EQ(route_kernel_rows(native_route_t::bf16, 16), 0x3fu);
+        EXPECT_EQ(route_kernel_rows(native_route_t::bf16, 32), 0xfffu);
         EXPECT_EQ(r.caps(native_kernel_kind_t::int8, 16)->max_mr, 12);
         EXPECT_EQ(r.caps(native_kernel_kind_t::int8, 32)->max_mr, 12);
     }
@@ -2452,6 +2486,18 @@ json scheme_names(uint8_t mask) {
     return names;
 }
 
+/// The name of a family's instruction set, as the schema names the CPU's;
+/// AVX-512 F for the base set.
+const char *isa_name(native_isa_t isa) {
+    switch (isa) {
+        case native_isa_t::base: return "avx512f";
+        case native_isa_t::avx512_bf16: return "avx512bf16";
+        case native_isa_t::avx512_vnni: return "avx512vnni";
+        case native_isa_t::avx512_fp16: return "avx512fp16";
+    }
+    return "";
+}
+
 json cw_widths(int64_t mask) {
     json widths = json::array();
     if ((mask & kNativeInt8Cw32) != 0) widths.push_back(32);
@@ -2501,9 +2547,16 @@ nlohmann::ordered_json key_json(const native_config_key_t &k) {
             j["values"] = native_brgemm_test::native_enum_values(k.type);
             break;
     }
-    j["applies"] = d->applies;
+    j["applies"] = (d->families & ~kFloatFamilies) == 0 ? "bf16"
+            : (d->families & ~kInt8Families) == 0       ? "int8"
+                                                        : "both";
     j["int8_schemes"] = scheme_names(
-            std::string(d->applies) == "bf16" ? 0 : k.int8_schemes);
+            (d->families & kInt8Families) == 0 ? 0 : k.int8_schemes);
+    json families = json::array();
+    for (const native_family_desc_t &f : kNativeFamilies)
+        if ((d->families & (1u << static_cast<int>(f.id))) != 0)
+            families.push_back(f.name);
+    j["families"] = families;
     j["bits"] = d->same_bits ? "same" : "changes";
     j["kind"] = d->pin ? "pin" : "param";
     return j;
@@ -2522,12 +2575,24 @@ const char *const kPlanLineFields[] = {"M", "N", "K", "pack_nr", "nr", "mb",
 
 /// The values of the plan line's gemv field: the GEMV kernels an M = 1 call
 /// runs on, by its type, and none for a call on the tiles.
-const char *const kPlanLineGemv[]
-        = {"none", "bf16", "f32", "f16", "f16_ph", "s8", "s8_group", "s4"};
+/// The gemv values of the plan line: none, then the GEMV kernels' names of
+/// the routes (native_route_desc_t::gemv), those of the float routes first,
+/// each once, in route order.
+std::vector<std::string> plan_line_gemv() {
+    std::vector<std::string> names = {"none"};
+    for (const bool rows : {true, false})
+        for (const native_route_desc_t &r : kNativeRoutes)
+            if ((r.cls == native_route_class_t::rows) == rows
+                    && std::find(names.begin(), names.end(), r.gemv)
+                            == names.end())
+                names.push_back(r.gemv);
+    return names;
+}
 
 /// What the planner reads and offers on this build and CPU: the config keys,
-/// the match keys, rule features and comparisons, the kernels (k_unit their
-/// family's k_step), the hardware and what the plan reads of it (uarch), this
+/// the match keys, rule features and comparisons, the formats with their
+/// routes and the families, the kernels of each route (k_unit their family's
+/// k_step), the hardware and what the plan reads of it (uarch), this
 /// CPU's value of every hardware key (hw_match), and the fields of the plan
 /// line and the values of its gemv field.
 nlohmann::ordered_json schema_json() {
@@ -2588,96 +2653,52 @@ nlohmann::ordered_json schema_json() {
     doc["rule_ops"] = std::vector<std::string>(
             std::begin(kNativeRuleOps), std::end(kNativeRuleOps));
 
+    // The formats, each with its routes, and the families of the tables
+    // (native_format.hpp), then the registry's kernels of each route.
+    const char *const route_classes[] = {"rows", "channel", "group"};
+    nlohmann::ordered_json formats = nlohmann::ordered_json::array();
+    for (const native_format_desc_t &f : kNativeFormats) {
+        nlohmann::ordered_json routes = nlohmann::ordered_json::array();
+        for (const native_route_desc_t &route : kNativeRoutes)
+            if (route.format == f.id)
+                routes.push_back({{"family", native_family(route.family).name},
+                        {"int8_schemes", scheme_names(route.schemes)},
+                        {"class", route_classes[static_cast<int>(route.cls)]},
+                        {"priced", route.priced}, {"gemv", route.gemv}});
+        // The bytes of one weight scale of each type the format takes.
+        std::vector<int> scale_bytes;
+        for (unsigned i = 0; i < 8 * sizeof(f.contract.scale_types); ++i) {
+            if ((f.contract.scale_types & (1u << i)) == 0) continue;
+            const int b = static_cast<int>(
+                    native_scale_bytes(static_cast<native_scale_t>(i)));
+            if (std::find(scale_bytes.begin(), scale_bytes.end(), b)
+                    == scale_bytes.end())
+                scale_bytes.push_back(b);
+        }
+        std::sort(scale_bytes.begin(), scale_bytes.end());
+        formats.push_back({{"name", f.name},
+                {"elem_bits", f.geometry.elem_bits},
+                {"k_per_word", f.geometry.k_per_word},
+                {"planes", f.geometry.planes},
+                {"src_bits", f.contract.src_bits}, {"quantized", f.quantized()},
+                {"grouped",
+                        (native_type_bit(f.wei_dt) & kNativeGroupedTypes) != 0},
+                {"scale_bytes", scale_bytes}, {"routes", routes}});
+    }
+    doc["formats"] = formats;
+    nlohmann::ordered_json families = nlohmann::ordered_json::array();
+    for (const native_family_desc_t &f : kNativeFamilies)
+        families.push_back({{"name", f.name}, {"isa", isa_name(f.isa)},
+                {"k_step", f.k_step}, {"slab_cols", native_slab_cols(f.id)},
+                {"operand_bits", f.operand_bits},
+                {"vector_cols", f.vector_cols}});
+    doc["families"] = families;
     nlohmann::ordered_json kernels = nlohmann::ordered_json::array();
-    const native_kernel_registry_t &r = native_kernel_registry();
-    for (const native_kernel_kind_t kind :
-            {native_kernel_kind_t::bf16, native_kernel_kind_t::int8})
-        for (const int nr : {16, 32, 64, 128}) {
-            const native_kernel_caps_t *c = r.caps(kind, nr);
-            if (c == nullptr) continue;
-            const bool bf16 = kind == native_kernel_kind_t::bf16;
-            kernels.push_back({{"kind", bf16 ? "bf16" : "int8"}, {"nr", nr},
-                    {"mr_mask", kernel_rows(kind, nr)}, {"max_mr", c->max_mr},
-                    {"k_unit", native_family(kind).k_step},
-                    {"int8_schemes", scheme_names(c->int8_schemes)}});
-        }
-    // The INT8 and INT4 kernels of a tile of several slabs are those of the
-    // slab.
-    for (const int nr : {16, 32, 64, 128}) {
-        const int nv = std::min(nr, 32) / 16;
-        const native_kernel_caps_t *c
-                = r.int8_caps(nr, native_int8_scheme_t::per_group);
-        if (c == nullptr) continue;
-        uint32_t mask = 0;
-        for (int mr = 1; mr <= 12; ++mr)
-            if (select_native_int8_group_ukernel(mr, nv, false) != nullptr
-                    && select_native_int8_group_ukernel(mr, nv, true)
-                            != nullptr)
-                mask |= 1u << (mr - 1);
-        kernels.push_back({{"kind", "int8"}, {"nr", nr}, {"mr_mask", mask},
-                {"max_mr", c->max_mr},
-                {"k_unit", native_family(native_kernel_kind_t::int8).k_step},
-                {"int8_schemes", scheme_names(c->int8_schemes)}});
-    }
-    for (const int nr : {16, 32, 64, 128}) {
-        const int nv = std::min(nr, 32) / 16;
-        const native_kernel_caps_t *c = r.caps(native_kernel_kind_t::int4, nr);
-        if (c == nullptr) continue;
-        uint32_t mask = 0;
-        for (int mr = 1; mr <= 12; ++mr)
-            if (select_native_int4_group_ukernel(
-                        mr, nv, native_int8_order_t::fused)
-                            != nullptr
-                    && select_native_int4_group_ukernel(
-                               mr, nv, native_int8_order_t::reference)
-                            != nullptr)
-                mask |= 1u << (mr - 1);
-        kernels.push_back({{"kind", "int4"}, {"nr", nr}, {"mr_mask", mask},
-                {"max_mr", c->max_mr},
-                {"k_unit", native_family(native_kernel_kind_t::int4).k_step},
-                {"int8_schemes", scheme_names(c->int8_schemes)}});
-    }
-    for (const int nr : {16, 32, 64, 128}) {
-        const int nv = std::min(nr, 32) / 16;
-        const native_kernel_caps_t *c = r.caps(native_kernel_kind_t::int4, nr,
-                native_int8_scheme_t::per_channel);
-        if (c == nullptr) continue;
-        uint32_t mask = 0;
-        for (int mr = 1; mr <= 12; ++mr)
-            if (select_native_int4_one_group_ukernel(
-                        mr, nv, native_int8_order_t::fused)
-                            != nullptr
-                    && select_native_int4_one_group_ukernel(
-                               mr, nv, native_int8_order_t::reference)
-                            != nullptr)
-                mask |= 1u << (mr - 1);
-        kernels.push_back({{"kind", "int4"}, {"nr", nr}, {"mr_mask", mask},
-                {"max_mr", c->max_mr},
-                {"k_unit", native_family(native_kernel_kind_t::int4).k_step},
-                {"int8_schemes", scheme_names(c->int8_schemes)}});
-    }
-    for (const int nr : {16, 32, 64, 128}) {
-        const native_kernel_caps_t *c = r.caps(native_kernel_kind_t::f32, nr);
-        if (c == nullptr) continue;
-        kernels.push_back({{"kind", "f32"}, {"nr", nr},
-                {"mr_mask", kernel_rows(native_kernel_kind_t::f32, nr)},
-                {"max_mr", c->max_mr},
-                {"k_unit", native_family(native_kernel_kind_t::f32).k_step},
-                {"int8_schemes", scheme_names(c->int8_schemes)}});
-    }
-    // An f16 call takes the F16_PH kernels where the registry has them, else
-    // the F16 kernels; F16_PH also has tiles of two blocks.
-    for (const auto &[kind, name] :
-            {std::pair {native_kernel_kind_t::f16, "f16"},
-                    std::pair {native_kernel_kind_t::f16_ph, "f16_ph"}})
-        for (const int nr : {16, 32, 64, 128}) {
-            const native_kernel_caps_t *c = r.caps(kind, nr);
-            if (c == nullptr) continue;
-            kernels.push_back({{"kind", name}, {"nr", nr},
-                    {"mr_mask", kernel_rows(kind, nr)}, {"max_mr", c->max_mr},
-                    {"k_unit", native_family(kind).k_step},
-                    {"int8_schemes", scheme_names(c->int8_schemes)}});
-        }
+    for (const native_kernel_caps_t &c : native_kernel_registry().all())
+        kernels.push_back({{"kind", native_family(c.kind).name}, {"nr", c.nr},
+                {"mr_mask", route_kernel_rows(c.route, c.nr)},
+                {"max_mr", c.max_mr}, {"k_unit", native_family(c.kind).k_step},
+                {"int8_schemes", scheme_names(c.int8_schemes)}});
     doc["kernels"] = kernels;
     doc["tuning_file"] = {{"format", kNativeTuningFormat},
             {"version", kNativeTuningVersion},
@@ -2689,8 +2710,7 @@ nlohmann::ordered_json schema_json() {
                             std::end(kNativeIsaNames))}};
     doc["plan_line"] = std::vector<std::string>(
             std::begin(kPlanLineFields), std::end(kPlanLineFields));
-    doc["plan_line_gemv"] = std::vector<std::string>(
-            std::begin(kPlanLineGemv), std::end(kPlanLineGemv));
+    doc["plan_line_gemv"] = plan_line_gemv();
     return doc;
 }
 
@@ -2825,6 +2845,16 @@ TEST(NativeConfigSchema, SchemaDump) {
     EXPECT_EQ(key("row_split").value("default", json()), true);
     EXPECT_EQ(key("min_pass_k").value("multiple_of", json()), 2);
     EXPECT_EQ(key("min_pass_k").value("applies", json()), "both");
+    // The families a key applies to, next to its INT8 schemes.
+    EXPECT_EQ(key("nb").value("families", json()),
+            json::array({"bf16", "int8", "f32", "int4", "f16", "f16_ph"}));
+    EXPECT_EQ(key("kc").value("families", json()),
+            json::array({"bf16", "f32", "f16", "f16_ph"}));
+    EXPECT_EQ(key("kc").value("int8_schemes", json()), json::array());
+    EXPECT_EQ(key("int4_l1_pct").value("families", json()),
+            json::array({"int8", "int4"}));
+    EXPECT_EQ(key("int4_l1_pct").value("int8_schemes", json()),
+            json::array({"per_group"}));
     EXPECT_EQ(key("int8_cw").value("default", json()), json::array({32, 16}));
     EXPECT_EQ(key("int8_cw").value("must_contain", json()), json::array({16}));
     EXPECT_EQ(key("bias_in_dequant").value("bits", json()), "changes");
@@ -2990,6 +3020,35 @@ TEST(NativeConfigSchema, SchemaDump) {
             json::array({"bf16", "s8", "f32", "s4", "f16"}));
     EXPECT_EQ(doc.at("features").size(), 27u);
     EXPECT_EQ(doc.at("features").back(), "group");
+    // The formats with their routes, and the families.
+    ASSERT_EQ(doc.at("formats").size(), std::size(kNativeFormats));
+    EXPECT_EQ(doc.at("formats")[2].at("name"), "s4");
+    EXPECT_EQ(doc.at("formats")[2].at("elem_bits"), 4);
+    EXPECT_EQ(doc.at("formats")[2].at("k_per_word"), 8);
+    EXPECT_EQ(doc.at("formats")[2].at("src_bits"), 8);
+    EXPECT_EQ(doc.at("formats")[2].at("quantized"), true);
+    EXPECT_EQ(doc.at("formats")[2].at("planes"), 2);
+    EXPECT_EQ(doc.at("formats")[2].at("grouped"), true);
+    EXPECT_EQ(doc.at("formats")[1].at("grouped"), false);
+    EXPECT_EQ(doc.at("formats")[2].at("scale_bytes"), json::parse("[2, 4]"));
+    EXPECT_EQ(doc.at("formats")[0].at("scale_bytes"), json::array());
+    EXPECT_EQ(doc.at("formats")[2].at("routes"),
+            json::parse(R"([{"family": "int4", "int8_schemes": ["per_group"],
+                             "class": "group", "priced": true, "gemv": "s4"},
+                    {"family": "int4", "int8_schemes": ["per_channel"],
+                             "class": "group", "priced": true,
+                             "gemv": "s4"}])"));
+    EXPECT_EQ(doc.at("formats")[1].at("routes")[1].at("priced"), false);
+    EXPECT_EQ(doc.at("formats")[1].at("routes")[1].at("gemv"), "s8_group");
+    EXPECT_EQ(doc.at("plan_line_gemv"),
+            json::parse(R"(["none", "bf16", "f32", "f16", "f16_ph", "s8",
+                    "s8_group", "s4"])"));
+    EXPECT_EQ(doc.at("formats")[4].at("routes").size(), 2u);
+    ASSERT_EQ(doc.at("families").size(), std::size(kNativeFamilies));
+    EXPECT_EQ(doc.at("families")[5],
+            json::parse(R"({"name": "f16_ph", "isa": "avx512fp16",
+                    "k_step": 1, "slab_cols": 64, "operand_bits": 16,
+                    "vector_cols": 32})"));
     EXPECT_EQ(
             doc.at("tuning_file").at("format"), "zendnnl-native-brgemm-tuning");
     EXPECT_EQ(doc.at("tuning_file").at("version"), 2);
@@ -2998,7 +3057,7 @@ TEST(NativeConfigSchema, SchemaDump) {
 // The [MATMUL.NATIVE_BRGEMM] lines of a call of each weight type, INT8
 // scheme, schedule and epilogue the line tells apart, and of an M = 1 call
 // of each weight type and INT8 scheme, print the fields kPlanLineFields
-// lists and the gemv values kPlanLineGemv lists, which the schema dump
+// lists and the gemv values plan_line_gemv lists, which the schema dump
 // hands the offline tuner: every field and gemv value of every line is
 // listed, an M = 1 call names GEMV kernels and every other call none, and
 // every listed field and value is in a line (of f16 and f16_ph, the one
@@ -3031,6 +3090,7 @@ TEST(NativeConfigSchema, PlanLineFields) {
                 ? "f16"
                 : "f16_ph";
         int bad = 0;
+        const std::vector<std::string> gemvs = plan_line_gemv();
         std::set<std::string> seen, seen_gemv;
         for (const line_call_t &l : calls) {
             ::testing::internal::CaptureStdout();
@@ -3054,9 +3114,8 @@ TEST(NativeConfigSchema, PlanLineFields) {
                 }
                 if (f != "gemv") continue;
                 seen_gemv.insert(value);
-                const bool listed = std::find(std::begin(kPlanLineGemv),
-                                            std::end(kPlanLineGemv), value)
-                        != std::end(kPlanLineGemv);
+                const bool listed = std::find(gemvs.begin(), gemvs.end(), value)
+                        != gemvs.end();
                 if (!listed || (value == "none") != (l.M != 1)) {
                     std::fprintf(
                             stderr, "%s: gemv=%s\n", l.what, value.c_str());
@@ -3085,9 +3144,9 @@ TEST(NativeConfigSchema, PlanLineFields) {
             std::fprintf(stderr, "no line printed %s\n", f);
             ++bad;
         }
-        for (const char *g : kPlanLineGemv) {
+        for (const std::string &g : gemvs) {
             if (seen_gemv.count(g) != 0 || g == f16_unused) continue;
-            std::fprintf(stderr, "no line printed gemv=%s\n", g);
+            std::fprintf(stderr, "no line printed gemv=%s\n", g.c_str());
             ++bad;
         }
         return bad;
@@ -3116,7 +3175,8 @@ TEST(NativeConfigSchema, TheTunerFollowsThePlanner) {
             = ": tools/native_brgemm_tuning does not follow the "
               "planner (refresh_fixtures.sh, then its tests)";
     for (const char *member : {"format", "version", "match_keys", "features",
-                 "rule_ops", "tuning_file", "plan_line", "plan_line_gemv"})
+                 "rule_ops", "formats", "families", "tuning_file", "plan_line",
+                 "plan_line_gemv"})
         EXPECT_EQ(tuner.value(member, json()), live.at(member))
                 << member << fix;
     const json &keys = live.at("keys");

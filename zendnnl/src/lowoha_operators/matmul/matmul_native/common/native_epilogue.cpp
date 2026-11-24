@@ -442,19 +442,21 @@ inline __m512 pre_activation(const native_epilogue_t &ep, const float *acc,
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
 void store_tile(const native_epilogue_t &ep, const float *C, int ldc_acc,
         int m0, int mr, int n0, int nr) {
-    const bool bf16 = ep.dst_dt == data_type_t::bf16;
+    constexpr int kRne = _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC;
+    const data_type_t dt = ep.dst_dt;
     const int full = nr & ~15;
     for (int i = 0; i < mr; ++i) {
         const float *acc = C + static_cast<size_t>(i) * ldc_acc;
         char *row = static_cast<char *>(dst_at(ep, m0 + i, n0));
         for (int j = 0; j < full; j += 16) {
             const __m512 v = _mm512_loadu_ps(acc + j);
-            if (bf16)
+            if (dt == data_type_t::f32)
+                _mm512_storeu_ps(row + static_cast<size_t>(j) * 4, v);
+            else
                 _mm256_storeu_si256(reinterpret_cast<__m256i *>(
                                             row + static_cast<size_t>(j) * 2),
-                        avx512_f32_to_bf16_rne(v));
-            else
-                _mm512_storeu_ps(row + static_cast<size_t>(j) * 4, v);
+                        dt == data_type_t::bf16 ? avx512_f32_to_bf16_rne(v)
+                                                : _mm512_cvtps_ph(v, kRne));
         }
         if (full < nr) {
             const __mmask16 k = lane_mask(nr - full);
@@ -749,8 +751,8 @@ status_t prepare_epilogue(const GemmDescriptor &desc,
     ep.store_only = !is_gated && ep.alpha == 1.0f && ep.beta == 0.0f
             && ep.bias == nullptr && ep.bias_raw == nullptr && ep.ops.empty()
             && !ep.requant
-            && (ep.dst_dt == data_type_t::f32
-                    || ep.dst_dt == data_type_t::bf16);
+            && (ep.dst_dt == data_type_t::f32 || ep.dst_dt == data_type_t::bf16
+                    || ep.dst_dt == data_type_t::f16);
     return status_t::success;
 }
 

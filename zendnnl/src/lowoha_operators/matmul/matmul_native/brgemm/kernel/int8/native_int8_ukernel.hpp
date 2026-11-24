@@ -22,6 +22,8 @@
 #include <limits>
 
 #include "common/data_types.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_int8_scheme.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_types.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -86,9 +88,12 @@ using native_int8_ukernel_fn_t = void (*)(const native_int8_ukernel_args_t &);
 /// Largest MR served for NR = 16 * nv (nv 1 or 2); 0 otherwise.
 int native_int8_ukernel_max_mr(int nv);
 
-/// nullptr outside MR 1 .. native_int8_ukernel_max_mr(nv).
+/// The kernel of a weight of format, of an s8 source with src_signed;
+/// nullptr outside MR 1 .. native_int8_ukernel_max_mr(nv), and for a format
+/// whose decode is not byte_offset: these kernels read its bytes as they are
+/// against the source read as a + 128, the same sums.
 native_int8_ukernel_fn_t select_native_int8_ukernel(
-        int mr, int nv, bool src_signed);
+        native_format_t format, int mr, int nv, bool src_signed);
 
 /// A batch-reduce INT8 kernel over one MR x NR tile (NR = 16 * nv): a batch
 /// of (A, B) blocks, each reduced exactly in int32, then taken through a
@@ -120,8 +125,8 @@ struct native_int8_group_ukernel_args_t {
     // sum of (a - src_zp) * w, src_zp times the element's column sums of the
     // weight taken from the sum of a * w.  The scales are src_scale[m *
     // src_scale_ld + g * src_scale_step] and the NR weight scales from
-    // element g * wei_scale_step of wei_scale on, of type wei_scale_dt (f32,
-    // bf16 or f16), each read exactly as f32.
+    // element g * wei_scale_step of wei_scale on, of type wei_scale_type
+    // (f32, bf16 or f16), each read exactly as f32.
     const int32_t *shift = nullptr;
     int shift_ld = 0;
     int shift_step = 0;
@@ -133,7 +138,7 @@ struct native_int8_group_ukernel_args_t {
     int src_scale_step = 0;
     const void *wei_scale = nullptr;
     int wei_scale_step = 0;
-    data_type_t wei_scale_dt = data_type_t::f32;
+    native_scale_t wei_scale_type = native_scale_t::f32;
     /// The f32 tile, ldc apart.  With accumulate it holds the sum of the
     /// elements before this batch; else the sum starts at +0.0.
     float *C = nullptr;
@@ -165,11 +170,19 @@ using native_int8_group_ukernel_fn_t
 /// source) and the step's scales fit the 32 vector registers.
 int native_int8_group_ukernel_max_mr(int nv);
 
-/// nullptr outside MR 1 .. native_int8_group_ukernel_max_mr(nv); the kernel
-/// of a u8 source with src_u8 (its wide form with wide_zp), of an s8 source
-/// otherwise.
+/// The kernel of a weight of format, by its decode; of a u8 source with
+/// src_u8 (its wide form with wide_zp), of an s8 source otherwise; nullptr
+/// outside MR 1 .. native_int8_group_ukernel_max_mr(nv) and for a format of
+/// no route on these kernels.
 native_int8_group_ukernel_fn_t select_native_int8_group_ukernel(
-        int mr, int nv, bool src_u8, bool wide_zp = false);
+        native_format_t format, int mr, int nv, bool src_u8,
+        bool wide_zp = false);
+
+/// Whether the kernels of every source a call of scheme over a weight of
+/// format takes, u8 and s8, exist at mr rows and nv vectors: the
+/// per-channel kernels for per_channel, the group kernels for per_group.
+bool native_int8_kernels_serve(
+        native_format_t format, native_int8_scheme_t scheme, int mr, int nv);
 
 } // namespace native
 } // namespace matmul

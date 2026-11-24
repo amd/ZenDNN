@@ -71,14 +71,15 @@ struct native_plan_cost_t {
 bool native_plan_core_streams(
         const UarchParams &uarch, const heuristic_params_t &hp);
 
-/// True for the INT8 tiles the model prices: per-channel weight scales (the
-/// INT8 tile's calls, K passes and weight bytes; the per-group tile batches
-/// its groups instead).
+/// True for the INT8 tiles the model prices on their K passes: a route of
+/// the channel class (the INT8 tile's calls, K passes and weight bytes; the
+/// per-group tile batches its groups instead).
 bool native_plan_cost_int8(const native_problem_t &p);
 
-/// Bytes the INT4 tile streams per weight element of p: half a byte plus
-/// the group's scale (wei_scale_bytes over the group size).
-double native_int4_weight_bytes(const native_problem_t &p);
+/// Bytes a tile streams per weight element of p: its format's element bytes
+/// plus, for a format of group scales only, the group's scale
+/// (wei_scale_bytes over the group size).
+double native_plan_weight_bytes(const native_problem_t &p);
 
 /// True while the weights of p (N x K elements of the weight type) take at
 /// most cm_group_l3_pct percent of the L3 of the domains plan q's team
@@ -93,17 +94,19 @@ bool native_plan_groups_fit_l3(const native_problem_t &p,
 bool native_plan_slice_skewed(
         const native_plan_t &q, const heuristic_params_t &hp);
 
-/// The modeled time of plan q of a BF16 or F16 problem p, of an INT8 one
-/// that native_plan_cost_int8 accepts, or of an s4 one, on uarch with the
-/// cost inputs of hp; zero for another.  An F16 call takes one FMA step a K
-/// row of two-byte weights, over source rows widened to f32 (four bytes an
-/// element); on the F16_PH kernels (q.kind) one FMA a K row of 32 weights,
-/// over its two-byte source rows.  An INT8 call takes K in quads at the
-/// plan's call width and rows per call, a weight element is one byte, and
-/// the K pass follows the tile's rows (native_int8_pass_quads).  An s4 call
-/// is priced on its per-group tile: the INT8 call over all of K, weight
-/// elements of native_int4_weight_bytes, and per group one FMA per row and
-/// output vector.  Weight tiles a worker visits are streamed once; under row
+/// The modeled time of plan q of a problem p of a priced route
+/// (native_route_desc_t::priced) on uarch with the cost inputs of hp; zero
+/// for another.  A call takes one multiply-add step per K of a word of its
+/// family over the planes of the weight's format, over source elements of
+/// the family's operand bits and output vectors of its vector columns: an
+/// F16 call one FMA a K row of two-byte weights over source rows widened to
+/// f32, an F16_PH call (q.kind) one a K row of 32 weights.  An INT8 call
+/// takes K in quads at the plan's call width and rows per call, and on the
+/// channel class the K pass follows the tile's rows
+/// (native_int8_pass_quads).  A call of the group class is priced on its
+/// per-group tile: the INT8 call over all of K, weight elements of
+/// native_plan_weight_bytes, and per group one FMA per row and output
+/// vector.  Weight tiles a worker visits are streamed once; under row
 /// groups each tile is read once per row group, from memory once per L3
 /// domain the threads of its column group span (the threads of the team
 /// taken in order, domain_threads to a domain), and from L3 for the other

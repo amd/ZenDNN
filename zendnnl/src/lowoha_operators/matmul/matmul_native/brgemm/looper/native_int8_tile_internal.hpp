@@ -23,6 +23,7 @@
 #include <immintrin.h>
 
 #include "common/zendnnl_compat.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/native_decode.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_int8_tile.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/avx512_math.hpp"
 #include "memory/memory_utils.hpp"
@@ -56,15 +57,23 @@ inline int native_int8_calls_in_turn(
             : nr / cw;
 }
 
+/// Element i of the weight scales v of type s, exactly as f32.
+float native_scale_value(const void *v, native_scale_t s, size_t i);
+
+/// Element i of v of data type dt (a bias), exactly as f32.
+inline float native_scale_value(const void *v, data_type_t dt, size_t i) {
+    return zendnnl::memory::read_and_cast<float>(v, dt, i);
+}
+
 /// The f32 values at weight columns p0 .. p0 + cw (cw a multiple of 16) of
 /// a per-column (stride 1) or per-tensor (stride 0) vector of f32, bf16 or
-/// f16: in place for f32 per column, else converted, exactly, into buf.
+/// f16, a bias of type dt: in place for f32 per column, else converted,
+/// exactly, into buf.
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
 static inline const float *column_values(
         const void *v, data_type_t dt, int stride, int p0, int cw, float *buf) {
     if (stride == 0) {
-        std::fill(
-                buf, buf + cw, zendnnl::memory::read_and_cast<float>(v, dt, 0));
+        std::fill(buf, buf + cw, native_scale_value(v, dt, 0));
         return buf;
     }
     if (dt == data_type_t::f32) return static_cast<const float *>(v) + p0;
@@ -79,12 +88,36 @@ static inline const float *column_values(
     return buf;
 }
 
+/// column_values of weight scales of type s.
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
+static inline const float *column_values(const void *v, native_scale_t s,
+        int stride, int p0, int cw, float *buf) {
+    if (stride == 0) {
+        std::fill(buf, buf + cw, native_scale_value(v, s, 0));
+        return buf;
+    }
+    switch (s) {
+        case native_scale_t::f32: return static_cast<const float *>(v) + p0;
+        case native_scale_t::f16:
+        case native_scale_t::bf16:
+        case native_scale_t::none: break;
+    }
+    const uint16_t *h = static_cast<const uint16_t *>(v) + p0;
+    for (int j = 0; j < cw; j += 16) {
+        const __m256i x
+                = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(h + j));
+        _mm512_storeu_ps(buf + j, native_halves_as_f32(x, s));
+    }
+    return buf;
+}
+
 /// column_values of a call of 32 columns whose first 16 are the weight
 /// columns p0 .. p0 + 16 and whose second 16 are p1 .. p1 + 16 (a paired
 /// tile's up run, or the next block), into buf.
+template <typename T>
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
 static inline const float *column_values_apart(
-        const void *v, data_type_t dt, int stride, int p0, int p1, float *buf) {
+        const void *v, T dt, int stride, int p0, int p1, float *buf) {
     for (int h = 0; h < 2; ++h) {
         float *out = buf + 16 * h;
         const float *in
@@ -146,11 +179,11 @@ inline int native_int8_channel_pass_cols(const native_weight_view_t &w, int n0,
 /// column_values of the columns p0 .. p0 + cols only (cols <= cw, the
 /// columns below the weight's N), the other cw - cols values zero, into
 /// buf: no element of v is read past the weight's N columns.
-static inline const float *column_values_below(const void *v, data_type_t dt,
-        int stride, int p0, int cw, int cols, float *buf) {
+template <typename T>
+static inline const float *column_values_below(
+        const void *v, T dt, int stride, int p0, int cw, int cols, float *buf) {
     for (int j = 0; j < cw; ++j)
-        buf[j] = j < cols ? zendnnl::memory::read_and_cast<float>(
-                                    v, dt, stride == 0 ? 0 : p0 + j)
+        buf[j] = j < cols ? native_scale_value(v, dt, stride == 0 ? 0 : p0 + j)
                           : 0.0f;
     return buf;
 }
@@ -294,13 +327,24 @@ void compute_int4_group_tile(const native_plan_t &plan,
 int64_t native_int4_request_octets(
         const native_weight_view_t &w, int p0, int nv, size_t b_second);
 
+/// Bytes of one K quad of one column of the layout words kind's kernels
+/// read: a word of 4 bytes holds the family's k_step K values (4 bytes of an
+/// s8 quad, 2 of s4 nibbles).
+constexpr int native_quad_bytes(native_kernel_kind_t kind) {
+    return INT8_VNNI_GRP * INT8_VNNI_GRP / native_family(kind).k_step;
+}
+
+/// The tiles read the weight scales of every quantized format in place.
+static_assert(native_scales_at(native_place_t::caller),
+        "weight scales in the call's {G, N} buffer");
+
 /// Groups per batch of a per-group tile over a plain pack, cw columns wide
 /// and rows tall, max_mr rows per call, groups of group_quads K quads of
-/// quad_bytes bytes per column (4 for an s8 weight, 2 for s4): all groups
-/// while their slab is within twice the pass budget of the plan, else equal
-/// batches within the budget.
+/// quad_bytes bytes per column (native_quad_bytes): all groups while their
+/// slab is within twice the pass budget of the plan, else equal batches
+/// within the budget.
 int native_int8_group_span(const native_plan_t &plan, int groups,
-        int group_quads, int cw, int rows, int max_mr, int quad_bytes = 4);
+        int group_quads, int cw, int rows, int max_mr, int quad_bytes);
 
 /// The per-group weight scales of call at the weight columns p0 .. p0 +
 /// cols of w (cols <= cw, the columns below the weight's N), for groups g0

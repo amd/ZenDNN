@@ -20,12 +20,14 @@
 #include <cstdint>
 #include <limits>
 
-#include "lowoha_operators/matmul/lowoha_common.hpp"
+#include "common/data_types.hpp"
 
 namespace zendnnl {
 namespace lowoha {
 namespace matmul {
 namespace native {
+
+using zendnnl::common::data_type_t;
 
 /// Columns per block of every weight the layout rule places on the native
 /// layout.

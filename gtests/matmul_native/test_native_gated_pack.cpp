@@ -25,6 +25,7 @@
 // served with the bits of the same call packed for itself from a pristine
 // copy of the weight, and the weight keeps one layout throughout.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -41,7 +42,9 @@
 
 #include "gtest_utils.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/bf16/bf16_brgemm_ukernel.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_brgemm_looper.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_epilogue.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_hw.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_pack.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_weight_view.hpp"
@@ -61,6 +64,7 @@ using gated_t = mm::matmul_gated_act_t;
 
 constexpr data_type_t kBf16 = data_type_t::bf16;
 constexpr data_type_t kF32 = data_type_t::f32;
+constexpr data_type_t kF16 = data_type_t::f16;
 constexpr data_type_t kS8 = data_type_t::s8;
 constexpr data_type_t kS4 = data_type_t::s4;
 constexpr int kGroup = 32;
@@ -68,11 +72,18 @@ constexpr int kGroup = 32;
 bool cpu_ok(data_type_t wei) {
     const auto &u = nat::detect_uarch();
     if (!nat::native_hw().base_isa) return false;
+    if (wei == kF32 || wei == kF16) return true;
     return wei == kBf16 ? u.avx512bf16 : u.avx512vnni;
 }
 
 const char *wei_name(data_type_t wei) {
-    return wei == kBf16 ? "bf16" : (wei == kS8 ? "s8" : "s4");
+    switch (wei) {
+        case kBf16: return "bf16";
+        case kF32: return "f32";
+        case kF16: return "f16";
+        case kS8: return "s8";
+        default: return "s4";
+    }
 }
 
 /// The operands of a case: a bf16 source, a raw [N, K] weight (bf16, s8,
@@ -534,6 +545,157 @@ TEST(NativeGatedPack, PlanLineNamesThePairingTheCallRan) {
         }
         return bad;
     }, "the pairing of gated calls");
+}
+
+// The gated calls of the float routes pair their halves as the INT8 ones do,
+// name the width on their plan line, and give the bits of the same call's
+// f32 pre-activation through the epilogue's staged rows: N 12288 and 1024
+// in whole blocks or runs of 16 columns as their tiles deal out, N 4128 in
+// runs of 16 columns of halves not whole blocks, over row blocks (M 300) and
+// K passes (K 2056); at M 1, on the GEMV kernels, N 12288 pairs whole blocks
+// and N 4128 pairs for BF16 only (the FP32 and F16 GEMV kernels read a
+// block's second 16 columns right after its first); N 4100 stages its rows.
+// Also with tiles of 64 and 128 columns pinned: on N of whole tiles of them
+// (12288, 1024) their slabs are whole blocks of each half; elsewhere the pin
+// does not apply.
+int float_halves_off() {
+    const nt::algo_pin_t pin(matmul_algo_t::native_brgemm);
+    struct case_t {
+        int M, N, K;
+        bool staged, float_staged;
+    };
+    const case_t cases[] = {{16, 12288, 128, false, false},
+            {4, 1024, 128, false, false}, {16, 4128, 128, false, false},
+            {300, 1024, 96, false, false}, {16, 4128, 2056, false, false},
+            {1, 12288, 128, false, false}, {1, 4128, 128, false, true},
+            {16, 4100, 128, true, true}};
+    uint32_t seed = 7900;
+    int bad = 0;
+    for (const data_type_t dt : {kBf16, kF32, kF16}) {
+        if (!cpu_ok(dt)) continue;
+        for (const case_t &cs : cases) {
+            const int M = cs.M, N = cs.N, K = cs.K, I = N / 2;
+            const buffer_t src = nt::random_buffer(
+                    dt, static_cast<size_t>(M) * K, seed++, -1.0f, 1.0f);
+            const buffer_t wei = nt::random_buffer(
+                    dt, static_cast<size_t>(N) * K, seed++, -0.5f, 0.5f);
+            const auto call
+                    = [&](void *dst, data_type_t dst_dt, gated_t gated) {
+                nt::call_t c;
+                c.M = M;
+                c.N = N;
+                c.K = K;
+                c.transB = true;
+                c.src = src.get();
+                c.wei = wei.get();
+                c.dst = dst;
+                c.gated = gated;
+                c.params.dtypes.src = c.params.dtypes.wei = dt;
+                c.params.dtypes.dst = dst_dt;
+                c.params.weight_cache_type = 0;
+                c.params.num_threads = 32;
+                return nt::run_matmul(c);
+            };
+            const size_t esz = nt::dt_bytes(dt);
+            buffer_t pre = nt::make_buffer(static_cast<size_t>(M) * N * 4);
+            buffer_t dst = nt::make_buffer(static_cast<size_t>(M) * I * esz);
+            ::testing::internal::CaptureStdout();
+            const status_t pst = call(pre.get(), kF32, gated_t::none);
+            const status_t gst = call(dst.get(), dt, gated_t::silu_and_mul);
+            const std::string log = ::testing::internal::GetCapturedStdout();
+            // The bits of the pre-activation through the staged rows.
+            buffer_t want = nt::make_buffer(static_cast<size_t>(M) * I * esz);
+            nat::GemmDescriptor d;
+            d.M = M;
+            d.N = N;
+            d.K = K;
+            d.ldc = I;
+            d.src_dt = d.wei_dt = d.dst_dt = dt;
+            d.gated_act = gated_t::silu_and_mul;
+            mm::matmul_params p;
+            p.dtypes.src = p.dtypes.wei = p.dtypes.dst = dt;
+            nat::native_epilogue_t ep;
+            const status_t est = nat::prepare_epilogue(
+                    d, p, nullptr, want.get(), false, ep);
+            if (est == status_t::success && ep.staged_halves) {
+                nat::apply_epilogue_tile(ep, pre.as<float>(), N, 0, M, 0, N);
+                nat::pair_staged_halves(ep, M, 0, 1);
+            }
+            const std::string head = "[MATMUL.NATIVE_BRGEMM] M="
+                    + std::to_string(M) + " N=" + std::to_string(N) + " ";
+            const size_t at = log.rfind(head);
+            const std::string line = at == std::string::npos
+                    ? std::string()
+                    : log.substr(at, log.find('\n', at) - at);
+            const auto field = [&](const char *name) {
+                const size_t f = line.find(name);
+                if (f == std::string::npos) return std::string();
+                const size_t v = f + std::strlen(name);
+                return line.substr(v, line.find(' ', v) - v);
+            };
+            const std::string pairing = field(" pairing=");
+            const bool staged = dt == kBf16 ? cs.staged : cs.float_staged;
+            const bool ok = pst == status_t::success && gst == status_t::success
+                    && est == status_t::success && ep.staged_halves
+                    && (staged ? pairing == "staged"
+                               : !pairing.empty() && pairing == field(" nr="))
+                    && std::memcmp(dst.get(), want.get(), want.bytes) == 0;
+            if (!ok) {
+                std::fprintf(stderr,
+                        "%s M=%d N=%d K=%d: pairing '%s' (want %s), "
+                        "bits %s, line: %s\n",
+                        wei_name(dt), M, N, K, pairing.c_str(),
+                        staged ? "staged" : "nr",
+                        std::memcmp(dst.get(), want.get(), want.bytes) == 0
+                                ? "same"
+                                : "differ",
+                        line.c_str());
+                ++bad;
+            }
+        }
+    }
+    return bad;
+}
+
+// A paired tile keeps the accumulators of all its rows until the epilogue
+// pairs them, mb x nr floats (route_block's paired branch), on every float
+// route: native_paired_plan's scratch holds them, for each tile of a unit
+// across K passes, at each width the pairing takes.
+TEST(NativeGatedPack, PairedPlansHoldEveryRowInScratch) {
+    for (const data_type_t dt : {kBf16, kF32, kF16})
+        for (const int M : {16, 300})
+            for (const int K : {128, 8192})
+                for (const int width : {32, 64, 128}) {
+                    nat::native_problem_t p;
+                    p.M = M;
+                    p.N = 1024;
+                    p.K = K;
+                    p.pack_nr = 32;
+                    p.threads = 32;
+                    p.src_dt = p.wei_dt = p.dst_dt = dt;
+                    p.epilogue = nat::native_epilogue_class_t::gated;
+                    const nat::native_plan_t planned
+                            = nat::native_planner().plan(p);
+                    const nat::native_plan_t q
+                            = nat::native_paired_plan(planned, p, width);
+                    const size_t tiles
+                            = q.kc >= K ? 1 : std::max(1, q.unit_tiles);
+                    EXPECT_GE(q.scratch_floats,
+                            tiles * static_cast<size_t>(q.mb) * q.nr)
+                            << wei_name(dt) << " M " << M << " K " << K
+                            << " width " << width << ": mb " << q.mb << " nr "
+                            << q.nr << " kc " << q.kc;
+                }
+}
+
+TEST(NativeGatedPack, FloatHalvesPairWithTheStagedBits) {
+    for (const char *config :
+            {static_cast<const char *>(nullptr), "nr=64", "nr=128"})
+        nt::expect_in_child(
+                {{"ZENDNNL_API_LOG_LEVEL", "4"},
+                        {"ZENDNNL_MATMUL_NATIVE_CONFIG", config},
+                        {"ZENDNNL_MATMUL_NATIVE_TUNING_FILE", nullptr}},
+                float_halves_off, "the bits of paired float halves");
 }
 
 // gelu_tanh_and_mul, the tanh form of gelu_and_mul, runs on the native

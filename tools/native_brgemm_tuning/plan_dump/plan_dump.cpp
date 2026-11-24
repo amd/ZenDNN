@@ -19,12 +19,13 @@
 //
 // Reads one case per line, "cfg l1d l2 l3 family_l3 dom wei scheme N K M
 // threads pack_nr group scale_bytes" (cfg: an override setting list, or -; l3
-// 0: a machine without an L3; wei: bf16, s8, s4, f16 or f32; scheme:
-// per_channel or per_group, read for an s8 weight; group and scale_bytes:
-// an s4 weight's group size along K and the bytes of one weight scale, 0
+// 0: a machine without an L3; wei: a format's name, bf16, s8, s4, f16 or f32;
+// scheme: per_channel or per_group, read for a quantized weight of other
+// than group scales only (s8); group and scale_bytes: the group size along K
+// and the bytes of one weight scale of a weight of group scales only (s4), 0
 // for other weights). make_native_problem builds the planner's problem of a
-// call with a bf16 source and dst (an f16 or f32 call: of the weight's
-// type); an INT8 call quantizes its source. Prints per line the problem's N
+// call with a bf16 source and dst (a float call: of the weight's type); a
+// call over a quantized weight quantizes its source. Prints per line the problem's N
 // and every plan field with validate_native_plan's verdict (valid=0|1),
 // "BADCFG <why>" for a config the parser rejects, or "BADLINE". The kernel
 // registry, and with it the kernels of an f16 call, is this CPU's.
@@ -44,20 +45,27 @@ using zendnnl::memory::data_type_t;
 
 namespace {
 
-bool weight_type(const std::string &wei, data_type_t &dt) {
-    if (wei == "bf16")
-        dt = data_type_t::bf16;
-    else if (wei == "s8")
-        dt = data_type_t::s8;
-    else if (wei == "s4")
-        dt = data_type_t::s4;
-    else if (wei == "f16")
-        dt = data_type_t::f16;
-    else if (wei == "f32")
-        dt = data_type_t::f32;
-    else
-        return false;
-    return true;
+/// The format named wei; nullptr for no format of that name.
+const nat::native_format_desc_t *format_named(const std::string &wei) {
+    for (const nat::native_format_desc_t &f : nat::kNativeFormats)
+        if (wei == f.name) return &f;
+    return nullptr;
+}
+
+/// The first scale type of f's contract, in native_scale_t order, whose
+/// scales take bytes bytes each: in dt, the data type a call gives them as;
+/// false for none.
+bool scale_type(
+        const nat::native_format_desc_t &f, int bytes, data_type_t &dt) {
+    for (unsigned i = 0; i < 8 * sizeof(f.contract.scale_types); ++i) {
+        if ((f.contract.scale_types & (1u << i)) == 0) continue;
+        const auto s = static_cast<nat::native_scale_t>(i);
+        if (static_cast<int>(nat::native_scale_bytes(s)) == bytes) {
+            dt = nat::native_scale_dt(s);
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace
@@ -69,18 +77,23 @@ int main() {
         std::string cfg, wei, scheme;
         int l1d, l2, l3, family_l3, dom, N, K, M, threads, pack_nr, group,
                 scale_bytes;
-        data_type_t wei_dt = data_type_t::none;
+        const nat::native_format_desc_t *f = nullptr;
+        data_type_t scale_dt = data_type_t::none;
+        bool grouped = false;
         if (!(is >> cfg >> l1d >> l2 >> l3 >> family_l3 >> dom >> wei >> scheme
                     >> N >> K >> M >> threads >> pack_nr >> group
                     >> scale_bytes)
-                || !weight_type(wei, wei_dt)
+                || (f = format_named(wei)) == nullptr
                 || (scheme != "per_channel" && scheme != "per_group")
-                || (wei_dt == data_type_t::s4
+                || ((grouped = (nat::native_type_bit(f->wei_dt)
+                                       & nat::kNativeGroupedTypes)
+                                    != 0)
                         && (group < 1 || K % group != 0
-                                || (scale_bytes != 2 && scale_bytes != 4)))) {
+                                || !scale_type(*f, scale_bytes, scale_dt)))) {
             std::printf("BADLINE\n");
             continue;
         }
+        const data_type_t wei_dt = f->wei_dt;
         nat::native_config_t c;
         std::string why;
         if (cfg != "-" && !nat::parse_native_config(cfg, c, why)) {
@@ -97,28 +110,24 @@ int main() {
         u.family_l3_cores = family_l3;
         u.l3_domain_cores = dom;
         u.avx512f = u.avx512bf16 = u.avx512vnni = true;
-        const bool int8
-                = wei_dt == data_type_t::s8 || wei_dt == data_type_t::s4;
-        const bool own_type
-                = wei_dt == data_type_t::f16 || wei_dt == data_type_t::f32;
+        const bool int8 = f->quantized();
         nat::GemmDescriptor desc;
         desc.M = M;
         desc.N = N;
         desc.K = K;
-        desc.src_dt = own_type ? wei_dt : data_type_t::bf16;
+        desc.src_dt = int8 ? data_type_t::bf16 : wei_dt;
         desc.wei_dt = wei_dt;
-        desc.dst_dt = own_type ? wei_dt : data_type_t::bf16;
+        desc.dst_dt = int8 ? data_type_t::bf16 : wei_dt;
         desc.num_threads = threads;
         mm::matmul_params params;
         params.dynamic_quant = int8;
         nat::native_int8_decision_t decision;
-        decision.scheme = scheme == "per_group" || wei_dt == data_type_t::s4
+        decision.scheme = scheme == "per_group" || grouped
                 ? nat::native_int8_scheme_t::per_group
                 : nat::native_int8_scheme_t::per_channel;
-        if (wei_dt == data_type_t::s4) {
+        if (grouped) {
             decision.groups = K / group;
-            params.quant_params.wei_scale.dt
-                    = scale_bytes == 4 ? data_type_t::f32 : data_type_t::bf16;
+            params.quant_params.wei_scale.dt = scale_dt;
         }
         const nat::native_problem_t p = nat::make_native_problem(
                 desc, params, nullptr, pack_nr, decision);

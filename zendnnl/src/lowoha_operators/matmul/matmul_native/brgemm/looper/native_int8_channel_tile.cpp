@@ -111,6 +111,7 @@ void compute_channel_tile(const native_plan_t &plan,
     assert(out == nullptr || !reference_order);
     assert(out == nullptr || !w.paired);
     const size_t out_esz = out != nullptr && out->bf16 ? 2 : 4;
+    const native_format_t format = native_route(call.route).format;
 
     alignas(64) float scale_buf[kNativeMaxTileCols];
     alignas(64) float bias_buf[kNativeMaxTileCols];
@@ -169,12 +170,12 @@ void compute_channel_tile(const native_plan_t &plan,
             float *scales = scale_buf + j * cw;
             float *bias = bias_buf + j * cw;
             k.col_scale = k.apart
-                    ? column_values_apart(call.wei_scale, call.wei_scale_dt,
+                    ? column_values_apart(call.wei_scale, call.wei_scale_type,
                               call.wei_scale_stride, k.p0, k.p1, scales)
                     : part
-                    ? column_values_below(call.wei_scale, call.wei_scale_dt,
+                    ? column_values_below(call.wei_scale, call.wei_scale_type,
                               call.wei_scale_stride, k.p0, cw, k.cols, scales)
-                    : column_values(call.wei_scale, call.wei_scale_dt,
+                    : column_values(call.wei_scale, call.wei_scale_type,
                               call.wei_scale_stride, k.p0, cw, scales);
             if (call.bias == nullptr)
                 k.bias = nullptr;
@@ -240,7 +241,8 @@ void compute_channel_tile(const native_plan_t &plan,
                                 + (static_cast<size_t>(m0 + i) * out->ldc + n0
                                           + cj)
                                         * out_esz;
-                    select_native_int8_ukernel(rows, nv, call.src_signed)(args);
+                    select_native_int8_ukernel(
+                            format, rows, nv, call.src_signed)(args);
                     if (reference_order && args.last_pass && k.apart) {
                         finish_in_reference_order<Tail>(call, m0 + i, rows,
                                 k.p0, 16, 16, k.col_sum, k.col_scale, args.C,

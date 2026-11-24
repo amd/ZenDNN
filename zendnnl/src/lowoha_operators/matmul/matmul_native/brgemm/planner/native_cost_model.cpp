@@ -30,17 +30,8 @@ namespace native {
 
 namespace {
 
-/// Bytes of a BF16 element.
-constexpr double kBf16Bytes = 2.0;
-
-/// Bytes of an F16 source element the kernels read: widened to f32.
-constexpr double kF16WidenedBytes = 4.0;
-
-/// Columns of one vector of f32 accumulators.
+/// Columns of one vector of an INT8 call (native_int8_call_rows' nv).
 constexpr int kVectorCols = 16;
-
-/// Columns of one vector of f16 accumulators.
-constexpr int kF16PhVectorCols = 32;
 
 /// What one tile of rows rows costs: its core cycles and, when the worker
 /// streams its weights, the cycles its stream idles.
@@ -63,26 +54,31 @@ int row_group_rows(int M, int unit, int rg, int row_groups) {
 /// last share its stream.
 constexpr int kMaxDomains = 64;
 
-/// Bytes of an INT8 weight or source element, and K of one step of the INT8
-/// kernel (a quad).
-constexpr double kInt8Bytes = 1.0;
-constexpr int kInt8StepK = 4;
-
-/// Bytes of an s4 weight element, without its group's scale.
-constexpr double kInt4Bytes = 0.5;
-
-/// The kernel calls of a tile, priced per K step of the kernel: a BF16 pair
-/// of K over the slabs of the kernels (native_tile_slab_cols), or an INT8
-/// quad over the plan's call width, in K passes of the tile's pass width
-/// (native_int8_pass_cols).
-/// An s4 weight's per-group tile takes INT8 quads of half a byte a weight
-/// over all of K, and per group the fused order's epilogue of one FMA per
+/// The kernel calls of a tile, priced per multiply-add step of the plan's
+/// kernels (K of a word of their family over the planes of the weight's
+/// format: a BF16 pair, an INT8 quad, one K row of f16): over the slabs of
+/// the kernels (native_tile_slab_cols), or over the INT8 call width in K
+/// passes of the tile's pass width (native_int8_pass_cols).  Bytes come from
+/// the descriptions: the weight's (native_plan_weight_bytes), a step's of
+/// the weight's elements, a source element's as the family multiplies it.
+/// A per-group tile adds per group the fused order's epilogue of one FMA per
 /// row and output vector on the same pipes.
 class tile_model_t {
 public:
     tile_model_t(const native_plan_t &q, const native_problem_t &p,
             const UarchParams &uarch, const heuristic_params_t &hp)
-        : q_(q), p_(p), hp_(hp), int8_(p.int8()), int4_(p.int4()) {
+        : q_(q), p_(p), hp_(hp) {
+        const native_route_desc_t &route = native_route(p.route());
+        const native_format_desc_t &format = native_format(p.wei_dt);
+        const native_family_desc_t &family = native_family(q.kind);
+        int8_ = route.cls != native_route_class_t::rows;
+        group_ = route.cls == native_route_class_t::group;
+        step_k_ = family.k_step / format.geometry.planes;
+        const double elem = format.geometry.elem_bits / 8.0;
+        k_steps_ = static_cast<double>(ceil_div(p.K, step_k_));
+        wei_bytes_ = native_plan_weight_bytes(p);
+        step_bytes_ = step_k_ * elem;
+        src_bytes_ = family.operand_bits / 8.0;
         pipes_ = hp.cm_fma_pipes > 0 ? hp.cm_fma_pipes
                                      : std::max(1, uarch.fma_ports);
         l1_bytes_ = static_cast<int64_t>(uarch.l1d_bytes) * hp.l1_pct;
@@ -90,16 +86,12 @@ public:
             slab_cols_ = native_int8_col_width(q, q.nr);
             pass_cols_ = native_int8_pass_cols(q);
             mr_ = native_int8_call_rows(q, slab_cols_ / kVectorCols);
-            k_steps_ = static_cast<double>(ceil_div(p.K, kInt8StepK));
-            wei_bytes_ = int4_ ? native_int4_weight_bytes(p) : kInt8Bytes;
-            step_bytes_ = kInt8StepK * (int4_ ? kInt4Bytes : kInt8Bytes);
-            src_bytes_ = kInt8Bytes;
             l2_share_ = static_cast<double>(uarch.l2_bytes) * hp.int8_l2_pct
                     / 100.0;
-            if (int4_) {
+            if (group_) {
                 const int gs = p.wei_group_size > 0 ? p.wei_group_size : p.K;
                 groups_ = ceil_div(p.K, std::max(1, gs));
-                l1_fit_ = (pass_cols_ * wei_bytes_ + mr_ * kInt8Bytes) * p.K
+                l1_fit_ = (pass_cols_ * wei_bytes_ + mr_ * src_bytes_) * p.K
                                 * 100
                         <= static_cast<double>(l1_bytes_);
             }
@@ -109,33 +101,13 @@ public:
             mr_ = q.mr;
             kc_ = std::min(std::max(1, q.kc), p.K);
             passes_ = ceil_div(p.K, kc_);
-            k_steps_ = ceil_div(p.K, 2);
-            wei_bytes_ = kBf16Bytes;
-            step_bytes_ = 2 * kBf16Bytes;
-            src_bytes_ = kBf16Bytes;
-            l1_fit_ = static_cast<int64_t>(q.nr + q.mr) * kc_
-                            * static_cast<int64_t>(kBf16Bytes) * 100
-                    <= static_cast<int64_t>(uarch.l1d_bytes) * hp.l1_pct;
+            l1_fit_ = (q.nr * elem + q.mr * src_bytes_) * kc_ * 100
+                    <= static_cast<double>(uarch.l1d_bytes) * hp.l1_pct;
             l2_share_ = static_cast<double>(uarch.l2_bytes) * hp.bf16_l2_pct
                     / 100.0;
-            // An F16 kernel takes one FMA a K row of two-byte weights, over
-            // source rows widened to f32; an F16_PH kernel one FMA a K row
-            // of 32 two-byte weights, over its two-byte source rows.
-            if (p.f16()) {
-                k_steps_ = p.K;
-                step_bytes_ = kBf16Bytes;
-            }
-            if (p.f16() && q.kind != native_kernel_kind_t::f16_ph) {
-                src_bytes_ = kF16WidenedBytes;
-                l1_fit_ = (q.nr * kBf16Bytes + q.mr * kF16WidenedBytes) * kc_
-                                * 100
-                        <= static_cast<double>(uarch.l1d_bytes) * hp.l1_pct;
-            }
         }
         slabs_ = std::max(1, q.nr / std::max(1, slab_cols_));
-        vectors_ = static_cast<double>(slab_cols_)
-                / (q.kind == native_kernel_kind_t::f16_ph ? kF16PhVectorCols
-                                                          : kVectorCols);
+        vectors_ = static_cast<double>(slab_cols_) / family.vector_cols;
         mem_cycles_ = native_plan_mem_cycles(uarch, hp);
         tall_ = 1.0 + native_plan_tall_pct(uarch, hp) / 100.0;
         link_bound_ = mem_cycles_ > hp.cm_stream_cycles;
@@ -176,12 +148,12 @@ public:
         // An INT8 tile's K pass follows its rows (native_int8_pass_quads).
         int passes = passes_;
         bool l1_fit = l1_fit_;
-        if (int8_ && !int4_) {
-            const int k_quads = ceil_div(p_.K, kInt8StepK);
+        if (int8_ && !group_) {
+            const int k_quads = ceil_div(p_.K, step_k_);
             const int pass = std::max(1,
                     native_int8_pass_quads(q_, k_quads, pass_cols_, rows, mr_));
             passes = ceil_div(k_quads, pass);
-            l1_fit = static_cast<int64_t>(pass_cols_ + mr_) * pass * kInt8StepK
+            l1_fit = static_cast<int64_t>(pass_cols_ + mr_) * pass * step_k_
                             * 100
                     <= l1_bytes_;
         }
@@ -222,7 +194,8 @@ private:
     const native_problem_t &p_;
     const heuristic_params_t &hp_;
     bool int8_ = false;
-    bool int4_ = false;
+    bool group_ = false;
+    int step_k_ = 1;
     int slab_cols_ = 32;
     int pass_cols_ = 32;
     int slabs_ = 1;
@@ -246,10 +219,11 @@ private:
 
 } // namespace
 
-double native_int4_weight_bytes(const native_problem_t &p) {
+double native_plan_weight_bytes(const native_problem_t &p) {
+    const double elem = native_format(p.wei_dt).geometry.elem_bits / 8.0;
+    if ((native_type_bit(p.wei_dt) & kNativeGroupedTypes) == 0) return elem;
     const int gs = p.wei_group_size > 0 ? p.wei_group_size : p.K;
-    return kInt4Bytes
-            + static_cast<double>(p.wei_scale_bytes) / std::max(1, gs);
+    return elem + static_cast<double>(p.wei_scale_bytes) / std::max(1, gs);
 }
 
 int native_plan_domain_threads(
@@ -280,7 +254,7 @@ bool native_plan_core_streams(
 }
 
 bool native_plan_cost_int8(const native_problem_t &p) {
-    return p.int8() && p.int8_scheme == native_int8_scheme_t::per_channel;
+    return native_route(p.route()).cls == native_route_class_t::channel;
 }
 
 bool native_plan_groups_fit_l3(const native_problem_t &p,
@@ -289,7 +263,7 @@ bool native_plan_groups_fit_l3(const native_problem_t &p,
     const int domains = ceil_div(
             std::max(1, q.threads), native_plan_domain_threads(uarch, hp));
     const double bytes = static_cast<double>(p.N) * p.K
-            * (p.int8() ? kInt8Bytes : kBf16Bytes);
+            * (native_format(p.wei_dt).geometry.elem_bits / 8.0);
     return bytes * 100.0 <= static_cast<double>(uarch.l3_domain_bytes) * domains
             * hp.cm_group_l3_pct;
 }
@@ -306,9 +280,10 @@ native_plan_cost_t native_plan_cost(const native_plan_t &q,
         const native_problem_t &p, const UarchParams &uarch,
         const heuristic_params_t &hp) {
     native_plan_cost_t out;
-    const bool int8 = native_plan_cost_int8(p) || p.int4();
-    if ((!p.bf16() && !p.f16() && !int8) || q.nr < 1 || q.mr < 1 || q.mb < 1
-            || q.threads < 1 || q.n_tiles < 1 || q.m_blocks < 1)
+    const native_route_desc_t &route = native_route(p.route());
+    const bool int8 = route.cls != native_route_class_t::rows;
+    if (!route.priced || q.nr < 1 || q.mr < 1 || q.mb < 1 || q.threads < 1
+            || q.n_tiles < 1 || q.m_blocks < 1)
         return out;
     if (int8
             && native_int8_call_rows(

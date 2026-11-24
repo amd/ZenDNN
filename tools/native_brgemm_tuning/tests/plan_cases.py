@@ -19,8 +19,9 @@ library's planner, and the digests of the library's plans for them.
 cases(seed, count) draws the same cases on every Python version.  A plan dump
 of the library reads one case per line, "cfg l1d l2 l3 family_l3 dom wei scheme
 N K M threads pack_nr group scale_bytes" (cfg: an override setting list, or -;
-l3 0: no L3; wei: bf16, s8, s4, f16 or f32; scheme: the INT8 scheme of an s8
-weight; group and scale_bytes: those of an s4 weight, 0 otherwise), builds the
+l3 0: no L3; wei: a format's name, bf16, s8, s4, f16 or f32; scheme: the INT8
+scheme of a quantized weight of other than group scales only (s8); group and
+scale_bytes: those of a weight of group scales only (s4), 0 otherwise), builds the
 problem of that call with make_native_problem (N not a multiple of 32 is
 planned at its padded width) and prints, per line, the problem's N and the
 plan of heuristic_plan(p, uarch, apply_native_config({},
@@ -65,7 +66,7 @@ from native_brgemm_tuning import schema as schema_mod  # noqa: E402
 from native_brgemm_tuning.candidates import parse_settings  # noqa: E402
 from native_brgemm_tuning.plan import (  # noqa: E402
     RULE_SWITCHES, Plan, heuristic_plan, params_from_config, validate_plan)
-from native_brgemm_tuning.problems import Problem  # noqa: E402
+from native_brgemm_tuning.problems import FORMATS, Problem  # noqa: E402
 
 FIXTURE = os.path.join(os.path.dirname(schema_mod.FIXTURE), "plan_check.json")
 SEED = 20261023
@@ -121,9 +122,10 @@ PINS = (
     ("int8_kc", ["4", "64", "1024"]), ("unit_tiles", ["1", "2", "3", "8", "4096"]),
 )
 NB_VALUES = ["16", "48", "64", "128", "256", "4096"]
-# Weight types of the drawn cases and their percent shares; s4 group sizes (0: one group over K).
+# Weight types of the drawn cases and their percent shares; the group sizes of a weight of
+# group scales only (0: one group over K).
 DTYPE_SHARES = (("bf16", 34), ("s8", 26), ("s4", 22), ("f16", 12), ("f32", 6))
-S4_GROUPS = (0, 0, 32, 64, 128, 128, 256)
+GROUP_SIZES = (0, 0, 32, 64, 128, 128, 256)
 SCHEDULES = ("slice", "row_groups", "blocks")
 # (N, K) of dense layers and lm_heads, and the Ms of the default M classes.
 LAYERS = ((4096, 4096), (6144, 4096), (14336, 4096), (4096, 14336), (11008, 4096), (4096, 11008),
@@ -192,11 +194,12 @@ class Case(NamedTuple):
         return "%s %d %d %d %d %d %s %s %d %d %d %d %d %d %d" % self
 
     def problem(self) -> Problem:
-        if self.dtype == "s4":
-            return Problem("s4", self.m, self.n, self.k, threads=self.threads, pack_nr=self.pack_nr,
+        fmt = FORMATS[self.dtype]
+        if fmt["grouped"]:
+            return Problem(self.dtype, self.m, self.n, self.k, threads=self.threads, pack_nr=self.pack_nr,
                            group=self.group, scale_bytes=self.scale_bytes)
         return Problem(self.dtype, self.m, self.n, self.k, threads=self.threads, pack_nr=self.pack_nr,
-                       int8_scheme=self.scheme if self.dtype == "s8" else "per_channel")
+                       int8_scheme=self.scheme if fmt["quantized"] else "per_channel")
 
     def uarch(self) -> schema_mod.Uarch:
         return schema_mod.Uarch(l1d_bytes=self.l1d, l2_bytes=self.l2, l3_bytes=self.l3,
@@ -262,11 +265,12 @@ def random_case(rng: Rng, machine: Optional[Tuple[int, int, int, int, int]] = No
     if rng.percent(15):
         n = rng.choice([rng.randint(1, 31), rng.randint(33, 4095), rng.randint(4097, 65536)])
     dtype = random_dtype(rng)
-    scheme = "per_group" if dtype == "s4" or (dtype == "s8" and rng.percent(25)) else "per_channel"
+    fmt = FORMATS[dtype]
+    scheme = "per_group" if fmt["grouped"] or (fmt["quantized"] and rng.percent(25)) else "per_channel"
     group = scale_bytes = 0
-    if dtype == "s4":
+    if fmt["grouped"]:
         # The group size divides K; one group takes all of K.
-        group = rng.choice(S4_GROUPS)
+        group = rng.choice(GROUP_SIZES)
         if group:
             k = group * max(1, k // group)
         else:

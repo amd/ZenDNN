@@ -17,7 +17,9 @@
 #ifndef MATMUL_NATIVE_BRGEMM_PLANNER_NATIVE_TUNING_FILE_HPP
 #define MATMUL_NATIVE_BRGEMM_PLANNER_NATIVE_TUNING_FILE_HPP
 
+#include <array>
 #include <cstdint>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -42,15 +44,46 @@ inline constexpr int64_t kNativeTuningVersion = 2;
 /// call whose N is not a multiple of the native blocks is its padded width
 /// (make_native_problem), as are the rule features computed from it; the
 /// [MATMUL.NATIVE_BRGEMM] line shows it as padded_n.  group is the group
-/// size of an s4 weight (native_problem_t::wei_group_size), 0 for any other.
+/// size of a weight of a format of group scales only (s4;
+/// native_problem_t::wei_group_size), 0 for any other.
 inline constexpr const char *kNativeMatchKeys[]
         = {"m", "n", "k", "threads", "pack_nr", "group", "dtype", "src", "dst",
                 "epilogue", "trans_a", "dynamic", "has_bias"};
 inline constexpr int kNativeNumericMatchKeys = 6;
 inline constexpr int kNativeNamedMatchKeys = 4;
-/// The names the named match keys dtype, src, dst and epilogue take.
-inline constexpr const char *kNativeDtypeNames[]
-        = {"bf16", "s8", "f32", "s4", "f16"};
+/// The formats the dtype match key names, in its order: the table index
+/// holds the first four in two bits.  Every format of kNativeFormats, each
+/// once, so that a tuning file keys a weight of any of them.
+inline constexpr native_format_t kNativeDtypeFormats[]
+        = {native_format_t::bf16, native_format_t::s8, native_format_t::f32,
+                native_format_t::s4, native_format_t::f16};
+
+/// Whether kNativeDtypeFormats names each format of kNativeFormats once.
+constexpr bool native_dtype_key_names_every_format() {
+    if (std::size(kNativeDtypeFormats) != std::size(kNativeFormats))
+        return false;
+    for (const native_format_desc_t &f : kNativeFormats) {
+        size_t n = 0;
+        for (const native_format_t d : kNativeDtypeFormats)
+            n += d == f.id ? 1 : 0;
+        if (n != 1) return false;
+    }
+    return true;
+}
+static_assert(native_dtype_key_names_every_format(),
+        "the dtype match key names every format once");
+
+constexpr std::array<const char *, std::size(kNativeDtypeFormats)>
+native_dtype_names() {
+    std::array<const char *, std::size(kNativeDtypeFormats)> names {};
+    for (size_t i = 0; i < names.size(); ++i)
+        names[i] = native_format(kNativeDtypeFormats[i]).name;
+    return names;
+}
+
+/// The names the named match keys dtype, src, dst and epilogue take; dtype's
+/// are its formats'.
+inline constexpr auto kNativeDtypeNames = native_dtype_names();
 inline constexpr const char *kNativeSrcNames[]
         = {"bf16", "f32", "u8", "s8", "f16"};
 inline constexpr const char *kNativeDstNames[]
@@ -59,9 +92,10 @@ inline constexpr const char *kNativeEpilogueNames[]
         = {"store", "bias", "postops", "gated"};
 
 /// The problem features rules compare, and their comparisons.  esz is the
-/// bytes of a weight element (0.5 for s4, 2 for f16); a_bytes counts the
-/// source's elements in their own bytes (1 for an s8 source, 2 for an f16
-/// one), b_bytes and slab_l2 the weight's at esz; group is the match key's.
+/// bytes of a weight element of the weight's format (0.5 for s4, 2 for f16);
+/// a_bytes counts the source's elements at the bits the format's kernels
+/// read (1 for an s8 source, 2 for an f16 one), b_bytes and slab_l2 the
+/// weight's at esz; group is the match key's.
 inline constexpr const char *kNativeRuleFeatures[] = {"m", "n", "k", "threads",
         "pack_nr", "bf16", "dynamic", "trans_a", "has_bias", "epilogue",
         "dst_bytes", "esz", "a_bytes", "b_bytes", "col_tiles", "m_per_thread",

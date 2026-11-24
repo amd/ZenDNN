@@ -31,6 +31,7 @@ import itertools
 import random
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
+from . import cost_model as cm
 from .plan import Plan, builtin_plan, ceil_div, effective_signature, mirrored, resolve, slab_tile_width
 from .problems import Problem
 from .schema import Schema
@@ -168,15 +169,20 @@ def search_keys(schema: Schema, dtype: str, allow_bit_changing: bool = False,
 
 
 def _value_rule(key: str, p: Problem, schema: Schema) -> List[Any]:
-    kind = schema.kind_of(p.dtype)
+    route = schema.route(p)
+    kind = route.family
     t = p.threads
     if key == "nr":
-        # Tiles of slabs where the build has them (every kind, or BF16 only in an older one).
+        # The widths of the route's kernels: 16 and 32 within a block, tiles of slabs where the
+        # build has them (every kind, or BF16 only in an older one), and a slab of two blocks
+        # (the F16_PH tile of 64).
+        slab = cm.SLAB_COLS.get(kind, 32)
         return [w for w in schema.nr_widths(kind) if (w in (16, 32) and w <= p.pack_nr and p.pack_nr % w == 0)
-                or slab_tile_width(kind, w, p.pack_nr) or (kind == "f16_ph" and w == 64 and p.pack_nr == 32)]
+                or slab_tile_width(kind, w, p.pack_nr) or (w == slab > 32 and p.pack_nr == 32)]
     if key == "mr":
+        # The rows of the route's kernels; the rows of an INT8 call are int8_mr's.
         return [r for r in (2, 4, 6, 8, 12)
-                if p.int8 or any(schema.covers(kind, r, w) for w in schema.nr_widths(kind))]
+                if route.cls != "rows" or any(schema.covers(kind, r, w) for w in schema.nr_widths(kind))]
     if key == "mb":
         vals = {p.m, 6, 12, 24, 48, 96, 192, 384, 768, 1536}
         vals |= {ceil_div(ceil_div(p.m, d), 6) * 6 for d in (2, 4, 8)}
@@ -301,7 +307,7 @@ class Space:
             if not spec.applies_to(problem.dtype):
                 continue
             # A key the INT8 scheme of the problem does not apply is dropped by the library.
-            if problem.int8 and spec.applies != "bf16" and problem.int8_scheme not in spec.int8_schemes:
+            if problem.int8 and problem.int8_scheme not in spec.int8_schemes:
                 continue
             if not spec.same_bits(problem.dtype) and not allow_bit_changing:
                 raise ValueError("key %s changes %s output bits; it needs --allow-bit-changing" % (k, problem.dtype))

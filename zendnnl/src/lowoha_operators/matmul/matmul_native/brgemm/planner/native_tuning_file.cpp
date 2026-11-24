@@ -74,8 +74,8 @@ static_assert(std::size(kMatchKeys) == kNumericKeys + kNamedKeys + kFlagKeys,
         "every match key has a kind");
 
 constexpr auto &kDtypeNames = kNativeDtypeNames;
-const data_type_t kDtypeTypes[] = {data_type_t::bf16, data_type_t::s8,
-        data_type_t::f32, data_type_t::s4, data_type_t::f16};
+static_assert(std::size(kDtypeNames) <= 8,
+        "a named key's uint8_t mask holds a bit per dtype");
 /// Dtypes of the table index (index_key holds two bits of dtype): the first
 /// four.
 constexpr int kIndexedDtypes = 4;
@@ -87,8 +87,7 @@ const data_type_t kDstTypes[] = {data_type_t::f32, data_type_t::bf16,
         data_type_t::f16, data_type_t::u8, data_type_t::s8, data_type_t::s32};
 const int kDstBytes[] = {4, 2, 2, 1, 1, 4};
 constexpr auto &kEpilogueNames = kNativeEpilogueNames;
-static_assert(std::size(kDtypeTypes) == std::size(kDtypeNames)
-                && std::size(kSrcTypes) == std::size(kSrcNames)
+static_assert(std::size(kSrcTypes) == std::size(kSrcNames)
                 && std::size(kDstTypes) == std::size(kDstNames)
                 && std::size(kDstBytes) == std::size(kDstNames),
         "a type per name");
@@ -135,11 +134,21 @@ struct names_t {
 
 names_t named_key_values(int named) {
     switch (named) {
-        case 0: return {kDtypeNames, std::size(kDtypeNames)};
+        case 0: return {kDtypeNames.data(), kDtypeNames.size()};
         case 1: return {kSrcNames, std::size(kSrcNames)};
         case 2: return {kDstNames, std::size(kDstNames)};
         default: return {kEpilogueNames, std::size(kEpilogueNames)};
     }
+}
+
+/// The dtype index of a weight of wei_dt: its format's in kNativeDtypeFormats,
+/// which names every format; -1 for a type no format holds.
+int dtype_index(data_type_t wei_dt) {
+    for (size_t i = 0; i < std::size(kNativeDtypeFormats); ++i) {
+        if (native_format(kNativeDtypeFormats[i]).wei_dt == wei_dt)
+            return static_cast<int>(i);
+    }
+    return -1;
 }
 
 template <size_t N>
@@ -271,7 +280,7 @@ int64_t numeric_value(const native_problem_t &p, int key) {
 
 int named_value(const native_problem_t &p, int named) {
     switch (named) {
-        case 0: return type_index(kDtypeTypes, p.wei_dt);
+        case 0: return dtype_index(p.wei_dt);
         case 1: return type_index(kSrcTypes, p.src_dt);
         case 2: return type_index(kDstTypes, p.dst_dt);
         default: return static_cast<int>(p.epilogue);
@@ -851,7 +860,7 @@ public:
     const native_config_entry_t *lookup(
             const native_problem_t &p) const noexcept override {
         const std::vector<uint32_t> *bucket = nullptr;
-        const int d = type_index(kDtypeTypes, p.wei_dt);
+        const int d = dtype_index(p.wei_dt);
         if (d >= 0 && d < kIndexedDtypes && !indexed_.empty()) {
             const auto it = indexed_.find(index_key(d, p.N, p.K));
             if (it != indexed_.end()) bucket = &it->second;
@@ -959,8 +968,9 @@ struct feature_hw_t {
 
 void problem_features(
         const native_problem_t &p, const feature_hw_t &hw, double *f) {
-    const double src_esz = p.f32() ? 4.0 : (p.bf16() || p.f16() ? 2.0 : 1.0);
-    const double esz = p.int4() ? 0.5 : src_esz;
+    const native_format_desc_t &format = native_format(p.wei_dt);
+    const double src_esz = format.contract.src_bits / 8.0;
+    const double esz = format.geometry.elem_bits / 8.0;
     const double m = p.M, n = p.N, k = p.K;
     const double threads = p.threads, pack_nr = p.pack_nr;
     const int dst = type_index(kDstTypes, p.dst_dt);

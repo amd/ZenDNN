@@ -911,11 +911,11 @@ TEST(NativeCostModel, Int8BlocksOfThreeCallsTakeTileRows) {
 // cm_int4_min_m rows the model leaves the s4 plan to the rules.
 TEST(NativeCostModel, PricesInt4Tiles) {
     const nat::native_problem_t g128 = int4_problem(6, 4096, 4096, 32, 128);
-    EXPECT_DOUBLE_EQ(nat::native_int4_weight_bytes(g128), 0.515625);
-    EXPECT_DOUBLE_EQ(nat::native_int4_weight_bytes(
+    EXPECT_DOUBLE_EQ(nat::native_plan_weight_bytes(g128), 0.515625);
+    EXPECT_DOUBLE_EQ(nat::native_plan_weight_bytes(
                              int4_problem(6, 4096, 4096, 32, 128, 4)),
             0.53125);
-    EXPECT_DOUBLE_EQ(nat::native_int4_weight_bytes(
+    EXPECT_DOUBLE_EQ(nat::native_plan_weight_bytes(
                              int4_problem(6, 4096, 4096, 32, 4096)),
             0.5 + 2.0 / 4096);
     const nat::heuristic_params_t hp
@@ -934,7 +934,11 @@ TEST(NativeCostModel, PricesInt4Tiles) {
         ASSERT_GT(c.memory, 0.0);
         EXPECT_NEAR(c.memory / b.memory, 0.515625 / 2, 1e-12);
         // 4 tiles per worker, one call of 6 rows over 2 output vectors and 2
-        // pipes: 6 cycles more per group.
+        // pipes: a step per K quad (a word of 8 K values over its 2 nibble
+        // planes), K / 4 steps of max(6 x 2 / 2, cm_fma_lat) = 6 cycles, and
+        // 6 cycles per group.
+        EXPECT_DOUBLE_EQ(c.core, 4 * (6.0 * 4096 / 4 + 32 * 6));
+        // 6 cycles more per group.
         const nat::native_plan_cost_t c32 = nat::native_plan_cost(
                 q, int4_problem(6, 4096, 4096, 32, 32), *u, hp);
         EXPECT_DOUBLE_EQ(c32.core - c.core, 4 * (128 - 32) * 6.0);

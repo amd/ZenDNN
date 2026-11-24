@@ -29,17 +29,14 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, NamedTuple
 
-BF16_BYTES = 2.0
-F16_WIDENED_BYTES = 4.0
+from .schema import fixture_tables
+
+# Columns of one vector of an INT8 call (int8_call_rows' nv).
 VECTOR_COLS = 16
-F16_PH_VECTOR_COLS = 32
 MAX_DOMAINS = 64
-INT8_BYTES = 1.0
-INT8_STEP_K = 4
-INT4_BYTES = 0.5
-# Columns of a slab of each kind's kernels, their widest call (native_slab_cols): a wider
-# tile runs it slab by slab.
-SLAB_COLS = {"bf16": 32, "int8": 32, "f32": 32, "int4": 32, "f16": 32, "f16_ph": 64}
+# Columns of a slab of each kind's kernels, their widest call (native_slab_cols, the
+# families' slab_cols): a wider tile runs it slab by slab.
+SLAB_COLS = {f["name"]: f["slab_cols"] for f in fixture_tables()["families"]}
 # The widest tile of every kind, whole slabs (kNativeMaxTileCols).
 MAX_SLAB_TILE_COLS = 128
 
@@ -129,21 +126,27 @@ def core_streams(uarch: Any, hp: Dict[str, Any]) -> bool:
     return mem_cycles(uarch, hp) < hp["cm_stream_cycles"]
 
 
-def cost_int8(p: Any) -> bool:
-    """native_plan_cost_int8: the per-channel INT8 tiles the model prices."""
-    return p.int8 and p.int8_scheme == "per_channel"
+def cost_int8(p: Any, schema: Any) -> bool:
+    """native_plan_cost_int8: the INT8 tiles the model prices on their K passes, of a route of
+    the channel class."""
+    return schema.route(p).cls == "channel"
 
 
-def int4_weight_bytes(p: Any) -> float:
-    """native_int4_weight_bytes: half a byte plus the group's scale per weight element."""
+def weight_bytes(p: Any, schema: Any) -> float:
+    """native_plan_weight_bytes: the format's element bytes plus, for a format of group scales
+    only, the group's scale per weight element."""
+    f = schema.formats[p.dtype]
+    elem = f.elem_bits / 8.0
+    if not f.grouped:
+        return elem
     gs = p.group if p.group > 0 else p.k
-    return INT4_BYTES + float(p.scale_bytes) / max(1, gs)
+    return elem + float(p.scale_bytes) / max(1, gs)
 
 
-def groups_fit_l3(p: Any, q: Any, uarch: Any, hp: Dict[str, Any]) -> bool:
+def groups_fit_l3(p: Any, q: Any, uarch: Any, hp: Dict[str, Any], schema: Any) -> bool:
     """native_plan_groups_fit_l3."""
     domains = ceil_div(max(1, q.threads), domain_threads(uarch, hp))
-    nbytes = float(p.plan_n) * p.k * (INT8_BYTES if p.int8 else BF16_BYTES)
+    nbytes = float(p.plan_n) * p.k * (schema.formats[p.dtype].elem_bits / 8.0)
     return nbytes * 100.0 <= float(uarch.l3_bytes) * domains * hp["cm_group_l3_pct"]
 
 
@@ -163,52 +166,50 @@ class PlanCost(NamedTuple):
 
 
 class TileModel:
-    """tile_model_t: the kernel calls of a tile priced per K step of its kernel."""
+    """tile_model_t: the kernel calls of a tile priced per multiply-add step of the plan's
+    kernels, on the terms of the schema's descriptions: the K of a word of the family over the
+    planes of the weight's format, the format's element bytes, the family's operand bits and
+    vector columns."""
 
-    def __init__(self, q: Any, p: Any, uarch: Any, hp: Dict[str, Any]):
+    def __init__(self, q: Any, p: Any, uarch: Any, hp: Dict[str, Any], schema: Any):
         self.q, self.p, self.hp = q, p, hp
-        self.int8, self.int4 = p.int8, p.int4
+        route = schema.route(p)
+        fmt = schema.formats[p.dtype]
+        family = schema.families[q.kind]
+        self.int8 = route.cls != "rows"
+        self.group = route.cls == "group"
+        self.step_k = family.k_step // fmt.planes
+        elem = fmt.elem_bits / 8.0
+        self.k_steps = float(ceil_div(p.k, self.step_k))
+        self.wei_bytes = weight_bytes(p, schema)
+        self.step_bytes = self.step_k * elem
+        self.src_bytes = family.operand_bits / 8.0
         self.pipes = hp["cm_fma_pipes"] if hp["cm_fma_pipes"] > 0 else max(1, uarch.fma_ports)
         self.l1_bytes = uarch.l1d_bytes * hp["l1_pct"]
         self.kc = 1
         self.passes = 1
         self.groups = 0
         self.l1_fit = False
-        f16_ph = q.kind == "f16_ph"
         if self.int8:
             self.slab_cols = int8_col_width(q, q.nr)
             self.pass_cols = int8_pass_cols(q)
             self.mr = int8_call_rows(q, self.slab_cols // VECTOR_COLS)
-            self.k_steps = float(ceil_div(p.k, INT8_STEP_K))
-            self.wei_bytes = int4_weight_bytes(p) if self.int4 else INT8_BYTES
-            self.step_bytes = INT8_STEP_K * (INT4_BYTES if self.int4 else INT8_BYTES)
-            self.src_bytes = INT8_BYTES
             self.l2_share = float(uarch.l2_bytes) * hp["int8_l2_pct"] / 100.0
-            if self.int4:
+            if self.group:
                 gs = p.group if p.group > 0 else p.k
                 self.groups = ceil_div(p.k, max(1, gs))
-                self.l1_fit = ((self.pass_cols * self.wei_bytes + self.mr * INT8_BYTES) * p.k * 100
+                self.l1_fit = ((self.pass_cols * self.wei_bytes + self.mr * self.src_bytes) * p.k * 100
                                <= float(self.l1_bytes))
         else:
             self.slab_cols = tile_slab_cols(q.kind, q.nr)
             self.mr = q.mr
             self.kc = min(max(1, q.kc), p.k)
             self.passes = ceil_div(p.k, self.kc)
-            self.k_steps = float(ceil_div(p.k, 2))
-            self.wei_bytes = BF16_BYTES
-            self.step_bytes = 2 * BF16_BYTES
-            self.src_bytes = BF16_BYTES
-            self.l1_fit = (q.nr + q.mr) * self.kc * 2 * 100 <= uarch.l1d_bytes * hp["l1_pct"]
+            self.l1_fit = ((q.nr * elem + q.mr * self.src_bytes) * self.kc * 100
+                           <= float(uarch.l1d_bytes) * hp["l1_pct"])
             self.l2_share = float(uarch.l2_bytes) * hp["bf16_l2_pct"] / 100.0
-            if p.f16:
-                self.k_steps = float(p.k)
-                self.step_bytes = BF16_BYTES
-            if p.f16 and not f16_ph:
-                self.src_bytes = F16_WIDENED_BYTES
-                self.l1_fit = ((q.nr * BF16_BYTES + q.mr * F16_WIDENED_BYTES) * self.kc * 100
-                               <= float(uarch.l1d_bytes) * hp["l1_pct"])
         self.slabs = max(1, q.nr // max(1, self.slab_cols))
-        self.vectors = float(self.slab_cols) / (F16_PH_VECTOR_COLS if f16_ph else VECTOR_COLS)
+        self.vectors = float(self.slab_cols) / family.vector_cols
         self.mem_cycles = mem_cycles(uarch, hp)
         self.tall = 1.0 + tall_pct(uarch, hp) / 100.0
         self.link_bound = self.mem_cycles > hp["cm_stream_cycles"]
@@ -232,11 +233,11 @@ class TileModel:
             return 0.0, 0.0
         p, q, hp = self.p, self.q, self.hp
         passes, l1_fit = self.passes, self.l1_fit
-        if self.int8 and not self.int4:
-            k_quads = ceil_div(p.k, INT8_STEP_K)
+        if self.int8 and not self.group:
+            k_quads = ceil_div(p.k, self.step_k)
             pss = max(1, int8_pass_quads(q, k_quads, self.pass_cols, rows, self.mr))
             passes = ceil_div(k_quads, pss)
-            l1_fit = (self.pass_cols + self.mr) * pss * INT8_STEP_K * 100 <= self.l1_bytes
+            l1_fit = (self.pass_cols + self.mr) * pss * self.step_k * 100 <= self.l1_bytes
         full, rest = rows // self.mr, rows % self.mr
         calls = full + (1 if rest > 0 else 0)
         first = self.call(self.mr if full > 0 else rest, False)
@@ -262,15 +263,17 @@ def _row_group_rows(m: int, unit: int, rg: int, row_groups: int) -> int:
     return r1 - r0
 
 
-def plan_cost(q: Any, p: Any, uarch: Any, hp: Dict[str, Any]) -> PlanCost:
-    """native_plan_cost: the modeled time of plan q of p; zero for a plan the model does not price."""
-    int8 = cost_int8(p) or p.int4
-    if ((not p.bf16 and not p.f16 and not int8) or q.nr < 1 or q.mr < 1 or q.mb < 1 or q.threads < 1
-            or q.n_tiles < 1 or q.m_blocks < 1):
+def plan_cost(q: Any, p: Any, uarch: Any, hp: Dict[str, Any], schema: Any) -> PlanCost:
+    """native_plan_cost: the modeled time of plan q of p; zero for a plan of a route the model
+    does not price."""
+    route = schema.route(p)
+    int8 = route.cls != "rows"
+    if (not route.priced or q.nr < 1 or q.mr < 1 or q.mb < 1 or q.threads < 1 or q.n_tiles < 1
+            or q.m_blocks < 1):
         return PlanCost()
     if int8 and int8_call_rows(q, int8_col_width(q, q.nr) // VECTOR_COLS) < 1:
         return PlanCost()
-    model = TileModel(q, p, uarch, hp)
+    model = TileModel(q, p, uarch, hp, schema)
     m = p.m
     tile_kib = float(q.nr) * p.k * model.wei_bytes / 1024.0
     workers = q.threads

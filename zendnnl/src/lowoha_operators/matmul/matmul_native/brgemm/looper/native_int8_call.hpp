@@ -29,6 +29,7 @@
 #include "lowoha_operators/matmul/lowoha_common.hpp"
 #include "lowoha_operators/matmul/lowoha_quant_layout.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/gemm_descriptor.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_format.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_int8_scheme.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_operator_bridge.hpp"
 
@@ -41,7 +42,8 @@ using zendnnl::error_handling::status_t;
 
 /// The decision of an INT8 call with weight scales params.quant_params and
 /// bias (params.dtypes.bias, or nullptr):
-///   * an s4 weight: per_group, of the G of its {G, N} weight scales
+///   * a weight of group scales only (kNativeGroupedTypes: an s4 weight):
+///     per_group, of the G of its {G, N} weight scales
 ///     (int4_scale_groups; G 1 is one group over K); the fused order, with a
 ///     direct store, at alpha 1 and beta 0 into an f32 or bf16 dst; the
 ///     reference order otherwise, over one group with alpha other than 1 or
@@ -69,16 +71,19 @@ struct native_int8_shift_store_t;
 
 /// Per-call INT8 operands, prepared once before the tile loop.
 struct native_int8_call_t {
-    /// Source rows of K bytes zero padded to whole quads (whole octets for
-    /// an s4 weight), lda apart: u8, or s8 when src_signed, which the
-    /// per-channel tile reads as s8 + 128 (compensated by a zero point raised
-    /// by 128) and the group kernels read as it is (the weight read as w +
-    /// 128, or an s4 weight as w + 8, compensated by group_shift).  The group
-    /// kernel reads a u8 source and the weight as they are and takes the
-    /// zero point times each group's column sums of the weight.
+    /// Source rows of K bytes zero padded to whole words of the weight's
+    /// format (quads, or octets of s4 nibbles), lda apart: u8, or s8 when
+    /// src_signed, which the per-channel tile reads as s8 + 128 (compensated
+    /// by a zero point raised by 128) and the group kernels read as it is
+    /// (the weight read by its format's decode, compensated by group_shift).
+    /// The group kernel reads a u8 source and the weight as they are and
+    /// takes the zero point times each group's column sums of the weight.
     const uint8_t *A = nullptr;
     int lda = 0;
     bool src_signed = false;
+    /// The route of the call's plan (native_problem_t::route()), whose
+    /// kernels the tiles take.
+    native_route_t route = native_route_t::s8_channel;
     /// Per row (stride 1) or per tensor (stride 0).
     const float *src_scale = nullptr;
     int src_scale_stride = 0;
@@ -86,9 +91,10 @@ struct native_int8_call_t {
     const int32_t *src_zp = nullptr;
     int src_zp_stride = 0;
     /// Weight column order; per column (stride 1) or per tensor (stride 0).
-    /// f32, bf16 or f16, read in place: a call reads only its tiles' columns.
+    /// Of type wei_scale_type, read in place: a call reads only its tiles'
+    /// columns.
     const void *wei_scale = nullptr;
-    data_type_t wei_scale_dt = data_type_t::f32;
+    native_scale_t wei_scale_type = native_scale_t::f32;
     int wei_scale_stride = 0;
     /// decide_int8_call's.  per_group: the weight scales are per group of
     /// group_quads K quads, element (g, n) at g * N + n, and the source scale
@@ -116,13 +122,13 @@ struct native_int8_call_t {
     int src_scale_group_stride = 0;
     /// per_group, s8 source: -(1 << shift_bits) times the sum of row m's
     /// source values over group g, at m * groups + g: it cancels what the
-    /// group kernel's reading of the weight as w + 128 (an s8 weight,
-    /// shift_bits 7) or w + 8 (an s4 weight, shift_bits 3) adds to the
-    /// group's sum.  Written by ready_group_shifts.  In shift_store when
-    /// they fit it (the store then has to outlive every use of the call),
-    /// else in shift_buf.
+    /// group kernel's reading of the weight (its format's decode: w + 128 of
+    /// an s8 weight, w + 8 of an s4 one) adds to the group's sum; shift_bits
+    /// is the format's offset_bits.  Written by ready_group_shifts.  In
+    /// shift_store when they fit it (the store then has to outlive every use
+    /// of the call), else in shift_buf.
     int32_t *group_shift = nullptr;
-    int shift_bits = 7;
+    int shift_bits = 0;
     /// per_group, s8 source: the rows, claimed shift_chunk at a time;
     /// shift_rows[0] is the next chunk a tile may claim, shift_rows[1 + c] is
     /// set once the shifts of chunk c are written.  shift_rows is in
@@ -232,15 +238,15 @@ inline int int8_source_groups(const matmul_params &params, int M, int N) {
 }
 
 /// The call may need group shifts (native_int8_call_t::group_shift): the
-/// per-group scheme of decide_int8_call (an s4 weight, or an s8 weight with
-/// int8_scale_groups or int8_source_groups) over an s8 source.  Makes no
-/// call.
+/// per-group scheme of decide_int8_call (a weight of group scales only,
+/// kNativeGroupedTypes, or another quantized weight with int8_scale_groups
+/// or int8_source_groups) over an s8 source.  Makes no call.
 ZENDNNL_ALWAYS_INLINE inline bool int8_may_need_group_shifts(
         const GemmDescriptor &desc, const matmul_params &params) {
-    if (desc.wei_dt != data_type_t::s4 && desc.wei_dt != data_type_t::s8)
-        return false;
+    const uint32_t wei = native_type_bit(desc.wei_dt);
+    if ((wei & kNativeQuantizedTypes) == 0) return false;
     return int8_s8_source(params)
-            && (desc.wei_dt == data_type_t::s4
+            && ((wei & kNativeGroupedTypes) != 0
                     || int8_scale_groups(params, desc.N) > 0
                     || int8_source_groups(params, desc.M, desc.N) > 0);
 }
@@ -275,9 +281,10 @@ inline int int8_shift_claim_rows(int K) {
 /// reorder_quantization_wrapper (scales and zero points written back to the
 /// caller's buffers when it gave them), or adopts a u8 / s8 source with its
 /// per-tensor, per-token or per-group scale and zero point, for a call
-/// check_int8_call accepts with decision.  A transposed source of an s4
-/// weight, or one the call quantizes to s8 with a scale per row (per tensor
-/// at M 1) or per group of a type narrower than f32, is quantized in its own
+/// check_int8_call accepts with decision.  A transposed source of a weight
+/// whose format quantizes it so (native_contract_t::transposed_as_given:
+/// s4), or one the call quantizes to s8 with a scale per row (per tensor at
+/// M 1) or per group of a type narrower than f32, is quantized in its own
 /// layout, as matmul's other routes quantize it; any other transposed source
 /// is made row-major first.  The source is copied only when it is transposed
 /// or K is not whole quads.  The copies (and the transpose before a
@@ -288,11 +295,13 @@ inline int int8_shift_claim_rows(int K) {
 /// chunk claims each go into call.shift_store when the caller set it and
 /// that part fits it, else they are allocated.  A call whose quantization
 /// params it cannot use is unimplemented, with *why (when why is not null)
-/// naming the reason.
+/// naming the reason.  route is the route of the call's plan
+/// (native_problem_t::route() of the problem of desc, params and decision).
 status_t prepare_int8_call(const GemmDescriptor &desc,
         const matmul_params &params, const native_int8_decision_t &decision,
-        const void *src, int copy_block, int64_t copy_par_min,
-        native_int8_call_t &call, const char **why = nullptr);
+        native_route_t route, const void *src, int copy_block,
+        int64_t copy_par_min, native_int8_call_t &call,
+        const char **why = nullptr);
 
 /// The copy prepare_int8_call makes of a source it does not read in place:
 /// dst[m * ldd + k] = byte (m, k) of an M x K source stored row-major lds

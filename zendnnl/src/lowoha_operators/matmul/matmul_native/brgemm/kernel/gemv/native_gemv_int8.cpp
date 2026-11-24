@@ -24,7 +24,9 @@
 #include <immintrin.h>
 
 #include "common/zendnnl_compat.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/native_decode.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/avx512_math.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_format.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -120,7 +122,7 @@ void s8_gemv(const uint8_t *__restrict a, int k_quads,
 }
 
 /// 16 values of a per-column vector of f32, bf16 or f16 at element at, or
-/// with per_column false its one value, as f32; exact.
+/// with per_column false its one value, as f32; exact: a bias of type dt.
 ZENDNNL_INLINE_TARGET("avx512f,avx512bw,avx512vl")
 inline __m512 column_f32(
         const void *v, data_type_t dt, bool per_column, size_t at) {
@@ -139,6 +141,34 @@ inline __m512 column_f32(
     const __m256i h = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(
             static_cast<const uint16_t *>(v) + at));
     return dt == data_type_t::bf16 ? avx512_bf16_to_f32(h) : _mm512_cvtph_ps(h);
+}
+
+/// column_f32 of weight scales of type s.
+ZENDNNL_INLINE_TARGET("avx512f,avx512bw,avx512vl")
+inline __m512 column_f32(
+        const void *v, native_scale_t s, bool per_column, size_t at) {
+    if (!per_column) {
+        switch (s) {
+            case native_scale_t::f32:
+                return _mm512_set1_ps(*static_cast<const float *>(v));
+            case native_scale_t::f16:
+            case native_scale_t::bf16:
+            case native_scale_t::none: break;
+        }
+        return _mm512_set1_ps(_mm512_cvtss_f32(native_halves_as_f32(
+                _mm256_set1_epi16(*static_cast<const short *>(v)), s)));
+    }
+    switch (s) {
+        case native_scale_t::f32:
+            return _mm512_loadu_ps(static_cast<const float *>(v) + at);
+        case native_scale_t::f16:
+        case native_scale_t::bf16:
+        case native_scale_t::none: break;
+    }
+    return native_halves_as_f32(
+            _mm256_loadu_si256(reinterpret_cast<const __m256i *>(
+                    static_cast<const uint16_t *>(v) + at)),
+            s);
 }
 
 /// f32(acc - zp * cs) for 16 lanes with the zero-point term in int64: exact
@@ -180,7 +210,7 @@ void s8_fused_gemv(const native_s8_gemv_args_t &p) {
                     : _mm512_cvtepi32_ps(_mm512_sub_epi32(
                               sum[i][v], _mm512_mullo_epi32(zp, cs)));
             const __m512 scale = _mm512_mul_ps(src_scale,
-                    column_f32(p.wei_scale, p.wei_scale_dt,
+                    column_f32(p.wei_scale, p.wei_scale_type,
                             p.wei_scale_per_column, col));
             const __m512 out = p.bias != nullptr
                     ? _mm512_fmadd_ps(f, scale,
@@ -195,12 +225,18 @@ ZENDNNL_INLINE_TARGET("avx512f,avx512bw,avx512vl")
 inline __m512 group_scales(const native_gemv_group_args_t &p, int g, int col) {
     if (p.unit_scales) return _mm512_set1_ps(1.0f);
     const size_t at = static_cast<size_t>(g) * p.wei_scale_ld + col;
-    if (p.wei_scale_dt == data_type_t::f32)
-        return _mm512_loadu_ps(static_cast<const float *>(p.wei_scale) + at);
-    const __m256i h = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(
-            static_cast<const uint16_t *>(p.wei_scale) + at));
-    return p.wei_scale_dt == data_type_t::bf16 ? avx512_bf16_to_f32(h)
-                                               : _mm512_cvtph_ps(h);
+    switch (p.wei_scale_type) {
+        case native_scale_t::f32:
+            return _mm512_loadu_ps(
+                    static_cast<const float *>(p.wei_scale) + at);
+        case native_scale_t::f16:
+        case native_scale_t::bf16:
+        case native_scale_t::none: break;
+    }
+    return native_halves_as_f32(
+            _mm256_loadu_si256(reinterpret_cast<const __m256i *>(
+                    static_cast<const uint16_t *>(p.wei_scale) + at)),
+            p.wei_scale_type);
 }
 
 /// The column of vector v of block i.
@@ -217,14 +253,16 @@ inline void store_sums(const native_gemv_group_args_t &p, __m512 (&c)[NB][2]) {
             _mm512_storeu_ps(p.c + 32 * i + 16 * v, c[i][v]);
 }
 
-/// One K quad of an s8 weight with per-group weight scales at off into acc,
-/// and over a u8 source the column sums of its weight quads into col.
-template <int NB, bool Runs, bool U8>
+/// One K quad of a weight of format F with per-group weight scales at off
+/// into acc, and over a u8 source the column sums of its weight quads into
+/// col; over an s8 source the weight read by F's decode, as w + 128.
+template <native_format_t F, int NB, bool Runs, bool U8>
 ZENDNNL_INLINE_TARGET("avx512f,avx512bw,avx512vnni")
 inline void group_quad_sums(const uint8_t *const (&lo)[NB],
         const uint8_t *const (&hi)[NB], size_t off, const uint8_t *a,
         __m512i (&acc)[NB][2], __m512i (&col)[NB][2]) {
-    const __m512i flip = _mm512_set1_epi32(static_cast<int32_t>(0x80808080u));
+    using decode = native_decode_of<F>;
+    const __m512i flip = _mm512_set1_epi32(decode::kFlip);
     const __m512i ones = _mm512_set1_epi8(1);
     const __m512i av = quad_at(a);
     for (int i = 0; i < NB; ++i) {
@@ -238,21 +276,21 @@ inline void group_quad_sums(const uint8_t *const (&lo)[NB],
             acc[i][1] = _mm512_dpbusd_epi32(acc[i][1], av, b1);
         } else {
             acc[i][0] = _mm512_dpbusd_epi32(
-                    acc[i][0], _mm512_xor_si512(b0, flip), av);
+                    acc[i][0], decode::bytes(b0, flip), av);
             acc[i][1] = _mm512_dpbusd_epi32(
-                    acc[i][1], _mm512_xor_si512(b1, flip), av);
+                    acc[i][1], decode::bytes(b1, flip), av);
         }
     }
 }
 
-/// The group kernel of an s8 weight with per-group weight scales: per group
-/// the exact sum (s8 source: from its shift, the weight read as w + 128; u8
-/// source: less the zero point times the group's column sums), converted,
-/// times the source scale, times the weight scale, one rounding each, added
-/// to the column's sum.
-template <int NB, bool Runs, bool U8>
+/// The group kernel of a weight of format F on the INT8 kernels with
+/// per-group weight scales: per group the exact sum (s8 source: from its
+/// shift, the weight read by F's decode as w + 128; u8 source: less the zero
+/// point times the group's column sums), converted, times the source scale,
+/// times the weight scale, one rounding each, added to the column's sum.
+template <native_format_t F, int NB, bool Runs, bool U8>
 ZENDNNL_TARGET_NOINLINE("avx512f,avx512bw,avx512vl,avx512dq,avx512vnni")
-void s8_group_gemv(const native_gemv_group_args_t &p) {
+void int8_group_gemv(const native_gemv_group_args_t &p) {
     const uint8_t *lo[NB];
     const uint8_t *hi[NB];
     for (int i = 0; i < NB; ++i) {
@@ -280,13 +318,13 @@ void s8_group_gemv(const native_gemv_group_args_t &p) {
         size_t off = base;
         int kq = 0;
         for (; kq + 1 < p.k_quads; kq += 2, off += 2 * kGroupBytes) {
-            group_quad_sums<NB, Runs, U8>(lo, hi, off,
+            group_quad_sums<F, NB, Runs, U8>(lo, hi, off,
                     a + static_cast<size_t>(kq) * 4, acc[0], col[0]);
-            group_quad_sums<NB, Runs, U8>(lo, hi, off + kGroupBytes,
+            group_quad_sums<F, NB, Runs, U8>(lo, hi, off + kGroupBytes,
                     a + static_cast<size_t>(kq + 1) * 4, acc[1], col[1]);
         }
         if (kq < p.k_quads)
-            group_quad_sums<NB, Runs, U8>(lo, hi, off,
+            group_quad_sums<F, NB, Runs, U8>(lo, hi, off,
                     a + static_cast<size_t>(kq) * 4, acc[0], col[0]);
         for (int i = 0; i < NB; ++i)
             for (int v = 0; v < 2; ++v) {
@@ -315,9 +353,10 @@ void s8_group_gemv(const native_gemv_group_args_t &p) {
     store_sums<NB>(p, c);
 }
 
-/// acc[i][v] += the dot products of one K quad, the high nibbles (High) or
-/// the low ones of the octets at off, with the source's quad at a.
-template <int NB, bool Runs, bool High>
+/// acc[i][v] += the dot products of one K quad, the high nibble plane
+/// (High) or the low one of the octets at off as Decode reads them with low,
+/// with the source's quad at a.
+template <int NB, bool Runs, bool High, typename Decode>
 ZENDNNL_INLINE_TARGET("avx512f,avx512bw,avx512vnni")
 inline void quad_sums(const uint8_t *const (&lo)[NB],
         const uint8_t *const (&hi)[NB], size_t off, const uint8_t *a,
@@ -327,16 +366,15 @@ inline void quad_sums(const uint8_t *const (&lo)[NB],
         for (int v = 0; v < 2; ++v) {
             const __m512i bits = _mm512_loadu_si512(
                     (v == 0 ? lo[i] : second_of<NB, Runs>(lo, hi, i)) + off);
-            const __m512i w = High
-                    ? _mm512_and_si512(_mm512_srli_epi16(bits, 4), low)
-                    : _mm512_and_si512(bits, low);
+            const __m512i w = Decode::template plane<High>(bits, low);
             acc[i][v] = _mm512_dpbusd_epi32(acc[i][v], w, av);
         }
 }
 
 /// set[i][v] += the dot products of the two K quads of the octets at off,
-/// low nibbles then high ones, with the source's quads at a and a + 4.
-template <int NB, bool Runs>
+/// the low nibble plane then the high one as Decode reads them with low,
+/// with the source's quads at a and a + 4.
+template <int NB, bool Runs, typename Decode>
 ZENDNNL_INLINE_TARGET("avx512f,avx512bw,avx512vnni")
 inline void octet_sums(const uint8_t *const (&lo)[NB],
         const uint8_t *const (&hi)[NB], size_t off, const uint8_t *a,
@@ -347,28 +385,28 @@ inline void octet_sums(const uint8_t *const (&lo)[NB],
         for (int v = 0; v < 2; ++v) {
             const __m512i bits = _mm512_loadu_si512(
                     (v == 0 ? lo[i] : second_of<NB, Runs>(lo, hi, i)) + off);
-            // No byte shift exists: the bits a 16-bit shift brings in from
-            // the next byte are masked off.
             set[i][v] = _mm512_dpbusd_epi32(
-                    set[i][v], _mm512_and_si512(bits, low), q0);
-            set[i][v] = _mm512_dpbusd_epi32(set[i][v],
-                    _mm512_and_si512(_mm512_srli_epi16(bits, 4), low), q1);
+                    set[i][v], Decode::template plane<false>(bits, low), q0);
+            set[i][v] = _mm512_dpbusd_epi32(
+                    set[i][v], Decode::template plane<true>(bits, low), q1);
         }
 }
 
-/// The group kernel of an s4 weight (native_int4_group_ukernel_fn_t's
-/// steps): per group the exact sum from its shift over the weight read as w
-/// + 8, then the step of the call's order.
-template <int NB, bool Runs>
+/// The group kernel of a weight of format F on the INT4 kernels
+/// (native_int4_group_ukernel_fn_t's steps): per group the exact sum from
+/// its shift over the weight read by F's decode as w + 8, then the step of
+/// the call's order.
+template <native_format_t F, int NB, bool Runs>
 ZENDNNL_TARGET_NOINLINE("avx512f,avx512bw,avx512vl,avx512dq,avx512vnni,fma")
-void s4_group_gemv(const native_gemv_group_args_t &p) {
+void int4_group_gemv(const native_gemv_group_args_t &p) {
     const uint8_t *lo[NB];
     const uint8_t *hi[NB];
     for (int i = 0; i < NB; ++i) {
         lo[i] = p.cols.lo[i];
         hi[i] = Runs ? p.cols.hi[i] : nullptr;
     }
-    const __m512i low = _mm512_set1_epi8(0x0F);
+    using decode = native_decode_of<F>;
+    const __m512i low = _mm512_set1_epi8(decode::kLow);
     const bool fused = p.order == native_int8_order_t::fused;
     __m512 c[NB][2];
     for (int i = 0; i < NB; ++i)
@@ -391,7 +429,7 @@ void s4_group_gemv(const native_gemv_group_args_t &p) {
         // through an octet.
         int taken = 0;
         if ((first & 1) != 0) {
-            quad_sums<NB, Runs, true>(lo, hi,
+            quad_sums<NB, Runs, true, decode>(lo, hi,
                     static_cast<size_t>(first >> 1) * kGroupBytes, a, acc, low);
             taken = 1;
         }
@@ -400,16 +438,17 @@ void s4_group_gemv(const native_gemv_group_args_t &p) {
         const uint8_t *ao = a + taken * 4;
         int o = 0;
         for (; o + 1 < octets; o += 2, off += 2 * kGroupBytes, ao += 16) {
-            octet_sums<NB, Runs>(lo, hi, off, ao, acc, low);
-            octet_sums<NB, Runs>(lo, hi, off + kGroupBytes, ao + 8, odd, low);
+            octet_sums<NB, Runs, decode>(lo, hi, off, ao, acc, low);
+            octet_sums<NB, Runs, decode>(
+                    lo, hi, off + kGroupBytes, ao + 8, odd, low);
         }
         if (o < octets) {
-            octet_sums<NB, Runs>(lo, hi, off, ao, acc, low);
+            octet_sums<NB, Runs, decode>(lo, hi, off, ao, acc, low);
             off += kGroupBytes;
             ao += 8;
         }
         if (taken + 2 * octets < p.k_quads)
-            quad_sums<NB, Runs, false>(lo, hi, off, ao, acc, low);
+            quad_sums<NB, Runs, false, decode>(lo, hi, off, ao, acc, low);
         for (int i = 0; i < NB; ++i)
             for (int v = 0; v < 2; ++v)
                 acc[i][v] = _mm512_add_epi32(acc[i][v], odd[i][v]);
@@ -451,16 +490,16 @@ constexpr std::array<native_s8_gemv_fn_t, sizeof...(I)> make_s8_table(
     return {{&s8_gemv<I + 1, Runs, Signed>...}};
 }
 
-template <bool Runs, bool U8, int... I>
-constexpr std::array<native_gemv_group_fn_t, sizeof...(I)> make_s8_group_table(
-        std::integer_sequence<int, I...>) {
-    return {{&s8_group_gemv<I + 1, Runs, U8>...}};
+template <native_format_t F, bool Runs, bool U8, int... I>
+constexpr std::array<native_gemv_group_fn_t, sizeof...(I)>
+make_int8_group_table(std::integer_sequence<int, I...>) {
+    return {{&int8_group_gemv<F, I + 1, Runs, U8>...}};
 }
 
-template <bool Runs, int... I>
-constexpr std::array<native_gemv_group_fn_t, sizeof...(I)> make_s4_table(
-        std::integer_sequence<int, I...>) {
-    return {{&s4_group_gemv<I + 1, Runs>...}};
+template <native_format_t F, bool Runs, int... I>
+constexpr std::array<native_gemv_group_fn_t, sizeof...(I)>
+make_int4_group_table(std::integer_sequence<int, I...>) {
+    return {{&int4_group_gemv<F, I + 1, Runs>...}};
 }
 
 using blocks_t = std::make_integer_sequence<int, kNativeGemvMaxIntBlocks>;
@@ -480,34 +519,105 @@ constexpr auto kS8FusedSigned = make_s8_fused_table<false, true>(blocks_t {});
 constexpr auto kS8FusedRuns = make_s8_fused_table<true, false>(blocks_t {});
 constexpr auto kS8FusedRunsSigned
         = make_s8_fused_table<true, true>(blocks_t {});
-constexpr auto kS8Group = make_s8_group_table<false, false>(blocks_t {});
-constexpr auto kS8GroupU8 = make_s8_group_table<false, true>(blocks_t {});
-constexpr auto kS8GroupRuns = make_s8_group_table<true, false>(blocks_t {});
-constexpr auto kS8GroupRunsU8 = make_s8_group_table<true, true>(blocks_t {});
-constexpr auto kS4 = make_s4_table<false>(blocks_t {});
-constexpr auto kS4Runs = make_s4_table<true>(blocks_t {});
+
+/// The group kernels of a weight of format F, by blocks: on the INT8 kernels
+/// over an s8 source and a u8 one, on the INT4 kernels over an s8 source
+/// (its u8 tables none), each with runs and without.
+struct group_tables_t {
+    const native_gemv_group_fn_t *s8, *u8, *s8_runs, *u8_runs;
+};
+
+template <native_format_t F>
+struct int8_group_gemvs_t {
+    static constexpr auto kS8
+            = make_int8_group_table<F, false, false>(blocks_t {});
+    static constexpr auto kU8
+            = make_int8_group_table<F, false, true>(blocks_t {});
+    static constexpr auto kS8Runs
+            = make_int8_group_table<F, true, false>(blocks_t {});
+    static constexpr auto kU8Runs
+            = make_int8_group_table<F, true, true>(blocks_t {});
+};
+
+template <native_format_t F>
+struct int4_group_gemvs_t {
+    static constexpr auto kS8 = make_int4_group_table<F, false>(blocks_t {});
+    static constexpr auto kS8Runs = make_int4_group_table<F, true>(blocks_t {});
+};
+
+/// The formats of the routes on the INT8 and on the INT4 kernels.
+constexpr auto kInt8Formats
+        = native_family_formats<native_kernel_kind_t::int8>();
+constexpr auto kInt4Formats
+        = native_family_formats<native_kernel_kind_t::int4>();
+
+template <size_t... I>
+constexpr std::array<group_tables_t, sizeof...(I)> make_int8_tables(
+        std::index_sequence<I...>) {
+    return {{{int8_group_gemvs_t<kInt8Formats[I]>::kS8.data(),
+            int8_group_gemvs_t<kInt8Formats[I]>::kU8.data(),
+            int8_group_gemvs_t<kInt8Formats[I]>::kS8Runs.data(),
+            int8_group_gemvs_t<kInt8Formats[I]>::kU8Runs.data()}...}};
+}
+
+template <size_t... I>
+constexpr std::array<group_tables_t, sizeof...(I)> make_int4_tables(
+        std::index_sequence<I...>) {
+    return {{{int4_group_gemvs_t<kInt4Formats[I]>::kS8.data(), nullptr,
+            int4_group_gemvs_t<kInt4Formats[I]>::kS8Runs.data(), nullptr}...}};
+}
+
+constexpr auto kInt8Tables
+        = make_int8_tables(std::make_index_sequence<kInt8Formats.size()> {});
+constexpr auto kInt4Tables
+        = make_int4_tables(std::make_index_sequence<kInt4Formats.size()> {});
+
+/// The group kernels of format; nullptr for a format of no route on the
+/// INT8 or INT4 kernels.
+const group_tables_t *group_tables_of(native_format_t format) {
+    for (size_t i = 0; i < kInt8Formats.size(); ++i)
+        if (kInt8Formats[i] == format) return &kInt8Tables[i];
+    for (size_t i = 0; i < kInt4Formats.size(); ++i)
+        if (kInt4Formats[i] == format) return &kInt4Tables[i];
+    return nullptr;
+}
+
+/// Whether the per-channel kernels serve format: a format of a route on the
+/// INT8 kernels whose decode reads each byte as the weight plus 128, which
+/// they take as the same sums of the weight's bytes as they are and the
+/// source plus 128.
+bool channel_gemvs_take(native_format_t format) {
+    for (const native_format_t f : kInt8Formats)
+        if (f == format)
+            return native_format(format).decode == native_decode_t::byte_offset;
+    return false;
+}
 
 } // namespace
 
-native_s8_gemv_fn_t select_native_s8_gemv(int nb, bool runs, bool src_signed) {
-    if (nb < 1 || nb > kNativeGemvMaxIntBlocks) return nullptr;
+native_s8_gemv_fn_t select_native_s8_gemv(
+        int nb, bool runs, native_format_t format, bool src_signed) {
+    if (!channel_gemvs_take(format) || nb < 1 || nb > kNativeGemvMaxIntBlocks)
+        return nullptr;
     if (runs) return (src_signed ? kS8RunsSigned : kS8Runs)[nb - 1];
     return (src_signed ? kS8Signed : kS8)[nb - 1];
 }
 
 native_s8_fused_gemv_fn_t select_native_s8_fused_gemv(
-        int nb, bool runs, bool src_signed) {
-    if (nb < 1 || nb > kNativeGemvMaxIntBlocks) return nullptr;
+        int nb, bool runs, native_format_t format, bool src_signed) {
+    if (!channel_gemvs_take(format) || nb < 1 || nb > kNativeGemvMaxIntBlocks)
+        return nullptr;
     if (runs) return (src_signed ? kS8FusedRunsSigned : kS8FusedRuns)[nb - 1];
     return (src_signed ? kS8FusedSigned : kS8Fused)[nb - 1];
 }
 
 native_gemv_group_fn_t select_native_group_gemv(
-        int nb, bool runs, bool s4, bool src_u8) {
-    if (nb < 1 || nb > kNativeGemvMaxIntBlocks) return nullptr;
-    if (s4) return (runs ? kS4Runs : kS4)[nb - 1];
-    if (runs) return (src_u8 ? kS8GroupRunsU8 : kS8GroupRuns)[nb - 1];
-    return (src_u8 ? kS8GroupU8 : kS8Group)[nb - 1];
+        int nb, bool runs, native_format_t format, bool src_u8) {
+    const group_tables_t *t = group_tables_of(format);
+    if (t == nullptr || nb < 1 || nb > kNativeGemvMaxIntBlocks) return nullptr;
+    const native_gemv_group_fn_t *k = runs ? (src_u8 ? t->u8_runs : t->s8_runs)
+                                           : (src_u8 ? t->u8 : t->s8);
+    return k == nullptr ? nullptr : k[nb - 1];
 }
 
 } // namespace native

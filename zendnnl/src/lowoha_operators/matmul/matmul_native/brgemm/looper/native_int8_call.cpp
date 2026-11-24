@@ -17,6 +17,7 @@
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_int8_call.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <cstddef>
 #include <cstring>
 #include <exception>
@@ -209,15 +210,17 @@ ZENDNNL_NOINLINE status_t quantize_source(const GemmDescriptor &desc,
     // A transposed source is quantized as given, as matmul's other routes
     // quantize it, with its quantized rows still transposed, where the
     // quantization of the same rows made row-major gives other values:
-    // with an s4 weight, and quantized to s8 with a scale per row (per
-    // tensor at M 1) or per group stored narrower than f32, which the row
-    // kernels quantize with before they narrow it.  Any other transposed
-    // source is made row-major first (a quantization to u8 has to be: the
-    // shared quantizer takes no per-row zero points of a transposed source).
+    // with a weight whose format's other route quantizes it so (s4,
+    // native_contract_t::transposed_as_given), and quantized to s8 with a
+    // scale per row (per tensor at M 1) or per group stored narrower than
+    // f32, which the row kernels quantize with before they narrow it.  Any
+    // other transposed source is made row-major first (a quantization to u8
+    // has to be: the shared quantizer takes no per-row zero points of a
+    // transposed source).
     const bool narrowed_rows = qp.src_scale.dt != data_type_t::f32
             && (n_scale == M || per_group_src);
     trans = desc.transA
-            && (desc.wei_dt == data_type_t::s4
+            && (native_format(desc.wei_dt).contract.transposed_as_given
                     || (compute == data_type_t::s8 && narrowed_rows));
     const void *rows = src;
     int rows_ld = desc.lda;
@@ -284,9 +287,11 @@ bool group_dst(data_type_t dt) {
             || dt == data_type_t::s32;
 }
 
-/// check_int8_call of a call with groups per-group weight scales.
-status_t check_group_call(const GemmDescriptor &desc,
-        const matmul_params &params, int groups, const char **why) {
+/// check_int8_call of a call with groups per-group weight scales on a weight
+/// of format f.
+status_t check_group_call(const native_format_desc_t &f,
+        const GemmDescriptor &desc, const matmul_params &params, int groups,
+        const char **why) {
     const auto &qp = params.quant_params;
     const quant_t &sc = qp.src_scale;
     if (!quant_groups_are_whole_quads(desc.K, groups))
@@ -294,7 +299,7 @@ status_t check_group_call(const GemmDescriptor &desc,
                 "per-group weight scales over groups of other than whole K "
                 "quads",
                 why);
-    if (!native_float_dt(qp.wei_scale.dt)
+    if (!native_takes_scales(f, qp.wei_scale.dt)
             || (sc.buff != nullptr && !native_float_dt(sc.dt)))
         return turned_away(status_t::unimplemented,
                 "a per-group call with scales other than f32, bf16 or f16",
@@ -355,10 +360,11 @@ status_t check_group_call(const GemmDescriptor &desc,
 }
 
 /// check_int8_call of a call with an {M, groups} source scale and
-/// per-tensor or per-channel weight scales (or none): an s8 source without a
-/// zero point, given or quantized in the call.
-status_t check_source_group_call(const GemmDescriptor &desc,
-        const matmul_params &params, int groups, const char **why) {
+/// per-tensor or per-channel weight scales (or none) on a weight of format
+/// f: an s8 source without a zero point, given or quantized in the call.
+status_t check_source_group_call(const native_format_desc_t &f,
+        const GemmDescriptor &desc, const matmul_params &params, int groups,
+        const char **why) {
     const auto &qp = params.quant_params;
     const quant_t &ws = qp.wei_scale;
     if (!quant_groups_are_whole_quads(desc.K, groups) || !group_dst(desc.dst_dt)
@@ -366,7 +372,7 @@ status_t check_source_group_call(const GemmDescriptor &desc,
             || (ws.buff != nullptr
                     && ((!quant_param_dims_are_per_tensor(ws.dims)
                                 && !quant_param_is_per_channel(ws, desc.N))
-                            || !native_float_dt(ws.dt))))
+                            || !native_takes_scales(f, ws.dt))))
         return turned_away(status_t::unimplemented,
                 "an {M, G} source scale with a zero point, a dst, groups or "
                 "weight scales the per-group tile does not take",
@@ -384,7 +390,7 @@ native_int8_decision_t decide_int8_call(const GemmDescriptor &desc,
         const matmul_params &params, const void *bias) {
     native_int8_decision_t d;
     const data_type_t dst = desc.dst_dt;
-    if (desc.wei_dt == data_type_t::s4) {
+    if ((native_type_bit(desc.wei_dt) & kNativeGroupedTypes) != 0) {
         d.scheme = native_int8_scheme_t::per_group;
         d.groups = int4_scale_groups(params, desc.N);
         d.direct_store = desc.alpha == 1.0f && desc.beta == 0.0f
@@ -430,16 +436,14 @@ status_t check_int8_call(const GemmDescriptor &desc,
         const matmul_params &params, const native_int8_decision_t &decision,
         const char **why) {
     const int M = desc.M;
-    const bool int4 = params.dtypes.wei == data_type_t::s4;
-    if ((!int4 && params.dtypes.wei != data_type_t::s8)
-            || (!int4 && desc.K > kMaxSafeInt8AccumK))
-        return turned_away(status_t::unimplemented,
-                "K exceeds the int32 accumulation bound", why);
+    const native_format_desc_t &f = native_format(params.dtypes.wei);
+    const native_contract_t &contract = f.contract;
+    if (desc.K > contract.k.max)
+        return turned_away(status_t::unimplemented, contract.k.why, why);
     const auto &qp = params.quant_params;
     if (qp.wei_zp.buff != nullptr)
-        return turned_away(status_t::unimplemented,
-                int4 ? "an s4 weight with zero points" : "weight zero points",
-                why);
+        return turned_away(
+                status_t::unimplemented, contract.wei_zp_refusal, why);
     // The tile applies beta of a gated call over the dst's N pre-activation
     // columns.
     if (desc.gated_act != matmul_gated_act_t::none && desc.beta != 0.0f
@@ -448,29 +452,31 @@ status_t check_int8_call(const GemmDescriptor &desc,
                 "beta with a gated activation over a dst of fewer than N "
                 "columns",
                 why);
-    if (int4) {
-        if (desc.K > kMaxNativeInt4K)
-            return turned_away(status_t::unimplemented,
-                    "an s4 weight of K whose whole octets exceed int", why);
-        // The INT4 group kernels take an s8 source only.
-        if (params.dtypes.src == data_type_t::u8
-                || (dynamic_source(params)
-                        && params.dtypes.compute == data_type_t::u8))
-            return turned_away(status_t::unimplemented,
-                    "a u8 source with an s4 weight", why);
-        // Nor a source zero point, also on a source the call quantizes,
-        // whose symmetric quantization would drop it.
-        if (qp.src_zp.buff != nullptr)
-            return turned_away(status_t::unimplemented,
-                    "an s4 weight with a source zero point", why);
+    if (contract.layout_k_refusal != nullptr && desc.K > native_max_layout_k(f))
+        return turned_away(
+                status_t::unimplemented, contract.layout_k_refusal, why);
+    // An integer source the kernels would take (the one the call quantizes
+    // to, or the call's) that the format refuses; the quantization checks
+    // below refuse the others.
+    const data_type_t int_src = dynamic_source(params) ? params.dtypes.compute
+                                                       : params.dtypes.src;
+    if (int_src == data_type_t::u8 || int_src == data_type_t::s8)
+        for (const native_refusal_t &r : contract.src_refusals)
+            if ((r.types & native_type_bit(int_src)) != 0)
+                return turned_away(status_t::unimplemented, r.why, why);
+    // A source zero point, also on a source the call quantizes, whose
+    // symmetric quantization would drop it.
+    if (contract.src_zp_refusal != nullptr && qp.src_zp.buff != nullptr)
+        return turned_away(
+                status_t::unimplemented, contract.src_zp_refusal, why);
+    if (contract.scale_grains == native_grain_bit(native_grain_t::group)) {
         if (decision.groups == 0)
-            return turned_away(status_t::unimplemented,
-                    "an s4 weight with weight scales other than {G, N}", why);
-        if (desc.K / decision.groups > kMaxSafeInt4GroupK)
-            return turned_away(status_t::unimplemented,
-                    "an s4 weight group above the int32 accumulation bound",
-                    why);
-        return check_group_call(desc, params, decision.groups, why);
+            return turned_away(
+                    status_t::unimplemented, contract.ungrouped_refusal, why);
+        if (desc.K / decision.groups > contract.group.max)
+            return turned_away(
+                    status_t::unimplemented, contract.group.why, why);
+        return check_group_call(f, desc, params, decision.groups, why);
     }
     // The symmetric quantization of a source the call quantizes to s8 would
     // drop a source zero point.
@@ -481,8 +487,8 @@ status_t check_int8_call(const GemmDescriptor &desc,
                 why);
     if (decision.scheme == native_int8_scheme_t::per_group)
         return decision.scales_after_groups
-                ? check_source_group_call(desc, params, decision.groups, why)
-                : check_group_call(desc, params, decision.groups, why);
+                ? check_source_group_call(f, desc, params, decision.groups, why)
+                : check_group_call(f, desc, params, decision.groups, why);
 
     const data_type_t src_dt = params.dtypes.src;
     if (src_dt == data_type_t::bf16 || src_dt == data_type_t::f32) {
@@ -543,7 +549,7 @@ status_t check_int8_call(const GemmDescriptor &desc,
     if (qp.wei_scale.buff != nullptr
             && ((!quant_param_dims_are_per_tensor(qp.wei_scale.dims)
                         && !quant_param_is_per_channel(qp.wei_scale, desc.N))
-                    || !native_float_dt(qp.wei_scale.dt)))
+                    || !native_takes_scales(f, qp.wei_scale.dt)))
         return turned_away(status_t::unimplemented,
                 "weight scales other than per tensor, per column or per group "
                 "of f32, bf16 or f16",
@@ -567,15 +573,18 @@ void copy_int8_source(const void *src, int lds, bool trans, int M, int K,
 
 status_t prepare_int8_call(const GemmDescriptor &desc,
         const matmul_params &params, const native_int8_decision_t &decision,
-        const void *src, int copy_block, int64_t copy_par_min,
-        native_int8_call_t &call, const char **why) {
+        native_route_t route, const void *src, int copy_block,
+        int64_t copy_par_min, native_int8_call_t &call, const char **why) {
     const int M = desc.M;
     const int K = desc.K;
     if (M <= 0 || K <= 0 || src == nullptr || desc.lda < (desc.transA ? M : K))
         return status_t::failure;
     const auto &qp = params.quant_params;
     const int groups = decision.groups;
+    const native_format_desc_t &f = native_format(desc.wei_dt);
 
+    assert(native_route(route).format == f.id);
+    call.route = route;
     call.A = nullptr;
     call.lda = 0;
     call.src_signed = false;
@@ -594,7 +603,7 @@ status_t prepare_int8_call(const GemmDescriptor &desc,
     call.group_quads = 0;
     call.src_scale_group_stride = 0;
     call.group_shift = nullptr;
-    call.shift_bits = 7;
+    call.shift_bits = f.offset_bits;
 
     const int nt = omp_in_parallel() ? 1 : std::max(1, desc.num_threads);
     const data_type_t src_dt = params.dtypes.src;
@@ -623,10 +632,11 @@ status_t prepare_int8_call(const GemmDescriptor &desc,
     }
 
     call.src_signed = a_dt == data_type_t::s8;
-    // The INT4 group kernel reads the source by K octets, the others by
-    // quads; a zero source value adds nothing against any padded weight.
-    const int k_pad = desc.wei_dt == data_type_t::s4 ? ceil_div(K, 8) * 8
-                                                     : ceil_div(K, 4) * 4;
+    // The kernels read the source by the K values of the weight's words
+    // (octets of s4 nibbles, else quads); a zero source value adds nothing
+    // against any padded weight.
+    const int k_word = f.geometry.k_per_word;
+    const int k_pad = ceil_div(K, k_word) * k_word;
     if (trans || k_pad != K) {
         call.a_buf.resize(static_cast<size_t>(M) * k_pad);
         copy_int8_source(a, lda, trans, M, K, call.a_buf.data(), k_pad, nt,
@@ -701,12 +711,12 @@ status_t prepare_int8_call(const GemmDescriptor &desc,
     const auto &wei_scale = qp.wei_scale;
     if (wei_scale.buff == nullptr) {
         call.wei_scale = &kUnitScale;
-        call.wei_scale_dt = data_type_t::f32;
+        call.wei_scale_type = native_scale_t::f32;
         call.wei_scale_stride = 0;
     } else if (decision.scheme == native_int8_scheme_t::per_group
             && !decision.scales_after_groups) {
         call.wei_scale = wei_scale.buff;
-        call.wei_scale_dt = wei_scale.dt;
+        call.wei_scale_type = native_scale_of(wei_scale.dt);
         call.wei_scale_stride = 1;
     } else {
         int64_t n = 0;
@@ -714,15 +724,17 @@ status_t prepare_int8_call(const GemmDescriptor &desc,
             n = 1;
         else if (quant_param_is_per_channel(wei_scale, desc.N))
             n = desc.N;
-        if (n == 0 || !native_float_dt(wei_scale.dt))
+        if (n == 0 || !native_takes_scales(f, wei_scale.dt))
             return turned_away(status_t::unimplemented,
                     "weight scales other than per tensor or per column of "
                     "f32, bf16 or f16",
                     why);
         call.wei_scale = wei_scale.buff;
-        call.wei_scale_dt = wei_scale.dt;
+        call.wei_scale_type = native_scale_of(wei_scale.dt);
         call.wei_scale_stride = n == 1 ? 0 : 1;
     }
+    assert((f.contract.scale_types & native_scale_bit(call.wei_scale_type))
+            != 0);
     call.scales_after_groups = decision.scales_after_groups;
     if (call.scheme == native_int8_scheme_t::per_group) {
         call.groups = groups;
@@ -740,7 +752,6 @@ status_t prepare_int8_call(const GemmDescriptor &desc,
             call.shift_buf.reset(new int32_t[shifts]);
             call.group_shift = call.shift_buf.get();
         }
-        call.shift_bits = desc.wei_dt == data_type_t::s4 ? 3 : 7;
         call.rows = M;
         call.shift_chunk = int8_shift_claim_rows(K);
         const int chunks = ceil_div(M, call.shift_chunk);

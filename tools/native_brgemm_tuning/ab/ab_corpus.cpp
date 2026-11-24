@@ -589,13 +589,15 @@ int run_call_case(const call_case_t &c) {
 
     buffer_t bias;
     if (c.bias != kNone) bias = random_buffer(r, c.bias, N, -1.0f, 1.0f);
+    // A gated call's binary operands index its N pre-activation columns.
     buffer_t operand, operand2;
+    const int po_cols = gated ? N : out_cols;
     if (c.po != po_t::none)
         p.postop_.push_back(
-                make_post_op(c.po, r, M, out_cols, c.po_dt, operand));
+                make_post_op(c.po, r, M, po_cols, c.po_dt, operand));
     if (c.po2 != po_t::none)
         p.postop_.push_back(
-                make_post_op(c.po2, r, M, out_cols, c.po_dt, operand2));
+                make_post_op(c.po2, r, M, po_cols, c.po_dt, operand2));
 
     // dst: M rows of ldc, then the guard; all of it starts as init.
     const size_t c_elems
@@ -818,6 +820,66 @@ std::vector<call_case_t> call_cases() {
                     c.ldc_pad = 5;
                     add(c);
                 }
+        // Gated halves of runs of 16 columns of halves not whole blocks (N 96
+        // and 160; an M = 1 call on the FP32 or F16 GEMV kernels stages its
+        // rows), several K passes, row blocks of a prompt, a transposed
+        // source, beta (over a dst of N columns), a post-op over the
+        // pre-activation, another dst type and other thread counts.
+        {
+            call_case_t g = base;
+            g.gated = gated_t::silu_and_mul;
+            for (const int M : {1, 7, 64})
+                for (const int N : {96, 160}) {
+                    call_case_t c = g;
+                    c.M = M;
+                    c.N = N;
+                    add(c);
+                }
+            // An s4 weight or weight scales per group take K of whole
+            // groups of whole K quads: 2112 for them instead of 2049.
+            for (const int K : {2049, 8192})
+                for (const int N : {128, 160}) {
+                    call_case_t c = g;
+                    c.M = 13;
+                    c.N = N;
+                    c.K = K == 2049 && (grouped(route) || int4(route)) ? 2112
+                                                                       : K;
+                    add(c);
+                }
+            for (const int N : {1024, 160}) {
+                call_case_t c = g;
+                c.M = 1024;
+                c.N = N;
+                add(c);
+            }
+            for (const int M : {5, 64}) {
+                call_case_t c = g;
+                c.M = M;
+                c.N = 128;
+                c.transA = true;
+                add(c);
+                c.transA = false;
+                c.beta = 0.5f;
+                c.ldc_pad = 64;
+                add(c);
+                c.beta = 0.0f;
+                c.ldc_pad = 0;
+                c.bias = kF32;
+                c.po = po_t::add;
+                c.po2 = po_t::relu;
+                add(c);
+                c.bias = kNone;
+                c.po = c.po2 = po_t::none;
+                c.dst = kF32;
+                add(c);
+                c.dst = base.dst;
+                for (const int t : {1, 3}) {
+                    c.threads = t;
+                    c.N = 1024;
+                    add(c);
+                }
+            }
+        }
         // alpha and beta.
         for (const int M : {3, 40})
             for (const auto &ab : {std::pair<float, float> {1.5f, 0.0f},

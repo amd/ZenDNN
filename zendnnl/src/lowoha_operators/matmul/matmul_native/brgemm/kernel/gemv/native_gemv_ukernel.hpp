@@ -22,6 +22,7 @@
 
 #include "common/data_types.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_int8_scheme.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_types.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -113,7 +114,7 @@ struct native_s8_gemv_args_t {
     /// f32, bf16 or f16 weight scales, per column or one per tensor, and an
     /// f32, bf16 or f16 bias per column (or none), read exactly as f32.
     const void *wei_scale = nullptr;
-    data_type_t wei_scale_dt = data_type_t::f32;
+    native_scale_t wei_scale_type = native_scale_t::f32;
     bool wei_scale_per_column = true;
     const void *bias = nullptr;
     data_type_t bias_dt = data_type_t::f32;
@@ -149,12 +150,12 @@ struct native_gemv_group_args_t {
     const float *src_scale = nullptr;
     int src_scale_step = 0;
     /// Group g's weight scale of weight column n at element g * wei_scale_ld
-    /// + n of wei_scale, of type wei_scale_dt (f32, bf16 or f16), read
+    /// + n of wei_scale, of type wei_scale_type (f32, bf16 or f16), read
     /// exactly as f32; col_lo[i] and col_hi[i] are the weight columns of block
     /// i's first and second 16 columns.  unit_scales: every weight scale is
     /// 1, and over an s4 weight every source scale too.
     const void *wei_scale = nullptr;
-    data_type_t wei_scale_dt = data_type_t::f32;
+    native_scale_t wei_scale_type = native_scale_t::f32;
     size_t wei_scale_ld = 0;
     int col_lo[kNativeGemvMaxBlocks] = {};
     int col_hi[kNativeGemvMaxBlocks] = {};
@@ -182,13 +183,20 @@ native_bf16_gemv_fn_t select_native_bf16_gemv(int nb, bool runs);
 native_f32_gemv_fn_t select_native_f32_gemv(int nb);
 native_f16_gemv_fn_t select_native_f16_gemv(int nb);
 native_f16_ph_gemv_fn_t select_native_f16_ph_gemv(int nb);
-native_s8_gemv_fn_t select_native_s8_gemv(int nb, bool runs, bool src_signed);
+/// The INT8 per-channel kernels of a weight of format, of an s8 source with
+/// src_signed; nullptr for a format whose decode is not byte_offset (these
+/// read its bytes as they are against the source read as a + 128, the same
+/// sums).
+native_s8_gemv_fn_t select_native_s8_gemv(
+        int nb, bool runs, native_format_t format, bool src_signed);
 native_s8_fused_gemv_fn_t select_native_s8_fused_gemv(
-        int nb, bool runs, bool src_signed);
-/// s4: an s4 weight's group kernel (an s8 source), else an s8 weight's over a
-/// u8 source (src_u8) or an s8 one.
+        int nb, bool runs, native_format_t format, bool src_signed);
+/// The group kernel of a weight of format, by its decode: of the INT4
+/// kernels over an s8 source, of the INT8 kernels over a u8 source (src_u8)
+/// or an s8 one; nullptr for a format of no route on either, and for a u8
+/// source on the INT4 kernels.
 native_gemv_group_fn_t select_native_group_gemv(
-        int nb, bool runs, bool s4, bool src_u8);
+        int nb, bool runs, native_format_t format, bool src_u8);
 
 } // namespace native
 } // namespace matmul

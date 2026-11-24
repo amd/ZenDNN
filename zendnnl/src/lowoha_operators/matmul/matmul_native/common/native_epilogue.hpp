@@ -96,8 +96,8 @@ struct native_epilogue_t {
     data_type_t dst_dt = data_type_t::none;
     int dst_esz = 0;
     int ldc = 0;
-    /// Only the store: an f32 or bf16 dst, alpha 1, beta 0, and no bias,
-    /// post-op, requantization or gated activation.
+    /// Only the store: an f32, bf16 or f16 dst, alpha 1, beta 0, and no
+    /// bias, post-op, requantization or gated activation.
     bool store_only = false;
     std::vector<native_postop_t> ops;
 

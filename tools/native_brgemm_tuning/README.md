@@ -287,10 +287,11 @@ is optional: a campaign without ceilings tunes as before.
   candidate), the search tries their halves, doubles and built-in values, and
   the export writes them in every entry and, from M 2, in the rules, for calls
   on the campaign's team (its threads) only, as they were measured on it: a
-  tree of them by weight type (on `esz` and `bf16`), or under every leaf of the
-  learned tree (ordered rules: ahead of every rule a variant of it for each
-  calibrated type, so the other types and teams keep the rule, then one rule
-  per weight type);
+  tree of them by weight type (on `esz` and `bf16`, from the formats of the
+  dump; a calibrated type that another type matches in both is refused), or
+  under every leaf of the learned tree (ordered rules: ahead of every rule a
+  variant of it for each calibrated type, so the other types and teams keep
+  the rule, then one rule per weight type);
   `--no-calibration-rule` keeps them in the entries only (a file `merge`
   takes). `meta.op_perf.calibration` records the A/B, and the values when it
   kept them.

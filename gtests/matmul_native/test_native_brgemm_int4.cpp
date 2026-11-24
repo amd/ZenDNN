@@ -109,28 +109,34 @@ TEST(NativeBrgemmInt4GroupKernel, Table) {
         EXPECT_EQ(max_mr, nv == 1 ? 12 : 6) << nv;
         for (const auto order : {nat::native_int8_order_t::fused,
                      nat::native_int8_order_t::reference}) {
-            EXPECT_EQ(nat::select_native_int4_group_ukernel(0, nv, order),
+            EXPECT_EQ(nat::select_native_int4_group_ukernel(
+                              nat::native_format_t::s4, 0, nv, order),
                     nullptr);
             EXPECT_EQ(nat::select_native_int4_group_ukernel(
-                              max_mr + 1, nv, order),
+                              nat::native_format_t::s4, max_mr + 1, nv, order),
                     nullptr);
             for (int mr = 1; mr <= max_mr; ++mr)
-                EXPECT_NE(nat::select_native_int4_group_ukernel(mr, nv, order),
+                EXPECT_NE(nat::select_native_int4_group_ukernel(
+                                  nat::native_format_t::s4, mr, nv, order),
                         nullptr)
                         << mr << " " << nv;
         }
         for (int mr = 1; mr <= max_mr; ++mr) {
             const auto fused = nat::select_native_int4_group_ukernel(
-                    mr, nv, nat::native_int8_order_t::fused);
+                    nat::native_format_t::s4, mr, nv,
+                    nat::native_int8_order_t::fused);
             const auto groups = nat::select_native_int4_group_ukernel(
-                    mr, nv, nat::native_int8_order_t::fused, true);
+                    nat::native_format_t::s4, mr, nv,
+                    nat::native_int8_order_t::fused, true);
             const auto reference = nat::select_native_int4_group_ukernel(
-                    mr, nv, nat::native_int8_order_t::reference);
+                    nat::native_format_t::s4, mr, nv,
+                    nat::native_int8_order_t::reference);
             EXPECT_NE(groups, nullptr) << mr << " " << nv;
             EXPECT_NE(fused, reference) << mr << " " << nv;
             EXPECT_NE(groups, fused) << mr << " " << nv;
             EXPECT_NE(groups, reference) << mr << " " << nv;
-            EXPECT_EQ(nat::select_native_int4_group_ukernel(mr, nv,
+            EXPECT_EQ(nat::select_native_int4_group_ukernel(
+                              nat::native_format_t::s4, mr, nv,
                               nat::native_int8_order_t::reference, true),
                     reference)
                     << mr << " " << nv;
@@ -138,8 +144,9 @@ TEST(NativeBrgemmInt4GroupKernel, Table) {
     }
     for (int nv : {3, 4}) {
         EXPECT_EQ(nat::native_int4_group_ukernel_max_mr(nv), 0);
-        EXPECT_EQ(nat::select_native_int4_group_ukernel(
-                          1, nv, nat::native_int8_order_t::fused),
+        EXPECT_EQ(
+                nat::select_native_int4_group_ukernel(nat::native_format_t::s4,
+                        1, nv, nat::native_int8_order_t::fused),
                 nullptr);
     }
 }
@@ -293,7 +300,7 @@ TEST(NativeBrgemmInt4GroupKernel, MatchesTheModel) {
                             args.src_scale_step = sa_step;
                             args.wei_scale = sb.get();
                             args.wei_scale_step = sb_step;
-                            args.wei_scale_dt = sb_dt;
+                            args.wei_scale_type = nat::native_scale_of(sb_dt);
                             args.C = c.data();
                             args.ldc = ldc;
                             args.accumulate = accumulate;
@@ -304,7 +311,8 @@ TEST(NativeBrgemmInt4GroupKernel, MatchesTheModel) {
                                 args.dst_bf16 = store == store_t::bf16;
                             }
                             nat::select_native_int4_group_ukernel(
-                                    mr, nv, order, src_groups)(args);
+                                    nat::native_format_t::s4, mr, nv, order,
+                                    src_groups)(args);
 
                             size_t bad = 0;
                             for (int m = 0; m < mr; ++m)
@@ -403,18 +411,19 @@ TEST(NativeBrgemmInt4OneGroupKernel, Table) {
         EXPECT_EQ(max_mr, 12) << nv;
         for (const auto order : {nat::native_int8_order_t::fused,
                      nat::native_int8_order_t::reference}) {
-            EXPECT_EQ(nat::select_native_int4_one_group_ukernel(0, nv, order),
+            EXPECT_EQ(nat::select_native_int4_one_group_ukernel(
+                              nat::native_format_t::s4, 0, nv, order),
                     nullptr);
             EXPECT_EQ(nat::select_native_int4_one_group_ukernel(
-                              max_mr + 1, nv, order),
+                              nat::native_format_t::s4, max_mr + 1, nv, order),
                     nullptr);
             for (int mr = 1; mr <= max_mr; ++mr) {
                 const auto one = nat::select_native_int4_one_group_ukernel(
-                        mr, nv, order);
+                        nat::native_format_t::s4, mr, nv, order);
                 EXPECT_NE(one, nullptr) << mr << " " << nv;
                 // The group kernel's own instances where it has the rows.
-                const auto group
-                        = nat::select_native_int4_group_ukernel(mr, nv, order);
+                const auto group = nat::select_native_int4_group_ukernel(
+                        nat::native_format_t::s4, mr, nv, order);
                 if (mr <= nat::native_int4_group_ukernel_max_mr(nv)) {
                     EXPECT_EQ(one, group) << mr << " " << nv;
                 } else {
@@ -424,15 +433,18 @@ TEST(NativeBrgemmInt4OneGroupKernel, Table) {
         }
         for (int mr = 1; mr <= max_mr; ++mr)
             EXPECT_NE(nat::select_native_int4_one_group_ukernel(
-                              mr, nv, nat::native_int8_order_t::fused),
+                              nat::native_format_t::s4, mr, nv,
+                              nat::native_int8_order_t::fused),
                     nat::select_native_int4_one_group_ukernel(
-                            mr, nv, nat::native_int8_order_t::reference))
+                            nat::native_format_t::s4, mr, nv,
+                            nat::native_int8_order_t::reference))
                     << mr << " " << nv;
     }
     for (int nv : {3, 4}) {
         EXPECT_EQ(nat::native_int4_one_group_ukernel_max_mr(nv), 0);
         EXPECT_EQ(nat::select_native_int4_one_group_ukernel(
-                          1, nv, nat::native_int8_order_t::fused),
+                          nat::native_format_t::s4, 1, nv,
+                          nat::native_int8_order_t::fused),
                 nullptr);
     }
 }
@@ -597,7 +609,8 @@ TEST(NativeBrgemmInt4OneGroupKernel, MatchesTheModel) {
                                     args.src_scale = sa.data() + row;
                                     args.src_scale_ld = 1;
                                     args.wei_scale = sb.get();
-                                    args.wei_scale_dt = sb_dt;
+                                    args.wei_scale_type
+                                            = nat::native_scale_of(sb_dt);
                                     args.C = c.data() + row * ldc;
                                     args.ldc = ldc;
                                     args.accumulate = accumulate;
@@ -620,7 +633,8 @@ TEST(NativeBrgemmInt4OneGroupKernel, MatchesTheModel) {
                             std::vector<float> c = c_in;
                             std::vector<uint8_t> dst = dst_in;
                             run(nat::select_native_int4_one_group_ukernel(
-                                        mr, nv, order),
+                                        nat::native_format_t::s4, mr, nv,
+                                        order),
                                     0, c, dst);
 
                             size_t bad = 0;
@@ -704,9 +718,11 @@ TEST(NativeBrgemmInt4OneGroupKernel, MatchesTheModel) {
                                 std::vector<float> gc = c_in;
                                 std::vector<uint8_t> gdst = dst_in;
                                 run(nat::select_native_int4_group_ukernel(
-                                            group_mr, nv, order),
+                                            nat::native_format_t::s4, group_mr,
+                                            nv, order),
                                         0, gc, gdst);
                                 run(nat::select_native_int4_group_ukernel(
+                                            nat::native_format_t::s4,
                                             mr - group_mr, nv, order),
                                         group_mr, gc, gdst);
                                 EXPECT_EQ(std::memcmp(gc.data(), c.data(),
@@ -2076,7 +2092,8 @@ TEST(NativeBrgemmInt4Decision, CallsThatMayNeedGroupShifts) {
         nat::native_int8_shift_store_t store;
         nat::native_int8_call_t call;
         call.shift_store = &store;
-        ASSERT_EQ(nat::prepare_int8_call(d, k.params, decision, k.src, 64,
+        ASSERT_EQ(nat::prepare_int8_call(d, k.params, decision,
+                          nt::int8_route_of(d, k.params, decision), k.src, 64,
                           int64_t {1} << 40, call),
                 status_t::success)
                 << c.name;
@@ -2639,8 +2656,9 @@ TEST(NativeBrgemmInt4Bounds, SourceRowsOfTheLargestK) {
             = nat::decide_int8_call(d, p, nullptr);
     ASSERT_EQ(nat::check_int8_call(d, p, decision), status_t::success);
     nat::native_int8_call_t call;
-    ASSERT_EQ(nat::prepare_int8_call(
-                      d, p, decision, src, 64, int64_t {1} << 40, call),
+    ASSERT_EQ(nat::prepare_int8_call(d, p, decision,
+                      nt::int8_route_of(d, p, decision), src, 64,
+                      int64_t {1} << 40, call),
             status_t::success);
     EXPECT_EQ(call.A, reinterpret_cast<const uint8_t *>(src));
     EXPECT_EQ(call.lda, K);
@@ -2708,7 +2726,8 @@ TEST(NativeBrgemmInt4Bounds, EachPartTakesTheLentStoreWhenItFits) {
         nat::native_int8_shift_store_t store;
         nat::native_int8_call_t call;
         call.shift_store = &store;
-        ASSERT_EQ(nat::prepare_int8_call(d, p, decision, src.data(), 64,
+        ASSERT_EQ(nat::prepare_int8_call(d, p, decision,
+                          nt::int8_route_of(d, p, decision), src.data(), 64,
                           int64_t {1} << 40, call),
                 status_t::success)
                 << what;
@@ -2872,12 +2891,13 @@ TEST(NativeBrgemmInt4Bounds, RowStridesOfTwelveRowsPastAnInt) {
         args.src_scale_step = kind.src_groups ? 1 : 0;
         args.wei_scale = wei_scale.data();
         args.wei_scale_step = 0;
-        args.wei_scale_dt = kF32;
+        args.wei_scale_type = nat::native_scale_of(kF32);
         args.C = c.data();
         args.ldc = 16;
         args.finish = kind.finish;
         const auto kernel = nat::select_native_int4_group_ukernel(
-                kRows, 1, kind.order, kind.src_groups);
+                nat::native_format_t::s4, kRows, 1, kind.order,
+                kind.src_groups);
         ASSERT_NE(kernel, nullptr);
         kernel(args);
         for (int m = 0; m < kRows; ++m)
@@ -2974,14 +2994,16 @@ TEST(NativeBrgemmInt4Bounds, OneGroupKernelsReadOnlyTheWeight) {
                                 args.src_scale = ones.data();
                                 args.src_scale_ld = 1;
                                 args.wei_scale = ones.data();
-                                args.wei_scale_dt = kF32;
+                                args.wei_scale_type
+                                        = nat::native_scale_of(kF32);
                                 args.C = c.data();
                                 args.ldc = 32;
                                 args.partial_in = k0 > 0;
                                 args.partial_out = true;
                                 args.request_limit_octets
                                         = prefetch ? octets - quad / 2 : 0;
-                                nat::select_native_int4_one_group_ukernel(mr, 2,
+                                nat::select_native_int4_one_group_ukernel(
+                                        nat::native_format_t::s4, mr, 2,
                                         nat::native_int8_order_t::fused)(args);
                             }
                             size_t bad = 0;

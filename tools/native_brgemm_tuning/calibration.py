@@ -32,9 +32,9 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from .candidates import Candidate, Space, builtin_value, parse_values
 from .export import merge_config
-from .problems import Problem
+from .problems import FORMATS, Problem, format_families
 from .results import ProblemSummary
-from .rules import MIN_RULE_M
+from .rules import MIN_RULE_M, OPS
 
 KEYS = ("cm_fma_pipes", "cm_fma_lat", "cm_l2_bytes", "cm_l3_cycles", "cm_mem_cycles", "cm_stream_cycles")
 # The keys tune.py calibrate tries unless told otherwise: at the probe's L2 streaming rate,
@@ -44,11 +44,77 @@ DEFAULT_KEYS = tuple(k for k in KEYS if k != "cm_l2_bytes")
 # The weight types whose plans the cost model prices (native_plan_cost: BF16, F16, INT8
 # with per-channel scales and s4); an f32 plan takes none of the inputs.
 PRICED = ("bf16", "f16", "s8", "s4")
-# Rule conditions on the features that tell the weight types apart (esz: bytes of a weight
-# element, 0.5 for s4; bf16: 1 for bf16 weights).
-TYPE_WHEN = {"s4": [["esz", "<=", 0.75]], "s8": [["esz", ">", 0.75], ["esz", "<=", 1.5]],
-             "bf16": [["esz", ">", 1.5], ["bf16", ">", 0.5]],
-             "f16": [["esz", ">", 1.5], ["bf16", "<=", 0.5], ["esz", "<=", 3.0]], "f32": [["esz", ">", 3.0]]}
+
+
+def type_features(formats: Sequence[Dict[str, Any]]) -> Dict[str, Dict[str, float]]:
+    """The rule features that tell weight types apart, per format of the dump (rule_features):
+    esz, the bytes of a weight element, and bf16, 1 for a weight on the BF16 kernels."""
+    return {f["name"]: {"esz": f["elem_bits"] / 8.0, "bf16": 1.0 if "bf16" in format_families(f) else 0.0}
+            for f in formats}
+
+
+def _holds(when: Sequence[Sequence[Any]], feats: Dict[str, float]) -> bool:
+    return all(OPS[op](feats[f], v) for f, op, v in when)
+
+
+def type_when(formats: Sequence[Dict[str, Any]]) -> Dict[str, List[List[Any]]]:
+    """Per weight type, rule conditions that hold for its problems and for no other type's: esz
+    above the midpoint to the next smaller element size, the bf16 feature where another type has
+    its element size, then esz up to the midpoint to the next larger one where a larger type
+    meets the conditions before it.  A type that another type matches in esz and bf16 has none."""
+    feats = type_features(formats)
+    sizes = sorted({v["esz"] for v in feats.values()})
+    out = {}
+    for d, v in feats.items():
+        same = [o for o, w in feats.items() if o != d and w["esz"] == v["esz"]]
+        if any(feats[o]["bf16"] == v["bf16"] for o in same):
+            continue
+        i = sizes.index(v["esz"])
+        when: List[List[Any]] = []
+        if i > 0:
+            when.append(["esz", ">", (sizes[i - 1] + v["esz"]) / 2])
+        if same:
+            when.append(["bf16", ">", 0.5] if v["bf16"] > 0.5 else ["bf16", "<=", 0.5])
+        if any(w["esz"] > v["esz"] and _holds(when, w) for w in feats.values()):
+            when.append(["esz", "<=", (v["esz"] + sizes[i + 1]) / 2])
+        out[d] = when
+    return out
+
+
+def type_splits(formats: Sequence[Dict[str, Any]]) -> Any:
+    """The weight types as a tree of splits, {"feature", "le", "then", "else"} with then the types
+    of feature <= le, each the most even of bf16 at 0.5 and esz at the midpoints between element
+    sizes (on a tie the first of them, in that order); a leaf is a type's name, or the list of the
+    types no split tells apart."""
+    feats = type_features(formats)
+    sizes = sorted({v["esz"] for v in feats.values()})
+    splits = [("bf16", 0.5)] + [("esz", (a + b) / 2) for a, b in zip(sizes, sizes[1:])]
+
+    def build(names: List[str]) -> Any:
+        best = None
+        for feature, le in splits:
+            then = [d for d in names if feats[d][feature] <= le]
+            other = [d for d in names if feats[d][feature] > le]
+            if then and other and (best is None or max(len(then), len(other)) < best[0]):
+                best = (max(len(then), len(other)), feature, le, then, other)
+        if best is None:
+            return names[0] if len(names) == 1 else names
+        return {"feature": best[1], "le": best[2], "then": build(best[3]), "else": build(best[4])}
+
+    return build(list(feats))
+
+
+# The rule conditions that tell each weight type's problems from the others' and the types'
+# tree of splits, from the formats of the dump.
+TYPE_WHEN = type_when(list(FORMATS.values()))
+TYPE_SPLITS = type_splits(list(FORMATS.values()))
+
+
+def _type_when(dtype: str) -> List[List[Any]]:
+    if dtype not in TYPE_WHEN:
+        raise ValueError("weight type %s: no condition on esz and bf16 tells its problems from another type's"
+                         % dtype)
+    return TYPE_WHEN[dtype]
 
 
 def configs(cal: Any, dtypes: Sequence[str], keys: Optional[Sequence[str]] = None) -> Dict[str, Dict[str, int]]:
@@ -151,7 +217,8 @@ def type_tree(cfgs: Dict[str, Dict[str, Any]], over: Optional[Dict[str, Any]] = 
               rule_id: Optional[str] = None) -> Dict[str, Any]:
     """A rule subtree that gives each weight type cfgs[type] (with over merged on top); a type
     the campaign has no problem of gets over alone. The subtree of a rule's leaf (rule_id)
-    names its leaves for the rule: <rule_id>_<type> for a calibrated type, rule_id otherwise."""
+    names its leaves for the rule: <rule_id>_<type> for a calibrated type, rule_id otherwise.
+    The splits are TYPE_SPLITS'; ValueError for a calibrated type no split tells apart."""
     over = over or {}
 
     def leaf(d: str) -> Dict[str, Any]:
@@ -160,9 +227,16 @@ def type_tree(cfgs: Dict[str, Dict[str, Any]], over: Optional[Dict[str, Any]] = 
         out = _leaf(merge_config(cfgs[d], over), d)
         return dict(out, id="%s_%s" % (rule_id, d)) if rule_id and out["config"] else out
 
-    ints = _split("esz", 0.75, leaf("s4"), leaf("s8"))
-    floats = _split("bf16", 0.5, _split("esz", 3.0, leaf("f16"), leaf("f32")), leaf("bf16"))
-    return _split("esz", 1.5, ints, floats)
+    def node(n: Any) -> Dict[str, Any]:
+        if isinstance(n, str):
+            return leaf(n)
+        if isinstance(n, list):
+            if any(d in cfgs for d in n):
+                raise ValueError("weight types %s: no split on esz and bf16 tells them apart" % ", ".join(n))
+            return leaf(n[0])
+        return _split(n["feature"], n["le"], node(n["then"]), node(n["else"]))
+
+    return node(TYPE_SPLITS)
 
 
 def _on_team(threads: int, inside: Dict[str, Any], outside: Dict[str, Any]) -> Dict[str, Any]:
@@ -198,10 +272,10 @@ def with_rules(rules: Optional[Dict[str, Any]], cfgs: Dict[str, Dict[str, Any]],
             cfg = merge_config(cal, own)
             if cal and cfg != own:
                 out.append(dict(r, id="%s_%s" % (r.get("id", "rule"), d),
-                                when=r.get("when", []) + TYPE_WHEN[d] + team, config=cfg))
+                                when=r.get("when", []) + _type_when(d) + team, config=cfg))
         out.append(r)
     for d, cfg in sorted(cfgs.items()):
         if cfg:
-            out.append({"id": "calibration_%s" % d, "when": [["m", ">=", MIN_RULE_M]] + TYPE_WHEN[d] + team,
+            out.append({"id": "calibration_%s" % d, "when": [["m", ">=", MIN_RULE_M]] + _type_when(d) + team,
                         "config": dict(cfg)})
     return {"kind": "ordered", "list": out}

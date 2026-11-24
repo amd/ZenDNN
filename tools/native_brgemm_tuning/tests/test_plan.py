@@ -20,6 +20,7 @@ import os
 import random
 import sys
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import plan_cases  # noqa: E402
@@ -27,6 +28,7 @@ from helpers import BF16_SLABS, DESIGN, NEWER, NO_BLOCKS, OLDER, RULES_OFF, SCHE
 
 from native_brgemm_tuning import cost_model as cm  # noqa: E402
 from native_brgemm_tuning import plan as PL  # noqa: E402
+from native_brgemm_tuning import problems as P  # noqa: E402
 from native_brgemm_tuning.candidates import parse_settings  # noqa: E402
 from native_brgemm_tuning.problems import Problem  # noqa: E402
 from native_brgemm_tuning.schema import Schema, Uarch  # noqa: E402
@@ -328,7 +330,7 @@ class TestBf16Rules(unittest.TestCase):
         # Every type takes tiles of 64 and 128 columns of slabs of its widest call (32 columns, the
         # F16_PH tile of 64), with the rows of the slab; only a pin reaches them, and a build whose
         # registry has them for BF16 only rejects them.
-        f16_kind = SCHEMA.f16_kind()
+        f16_kind = SCHEMA.kind_of("f16")
         cases = [(Problem("s8", 64, 4096, 4096), "int8"),
                  (Problem("s8", 64, 4096, 4096, int8_scheme="per_group"), "int8"),
                  (Problem("s4", 64, 4096, 4096, group=128, scale_bytes=2), "int4"),
@@ -649,6 +651,23 @@ class TestNoL3(unittest.TestCase):
         self.assertGreater(with_l3, 0)
 
 
+class TestFamilies(unittest.TestCase):
+    """A weight's BF16, FP32 and F16 kernels are the families of its format's routes in the dump."""
+
+    def test_the_formats_kernels(self):
+        for d in P.DTYPES:
+            p = Problem(d, 8, 4096, 4096, group=128 if P.FORMATS[d]["grouped"] else 0)
+            self.assertEqual(p.families, tuple(r["family"] for r in P.FORMATS[d]["routes"]), d)
+            self.assertEqual((p.bf16, p.f32, p.f16), (d == "bf16", d == "f32", d == "f16"), d)
+        # A format of the dump on the F16 kernels is an f16 weight whatever its name.
+        twin = dict(P.FORMATS["f16"], name="x16")
+        with unittest.mock.patch.object(P, "DTYPES", P.DTYPES + ("x16",)), \
+                unittest.mock.patch.dict(P.FORMATS, {"x16": twin}), \
+                unittest.mock.patch.dict(P.FAMILIES, {"x16": P.format_families(twin)}):
+            x = Problem("x16", 8, 4096, 4096, src="f16", dst="f16")
+            self.assertEqual((x.bf16, x.f32, x.f16), (False, False, True))
+
+
 class TestAnyN(unittest.TestCase):
     """A weight of N not a multiple of 32 is planned, matched and logged at its padded width."""
 
@@ -675,7 +694,7 @@ class TestPerGroup(unittest.TestCase):
         g, c = Problem("s8", 32, 4096, 4096, int8_scheme="per_group"), Problem("s8", 32, 4096, 4096)
         qg, qc = builtin(g), builtin(c)
         self.assertEqual((qg.int8_rows_nv1, qg.int8_rows_nv2),
-                         (SCHEMA.int8_max_mr(1, "per_group"), SCHEMA.int8_max_mr(2, "per_group")))
+                         (SCHEMA.route_max_mr(SCHEMA.route(g), 1), SCHEMA.route_max_mr(SCHEMA.route(g), 2)))
         self.assertEqual((qc.int8_rows_nv1, qc.int8_rows_nv2), (12, 12))
         self.assertLess(qg.int8_rows_nv2, 12)
         self.assertGreater(qc.int8_pass_quads, 0)
@@ -718,7 +737,8 @@ class TestOneGroupS4(unittest.TestCase):
     library's rule test of s4 weights states it: the rules' plan of several groups at their rows per call."""
 
     def test_rules_plan_at_the_rows_of_one_group(self):
-        rows = (SCHEMA.int4_max_mr(1, "per_channel"), SCHEMA.int4_max_mr(2, "per_channel"))
+        one = SCHEMA.route_of("s4", "per_group", one_group=True)
+        rows = (SCHEMA.route_max_mr(one, 1), SCHEMA.route_max_mr(one, 2))
         self.assertEqual(rows, (12, 12))
         for u in (SMALL, LARGE):
             for n, k in SHAPES:
@@ -775,7 +795,7 @@ class TestLibraryPlans(unittest.TestCase):
         # Tiles of slabs of every kernel kind are among the legal plans.
         wide = {x.split(" kind=")[1].split()[0] for x in lines
                 if x.endswith("valid=1") and (" nr=64 " in x or " nr=128 " in x)}
-        self.assertEqual(wide, {"bf16", "int8", "int4", "f32", schema.f16_kind()})
+        self.assertEqual(wide, {"bf16", "int8", "int4", "f32", schema.kind_of("f16")})
         self.check_digests(fx, lines)
 
     def test_nb_plans_match_the_library(self):
@@ -794,8 +814,8 @@ class TestLibraryPlans(unittest.TestCase):
         main, nb = plan_cases.load_fixture(), plan_cases.load_fixture(plan_cases.NB_FIXTURE)
         self.assertEqual(("f16" in main["kernels"], "f16_ph" in main["kernels"]), (True, True))
         self.assertEqual(("f16" in nb["kernels"], "f16_ph" in nb["kernels"]), (True, False))
-        self.assertEqual(self.schema_of(main).f16_kind(), "f16_ph")
-        self.assertEqual(self.schema_of(nb).f16_kind(), "f16")
+        self.assertEqual(self.schema_of(main).kind_of("f16"), "f16_ph")
+        self.assertEqual(self.schema_of(nb).kind_of("f16"), "f16")
 
 
 class TestSignature(unittest.TestCase):

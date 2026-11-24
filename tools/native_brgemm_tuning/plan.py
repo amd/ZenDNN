@@ -40,7 +40,8 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from . import cost_model as cm
 from .cost_model import ceil_div, int4_pass_quads, int8_call_rows, int8_col_width, int8_pass_quads
-from .problems import Problem
+from .problems import FORMATS, Problem
+from .schema import route_scheme
 
 # heuristic_params_t{}: every key of the planner at its built-in value; a pin at 0
 # (-1 for col_groups) is auto, a rule switch at 0 leaves its rule out.
@@ -224,13 +225,8 @@ def call_rows(hp: Dict[str, Any], int8: bool, nr: int) -> int:
 
 
 def kernel_kind(p: Problem, schema: Any) -> str:
-    """The kernels of p's tile (the planner's kernel_kind): INT8 for s8 and s4, the registry's
-    F16 kind for f16."""
-    if p.int8:
-        return "int8"
-    if p.f16:
-        return schema.f16_kind()
-    return "f32" if p.f32 else "bf16"
+    """The family of p's route, whose kernels its tiles run (the planner's kernel_kind)."""
+    return schema.route(p).family
 
 
 def slab_tile_width(kind: str, nr: int, pack_nr: int) -> bool:
@@ -442,14 +438,18 @@ def rules_plan(p: Problem, uarch: Any, hp: Dict[str, Any], schema: Any) -> Plan:
         raise ValueError("the L3 domain is unknown: pass it (e.g. --uarch family_l3_cores=8)")
     # The tiles of a weight of N not a multiple of its blocks run on its padded width.
     m, n, k = p.m, p.plan_n, p.k
-    bf16, int8, int4 = p.bf16, p.int8, p.int4
+    # The float routes take the rules of BF16 with their own element size, but not the BF16
+    # tiles of several slabs.
+    route = schema.route(p)
+    int8 = route.cls != "rows"
+    int4 = route.family == "int4"
     esz, wei_esz = p.esz, p.wei_esz
     threads = min(p.threads, hp["threads_cap"]) if hp["threads_cap"] > 0 else p.threads
     on = rule_switches(hp)
     nbytes = p.row_byte_units if m <= hp["decode_m"] else 0
     q = Plan()
-    kind = kernel_kind(p, schema)
-    q.kind = "int4" if int4 else kind
+    kind = route.family
+    q.kind = kind
     f16_ph = q.kind == "f16_ph"
     q.nr = hp["nr"] if hp["nr"] > 0 else widest_tile(p, q.kind, hp)
     q.mb = max(1, min(m, hp["mb"] if hp["mb"] > 0 else hp["block_rows"]))
@@ -565,18 +565,10 @@ def rules_plan(p: Problem, uarch: Any, hp: Dict[str, Any], schema: Any) -> Plan:
                          and q.n_tiles <= 2 * domains and share_bytes <= l3_share)
     q.traversal = hp["traversal"]
     q.scratch_floats = scratch_floats(q, p)
-    # A per-group call runs the group kernel, with its own rows per call, an s4
-    # weight the INT4 group kernel, or the INT4 kernel of one group.
-    group_kernel = int8 and p.int8_scheme == "per_group"
-    int4_scheme = schema.int4_scheme(p.int4_one_group)
-
-    def int8_max_mr(nv: int) -> int:
-        if int4:
-            return schema.int4_max_mr(nv, int4_scheme)
-        return schema.int8_max_mr(nv, "per_group" if group_kernel else "per_channel")
-
-    q.int8_rows_nv1 = min(hp["int8_mr"], int8_max_mr(1))
-    q.int8_rows_nv2 = min(hp["int8_mr"], int8_max_mr(2))
+    # An INT8 call takes the rows per call of its route's kernels.
+    group_kernel = route.cls == "group"
+    q.int8_rows_nv1 = min(hp["int8_mr"], schema.route_max_mr(route, 1))
+    q.int8_rows_nv2 = min(hp["int8_mr"], schema.route_max_mr(route, 2))
     q.int8_cw_mask = cw_mask(hp["int8_cw"])
     q.int8_pass_budget = uarch.l2_bytes * hp["int8_l2_pct"] // 100
     # The later row calls of an s4 tile read each batch of its groups again: in a
@@ -606,7 +598,7 @@ def rules_plan(p: Problem, uarch: Any, hp: Dict[str, Any], schema: Any) -> Plan:
     # busiest worker at most min_gain_pct percent more work, replaces the plan; it may
     # take the blocks schedule.  The domains are those of the planned team.
     team_domains = ceil_div(q.threads, max(1, dt))
-    if (bf16 and on.bf16_narrow_n and hp["nr"] == 0 and m >= hp["bf16_narrow_n_min_m"]
+    if (route.family == "bf16" and on.bf16_narrow_n and hp["nr"] == 0 and m >= hp["bf16_narrow_n_min_m"]
             and q.nr == MAX_TILE_COLS and q.col_groups == 0 and q.unit_tiles == 0
             and q.n_tiles < 2 * team_domains):
         work = busiest_work(q, m, nbytes)
@@ -639,10 +631,13 @@ def _gain_bound_cycles(base: float, hp: Dict[str, Any]) -> float:
 
 
 def model_plan(p: Problem, uarch: Any, hp: Dict[str, Any], q: Plan, schema: Any) -> Plan:
-    """The cost model's plan for the rules' BF16 or F16 plan q (model_plan)."""
-    if (not p.bf16 and not p.f16) or q.nr < MAX_TILE_COLS or q.mr < 1 or q.n_tiles < q.threads:
+    """The cost model's plan for the rules' plan q of a priced route of the rows class
+    (model_plan)."""
+    route = schema.route(p)
+    if route.cls != "rows" or not route.priced or q.nr < MAX_TILE_COLS or q.mr < 1 or q.n_tiles < q.threads:
         return q
     m, k = p.m, p.k
+    wei_esz = schema.formats[p.dtype].elem_bits // 8
     short_rows = (hp["mr"] == 0 and hp["cm_short_rows"] < hp["tall_rows"] and q.mr > hp["cm_short_rows"]
                   and q.mb > hp["cm_short_rows"] and (q.m_blocks == 1 or cm.tall_pct(uarch, hp) > 0))
     g = q.threads // 2
@@ -652,23 +647,23 @@ def model_plan(p: Problem, uarch: Any, hp: Dict[str, Any], q: Plan, schema: Any)
     row_groups = (hp["col_groups"] < 0 and hp["schedule"] == "auto" and q.col_groups == 0
                   and q.unit_tiles == 0 and q.m_blocks == 1 and g >= 1 and q.threads % 2 == 0
                   and q.n_tiles % g == 0 and (split_rows or split_short) and cm.slice_skewed(q, hp)
-                  and q.nr * k * 2 * 100 <= uarch.l2_bytes * hp["cm_group_slab_pct"]
-                  and cm.groups_fit_l3(p, q, uarch, hp))
-    pass_k = (hp["cm_pass_kib"] * 1024 // (q.nr * 2)) & ~1
+                  and q.nr * k * wei_esz * 100 <= uarch.l2_bytes * hp["cm_group_slab_pct"]
+                  and cm.groups_fit_l3(p, q, uarch, hp, schema))
+    pass_k = (hp["cm_pass_kib"] * 1024 // (q.nr * wei_esz)) & ~1
     long_pass = (hp["kc"] == 0 and q.m_blocks == 1 and ceil_div(q.mb, q.mr) >= hp["cm_pass_calls"]
                  and pass_k >= 2 and pass_k > q.kc and pass_k < k)
     # Where one core streams slower than its share of the domain's link, the short
     # M blocks of a BF16 plan whose team fills each L3 domain it spans take only a K
     # above cm_block_k.
-    block_k_bound = (p.bf16 and cm.core_streams(uarch, hp)
+    block_k_bound = (route.family == "bf16" and cm.core_streams(uarch, hp)
                      and q.threads % cm.domain_threads(uarch, hp) == 0)
     short_blocks = (hp["mb"] == 0 and hp["kc"] == 0 and q.m_blocks == 1 and m > 2 * q.mr
                     and hp["tile_rows"] < q.mr
-                    and (m + q.nr) * k * 2 * 100 <= uarch.l2_bytes * hp["bf16_l2_pct"]
+                    and (m + q.nr) * k * wei_esz * 100 <= uarch.l2_bytes * hp["bf16_l2_pct"]
                     and (k > hp["cm_block_k"] or not block_k_bound))
     if not short_rows and not row_groups and not long_pass and not short_blocks:
         return q
-    base = cm.plan_cost(q, p, uarch, hp).cycles
+    base = cm.plan_cost(q, p, uarch, hp, schema).cycles
     if not base > 0:
         return q
     state = {"best": q, "bound": _gain_bound_cycles(base, hp)}
@@ -676,7 +671,7 @@ def model_plan(p: Problem, uarch: Any, hp: Dict[str, Any], q: Plan, schema: Any)
     def consider(c: Plan) -> bool:
         if validate_plan(c, p, schema) is not None:
             return False
-        cycles = cm.plan_cost(c, p, uarch, hp).cycles
+        cycles = cm.plan_cost(c, p, uarch, hp, schema).cycles
         if not cycles < state["bound"]:
             return False
         state["best"] = c
@@ -697,7 +692,7 @@ def model_plan(p: Problem, uarch: Any, hp: Dict[str, Any], q: Plan, schema: Any)
     best = state["best"]
     drift = long_pass and cm.core_streams(uarch, hp)
     if (drift or short_blocks) and (not took_groups or split_rows):
-        c = cm.plan_cost(best, p, uarch, hp)
+        c = cm.plan_cost(best, p, uarch, hp, schema)
         r = dict(hp)
         if best.unit_tiles > 0:
             r["schedule"] = "blocks"
@@ -719,8 +714,8 @@ def model_plan(p: Problem, uarch: Any, hp: Dict[str, Any], q: Plan, schema: Any)
 
 
 def int8_model_plan(p: Problem, uarch: Any, hp: Dict[str, Any], q: Plan, schema: Any) -> Plan:
-    """The cost model's plan for the rules' per-channel INT8 plan q (int8_model_plan)."""
-    if not cm.cost_int8(p) or q.nr < MAX_TILE_COLS or q.n_tiles < q.threads:
+    """The cost model's plan for the rules' INT8 plan q of the channel class (int8_model_plan)."""
+    if not cm.cost_int8(p, schema) or q.nr < MAX_TILE_COLS or q.n_tiles < q.threads:
         return q
     cw = int8_col_width(q, q.nr)
     rows = int8_call_rows(q, cw // 16)
@@ -732,12 +727,12 @@ def int8_model_plan(p: Problem, uarch: Any, hp: Dict[str, Any], q: Plan, schema:
                   and q.unit_tiles == 0 and g >= 1 and q.threads % 2 == 0 and q.n_tiles % g == 0
                   and row_groups_split(p.m, q.row_unit, hp) and cm.slice_skewed(q, hp)
                   and q.nr * k * 100 <= uarch.l2_bytes * hp["cm_group_slab_pct"]
-                  and cm.groups_fit_l3(p, q, uarch, hp))
+                  and cm.groups_fit_l3(p, q, uarch, hp, schema))
     if row_groups:
-        base = cm.plan_cost(q, p, uarch, hp).cycles
+        base = cm.plan_cost(q, p, uarch, hp, schema).cycles
         c = rules_plan(p, uarch, dict(hp, col_groups=g), schema)
         if (base > 0 and validate_plan(c, p, schema) is None
-                and cm.plan_cost(c, p, uarch, hp).cycles < _gain_bound_cycles(base, hp)):
+                and cm.plan_cost(c, p, uarch, hp, schema).cycles < _gain_bound_cycles(base, hp)):
             return c
     rows_short = min(hp["tile_rows"], MAX_CALL_ROWS)
     if (hp["cm_int8_l1_pct"] > 0 and q.col_groups == 0 and q.unit_tiles == 0 and hp["int8_kc"] == 0
@@ -752,19 +747,22 @@ def int8_model_plan(p: Problem, uarch: Any, hp: Dict[str, Any], q: Plan, schema:
 
 
 def int4_model_plan(p: Problem, uarch: Any, hp: Dict[str, Any], q: Plan, schema: Any) -> Plan:
-    """The cost model's plan for the rules' s4 plan q (int4_model_plan): M blocks of
-    ceil(M / b) rows, b 2 to 4, for a single row block whose slice does not divide its
-    column tiles over the threads.  The model's s4 tile is the INT4 group kernel's: the
-    plans of a weight of one group are weighed at its rows per call and keep their own."""
+    """The cost model's plan for the rules' plan q of the INT4 kernels (int4_model_plan): M
+    blocks of ceil(M / b) rows, b 2 to 4, for a single row block whose slice does not divide
+    its column tiles over the threads.  The model's tile is that of the format's per-group
+    route: the plans of a weight of one group are weighed at its rows per call and keep their
+    own."""
     if (hp["cm_int4_min_m"] <= 0 or p.m < hp["cm_int4_min_m"] or hp["mb"] != 0 or hp["col_groups"] >= 0
             or hp["schedule"] != "auto" or q.nr < MAX_TILE_COLS or q.m_blocks != 1 or q.col_groups != 0
             or q.unit_tiles != 0 or q.n_tiles < q.threads or q.n_tiles % q.threads == 0):
         return q
 
+    group = schema.route_of(p.dtype, "per_group")
+
     def cost(c: Plan) -> float:
-        c = replace(c, int8_rows_nv1=min(c.int8_rows_nv1, schema.int4_max_mr(1)),
-                    int8_rows_nv2=min(c.int8_rows_nv2, schema.int4_max_mr(2)))
-        return cm.plan_cost(c, p, uarch, hp).cycles
+        c = replace(c, int8_rows_nv1=min(c.int8_rows_nv1, schema.route_max_mr(group, 1)),
+                    int8_rows_nv2=min(c.int8_rows_nv2, schema.route_max_mr(group, 2)))
+        return cm.plan_cost(c, p, uarch, hp, schema).cycles
 
     base = cost(q)
     if not base > 0:
@@ -801,9 +799,10 @@ def heuristic_plan(p: Problem, uarch: Any, hp: Dict[str, Any], schema: Any) -> P
     q = rules_plan(p, uarch, hp, schema)
     if hp["cost_model"] == 0:
         return q
-    if p.int4:
+    route = schema.route(p)
+    if route.family == "int4":
         return int4_group_passes(p, uarch, hp, int4_model_plan(p, uarch, hp, q, schema))
-    if p.int8:
+    if route.cls != "rows":
         return int8_model_plan(p, uarch, hp, q, schema)
     return model_plan(p, uarch, hp, q, schema)
 
@@ -848,6 +847,7 @@ def validate_plan(q: Plan, p: Problem, schema: Any) -> Optional[str]:
     if q.row_unit < 1 or q.copy_block < 1 or q.copy_par_min < 0:
         return "row_unit, copy_block or copy_par_min out of range"
     if p.int8:
+        route = schema.route(p)
         if not q.int8_cw_mask & 1:
             return "int8_cw does not allow 16"
         for nv in (1, 2):
@@ -855,13 +855,11 @@ def validate_plan(q: Plan, p: Problem, schema: Any) -> Optional[str]:
             if width > q.nr or not q.int8_cw_mask & CW_BITS[width]:
                 continue
             r = q.rows(nv)
-            if p.int4:
-                served = p.int8_scheme == "per_group" and schema.covers(
-                    "int4", r, width, schema.int4_scheme(p.int4_one_group))
-            else:
-                served = schema.int8_serves(r, width, p.int8_scheme)
+            # A format of group scales only takes per-group calls.
+            served = ((not schema.formats[p.dtype].grouped or p.int8_scheme == "per_group")
+                      and schema.covers(route.family, r, width, route_scheme(route)))
             if not 1 <= r <= MAX_CALL_ROWS or not served:
-                if p.int4:
+                if route.family == "int4":
                     return ("no INT4 kernel for %d rows per call at width %d (the kernels of one group "
                             "over K, or the group kernels)" % (r, width))
                 return "no INT8 kernel of the call's scheme for %d rows per call at width %d" % (r, width)
@@ -898,16 +896,18 @@ def paired_plan(planned: Plan, p: Problem, width: int) -> Plan:
             q.mb = ceil_div(p.m, m_blocks)
             q.m_blocks = ceil_div(p.m, q.mb)
         q.scratch_floats = scratch_floats(q, p)
-    if p.bf16:
-        q.scratch_floats = max(q.scratch_floats, q.mb * q.nr)
+    q.scratch_floats = max(q.scratch_floats, q.mb * q.nr)
     return q
 
 
 def paired_width(q: Plan, p: Problem) -> int:
-    """native_paired_width: the width at which the BF16 and INT8 tiles of a gated call pair its
-    [gate | up] halves, from the plan's tiles, row blocks and team; 0 for another call, or for one
-    that stages its rows instead (N not whole 32-column blocks)."""
-    if p.epilogue != "gated" or p.f16 or p.f32 or q.nr <= 0 or q.nr % 16 or p.n % 32:
+    """native_paired_width: the width at which the tiles of a gated call pair its [gate | up] halves,
+    from the plan's tiles, row blocks and team; 0 for another call, or for one that stages its rows
+    instead (N not whole 32-column blocks, or halves not whole blocks of an M = 1 f32 or f16 call,
+    whose GEMV kernels read a block's second 16 columns right after its first)."""
+    if p.epilogue != "gated" or q.nr <= 0 or q.nr % 16 or p.n % 32:
+        return 0
+    if (p.f16 or p.f32) and gemv_kind(q, p) != "none" and p.n // 2 % 32:
         return 0
     if q.nr >= 64:
         return q.nr
@@ -1135,25 +1135,34 @@ LOG_LINE_FIELDS = ("M", "N", "K", "pack_nr", "nr", "mb", "kc", "kernels", "tiles
                    "unit_tiles", "nb", "domain_threads", "transA", "gemv", "mr", "row_unit", "traversal",
                    "int8_rows", "int8_cw", "int8_scheme", "direct", "wei", "gs", "order", "pass_budget", "int8_pass",
                    "dequant_bias", "copy_block", "source", "cfg", "team", "padded_n", "pairing")
-# The values of the line's gemv field: the GEMV kernels an M = 1 call runs on, by its
-# weight type, INT8 scheme and kernels, and none for a call on the tiles.
-GEMV_KINDS = ("none", "bf16", "f32", "f16", "f16_ph", "s8", "s8_group", "s4")
+
+
+def _gemv_kinds() -> Tuple[str, ...]:
+    """none, then the GEMV kernels' names of the routes, those of the float routes first, each
+    once (the schema dump's plan_line_gemv)."""
+    routes = [r for f in FORMATS.values() for r in f["routes"]]
+    names = ["none"]
+    for r in [r for r in routes if r["class"] == "rows"] + [r for r in routes if r["class"] != "rows"]:
+        if r["gemv"] not in names:
+            names.append(r["gemv"])
+    return tuple(names)
+
+
+# The values of the line's gemv field: the GEMV kernels an M = 1 call runs on, those of its
+# route, and none for a call on the tiles.
+GEMV_KINDS = _gemv_kinds()
 
 
 def gemv_kind(q: Plan, p: Problem) -> str:
     """The GEMV kernels the call runs on (gemv_kind_of): every M = 1 call runs on those of
-    its type, an f16 call on those of its plan's kernels; none for any other M.  A GEMV
-    kernel takes all of K for each block of columns: the plan's tiles, M blocks and K
-    passes do not apply to the call."""
+    its route, the route of its format on its plan's kernels that serves its INT8 scheme
+    (the group and the one-group routes of a format of group scales only run kernels of one
+    name); none for any other M.  A GEMV kernel takes all of K for each block of columns:
+    the plan's tiles, M blocks and K passes do not apply to the call."""
     if p.m != 1:
         return "none"
-    if p.dtype in ("bf16", "f32"):
-        return p.dtype
-    if p.f16:
-        return "f16_ph" if q.kind == "f16_ph" else "f16"
-    if p.int4:
-        return "s4"
-    return "s8_group" if p.int8_scheme == "per_group" else "s8"
+    routes = [r for r in FORMATS[p.dtype]["routes"] if r["family"] == q.kind]
+    return next((r for r in routes if p.int8_scheme in r["int8_schemes"]), routes[0])["gemv"]
 
 
 def plan_log_fields(q: Plan, p: Problem) -> Dict[str, str]:

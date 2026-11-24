@@ -21,15 +21,25 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
-# Weight types (native_problem_t::wei_dt), sources and destinations, as the match keys name them.
-DTYPES = ("bf16", "s8", "f32", "s4", "f16")
-SRC_TYPES = ("bf16", "f32", "u8", "s8", "f16")
-DST_TYPES = ("f32", "bf16", "f16", "u8", "s8", "s32")
-EPILOGUES = ("store", "bias", "postops", "gated")
+from .schema import fixture_tables
+
+
+def format_families(fmt: Dict[str, Any]) -> Tuple[str, ...]:
+    """The kernel families of the routes of a format of the dump, in route order."""
+    return tuple(r["family"] for r in fmt["routes"])
+
+
+# Weight types (native_problem_t::wei_dt), sources, destinations and epilogues, as the match
+# keys name them, the formats of the weight types and the families of their routes.
+_NAMES = fixture_tables()["match_keys"]
+DTYPES = tuple(_NAMES["dtype"])
+SRC_TYPES = tuple(_NAMES["src"])
+DST_TYPES = tuple(_NAMES["dst"])
+EPILOGUES = tuple(_NAMES["epilogue"])
+FORMATS = {f["name"]: f for f in fixture_tables()["formats"]}
+FAMILIES = {name: format_families(f) for name, f in FORMATS.items()}
 DST_BYTES = {"f32": 4, "bf16": 2, "f16": 2, "u8": 1, "s8": 1, "s32": 4}
 INT8_SCHEMES = ("per_channel", "per_group")
-# Bytes of one weight scale of an s4 problem: f32, or bf16 / f16.
-SCALE_BYTES = (2, 4)
 # Columns of one block of the native layout: a weight of N not a multiple of it is
 # held, planned and matched at N rounded up to whole pack_nr blocks.
 LAYOUT_PACK_NR = 32
@@ -88,7 +98,8 @@ class Problem:
             raise ValueError("weight type %r is not one of %s" % (self.dtype, ", ".join(DTYPES)))
         if min(self.m, self.n, self.k, self.threads, self.pack_nr) < 1:
             raise ValueError("M, N, K, threads and pack_nr must be positive: %r" % (self,))
-        own = self.dtype if self.dtype in ("f16", "f32") else "bf16"
+        fmt = FORMATS[self.dtype]
+        own = "bf16" if fmt["quantized"] else self.dtype
         if self.src is None:
             object.__setattr__(self, "src", own)
         if self.dst is None:
@@ -97,51 +108,61 @@ class Problem:
             raise ValueError("bad src / dst type in %r" % (self,))
         if self.epilogue not in EPILOGUES:
             raise ValueError("epilogue %r is not one of %s" % (self.epilogue, EPILOGUES))
+        # A format of group scales only takes per-group calls, another quantized format the
+        # schemes of its routes, a float format none (per_channel).
+        schemes = (("per_group",) if fmt["grouped"] else tuple(
+            s for r in fmt["routes"] for s in r["int8_schemes"])) if fmt["quantized"] else ("per_channel",)
         if self.int8_scheme is None:
-            object.__setattr__(self, "int8_scheme", "per_group" if self.dtype == "s4" else "per_channel")
-        if self.int8_scheme not in INT8_SCHEMES or (self.dtype != "s8" and self.int8_scheme != (
-                "per_group" if self.dtype == "s4" else "per_channel")):
+            object.__setattr__(self, "int8_scheme", schemes[0])
+        if self.int8_scheme not in INT8_SCHEMES or self.int8_scheme not in schemes:
             raise ValueError("INT8 scheme %r: an s8 weight takes one of %s, an s4 weight per_group" % (
                 self.int8_scheme, INT8_SCHEMES))
-        if self.dtype == "s4":
+        if fmt["grouped"] or (fmt["quantized"] and self.int8_scheme == "per_group"
+                              and (self.group or self.scale_bytes)):
             if self.scale_bytes == 0:
-                object.__setattr__(self, "scale_bytes", 2)
+                object.__setattr__(self, "scale_bytes", 2 if fmt["grouped"] else 4)
             if self.group < 1 or self.group > self.k or self.k % self.group:
-                raise ValueError("an s4 weight's group size %d does not divide K=%d" % (self.group, self.k))
-            if self.scale_bytes not in SCALE_BYTES:
-                raise ValueError("an s4 weight's scales take %s bytes, not %d" % (SCALE_BYTES, self.scale_bytes))
-        elif self.dtype == "s8" and self.int8_scheme == "per_group" and (self.group or self.scale_bytes):
-            if self.scale_bytes == 0:
-                object.__setattr__(self, "scale_bytes", 4)
-            if self.group < 1 or self.group > self.k or self.k % self.group:
-                raise ValueError("an s8 weight's group size %d does not divide K=%d" % (self.group, self.k))
-            if self.scale_bytes not in SCALE_BYTES:
-                raise ValueError("an s8 weight's scales take %s bytes, not %d" % (SCALE_BYTES, self.scale_bytes))
+                raise ValueError("an %s weight's group size %d does not divide K=%d" % (
+                    self.dtype, self.group, self.k))
+            if self.scale_bytes not in fmt["scale_bytes"]:
+                raise ValueError("an %s weight's scales take %s bytes, not %d" % (
+                    self.dtype, tuple(fmt["scale_bytes"]), self.scale_bytes))
         elif self.group or self.scale_bytes:
             raise ValueError("group and scale_bytes are for s4 and per-group s8 weights only: %r" % (self,))
         if self.dynamic is None:
             object.__setattr__(self, "dynamic", self.int8 and self.src in ("bf16", "f32"))
 
     @property
+    def families(self) -> Tuple[str, ...]:
+        """The kernel families of its format's routes, in route order."""
+        return FAMILIES[self.dtype]
+
+    @property
     def bf16(self) -> bool:
-        return self.dtype == "bf16"
+        """A weight of a format with a route on the BF16 kernels (the rule feature bf16)."""
+        return "bf16" in self.families
 
     @property
     def f32(self) -> bool:
-        return self.dtype == "f32"
+        """A weight of a format with a route on the FP32 kernels."""
+        return "f32" in self.families
 
     @property
     def f16(self) -> bool:
-        return self.dtype == "f16"
+        """A weight of a format with a route on the F16 kernels, whose source rows are widened
+        to f32; its plans may take the format's F16_PH route instead (Plan.kind)."""
+        return "f16" in self.families
 
     @property
     def int8(self) -> bool:
-        """An s8 or s4 weight: the INT8 tile and its plan fields."""
-        return self.dtype in ("s8", "s4")
+        """A weight of a quantized format (s8 or s4): the INT8 tile and its plan fields."""
+        return FORMATS[self.dtype]["quantized"]
 
     @property
     def int4(self) -> bool:
-        return self.dtype == "s4"
+        """A weight of a format of group scales only (s4): the INT4 kernels, and the group the
+        planner, the features and the match keys read."""
+        return FORMATS[self.dtype]["grouped"]
 
     @property
     def int4_one_group(self) -> bool:
@@ -160,18 +181,21 @@ class Problem:
 
     @property
     def esz(self) -> int:
-        """Bytes of a source element the kernels read (the planner's elem_bytes)."""
-        return 4 if self.f32 else (2 if self.bf16 or self.f16 else 1)
+        """Bytes of a source element the kernels read (the planner's elem_bytes): the format's
+        source bits."""
+        return FORMATS[self.dtype]["src_bits"] // 8
 
     @property
     def wei_esz(self) -> float:
-        """Bytes of a weight element: esz, half a byte for s4."""
-        return 0.5 if self.int4 else float(self.esz)
+        """Bytes of a weight element: the format's element bits (half a byte for s4)."""
+        return FORMATS[self.dtype]["elem_bits"] / 8.0
 
     @property
     def row_byte_units(self) -> int:
-        """Weight columns a source row weighs in the makespan's bytes: 2 over s4 weights."""
-        return 2 if self.int4 else 1
+        """Weight columns a source row weighs in the makespan's bytes: the format's source bits
+        over its element bits (2 over s4 weights)."""
+        f = FORMATS[self.dtype]
+        return f["src_bits"] // f["elem_bits"]
 
     def key(self) -> str:
         """Identity string; Problem.parse(p.key()) == p."""
@@ -325,7 +349,7 @@ def _shape_rows(path: str, dtypes: Optional[Iterable[str]], skip_names: Iterable
                 continue
             n, k = int(row["n"]), int(row["k"])
             gs = 0
-            if dtype == "s4":
+            if FORMATS[dtype]["grouped"]:
                 gs = int((row.get("group") or "").strip() or group)
                 gs = k if gs == -1 else gs
             lo = int(row.get("m_lo", "1") or 1)
@@ -393,7 +417,7 @@ def problems_from_shapes(shapes: Iterable[Shape], classes: List[MClass], threads
                 ms = [max(s.m_lo, min(c.reps[0], hi if hi is not None else c.reps[0]))]
             for m in ms:
                 extra = dict(attrs)
-                if s.dtype == "s4":
+                if FORMATS[s.dtype]["grouped"]:
                     extra["group"] = s.group
                 elif "scale_bytes" in extra:
                     del extra["scale_bytes"]
@@ -407,9 +431,10 @@ def problems_from_shapes(shapes: Iterable[Shape], classes: List[MClass], threads
 
 def rule_features(p: Problem, uarch: Any, hw: Any = None) -> Dict[str, float]:
     """The rule features of the tuning file's rules for p (problem_features: doubles, as the
-    loader evaluates them).  esz is the bytes of a weight element (0.5 for s4), a_bytes
-    counts the source in the bytes of the weight's tile (4 for f32, 2 for bf16 and f16, 1
-    for an s8 source), b_bytes and slab_l2 the weight at esz; group is the s4 group size.
+    loader evaluates them).  esz is the bytes of a weight element of p's format (0.5 for s4),
+    a_bytes counts the source at the bits the format's kernels read (4 for f32, 2 for bf16
+    and f16, 1 for an s8 source), b_bytes and slab_l2 the weight at esz; group is the group
+    size of a format of group scales only (s4).
 
     uarch gives l2 / l3; hw (schema.Hardware) gives l3_threads / smt / cores (0 when None).
     """
@@ -437,6 +462,7 @@ def rule_features(p: Problem, uarch: Any, hw: Any = None) -> Dict[str, float]:
         "cores": float(hw.physical_cores) if hw else 0.0,
         "a_l3": a_bytes / l3 if l3 else 0.0, "b_l3": b_bytes / l3 if l3 else 0.0,
         "slab_l2": float(p.pack_nr) * p.k * esz / l2 if l2 else 0.0,
-        # The library's feature is native_problem_t::wei_group_size, an s4 weight's only.
+        # The library's feature is native_problem_t::wei_group_size, of a weight of a format
+        # of group scales only.
         "group": float(p.group) if p.int4 else 0.0,
     }

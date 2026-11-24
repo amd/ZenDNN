@@ -286,13 +286,13 @@ TEST(NativeBrgemmF16Kernel, RegistryServesEveryRowCount) {
                 = r.caps(nat::native_kernel_kind_t::f16, nr);
         if (!nat::detect_uarch().avx512f) {
             EXPECT_EQ(c, nullptr);
-            EXPECT_EQ(r.f16_table(nr), nullptr);
+            EXPECT_EQ(r.table<nat::native_kernel_kind_t::f16>(nr), nullptr);
             continue;
         }
         ASSERT_NE(c, nullptr) << nr;
         EXPECT_EQ(c->max_mr, 12);
         for (int mr = 1; mr <= 12; ++mr)
-            EXPECT_EQ(r.f16_table(nr)[mr],
+            EXPECT_EQ(r.table<nat::native_kernel_kind_t::f16>(nr)[mr],
                     nat::select_native_f16_ukernel(mr, std::min(nr, 32) / 16))
                     << nr << " " << mr;
         EXPECT_TRUE(r.covers(nat::native_kernel_kind_t::f16, 12, nr));
@@ -300,7 +300,7 @@ TEST(NativeBrgemmF16Kernel, RegistryServesEveryRowCount) {
     }
     for (const int nr : {48, 96, 256}) {
         EXPECT_EQ(r.caps(nat::native_kernel_kind_t::f16, nr), nullptr) << nr;
-        EXPECT_EQ(r.f16_table(nr), nullptr) << nr;
+        EXPECT_EQ(r.table<nat::native_kernel_kind_t::f16>(nr), nullptr) << nr;
     }
 }
 
@@ -505,13 +505,14 @@ TEST(NativeBrgemmF16PhKernel, RegistryServesThemWhereTheCpuHasAvx512Fp16) {
                 = r.caps(nat::native_kernel_kind_t::f16_ph, nr);
         if (!want) {
             EXPECT_EQ(c, nullptr) << nr;
-            EXPECT_EQ(r.f16_ph_table(nr), nullptr) << nr;
+            EXPECT_EQ(r.table<nat::native_kernel_kind_t::f16_ph>(nr), nullptr)
+                    << nr;
             continue;
         }
         ASSERT_NE(c, nullptr) << nr;
         EXPECT_EQ(c->max_mr, 12);
         for (int mr = 1; mr <= 12; ++mr)
-            EXPECT_EQ(r.f16_ph_table(nr)[mr],
+            EXPECT_EQ(r.table<nat::native_kernel_kind_t::f16_ph>(nr)[mr],
                     nat::select_native_f16_ph_ukernel(
                             mr, std::min(nr, 64) / 16))
                     << nr << " " << mr;
@@ -521,7 +522,18 @@ TEST(NativeBrgemmF16PhKernel, RegistryServesThemWhereTheCpuHasAvx512Fp16) {
     EXPECT_EQ(r.f16_kind(),
             want ? nat::native_kernel_kind_t::f16_ph
                  : nat::native_kernel_kind_t::f16);
+    EXPECT_EQ(r.has(nat::native_kernel_kind_t::f16_ph), want);
     EXPECT_EQ(f16_ph_calls(), want);
+    // The planner's route of an f16 problem runs on the kernels f16_kind()
+    // names, so the tests that read f16_kind() predict the planner.
+    nat::native_problem_t p;
+    p.M = 8;
+    p.N = 64;
+    p.K = 64;
+    p.pack_nr = 32;
+    p.threads = 1;
+    p.src_dt = p.wei_dt = p.dst_dt = kF16;
+    EXPECT_EQ(nat::native_route(p.route()).family, r.f16_kind());
 }
 
 // ── Layout ───────────────────────────────────────────────────────────────

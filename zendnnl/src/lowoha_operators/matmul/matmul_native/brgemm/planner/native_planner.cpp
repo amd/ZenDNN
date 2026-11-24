@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <iterator>
 #include <limits>
 #include <new>
 #include <numeric>
@@ -85,20 +86,41 @@ size_t cache_slot(const native_problem_t &p) {
     return static_cast<size_t>(h) & (kNativePlanCacheSlots - 1);
 }
 
+/// Why validate_native_plan turns away a float plan, by its family
+/// (native_kernel_kind_t): no kernel for a row count, a K pass of other than
+/// whole K steps of the kernels, or of other than whole blocks of a family
+/// that accumulates blocks.  Not those of the INT8 tile.
+struct rows_reasons_t {
+    const char *no_kernel, *kc, *k_block;
+};
+constexpr rows_reasons_t kRowsReasons[] = {
+        {"no BF16 kernel for every row count 1 .. mr at nr",
+                "kc is below K and not an even number of at least 2", nullptr},
+        {nullptr, nullptr, nullptr},
+        {"no FP32 kernel for every row count 1 .. mr at nr", "kc is below 1",
+                nullptr},
+        {nullptr, nullptr, nullptr},
+        {"no F16 kernel for every row count 1 .. mr at nr", "kc is below 1",
+                nullptr},
+        {"no F16_PH kernel for every row count 1 .. mr at nr", "kc is below 1",
+                "kc is below K and not a whole number of F16_PH blocks"}};
+static_assert(std::size(kRowsReasons) == std::size(kNativeFamilies),
+        "a row of reasons per family");
+
 /// The source layers, lowest precedence first.
 constexpr native_plan_source_t kLayers[] = {native_plan_source_t::rules,
         native_plan_source_t::table, native_plan_source_t::override};
 constexpr int kLayerCount = 3;
 
 /// A tile of 64 or 128 columns of several slabs of kind's kernels
-/// (native_slab_cols): 32-column slabs, each inside one pack block (the
-/// kernel reads a slab with the block's stride), of whole blocks or of one
-/// block; F16_PH slabs of 64 columns, each two pack blocks of 32 as the
-/// F16_PH tile of 64.
+/// (native_slab_cols): slabs of kMaxTileCols columns, each inside one pack
+/// block (the kernel reads a slab with the block's stride), of whole blocks
+/// or of one block; wider slabs (F16_PH's 64 columns) each two pack blocks
+/// of kMaxTileCols, as the tile of one such slab.
 bool slab_tile_width(native_kernel_kind_t kind, int nr, int pack_nr) {
     const int slab = native_slab_cols(kind);
     if ((nr != 64 && nr != kNativeMaxTileCols) || nr <= slab) return false;
-    if (kind == native_kernel_kind_t::f16_ph) return pack_nr == kMaxTileCols;
+    if (slab > kMaxTileCols) return pack_nr == kMaxTileCols;
     return pack_nr > 0 && pack_nr % slab == 0
             && (nr % pack_nr == 0 || pack_nr % nr == 0);
 }
@@ -110,23 +132,30 @@ int call_rows(const heuristic_params_t &hp, bool int8, int nr) {
     return !int8 && nr >= 32 ? hp.tall_rows : hp.tile_rows;
 }
 
-/// The kernels of p's tile: BF16, FP32, F16 and F16_PH run one kernel per
-/// row call and K pass, INT8 its own tile.
+/// The family of p's route, whose kernels its tiles run.
 native_kernel_kind_t kernel_kind(const native_problem_t &p) {
-    if (p.int8()) return native_kernel_kind_t::int8;
-    if (p.f16()) return native_kernel_registry().f16_kind();
-    return p.f32() ? native_kernel_kind_t::f32 : native_kernel_kind_t::bf16;
+    return native_route(p.route()).family;
+}
+
+/// Rows per call of the INT8 kernels of route at nv vectors (1 or 2): the
+/// route table's rows of an INT8 route; a float route has no INT8 kernels,
+/// and its plan carries kMaxCallRows, unread.
+int route_max_mr(native_route_t route, int nv) {
+    const native_route_desc_t &r = native_route(route);
+    return r.cls == native_route_class_t::rows ? kMaxCallRows
+                                               : native_route_rows(r, nv);
 }
 
 /// The widest tile of p's plans without a pinned nr: kMaxTileCols columns,
-/// or on the F16_PH kernels from f16_wide_min_m rows, whose tile of two
-/// blocks shares each source broadcast, two blocks of kMaxTileCols where N
-/// is whole tiles of them.
+/// or on kernels of a slab of two blocks of kMaxTileCols (F16_PH's) from
+/// f16_wide_min_m rows, whose slab shares each source broadcast, the slab
+/// where N is whole slabs.
 int widest_tile(const native_problem_t &p, native_kernel_kind_t kind,
         const heuristic_params_t &hp) {
-    if (kind == native_kernel_kind_t::f16_ph && p.M >= hp.f16_wide_min_m
-            && p.pack_nr == kMaxTileCols && p.N % (2 * kMaxTileCols) == 0)
-        return 2 * kMaxTileCols;
+    const int slab = native_slab_cols(kind);
+    if (slab > kMaxTileCols && p.M >= hp.f16_wide_min_m
+            && p.pack_nr == kMaxTileCols && p.N % slab == 0)
+        return slab;
     return std::min(p.pack_nr, kMaxTileCols);
 }
 
@@ -460,6 +489,26 @@ int traffic_col_groups(const native_plan_t &q, int M, int N, int K, int elem,
 
 } // namespace
 
+native_route_t native_problem_t::route() const {
+    const native_format_desc_t &f = native_format(wei_dt);
+    if (f.quantized()) {
+        const bool one_group
+                = (native_type_bit(wei_dt) & kNativeGroupedTypes) != 0
+                && (wei_group_size == 0 || wei_group_size >= K);
+        return native_int8_route(f.id,
+                one_group ? native_int8_scheme_t::per_channel : int8_scheme);
+    }
+    const native_kernel_registry_t &kernels = native_kernel_registry();
+    native_route_t route = native_route_t::bf16;
+    bool first = true;
+    for (const native_route_desc_t &r : kNativeRoutes) {
+        if (r.format != f.id) continue;
+        if (first || kernels.has(r.family)) route = r.id;
+        first = false;
+    }
+    return route;
+}
+
 bool native_problem_t::operator==(const native_problem_t &o) const {
     return M == o.M && N == o.N && K == o.K && pack_nr == o.pack_nr
             && threads == o.threads && src_dt == o.src_dt && wei_dt == o.wei_dt
@@ -507,7 +556,7 @@ native_problem_t make_native_problem(const GemmDescriptor &desc,
     p.dst_dt = desc.dst_dt;
     p.trans_a = desc.transA;
     const bool int8
-            = desc.wei_dt == data_type_t::s8 || desc.wei_dt == data_type_t::s4;
+            = (native_type_bit(desc.wei_dt) & kNativeQuantizedTypes) != 0;
     p.dynamic_quant = int8 && params.dynamic_quant
             && (desc.src_dt == data_type_t::bf16
                     || desc.src_dt == data_type_t::f32);
@@ -515,10 +564,11 @@ native_problem_t make_native_problem(const GemmDescriptor &desc,
     const native_int8_decision_t int8_decision
             = int8 ? decision : native_int8_decision_t {};
     p.int8_scheme = int8_decision.scheme;
-    if (desc.wei_dt == data_type_t::s4 && int8_decision.groups > 0) {
+    if ((native_type_bit(desc.wei_dt) & kNativeGroupedTypes) != 0
+            && int8_decision.groups > 0) {
         p.wei_group_size = desc.K / int8_decision.groups;
-        p.wei_scale_bytes = static_cast<int>(
-                zendnnl::common::size_of(params.quant_params.wei_scale.dt));
+        p.wei_scale_bytes = static_cast<int>(native_scale_bytes(
+                native_scale_of(params.quant_params.wei_scale.dt)));
     }
 
     bool postops = desc.alpha != 1.0f || desc.beta != 0.0f
@@ -542,10 +592,11 @@ namespace {
 native_plan_t rules_plan(const native_problem_t &p, const UarchParams &uarch,
         const heuristic_params_t &hp) {
     const int M = p.M, N = p.N, K = p.K;
-    // FP32 takes the rules of BF16 with its own element size, but not the
-    // BF16 tiles of several slabs.
-    const bool bf16 = p.bf16();
-    const bool int8 = p.int8();
+    // The float routes take the rules of BF16 with their own element size,
+    // but not the BF16 tiles of several slabs.
+    const native_route_t route = p.route();
+    const native_route_desc_t &rd = native_route(route);
+    const bool int8 = rd.cls != native_route_class_t::rows;
     const int esz = elem_bytes(p);
     const double wei_esz = wei_elem_bytes(p);
     const int threads = hp.threads_cap > 0 ? std::min(p.threads, hp.threads_cap)
@@ -555,8 +606,9 @@ native_plan_t rules_plan(const native_problem_t &p, const UarchParams &uarch,
     // Every division below has a positive divisor for any input, so a pin
     // that cannot serve the problem reaches validate_native_plan.
     native_plan_t q;
-    q.kind = p.int4() ? native_kernel_kind_t::int4 : kernel_kind(p);
-    const bool f16_ph = q.kind == native_kernel_kind_t::f16_ph;
+    q.kind = rd.family;
+    q.route = route;
+    const int k_block = native_family(q.kind).k_block;
     q.nr = hp.nr > 0 ? hp.nr : widest_tile(p, q.kind, hp);
     q.mb = std::max(1, std::min(M, hp.mb > 0 ? hp.mb : hp.block_rows));
     auto count = [&q, M, N]() {
@@ -569,8 +621,7 @@ native_plan_t rules_plan(const native_problem_t &p, const UarchParams &uarch,
     // A pinned BF16 or FP32 mr stops at the narrowest width with its kernels.
     const auto narrower_has_mr = [&]() {
         return hp.mr == 0 || int8
-                || native_kernel_registry().covers(
-                        kernel_kind(p), hp.mr, q.nr / 2);
+                || native_kernel_registry().covers(q.kind, hp.mr, q.nr / 2);
     };
     if (hp.nr > 0)
         count();
@@ -635,12 +686,11 @@ native_plan_t rules_plan(const native_problem_t &p, const UarchParams &uarch,
             }
         }
     }
-    // The F16_PH kernels accumulate blocks of kNativeF16AccumBlockK steps
-    // from the start of each call's K: K passes of whole blocks keep every
+    // Kernels that accumulate blocks of k_block steps from the start of each
+    // call's K (F16_PH's) take K passes of whole blocks, which keep every
     // block at the same K whatever the plan.
-    if (f16_ph && q.kc < K)
-        q.kc = std::max(kNativeF16AccumBlockK,
-                q.kc / kNativeF16AccumBlockK * kNativeF16AccumBlockK);
+    if (k_block > 0 && q.kc < K)
+        q.kc = std::max(k_block, q.kc / k_block * k_block);
 
     // Unless every thread takes whole columns, the slices of the tile order
     // start at different row blocks.  When the source and the B slabs of one
@@ -741,21 +791,11 @@ native_plan_t rules_plan(const native_problem_t &p, const UarchParams &uarch,
     }
     q.traversal = hp.traversal;
     q.scratch_floats = native_plan_scratch_floats(q, p);
-    // A per-group call runs the group kernel, with its own rows per call,
-    // of an s4 weight the INT4 group kernel, or the INT4 kernel of one group.
-    const bool group_kernel
-            = int8 && p.int8_scheme == native_int8_scheme_t::per_group;
-    const bool int4 = p.int4();
-    const bool one_group = p.int4_one_group();
-    const auto int8_max_mr = [group_kernel, int4, one_group](int nv) {
-        if (int4)
-            return one_group ? native_int4_one_group_ukernel_max_mr(nv)
-                             : native_int4_group_ukernel_max_mr(nv);
-        return group_kernel ? native_int8_group_ukernel_max_mr(nv)
-                            : native_int8_ukernel_max_mr(nv);
-    };
-    q.int8_rows_nv1 = std::min(hp.int8_mr, int8_max_mr(1));
-    q.int8_rows_nv2 = std::min(hp.int8_mr, int8_max_mr(2));
+    // An INT8 call takes the rows per call of its route's kernels.
+    const bool group_kernel = rd.cls == native_route_class_t::group;
+    const bool int4 = rd.family == native_kernel_kind_t::int4;
+    q.int8_rows_nv1 = std::min(hp.int8_mr, route_max_mr(route, 1));
+    q.int8_rows_nv2 = std::min(hp.int8_mr, route_max_mr(route, 2));
     q.int8_cw_mask = hp.int8_cw_mask;
     q.int8_pass_budget
             = static_cast<int64_t>(uarch.l2_bytes) * hp.int8_l2_pct / 100;
@@ -805,8 +845,9 @@ native_plan_t rules_plan(const native_problem_t &p, const UarchParams &uarch,
     // weighed as the slice of its grid.  The domains are those of the
     // planned team.
     const int team_domains = ceil_div(q.threads, std::max(1, dt));
-    if (bf16 && on.bf16_narrow_n && hp.nr == 0 && M >= hp.bf16_narrow_n_min_m
-            && q.nr == kMaxTileCols && q.col_groups == 0 && q.unit_tiles == 0
+    if (rd.family == native_kernel_kind_t::bf16 && on.bf16_narrow_n
+            && hp.nr == 0 && M >= hp.bf16_narrow_n_min_m && q.nr == kMaxTileCols
+            && q.col_groups == 0 && q.unit_tiles == 0
             && q.n_tiles < 2 * team_domains) {
         const int64_t work = busiest_work(q, M, bytes);
         const int64_t most
@@ -864,9 +905,11 @@ bool row_groups_split(int M, int unit, const heuristic_params_t &hp) {
 /// the blocks rules.
 native_plan_t model_plan(const native_problem_t &p, const UarchParams &uarch,
         const heuristic_params_t &hp, const native_plan_t &q) {
-    if ((!p.bf16() && !p.f16()) || q.nr < kMaxTileCols || q.mr < 1
-            || q.n_tiles < q.threads)
+    const native_route_desc_t &rd = native_route(p.route());
+    if (rd.cls != native_route_class_t::rows || !rd.priced
+            || q.nr < kMaxTileCols || q.mr < 1 || q.n_tiles < q.threads)
         return q;
+    const int wei_esz = native_format(p.wei_dt).geometry.elem_bits / 8;
     // Shorter calls change only blocks taller than them, and past one row
     // block they gain only through the price of taller calls.  Two row
     // groups take whole row units each (units of cm_short_rows rows for
@@ -890,14 +933,14 @@ native_plan_t model_plan(const native_problem_t &p, const UarchParams &uarch,
             && q.unit_tiles == 0 && q.m_blocks == 1 && g >= 1
             && q.threads % 2 == 0 && q.n_tiles % g == 0
             && (split_rows || split_short) && native_plan_slice_skewed(q, hp)
-            && static_cast<int64_t>(q.nr) * p.K * 2 * 100
+            && static_cast<int64_t>(q.nr) * p.K * wei_esz * 100
                     <= static_cast<int64_t>(uarch.l2_bytes)
                             * hp.cm_group_slab_pct
             && native_plan_groups_fit_l3(p, q, uarch, hp);
     // A single row block of cm_pass_calls calls or more at the rules' rows
     // per call may take a K pass of cm_pass_kib KiB of slab.
     const int64_t pass_k = (static_cast<int64_t>(hp.cm_pass_kib) * 1024
-                                   / (static_cast<int64_t>(q.nr) * 2))
+                                   / (static_cast<int64_t>(q.nr) * wei_esz))
             & ~int64_t {1};
     const bool long_pass = hp.kc == 0 && q.m_blocks == 1
             && ceil_div(q.mb, q.mr) >= hp.cm_pass_calls && pass_k >= 2
@@ -907,11 +950,12 @@ native_plan_t model_plan(const native_problem_t &p, const UarchParams &uarch,
     // tile_rows rows; where one core streams slower than its share of the
     // domain's link, a BF16 plan whose team fills each L3 domain it spans
     // only over a K above cm_block_k.
-    const bool block_k_bound = p.bf16() && native_plan_core_streams(uarch, hp)
+    const bool block_k_bound = rd.family == native_kernel_kind_t::bf16
+            && native_plan_core_streams(uarch, hp)
             && q.threads % native_plan_domain_threads(uarch, hp) == 0;
     const bool short_blocks = hp.mb == 0 && hp.kc == 0 && q.m_blocks == 1
             && p.M > 2 * q.mr && hp.tile_rows < q.mr
-            && (static_cast<int64_t>(p.M) + q.nr) * p.K * 2 * 100
+            && (static_cast<int64_t>(p.M) + q.nr) * p.K * wei_esz * 100
                     <= static_cast<int64_t>(uarch.l2_bytes) * hp.bf16_l2_pct
             && (p.K > hp.cm_block_k || !block_k_bound);
     if (!short_rows && !row_groups && !long_pass && !short_blocks) return q;
@@ -1045,9 +1089,9 @@ constexpr int kInt4RowBlocks = 4;
 /// rows, are modeled more than cm_gain_pct percent faster; then the
 /// fastest, the fewer blocks on a tie.  The row blocks deal the tiles of
 /// the slice more evenly.  mb, col_groups and the schedule pin what they
-/// set.  The model's s4 tile describes the INT4 group kernel: the plans of
-/// a weight of one group are weighed at its rows per call, and keep their
-/// own.
+/// set.  The model's tile is that of the format's per-group route: the
+/// plans of a weight of one group are weighed at its rows per call, and keep
+/// their own.
 native_plan_t int4_model_plan(const native_problem_t &p,
         const UarchParams &uarch, const heuristic_params_t &hp,
         const native_plan_t &q) {
@@ -1057,11 +1101,11 @@ native_plan_t int4_model_plan(const native_problem_t &p,
             || q.unit_tiles != 0 || q.n_tiles < q.threads
             || q.n_tiles % q.threads == 0)
         return q;
+    const native_route_t group
+            = native_int8_route(p.format(), native_int8_scheme_t::per_group);
     const auto cost = [&](native_plan_t c) {
-        c.int8_rows_nv1 = std::min(
-                c.int8_rows_nv1, native_int4_group_ukernel_max_mr(1));
-        c.int8_rows_nv2 = std::min(
-                c.int8_rows_nv2, native_int4_group_ukernel_max_mr(2));
+        c.int8_rows_nv1 = std::min(c.int8_rows_nv1, route_max_mr(group, 1));
+        c.int8_rows_nv2 = std::min(c.int8_rows_nv2, route_max_mr(group, 2));
         return native_plan_cost(c, p, uarch, hp).cycles;
     };
     const double base = cost(q);
@@ -1113,22 +1157,25 @@ native_plan_t heuristic_plan(const native_problem_t &p,
         const UarchParams &uarch, const heuristic_params_t &hp) {
     const native_plan_t q = rules_plan(p, uarch, hp);
     if (hp.cost_model == 0) return q;
-    if (p.int4())
+    const native_route_desc_t &rd = native_route(p.route());
+    if (rd.family == native_kernel_kind_t::int4)
         return int4_group_passes(
                 p, uarch, hp, int4_model_plan(p, uarch, hp, q));
-    return p.int8() ? int8_model_plan(p, uarch, hp, q)
-                    : model_plan(p, uarch, hp, q);
+    return rd.cls != native_route_class_t::rows
+            ? int8_model_plan(p, uarch, hp, q)
+            : model_plan(p, uarch, hp, q);
 }
 
 const char *validate_native_plan(
         const native_plan_t &plan, const native_problem_t &p) {
     const native_plan_t &q = plan;
-    const bool bf16 = p.bf16();
     const bool narrow = (q.nr == 16 || q.nr == 32) && q.nr <= p.pack_nr
             && p.pack_nr % q.nr == 0;
-    const bool f16_ph_wide = q.kind == native_kernel_kind_t::f16_ph
-            && p.pack_nr == kMaxTileCols && q.nr == 2 * kMaxTileCols;
-    if (!narrow && !f16_ph_wide && !slab_tile_width(q.kind, q.nr, p.pack_nr))
+    // A slab of two blocks of kMaxTileCols (F16_PH's) is a tile of its own.
+    const int slab = native_slab_cols(q.kind);
+    const bool wide_slab
+            = slab > kMaxTileCols && p.pack_nr == kMaxTileCols && q.nr == slab;
+    if (!narrow && !wide_slab && !slab_tile_width(q.kind, q.nr, p.pack_nr))
         return "nr is not 16 or 32 dividing pack_nr, for F16_PH two blocks, "
                "or 64 or 128 of slabs of the kernels' widest call";
     if (q.mb < 1 || q.mb > p.M || q.m_blocks != ceil_div(p.M, q.mb)
@@ -1136,24 +1183,23 @@ const char *validate_native_plan(
         return "the tile grid does not match M, N, mb and nr";
     const native_kernel_registry_t &kernels = native_kernel_registry();
     if (q.mr < 1 || q.mr > kMaxCallRows) return "mr is outside 1 .. 12";
-    if (bf16 && !kernels.covers(native_kernel_kind_t::bf16, q.mr, q.nr))
-        return "no BF16 kernel for every row count 1 .. mr at nr";
-    if (bf16 && q.kc < p.K && (q.kc < 2 || q.kc % 2 != 0))
-        return "kc is below K and not an even number of at least 2";
-    if (p.f32() && !kernels.covers(native_kernel_kind_t::f32, q.mr, q.nr))
-        return "no FP32 kernel for every row count 1 .. mr at nr";
-    const bool f16_ph = q.kind == native_kernel_kind_t::f16_ph;
-    if (p.f16() && !f16_ph
-            && !kernels.covers(native_kernel_kind_t::f16, q.mr, q.nr))
-        return "no F16 kernel for every row count 1 .. mr at nr";
-    if (f16_ph
-            && (!p.f16()
-                    || !kernels.covers(
-                            native_kernel_kind_t::f16_ph, q.mr, q.nr)))
-        return "no F16_PH kernel for every row count 1 .. mr at nr";
-    if ((p.f32() || p.f16()) && q.kc < 1) return "kc is below 1";
-    if (f16_ph && q.kc < p.K && q.kc % kNativeF16AccumBlockK != 0)
-        return "kc is below K and not a whole number of F16_PH blocks";
+    // A float plan runs a family of its format's routes, with a kernel for
+    // every row count up to mr at nr, over K passes of whole K steps of its
+    // kernels and of whole blocks of a family that accumulates blocks.
+    if (!p.int8()) {
+        const native_kernel_kind_t kind
+                = native_family_takes(q.kind, p.format())
+                ? q.kind
+                : native_route(p.route()).family;
+        const native_family_desc_t &fam = native_family(kind);
+        const rows_reasons_t &why = kRowsReasons[static_cast<int>(kind)];
+        if (kind != q.kind || !kernels.covers(kind, q.mr, q.nr))
+            return why.no_kernel;
+        if (q.kc < p.K && (q.kc < fam.k_step || q.kc % fam.k_step != 0))
+            return why.kc;
+        if (fam.k_block > 0 && q.kc < p.K && q.kc % fam.k_block != 0)
+            return why.k_block;
+    }
     if (q.threads < 1 || q.threads > p.threads)
         return "threads is outside 1 .. the requested team";
     if (q.col_groups < 0
@@ -1168,6 +1214,7 @@ const char *validate_native_plan(
     if (q.row_unit < 1 || q.copy_block < 1 || q.copy_par_min < 0)
         return "row_unit, copy_block or copy_par_min is out of range";
     if (p.int8()) {
+        const native_route_desc_t &rd = native_route(p.route());
         if ((q.int8_cw_mask & kNativeInt8Cw16) == 0)
             return "int8_cw does not allow 16";
         for (const int nv : {1, 2}) {
@@ -1175,17 +1222,20 @@ const char *validate_native_plan(
             const uint8_t bit = nv == 2 ? kNativeInt8Cw32 : kNativeInt8Cw16;
             if (width > q.nr || (q.int8_cw_mask & bit) == 0) continue;
             const int rows = native_int8_call_rows(q, nv);
-            const bool served = p.int4()
-                    ? p.int8_scheme == native_int8_scheme_t::per_group
-                            && kernels.covers(native_kernel_kind_t::int4, rows,
-                                    width, native_int4_scheme(p))
-                    : kernels.covers_int8(rows, width, p.int8_scheme);
+            // A format of group scales only takes per-group calls.
+            const bool served
+                    = ((native_type_bit(p.wei_dt) & kNativeGroupedTypes) == 0
+                              || p.int8_scheme
+                                      == native_int8_scheme_t::per_group)
+                    && kernels.covers(
+                            rd.family, rows, width, native_route_scheme(rd));
             if (rows < 1 || rows > kMaxCallRows || !served)
-                return p.int4() ? "no INT4 kernel for the rows per call at an "
-                                  "allowed width (the kernels of one group "
-                                  "over K, or the group kernels)"
-                                : "no INT8 kernel of the call's scheme for the "
-                                  "rows per call at an allowed width";
+                return rd.family == native_kernel_kind_t::int4
+                        ? "no INT4 kernel for the rows per call at an "
+                          "allowed width (the kernels of one group "
+                          "over K, or the group kernels)"
+                        : "no INT8 kernel of the call's scheme for the "
+                          "rows per call at an allowed width";
         }
         if (q.int8_pass_quads < 0 || q.int8_pass_budget < 0)
             return "int8_pass_quads or int8_pass_budget is negative";

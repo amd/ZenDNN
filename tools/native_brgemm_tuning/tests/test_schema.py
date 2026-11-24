@@ -106,6 +106,18 @@ class TestFixture(unittest.TestCase):
         self.assertTrue(SCHEMA.key("int8_blocks_min_m").applies_to("s8"))
         self.assertFalse(SCHEMA.key("int8_blocks_min_m").applies_to("bf16"))
         self.assertFalse(DESIGN.key("min_pass_k").applies_to("s8"))
+        # The families a key applies to, which a key of a dump without them takes from its
+        # applies; a problem's families are those of its format's routes.
+        self.assertEqual(SCHEMA.key("kc").families, ("bf16", "f32", "f16", "f16_ph"))
+        self.assertEqual(SCHEMA.key("int4_l1_pct").families, ("int8", "int4"))
+        self.assertEqual(DESIGN.key("kc").families, SCHEMA.key("kc").families)
+        older = S.Schema(dict(SCHEMA.doc, keys=[{f: v for f, v in d.items() if f != "families"}
+                                                for d in SCHEMA.doc["keys"]]))
+        self.assertEqual([k.families for k in older.keys], [k.families for k in SCHEMA.keys])
+        self.assertTrue(SCHEMA.key("kc").applies_to("f16_ph") and SCHEMA.key("kc").applies_to("f16"))
+        self.assertFalse(SCHEMA.key("kc").applies_to("int4") or SCHEMA.key("kc").applies_to("s4"))
+        self.assertEqual((S.WEIGHT_DTYPES, S.INT8_DTYPES, S.FLOAT_DTYPES),
+                         (("bf16", "s8", "f32", "s4", "f16"), ("s8", "s4"), ("bf16", "f32", "f16")))
 
     def test_older_schema(self):
         self.assertEqual(S.schema_diff(DESIGN, SCHEMA),
@@ -156,26 +168,32 @@ class TestFixture(unittest.TestCase):
         self.assertTrue(SCHEMA.covers("int8", 6, 128, "per_group"))
         self.assertFalse(SCHEMA.covers("int8", 7, 128, "per_group"))
         self.assertIsNone(SCHEMA.caps("int8", 256))
-        self.assertEqual((SCHEMA.int8_max_mr(3), SCHEMA.int8_max_mr(4)), (0, 12))
-        self.assertEqual((SCHEMA.int8_max_mr(2), SCHEMA.int8_max_mr(2, "per_group")), (12, 6))
+        s8, s8_group = SCHEMA.route_of("s8"), SCHEMA.route_of("s8", "per_group")
+        self.assertEqual((SCHEMA.route_max_mr(s8, 3), SCHEMA.route_max_mr(s8, 4)), (0, 12))
+        self.assertEqual((SCHEMA.route_max_mr(s8, 2), SCHEMA.route_max_mr(s8_group, 2)), (12, 6))
+        # A float plan carries the rows of the per-channel INT8 kernels.
+        self.assertEqual(SCHEMA.route_max_mr(SCHEMA.route_of("bf16"), 2), 12)
         for kind in ("bf16", "int8", "int4", "f32", "f16", "f16_ph"):
             self.assertEqual(SCHEMA.nr_widths(kind), [16, 32, 64, 128], kind)
         self.assertEqual(S.kernel_kind("f32"), "f32")
         # s4 weights run the INT4 group kernels (rows 1 .. 12 at 16 columns, 1 .. 6 at 32), a weight of one
         # group over K the kernels of one group (1 .. 12 at both); f16 weights the F16_PH kernels where the
         # registry has them (also two blocks wide), else the F16 kernels.
-        self.assertEqual((S.kernel_kind("s4"), SCHEMA.int4_max_mr(1), SCHEMA.int4_max_mr(2)), ("int4", 12, 6))
-        self.assertEqual((SCHEMA.int4_max_mr(1, "per_channel"), SCHEMA.int4_max_mr(2, "per_channel")), (12, 12))
+        s4, s4_one = SCHEMA.route_of("s4", "per_group"), SCHEMA.route_of("s4", "per_group", one_group=True)
+        self.assertEqual((S.kernel_kind("s4"), SCHEMA.route_max_mr(s4, 1), SCHEMA.route_max_mr(s4, 2)), ("int4", 12, 6))
+        self.assertEqual((SCHEMA.route_max_mr(s4_one, 1), SCHEMA.route_max_mr(s4_one, 2)), (12, 12))
         self.assertEqual(SCHEMA.caps("int4", 128, "per_channel").max_mr, 12)
         self.assertEqual(SCHEMA.caps("int4", 32, "per_group").schemes, ("per_group",))
         self.assertEqual(SCHEMA.caps("int4", 32, "per_channel").schemes, ("per_channel",))
         self.assertTrue(SCHEMA.covers("int4", 12, 32, "per_channel"))
         self.assertFalse(SCHEMA.covers("int4", 7, 32, "per_group"))
-        self.assertEqual((SCHEMA.int4_scheme(True), SCHEMA.int4_scheme(False)), ("per_channel", "per_group"))
+        self.assertEqual((s4_one.schemes, s4.schemes), (("per_channel",), ("per_group",)))
+        self.assertEqual((s4_one.cls, s4.cls, SCHEMA.route_of("s8").cls), ("group", "group", "channel"))
         # A build without the kernels of one group runs every s4 weight on the group kernels.
         group_only = S.Schema(dict(SCHEMA.doc, kernels=[
             k for k in SCHEMA.doc["kernels"] if not (k["kind"] == "int4" and k["int8_schemes"] == ["per_channel"])]))
-        self.assertEqual((group_only.int4_scheme(True), group_only.int4_max_mr(2, "per_channel")), ("per_group", 0))
+        self.assertEqual((group_only.route_of("s4", "per_group", one_group=True).schemes,
+                          group_only.caps("int4", 32, "per_channel")), (("per_group",), None))
         # Without a scheme, caps and covers take what the library's caps(kind, nr) takes: the INT4
         # group kernels and the per-channel INT8 kernels, with or without the kernels of one group.
         for s in (SCHEMA, group_only):
@@ -183,25 +201,23 @@ class TestFixture(unittest.TestCase):
             self.assertEqual(s.caps("int4", 32).schemes, ("per_group",))
             self.assertEqual((s.covers("int4", 6, 32), s.covers("int4", 7, 32)), (True, False))
             self.assertEqual(s.caps("int8", 32), s.caps("int8", 32, "per_channel"))
-        # A family that lists no scheme serves every scheme, for int4_scheme as for caps.
+        # A family that lists no scheme serves every scheme, for the routes as for caps.
         unlisted = S.Schema(dict(SCHEMA.doc, kernels=[
             dict(k, int8_schemes=[]) if k["kind"] == "int4" else k for k in group_only.doc["kernels"]]))
-        self.assertEqual(unlisted.int4_scheme(True), "per_channel")
+        self.assertEqual(unlisted.route_of("s4", "per_group", one_group=True).schemes, ("per_channel",))
         self.assertEqual(unlisted.caps("int4", 32, "per_channel"), unlisted.caps("int4", 32))
         self.assertEqual(SCHEMA.nr_widths("f16"), [16, 32, 64, 128])
         kinds = {c.kind for c in SCHEMA.kernels}
-        self.assertEqual(SCHEMA.f16_kind(), "f16_ph" if "f16_ph" in kinds else "f16")
+        self.assertEqual(SCHEMA.kind_of("f16"), "f16_ph" if "f16_ph" in kinds else "f16")
         if "f16_ph" in kinds:
             self.assertEqual(SCHEMA.nr_widths("f16_ph"), [16, 32, 64, 128])
-        self.assertEqual(SCHEMA.kind_of("f16"), SCHEMA.f16_kind())
         self.assertEqual(set(kinds) - set(S.KERNEL_KINDS), set())
-        # covers_int8: the scheme's family at the width takes 1 .. max_mr rows.
-        self.assertTrue(SCHEMA.int8_serves(12, 32))
-        self.assertTrue(SCHEMA.int8_serves(6, 32, "per_group"))
-        self.assertFalse(SCHEMA.int8_serves(7, 32, "per_group"))
-        self.assertFalse(SCHEMA.int8_serves(0, 16))
-        self.assertTrue(SCHEMA.int8_serves(12, 64))
-        self.assertFalse(SCHEMA.int8_serves(1, 48))
+        # The INT8 kernels of a scheme at a width take 1 .. max_mr rows.
+        self.assertTrue(SCHEMA.covers("int8", 12, 32, "per_channel"))
+        self.assertTrue(SCHEMA.covers("int8", 6, 32, "per_group"))
+        self.assertFalse(SCHEMA.covers("int8", 0, 16, "per_channel"))
+        self.assertTrue(SCHEMA.covers("int8", 12, 64, "per_channel"))
+        self.assertFalse(SCHEMA.covers("int8", 1, 48, "per_channel"))
 
     def test_hardware_and_uarch(self):
         # The fixture's example machine: L3 domains of 8 cores and 32 MiB, AVX512-FP16.
@@ -341,10 +357,11 @@ class TestLoading(unittest.TestCase):
                       if not (k["nr"] == 32 and k["kind"] == "int8" and k["int8_schemes"] == ["per_group"])]
         s = S.Schema(dict(doc, kernels=no_group32))
         self.assertEqual(S.schema_diff(SCHEMA, s), ["kernel int8 nr 32 (per_group): (63, 6, 4) vs None"])
-        self.assertEqual(s.int8_max_mr(2, "per_group"), 0)
+        self.assertEqual(s.route_max_mr(s.route_of("s8", "per_group"), 2), 0)
         # A family that names no scheme serves every scheme.
-        older = [dict(k, int8_schemes=[]) for k in doc["kernels"] if "per_group" not in k["int8_schemes"]]
-        self.assertEqual(S.Schema(dict(doc, kernels=older)).int8_max_mr(2, "per_group"), 12)
+        older = S.Schema(dict(doc, kernels=[dict(k, int8_schemes=[]) for k in doc["kernels"]
+                                            if "per_group" not in k["int8_schemes"]]))
+        self.assertEqual(older.route_max_mr(older.route_of("s8", "per_group"), 2), 12)
 
     def test_l3_domain_of_the_plan(self):
         hw = dict(SCHEMA.doc["hw"], l3_domain_threads=64, smt=2)

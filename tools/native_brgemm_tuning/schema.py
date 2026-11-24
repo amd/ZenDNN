@@ -27,7 +27,9 @@ older build, without the rule keys, the blocks schedule and hw_match.  Field
 names are normalized, so small spelling differences of the dump (a key dict
 instead of a list, "bits_same" instead of "bits", a "registry" instead of
 "kernels") load the same; a dump without hw_match gets the fields its
-hardware and uarch give.
+hardware and uarch give.  The weight types, kernel kinds and their terms
+(WEIGHT_DTYPES, KERNEL_KINDS, INT8_DTYPES, the K units) are the fixture's
+formats, families and match-key names: this build's tables.
 """
 
 from __future__ import annotations
@@ -43,16 +45,36 @@ FIXTURE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "fixtures", "schema_dump.json"
 )
 
-WEIGHT_DTYPES = ("bf16", "s8", "f32", "s4", "f16")
 INT8_SCHEMES = ("per_channel", "per_group")
 # The INT8 scheme of a problem that names none: per-channel weight scales.
 INT8_SCHEME = "per_channel"
-# The planner's kernel kinds (native_kernel_kind_t): int4 is the kernels of an s4 weight
-# (the group kernels, and those of a weight of one group over K), f16 the kernels of an
-# f16 weight over a source widened to f32, f16_ph the kernels that multiply-add in f16.
-KERNEL_KINDS = ("bf16", "int8", "f32", "int4", "f16", "f16_ph")
-# Weight types whose tiles are INT8 tiles (the keys the schema says apply to int8).
-INT8_DTYPES = ("s8", "s4")
+
+
+def fixture_tables() -> Dict[str, Any]:
+    """The formats, families and match keys of fixtures/schema_dump.json."""
+    if not _FIXTURE_TABLES:
+        with open(FIXTURE, encoding="utf-8") as f:
+            fixture = json.load(f)
+        _FIXTURE_TABLES.update({k: fixture[k] for k in ("formats", "families", "match_keys")})
+    return _FIXTURE_TABLES
+
+
+_FIXTURE_TABLES: Dict[str, Any] = {}
+_FORMATS = {f["name"]: f for f in fixture_tables()["formats"]}
+# Weight types as the dtype match key names them, in its order.
+WEIGHT_DTYPES = tuple(fixture_tables()["match_keys"]["dtype"])
+# The planner's kernel kinds (native_kernel_kind_t), the families of the formats' routes:
+# int4 is the kernels of an s4 weight (the group kernels, and those of a weight of one group
+# over K), f16 the kernels of an f16 weight over a source widened to f32, f16_ph the kernels
+# that multiply-add in f16.
+KERNEL_KINDS = tuple(f["name"] for f in fixture_tables()["families"])
+# Weight types of the quantized formats, whose tiles are INT8 tiles (the keys the schema
+# says apply to int8), and the others.
+INT8_DTYPES = tuple(n for n, f in _FORMATS.items() if f["quantized"])
+FLOAT_DTYPES = tuple(n for n, f in _FORMATS.items() if not f["quantized"])
+# The kinds of the routes of each.
+INT8_KINDS = tuple(dict.fromkeys(r["family"] for n in INT8_DTYPES for r in _FORMATS[n]["routes"]))
+FLOAT_KINDS = tuple(dict.fromkeys(r["family"] for n in FLOAT_DTYPES for r in _FORMATS[n]["routes"]))
 ISA_ORDER = ("avx512f", "avx512bf16", "avx512vnni")
 # Version 2 hardware keys, in the order the loader checks them.
 HW_KEYS = ("vendor", "family", "model", "stepping", "isa", "l1d_kib", "l2_kib", "l3_kib", "l3_cores", "smt",
@@ -67,15 +89,19 @@ class SchemaError(ValueError):
 
 
 def kernel_kind(dtype: str) -> str:
-    """Kernel kind of a weight type (or a kind's own name): bf16, int8 (s8), int4 (s4), f32,
-    f16; an f16 problem runs the registry's F16 kind (Schema.f16_kind)."""
+    """Kernel kind of a weight type (or a kind's own name): the family of its format's first
+    route; an f16 problem runs the last the registry has kernels for (Schema.kind_of)."""
     if dtype in KERNEL_KINDS:
         return dtype
-    if dtype == "s8":
-        return "int8"
-    if dtype == "s4":
-        return "int4"
+    if dtype in _FORMATS:
+        return _FORMATS[dtype]["routes"][0]["family"]
     raise SchemaError("unknown weight type %r" % (dtype,))
+
+
+def kind_families(kinds: Any) -> Tuple[str, ...]:
+    """The kernel kinds of the key applicability "both", "bf16" or "int8": every kind, those of
+    the float formats' routes or those of the quantized formats' routes."""
+    return {"both": KERNEL_KINDS, "bf16": FLOAT_KINDS, "int8": INT8_KINDS}.get(kinds, ())
 
 
 def _norm_applies(v: Any) -> str:
@@ -85,9 +111,9 @@ def _norm_applies(v: Any) -> str:
     v = str(v).lower()
     if v in ("both", "all", "any"):
         return "both"
-    if v in ("s8", "int8", "s4", "int4"):
+    if v in INT8_DTYPES or v in INT8_KINDS:
         return "int8"
-    if v in ("bf16", "f16", "f32"):
+    if v in FLOAT_DTYPES:
         return "bf16"
     return "none"
 
@@ -126,6 +152,9 @@ class KeySpec:
             raise SchemaError("key %s: unknown type %r" % (self.name, self.type))
         self.order = order
         self.applies = _norm_applies(d.get("applies", d.get("dtype", "both")))
+        # The kernel kinds whose problems the key applies to; a dump without the field: those
+        # of applies.
+        self.families = tuple(str(f) for f in d.get("families", kind_families(self.applies)))
         self.bits = _norm_bits(d)
         self.kind = str(d.get("kind", "param"))
         self.values = list(d["values"]) if d.get("values") is not None else None
@@ -160,17 +189,16 @@ class KeySpec:
         return int(s) if re.fullmatch(r"[+-]?\d+", s) else None
 
     def applies_to(self, dtype: str) -> bool:
-        """The key changes the plan of a problem of weight type dtype: "int8" keys apply to
-        the INT8 tiles (s8, s4), "bf16" keys to the others (bf16, f16, f32)."""
-        if self.applies == "both":
-            return True
-        int8 = dtype in INT8_DTYPES or dtype in ("int8", "int4")
-        return self.applies == ("int8" if int8 else "bf16")
+        """The key changes the plan of a problem of weight type dtype (or of kernel kind
+        dtype): a family of the routes of dtype's format is one of the key's."""
+        kinds = (dtype,) if dtype in KERNEL_KINDS else tuple(
+            r["family"] for r in _FORMATS[dtype]["routes"]) if dtype in _FORMATS else ()
+        return any(k in self.families for k in kinds)
 
     def same_bits(self, dtype: str) -> bool:
         """True when changing the key keeps the output bits for dtype."""
         if isinstance(self.bits, dict):
-            kind = "int8" if dtype in INT8_DTYPES else ("bf16" if dtype in ("f16", "f32") else kernel_kind(dtype))
+            kind = "int8" if dtype in INT8_DTYPES else ("bf16" if dtype in FLOAT_DTYPES else kernel_kind(dtype))
             return self.bits.get(kind, self.bits.get(kernel_kind(dtype))) == "same"
         return self.bits == "same"
 
@@ -262,11 +290,11 @@ class KernelCaps:
     An INT8 or INT4 family serves the schemes it lists; one that lists none serves every
     scheme. A kind the tuner does not know (of a newer build) is kept with known False."""
 
-    K_UNITS = {"bf16": 2, "int8": 4, "int4": 8, "f32": 1, "f16": 1, "f16_ph": 1}
+    K_UNITS = {f["name"]: f["k_step"] for f in fixture_tables()["families"]}
 
     def __init__(self, d: Dict[str, Any]):
         kind = str(d.get("kind", "bf16"))
-        self.known = kind in KERNEL_KINDS or kind in ("s8", "s4")
+        self.known = kind in KERNEL_KINDS or kind in WEIGHT_DTYPES
         self.kind = kernel_kind(kind) if self.known else kind
         self.nr = int(d["nr"])
         self.schemes = tuple(str(s) for s in d.get("int8_schemes") or ())
@@ -292,9 +320,62 @@ class KernelCaps:
     @property
     def served(self) -> Tuple[str, ...]:
         """The INT8 schemes the family serves; none for the other kinds."""
-        if self.kind not in ("int8", "int4"):
+        if self.kind not in INT8_KINDS:
             return ()
         return tuple(s for s in INT8_SCHEMES if self.serves(s))
+
+
+class Family:
+    """A kernel family of the dump (native_family_desc_t): the K of one word of the layout,
+    its slab, the bits of a source element its kernels multiply and the columns of one
+    multiply-add vector."""
+
+    def __init__(self, d: Dict[str, Any]):
+        self.name = str(d["name"])
+        self.k_step = int(d["k_step"])
+        self.slab_cols = int(d["slab_cols"])
+        self.operand_bits = int(d["operand_bits"])
+        self.vector_cols = int(d["vector_cols"])
+
+
+class Route:
+    """A route of a format (native_route_desc_t): the family of its kernels, the INT8 schemes
+    they serve, how the planner plans it (rows, channel, group), whether the cost model
+    prices its plans and the name of its GEMV kernels in the plan line."""
+
+    def __init__(self, d: Dict[str, Any]):
+        self.family = str(d["family"])
+        self.schemes = tuple(str(s) for s in d.get("int8_schemes") or ())
+        self.cls = str(d["class"])
+        self.priced = bool(d["priced"])
+        self.gemv = str(d.get("gemv") or "")
+
+
+class Format:
+    """A weight format of the dump (native_format_desc_t): its element bits, the planes of a
+    word of the layout, whether it is quantized and has group scales only, the bytes of one
+    weight scale of each type its scales take, and its routes."""
+
+    def __init__(self, d: Dict[str, Any]):
+        self.name = str(d["name"])
+        self.elem_bits = int(d["elem_bits"])
+        self.planes = int(d["planes"])
+        self.quantized = bool(d["quantized"])
+        self.grouped = bool(d["grouped"])
+        self.scale_bytes = tuple(int(b) for b in d.get("scale_bytes") or ())
+        self.routes = [Route(r) for r in d["routes"]]
+
+
+def route_scheme(route: Route) -> str:
+    """native_route_scheme: the INT8 scheme route's kernels serve; per_channel for a float
+    route."""
+    return "per_group" if route.schemes == ("per_group",) else "per_channel"
+
+
+def _descriptions(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """The formats and families of doc; of fixtures/schema_dump.json for a dump of a build
+    that gave none, whose tables were the same."""
+    return doc if doc.get("formats") and doc.get("families") else fixture_tables()
 
 
 def _identity(v: Any) -> Optional[int]:
@@ -429,6 +510,9 @@ class Schema:
         self.features = [f["name"] if isinstance(f, dict) else str(f) for f in feats]
         kernels = doc.get("kernels") or doc.get("registry") or doc.get("kernel_caps") or []
         self.kernels = [KernelCaps(d) for d in kernels]
+        tables = _descriptions(doc)
+        self.formats = {f.name: f for f in map(Format, tables["formats"])}
+        self.families = {f.name: f for f in map(Family, tables["families"])}
         hw = doc.get("hw") or doc.get("hardware") or doc.get("native_hw")
         self.hw = Hardware(hw) if hw else None
         if doc.get("uarch"):
@@ -456,9 +540,10 @@ class Schema:
         the INT4 group kernels per_group).  Without a scheme, as the library's caps(kind, nr):
         the per-channel INT8 kernels, the INT4 group kernels."""
         if scheme is None:
-            scheme = "per_group" if kind == "int4" else INT8_SCHEME
+            first = next((r for f in self.formats.values() for r in f.routes if r.family == kind), None)
+            scheme = route_scheme(first) if first is not None else INT8_SCHEME
         for c in self.kernels:
-            if c.kind == kind and c.nr == nr and (kind not in ("int8", "int4") or c.serves(scheme)):
+            if c.kind == kind and c.nr == nr and (kind not in INT8_KINDS or c.serves(scheme)):
                 return c
         return None
 
@@ -468,43 +553,44 @@ class Schema:
         c = self.caps(kind, nr, scheme)
         return c is not None and 1 <= mr <= c.max_mr
 
-    def int8_serves(self, mr: int, nr: int, scheme: str = INT8_SCHEME) -> bool:
-        """native_kernel_registry_t::covers_int8: the family of scheme at width nr takes
-        mr rows per call (1 .. its max_mr)."""
-        c = self.caps("int8", nr, scheme)
-        return c is not None and 1 <= mr <= c.max_mr
-
     def nr_widths(self, kind: str) -> List[int]:
         return sorted({c.nr for c in self.kernels if c.kind == kind})
 
-    def int8_max_mr(self, nv: int, scheme: str = INT8_SCHEME) -> int:
-        """Rows of the widest INT8 kernel of scheme at nr 16 nv (native_int8_ukernel_max_mr
-        for per-channel calls, the group kernel's for per-group calls)."""
-        c = self.caps("int8", 16 * nv, scheme)
+    def route_of(self, dtype: str, scheme: str = INT8_SCHEME, one_group: bool = False) -> Route:
+        """native_problem_t::route of a weight of type dtype: of a quantized format its route
+        of the INT8 scheme, the kernels of one group over K for one group over K of a format
+        of group scales only (where the registry has them: a build without them runs the
+        group kernels for every weight of the format); of another format the last of its
+        routes the registry has kernels for."""
+        f = self.formats[dtype]
+        if f.quantized:
+            if one_group and f.grouped and any(
+                    c.kind == r.family and c.serves("per_channel")
+                    for r in f.routes if "per_channel" in r.schemes for c in self.kernels):
+                scheme = "per_channel"
+            return next(r for r in f.routes if scheme in r.schemes)
+        route = f.routes[0]
+        for r in f.routes[1:]:
+            if any(c.kind == r.family for c in self.kernels):
+                route = r
+        return route
+
+    def route(self, p: Any) -> Route:
+        """The route of problem p's tiles (a group of 0 is one group over K)."""
+        return self.route_of(p.dtype, p.int8_scheme, p.group == 0 or p.group >= p.k)
+
+    def route_max_mr(self, route: Route, nv: int) -> int:
+        """Rows per call of the INT8 kernels of route at nr 16 nv: its own for an INT8 route,
+        the per-channel kernels' (the channel class) for a float one, whose plan carries them
+        unread."""
+        if route.cls == "rows":
+            route = next(r for f in self.formats.values() for r in f.routes if r.cls == "channel")
+        c = self.caps(route.family, 16 * nv, route_scheme(route))
         return c.max_mr if c else 0
-
-    def int4_max_mr(self, nv: int, scheme: str = "per_group") -> int:
-        """Rows of the INT4 kernels of scheme at nr 16 nv: per_group those of the group
-        kernels (native_int4_group_ukernel_max_mr), per_channel those of the kernels of one
-        group over K (native_int4_one_group_ukernel_max_mr)."""
-        c = self.caps("int4", 16 * nv, scheme)
-        return c.max_mr if c else 0
-
-    def int4_scheme(self, one_group: bool) -> str:
-        """The scheme of the INT4 kernels an s4 weight takes: per_channel for a weight of one
-        group over K where the registry has the kernels of one group, else per_group (a
-        build without them runs the group kernels for every s4 weight)."""
-        if one_group and any(c.kind == "int4" and c.serves("per_channel") for c in self.kernels):
-            return "per_channel"
-        return "per_group"
-
-    def f16_kind(self) -> str:
-        """native_kernel_registry_t::f16_kind: f16_ph where the registry has those kernels."""
-        return "f16_ph" if any(c.kind == "f16_ph" for c in self.kernels) else "f16"
 
     def kind_of(self, dtype: str) -> str:
         """The kernels a problem of weight type dtype plans for."""
-        return self.f16_kind() if dtype == "f16" else kernel_kind(dtype)
+        return self.route_of(dtype).family
 
     def summary(self) -> str:
         lines = ["schema %s (%s)" % (self.source, self.origin or "dump")]

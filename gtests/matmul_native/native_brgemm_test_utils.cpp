@@ -191,6 +191,17 @@ zendnnl::lowoha::matmul::native::GemmDescriptor call_descriptor(
     return desc;
 }
 
+zendnnl::lowoha::matmul::native::native_route_t int8_route_of(
+        const zendnnl::lowoha::matmul::native::GemmDescriptor &desc,
+        const mm::matmul_params &params,
+        const zendnnl::lowoha::matmul::native::native_int8_decision_t
+                &decision) {
+    namespace nat = mm::native;
+    return nat::make_native_problem(
+            desc, params, nullptr, nat::kNativeLayoutPackNr, decision)
+            .route();
+}
+
 status_t run_matmul(const call_t &c) {
     mm::matmul_batch_params_t batch;
     mm::matmul_gated_act_params gated;
@@ -431,6 +442,69 @@ bool f16_ph_kernels_registered() {
     return mm::native::detect_uarch().avx512fp16
             && mm::native::select_native_f16_ph_ukernel(1, 2) != nullptr
             && accum != "f32";
+}
+
+uint32_t route_kernel_rows(mm::native::native_route_t route, int nr) {
+    namespace nat = mm::native;
+    using nat::native_int8_order_t;
+    const nat::native_route_desc_t &r = nat::native_route(route);
+    const int nv = nat::native_tile_slab_cols(r.family, nr) / 16;
+    uint32_t mask = 0;
+    for (int mr = 1; mr <= 12; ++mr) {
+        bool served = false;
+        switch (route) {
+            case nat::native_route_t::bf16:
+                served = nat::select_bf16_brgemm_tall_kernel(mr, 16 * nv)
+                        != nullptr;
+                break;
+            case nat::native_route_t::s8_channel:
+                served = nat::select_native_int8_ukernel(
+                                 r.format, mr, nv, false)
+                                != nullptr
+                        && nat::select_native_int8_ukernel(
+                                   r.format, mr, nv, true)
+                                != nullptr;
+                break;
+            case nat::native_route_t::s8_group:
+                served = nat::select_native_int8_group_ukernel(
+                                 r.format, mr, nv, false)
+                                != nullptr
+                        && nat::select_native_int8_group_ukernel(
+                                   r.format, mr, nv, true)
+                                != nullptr;
+                break;
+            case nat::native_route_t::s4_group:
+                served = nat::select_native_int4_group_ukernel(
+                                 r.format, mr, nv, native_int8_order_t::fused)
+                                != nullptr
+                        && nat::select_native_int4_group_ukernel(r.format, mr,
+                                   nv, native_int8_order_t::fused, true)
+                                != nullptr
+                        && nat::select_native_int4_group_ukernel(r.format, mr,
+                                   nv, native_int8_order_t::reference)
+                                != nullptr;
+                break;
+            case nat::native_route_t::s4_one_group:
+                served = nat::select_native_int4_one_group_ukernel(
+                                 r.format, mr, nv, native_int8_order_t::fused)
+                                != nullptr
+                        && nat::select_native_int4_one_group_ukernel(r.format,
+                                   mr, nv, native_int8_order_t::reference)
+                                != nullptr;
+                break;
+            case nat::native_route_t::f32:
+                served = nat::select_native_fp32_ukernel(mr, nv) != nullptr;
+                break;
+            case nat::native_route_t::f16:
+                served = nat::select_native_f16_ukernel(mr, nv) != nullptr;
+                break;
+            case nat::native_route_t::f16_ph:
+                served = nat::select_native_f16_ph_ukernel(mr, nv) != nullptr;
+                break;
+        }
+        if (served) mask |= 1u << (mr - 1);
+    }
+    return mask;
 }
 
 ck_engagement_t::ck_engagement_t() {

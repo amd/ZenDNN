@@ -107,7 +107,7 @@ void finish_call_after_groups(const native_int8_call_t &call,
         int cols, float *scale_buf, float *C, int ldc) {
     if (second_apart(w, cw / 16, p0, p1)) {
         const float *scale = column_values_apart(call.wei_scale,
-                call.wei_scale_dt, call.wei_scale_stride, p0, p1, scale_buf);
+                call.wei_scale_type, call.wei_scale_stride, p0, p1, scale_buf);
         finish_after_groups<Tail, RowScale>(
                 call, m0, mr, p0, 16, 16, scale, C, ldc);
         finish_after_groups<Tail, RowScale>(
@@ -115,9 +115,9 @@ void finish_call_after_groups(const native_int8_call_t &call,
         return;
     }
     const float *scale = Tail && cols < cw
-            ? column_values_below(call.wei_scale, call.wei_scale_dt,
+            ? column_values_below(call.wei_scale, call.wei_scale_type,
                       call.wei_scale_stride, p0, cw, cols, scale_buf)
-            : column_values(call.wei_scale, call.wei_scale_dt,
+            : column_values(call.wei_scale, call.wei_scale_type,
                       call.wei_scale_stride, p0, cw, scale_buf);
     finish_after_groups<Tail, RowScale>(
             call, m0, mr, p0, cw, cols, scale, C, ldc);
@@ -133,10 +133,9 @@ void gather_group_wei_scales_below(const native_int8_call_t &call,
         const size_t row = static_cast<size_t>(g0 + i) * w.N;
         float *out = buf + static_cast<size_t>(i) * cw;
         for (int j = 0; j < cw; ++j)
-            out[j] = j < cols
-                    ? zendnnl::memory::read_and_cast<float>(
-                              call.wei_scale, call.wei_scale_dt, row + p0 + j)
-                    : 0.0f;
+            out[j] = j < cols ? native_scale_value(call.wei_scale,
+                                        call.wei_scale_type, row + p0 + j)
+                              : 0.0f;
     }
 }
 
@@ -180,7 +179,8 @@ void compute_group_tile(const native_plan_t &plan,
         const int8_t *b0;
         const char *scale0;
     } turn[kMaxTileCalls];
-    const size_t scale_bytes = size_of(call.wei_scale_dt);
+    const size_t scale_bytes = native_scale_bytes(call.wei_scale_type);
+    const native_format_t format = native_route(call.route).format;
 
     native_int8_group_ukernel_args_t args;
     args.lda = call.lda;
@@ -230,7 +230,7 @@ void compute_group_tile(const native_plan_t &plan,
         const int span = !gather_part
                 ? native_int8_group_span(plan, call.groups, call.group_quads,
                           native_int8_turn_width(plan, nr, cw, Tail), mr,
-                          max_mr)
+                          max_mr, native_quad_bytes(native_kernel_kind_t::int8))
                 : kScaleGroups;
         for (int g0 = 0; g0 < call.groups; g0 += span) {
             args.batch = std::min(span, call.groups - g0);
@@ -240,16 +240,16 @@ void compute_group_tile(const native_plan_t &plan,
             if (unit_scales) {
                 args.wei_scale = kUnitScales.v;
                 args.wei_scale_step = 0;
-                args.wei_scale_dt = data_type_t::f32;
+                args.wei_scale_type = native_scale_t::f32;
             } else if (gather_part) {
                 gather_group_wei_scales_below(
                         call, w, g0, args.batch, p0, cw, cols, scale_buf);
                 args.wei_scale = scale_buf;
                 args.wei_scale_step = cw;
-                args.wei_scale_dt = data_type_t::f32;
+                args.wei_scale_type = native_scale_t::f32;
             } else {
                 args.wei_scale_step = w.N;
-                args.wei_scale_dt = call.wei_scale_dt;
+                args.wei_scale_type = call.wei_scale_type;
             }
             // As few calls as max_mr allows, their rows within one of each
             // other.
@@ -278,7 +278,7 @@ void compute_group_tile(const native_plan_t &plan,
                                     + (row * out->ldc + n0 + cj) * out_esz
                             : nullptr;
                     select_native_int8_group_ukernel(
-                            rows, nv, src_u8, call.wide_zp)(args);
+                            format, rows, nv, src_u8, call.wide_zp)(args);
                 }
                 i += rows;
             }
@@ -301,7 +301,7 @@ void finish_int8_tile_after_groups(const native_plan_t &plan,
         const int cw = native_int8_col_width(plan, nr - c);
         const int p0 = w.tile_col(n0, nr, c);
         const int p1 = second_col(w, n0, nr, c, cw / 16, p0);
-        if (w.wei_dt == data_type_t::s4)
+        if (native_on_family<native_kernel_kind_t::int4>(call.route))
             finish_call_after_groups<false, true>(
                     call, w, m0, mr, p0, p1, cw, cw, scale_buf, C + c, ldc);
         else
@@ -358,7 +358,8 @@ void compute_int4_group_tile(const native_plan_t &plan,
         const char *scale0;
         int64_t reach;
     } turn[kMaxTileCalls];
-    const size_t scale_bytes = size_of(call.wei_scale_dt);
+    const size_t scale_bytes = native_scale_bytes(call.wei_scale_type);
+    const native_format_t format = native_route(call.route).format;
 
     native_int4_group_ukernel_args_t args;
     args.lda = call.lda;
@@ -409,11 +410,10 @@ void compute_int4_group_tile(const native_plan_t &plan,
         const bool part = Tail && cols < cw;
         assert(!(part && second_apart(w, nv, p0, turn[0].p1)));
         const bool gather_part = part && !unit_scales;
-        // A K quad of a column of an s4 weight is 2 bytes.
         const int span = !gather_part
                 ? native_int8_group_span(plan, call.groups, call.group_quads,
                           native_int8_turn_width(plan, nr, cw, Tail), mr,
-                          max_mr, 2)
+                          max_mr, native_quad_bytes(native_kernel_kind_t::int4))
                 : kScaleGroups;
         const int pass = one_group
                 ? native_int4_pass_quads(plan, call.group_quads,
@@ -428,16 +428,16 @@ void compute_int4_group_tile(const native_plan_t &plan,
             if (unit_scales) {
                 args.wei_scale = kUnitScales.v;
                 args.wei_scale_step = 0;
-                args.wei_scale_dt = data_type_t::f32;
+                args.wei_scale_type = native_scale_t::f32;
             } else if (gather_part) {
                 gather_group_wei_scales_below(
                         call, w, g0, args.batch, p0, cw, cols, scale_buf);
                 args.wei_scale = scale_buf;
                 args.wei_scale_step = cw;
-                args.wei_scale_dt = data_type_t::f32;
+                args.wei_scale_type = native_scale_t::f32;
             } else {
                 args.wei_scale_step = w.N;
-                args.wei_scale_dt = call.wei_scale_dt;
+                args.wei_scale_type = call.wei_scale_type;
             }
             for (int k0 = 0; k0 < call.group_quads; k0 += pass) {
                 const bool whole = k0 + pass >= call.group_quads;
@@ -490,9 +490,10 @@ void compute_int4_group_tile(const native_plan_t &plan,
                                         + (row * out->ldc + n0 + cj) * out_esz
                                 : nullptr;
                         (one_group ? select_native_int4_one_group_ukernel(
-                                             rows, nv, call.order)
-                                   : select_native_int4_group_ukernel(rows, nv,
-                                             call.order, src_groups))(args);
+                                             format, rows, nv, call.order)
+                                   : select_native_int4_group_ukernel(format,
+                                             rows, nv, call.order, src_groups))(
+                                args);
                     }
                     i += rows;
                 }

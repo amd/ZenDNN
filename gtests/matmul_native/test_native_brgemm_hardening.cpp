@@ -1317,6 +1317,117 @@ TEST(NativeBrgemmHardeningBf16Kernel, KAndSourceRowsWithinTheKernelsInt) {
     }
     EXPECT_EQ(bad, 0);
 }
+
+/// Bytes below the dst of far_dst_rows_off, which no call may touch.
+constexpr size_t kFarDstGuard = size_t {16} << 30;
+
+/// Bytes of the mapping of far_dst_rows_off at ldc.
+size_t far_dst_bytes(int M, int N, int ldc) {
+    return kFarDstGuard
+            + (static_cast<size_t>(M - 1) * ldc + N) * sizeof(float);
+}
+
+/// far_dst_rows_off's calls under the plan of kc K values a pass: the
+/// failures, each described on stderr.
+int far_dst_rows_off(int kc) {
+    const nt::algo_pin_t pin(matmul_algo_t::native_brgemm);
+    const int M = 12, N = 32, K = 64;
+    std::vector<uint16_t> a(static_cast<size_t>(M) * K);
+    std::vector<uint16_t> b(static_cast<size_t>(K) * N);
+    std::vector<float> want(static_cast<size_t>(M) * N, 0.0f);
+    for (int m = 0; m < M; ++m)
+        for (int k = 0; k < K; ++k)
+            a[m * K + k] = bf16_of(static_cast<float>((m + k) % 4 - 1));
+    for (int k = 0; k < K; ++k)
+        for (int n = 0; n < N; ++n)
+            b[k * N + n] = bf16_of(static_cast<float>((3 * k + n) % 5 - 2));
+    for (int m = 0; m < M; ++m)
+        for (int n = 0; n < N; ++n)
+            for (int k = 0; k < K; ++k)
+                want[m * N + n] += static_cast<float>((m + k) % 4 - 1)
+                        * static_cast<float>((3 * k + n) % 5 - 2);
+    const size_t page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+    const std::string plan = " nr=32 mb=12 kc=" + std::to_string(kc) + " ";
+    int bad = 0;
+    for (const int ldc : {195225786, 195225787, 200000000}) {
+        const size_t bytes = far_dst_bytes(M, N, ldc);
+        void *const map = mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        if (map == MAP_FAILED) {
+            std::fprintf(stderr, "ldc %d: no address space\n", ldc);
+            ++bad;
+            continue;
+        }
+        // Pages of 4 KiB only: a huge page of the first row would reach
+        // below the dst.
+        madvise(map, bytes, MADV_NOHUGEPAGE);
+        float *const dst = reinterpret_cast<float *>(
+                static_cast<uint8_t *>(map) + kFarDstGuard);
+        nt::call_t c;
+        c.M = M;
+        c.N = N;
+        c.K = K;
+        c.ldc = ldc;
+        c.src = a.data();
+        c.wei = b.data();
+        c.dst = dst;
+        c.params.dtypes.src = c.params.dtypes.wei = kBf16;
+        c.params.dtypes.dst = data_type_t::f32;
+        c.params.num_threads = 1;
+        ::testing::internal::CaptureStdout();
+        const status_t st = nt::run_matmul(c);
+        const std::string log = ::testing::internal::GetCapturedStdout();
+        int off = 0;
+        for (int m = 0; m < M; ++m)
+            for (int n = 0; n < N; ++n)
+                off += dst[static_cast<size_t>(m) * ldc + n] != want[m * N + n];
+        std::vector<unsigned char> resident(kFarDstGuard / page);
+        int touched = 0;
+        if (mincore(map, kFarDstGuard, resident.data()) != 0)
+            touched = -1;
+        else
+            for (const unsigned char r : resident)
+                touched += r & 1;
+        const bool rows12 = log.find(plan) != std::string::npos
+                && log.find(" mr=12 ") != std::string::npos;
+        if (st != status_t::success || off != 0 || touched != 0 || !rows12) {
+            std::fprintf(stderr,
+                    "ldc %d kc %d: status %d, %d of %d outputs off, %d pages "
+                    "below the dst touched, plan of 12 rows a call %s: %s\n",
+                    ldc, kc, static_cast<int>(st), off, M * N, touched,
+                    rows12 ? "ran" : "did not run", log.c_str());
+            ++bad;
+        }
+        munmap(map, bytes);
+    }
+    return bad;
+}
+
+// The bf16 kernels offset the rows of their calls in an int too, as m *
+// ldc: a bf16 call whose epilogue is left with only the store to an f32
+// dst accumulates into it while row 11 of a call of 12 rows lies within the
+// int range of row 0 (ldc 195225786), and past that (195225787, 200000000)
+// on the tiles' scratch, in one K pass and in two.  Over a sparse dst with
+// 16 GiB below it, every row holds its exact sums and no page below the dst
+// is touched.
+TEST(NativeBrgemmHardeningBf16Kernel, DstRowsPastTheKernelsIntTakeTheScratch) {
+    if (!nat::detect_uarch().avx512bf16 || !nat::native_base_isa())
+        GTEST_SKIP() << "needs AVX512-BF16 and AVX-512 F / BW / VL / DQ";
+    const size_t bytes = far_dst_bytes(12, 32, 200000000);
+    void *const probe = mmap(nullptr, bytes, PROT_NONE,
+            MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (probe == MAP_FAILED) GTEST_SKIP() << "no address space for the dst";
+    munmap(probe, bytes);
+    for (const int kc : {64, 32})
+        nt::expect_in_child(
+                {{"ZENDNNL_API_LOG_LEVEL", "4"},
+                        {"ZENDNNL_MATMUL_NATIVE_CONFIG",
+                                kc == 64 ? "nr=32,mr=12,kc=64"
+                                         : "nr=32,mr=12,kc=32"},
+                        {"ZENDNNL_MATMUL_NATIVE_TUNING_FILE", nullptr}},
+                [kc] { return far_dst_rows_off(kc); },
+                "bf16 store-only calls into dst rows far apart");
+}
 #endif
 
 // ── Instruction sets ─────────────────────────────────────────────────────

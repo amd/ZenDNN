@@ -38,6 +38,7 @@ set(matmul_native_common_headers
   native_hw.hpp
   native_weight_ends.hpp
   native_int8_scheme.hpp
+  native_types.hpp
   cost_model.hpp
   kernel_cache.hpp
   avx512_math.hpp

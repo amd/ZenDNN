@@ -86,7 +86,7 @@ class TestPrices(unittest.TestCase):
             p = bf16(32, 4096, 4096, threads)
             q = plan(u, p, "cost_model=0,col_groups=%d" % g)
             self.assertEqual(q.col_groups, g)
-            return CM.plan_cost(q, p, u, hp)
+            return CM.plan_cost(q, p, u, hp, SCHEMA)
 
         mem32, mem8 = CM.mem_cycles(DOMAINS32, hp), CM.mem_cycles(DOMAINS8, hp)
         rereads = 8 * 256.0 * hp["cm_l3_cycles"]
@@ -101,7 +101,8 @@ class TestPrices(unittest.TestCase):
     def test_other_plans_are_not_priced(self):
         hp = params()
         for p in (Problem("f32", 32, 4096, 4096), Problem("s8", 32, 4096, 4096, int8_scheme="per_group")):
-            self.assertEqual(CM.plan_cost(PL.rules_plan(p, DOMAINS8, hp, SCHEMA), p, DOMAINS8, hp), CM.PlanCost())
+            q = PL.rules_plan(p, DOMAINS8, hp, SCHEMA)
+            self.assertEqual(CM.plan_cost(q, p, DOMAINS8, hp, SCHEMA), CM.PlanCost())
 
 
 class TestBf16Choices(unittest.TestCase):
@@ -184,7 +185,8 @@ class TestInt4Choices(unittest.TestCase):
                 self.assertEqual(r.m_blocks, 1)
                 q = plan(u, p)
                 self.assertEqual((q.mb, q.nr, q.threads, q.col_groups), (mb, r.nr, r.threads, 0), (n, u.l3_bytes))
-                self.assertLess(CM.plan_cost(q, p, u, params()).cycles, 0.95 * CM.plan_cost(r, p, u, params()).cycles)
+                self.assertLess(CM.plan_cost(q, p, u, params(), SCHEMA).cycles,
+                                0.95 * CM.plan_cost(r, p, u, params(), SCHEMA).cycles)
                 for pin in ("mb=128", "col_groups=0", "schedule=slice", "cm_int4_min_m=0", "cm_int4_min_m=129",
                             "cm_gain_pct=100"):
                     self.assertEqual(plan(u, p, pin), plan(u, p, pin + ",cost_model=0"), pin)
@@ -300,12 +302,16 @@ class TestGatedLines(unittest.TestCase):
 
     def test_log_pairing(self):
         # The line's pairing=: the width the tiles pair the halves at, or staged where they stage its
-        # rows (N not whole 32-column blocks, and f16 and f32 calls); none for a call that is not gated.
-        for dtype, n, want in (("bf16", 4096, "64"), ("s8", 24576, "64"), ("bf16", 4128, "32"),
-                               ("bf16", 4112, "staged"), ("f32", 4096, "staged")):
-            p = Problem(dtype, 8, n, 4096, epilogue="gated")
+        # rows (N not whole 32-column blocks, and an M = 1 f16 or f32 call of halves not whole blocks,
+        # whose GEMV kernels read a block's second 16 columns right after its first); none for a call
+        # that is not gated.
+        for dtype, m, n, want in (("bf16", 8, 4096, "64"), ("s8", 8, 24576, "64"), ("bf16", 8, 4128, "32"),
+                                  ("bf16", 8, 4112, "staged"), ("f32", 8, 4096, "64"), ("f16", 8, 4128, "32"),
+                                  ("f32", 1, 4096, "64"), ("f32", 1, 4128, "staged"), ("f16", 1, 4128, "staged"),
+                                  ("bf16", 1, 4128, "32")):
+            p = Problem(dtype, m, n, 4096, epilogue="gated")
             q = PL.builtin_plan(p, DOMAINS8, SCHEMA)
-            self.assertEqual(PL.log_pairing(q, p), want, (dtype, n))
+            self.assertEqual(PL.log_pairing(q, p), want, (dtype, m, n))
             self.assertEqual(PL.compare_pairing(want, {"pairing": want}), [])
         store = Problem("bf16", 8, 4096, 4096)
         self.assertIsNone(PL.log_pairing(PL.builtin_plan(store, DOMAINS8, SCHEMA), store))
@@ -323,8 +329,8 @@ class TestGatedLines(unittest.TestCase):
         for dtype, n, nr, m_blocks, threads, want in (
                 ("bf16", 4096, 16, 1, 32, 64), ("s8", 4096, 32, 1, 48, 32), ("s8", 26624, 32, 1, 48, 64),
                 ("s4", 4096, 16, 3, 48, 64), ("bf16", 4128, 32, 1, 32, 32), ("bf16", 4096, 64, 1, 32, 64),
-                ("s8", 4096, 128, 1, 32, 128), ("bf16", 4112, 32, 1, 32, 0), ("f16", 4096, 32, 1, 32, 0),
-                ("f32", 4096, 32, 1, 32, 0), ("bf16", 4096, 24, 1, 32, 0), ("s8", 14336, 32, 1, 48, 32),
+                ("s8", 4096, 128, 1, 32, 128), ("bf16", 4112, 32, 1, 32, 0), ("f16", 4096, 32, 1, 32, 64),
+                ("f32", 4096, 32, 1, 32, 64), ("bf16", 4096, 24, 1, 32, 0), ("s8", 14336, 32, 1, 48, 32),
                 ("bf16", 4096, 64, 1, 48, 64)):
             p = Problem(dtype, 8, n, 4096, epilogue="gated", group=128 if dtype == "s4" else 0)
             r = dataclasses.replace(q, nr=nr, m_blocks=m_blocks, threads=threads)

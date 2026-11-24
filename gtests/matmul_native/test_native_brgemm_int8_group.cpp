@@ -549,7 +549,7 @@ bool tiles_take_batches(const gcase_t &c, const nat::native_plan_t &plan) {
         const int width = nat::native_int8_turn_width(plan, plan.nr, cw, false);
         const int max_mr = nat::native_int8_call_rows(plan, cw / 16);
         if (nat::native_int8_group_span(
-                    plan, c.G, c.gs / 4, width, rows, max_mr)
+                    plan, c.G, c.gs / 4, width, rows, max_mr, 4)
                 >= c.G)
             return false;
         col += width;
@@ -1313,7 +1313,7 @@ TEST(NativeBrgemmInt8GroupTile, SpanFollowsThePassBudget) {
                         for (int rows : {1, max_mr, max_mr + 1, 40, 192}) {
                             plan.int8_pass_budget = budget;
                             const int got = nat::native_int8_group_span(plan,
-                                    groups, group_quads, cw, rows, max_mr);
+                                    groups, group_quads, cw, rows, max_mr, 4);
                             const int64_t group_bytes
                                     = int64_t {4} * group_quads * (cw + max_mr);
                             int want = groups;
@@ -2034,7 +2034,8 @@ TEST(NativeBrgemmInt8SourceGroups, CallsThatMayNeedGroupShifts) {
         nat::native_int8_shift_store_t store;
         nat::native_int8_call_t call;
         call.shift_store = &store;
-        ASSERT_EQ(nat::prepare_int8_call(d, k.params, decision, k.src, 64,
+        ASSERT_EQ(nat::prepare_int8_call(d, k.params, decision,
+                          nt::int8_route_of(d, k.params, decision), k.src, 64,
                           int64_t {1} << 40, call),
                 status_t::success)
                 << c.name;
@@ -2054,34 +2055,40 @@ TEST(NativeBrgemmInt8GroupKernel, Table) {
         EXPECT_GE(max_mr, 6) << nv;
         EXPECT_LE(max_mr, 12) << nv;
         for (bool src_u8 : {false, true}) {
-            EXPECT_EQ(nat::select_native_int8_group_ukernel(0, nv, src_u8),
+            EXPECT_EQ(nat::select_native_int8_group_ukernel(
+                              nat::native_format_t::s8, 0, nv, src_u8),
                     nullptr);
             EXPECT_EQ(nat::select_native_int8_group_ukernel(
-                              max_mr + 1, nv, src_u8),
+                              nat::native_format_t::s8, max_mr + 1, nv, src_u8),
                     nullptr);
             for (int mr = 1; mr <= max_mr; ++mr)
-                EXPECT_NE(nat::select_native_int8_group_ukernel(mr, nv, src_u8),
+                EXPECT_NE(nat::select_native_int8_group_ukernel(
+                                  nat::native_format_t::s8, mr, nv, src_u8),
                         nullptr)
                         << mr << " " << nv << " " << src_u8;
         }
         // The wide form of a u8 source: its own kernels, of the same rows.
-        EXPECT_EQ(nat::select_native_int8_group_ukernel(0, nv, true, true),
+        EXPECT_EQ(nat::select_native_int8_group_ukernel(
+                          nat::native_format_t::s8, 0, nv, true, true),
                 nullptr);
         EXPECT_EQ(nat::select_native_int8_group_ukernel(
-                          max_mr + 1, nv, true, true),
+                          nat::native_format_t::s8, max_mr + 1, nv, true, true),
                 nullptr);
         for (int mr = 1; mr <= max_mr; ++mr) {
-            const auto wide
-                    = nat::select_native_int8_group_ukernel(mr, nv, true, true);
+            const auto wide = nat::select_native_int8_group_ukernel(
+                    nat::native_format_t::s8, mr, nv, true, true);
             EXPECT_NE(wide, nullptr) << mr << " " << nv;
-            EXPECT_NE(wide, nat::select_native_int8_group_ukernel(mr, nv, true))
+            EXPECT_NE(wide,
+                    nat::select_native_int8_group_ukernel(
+                            nat::native_format_t::s8, mr, nv, true))
                     << mr << " " << nv;
         }
     }
     for (int nv : {3, 4}) {
         EXPECT_EQ(nat::native_int8_group_ukernel_max_mr(nv), 0);
         for (bool src_u8 : {false, true})
-            EXPECT_EQ(nat::select_native_int8_group_ukernel(1, nv, src_u8),
+            EXPECT_EQ(nat::select_native_int8_group_ukernel(
+                              nat::native_format_t::s8, 1, nv, src_u8),
                     nullptr);
     }
 }
@@ -2231,7 +2238,7 @@ TEST(NativeBrgemmInt8GroupKernel, MatchesTheModel) {
                         args.src_scale_step = sa_step;
                         args.wei_scale = sb.get();
                         args.wei_scale_step = sb_step;
-                        args.wei_scale_dt = sb_dt;
+                        args.wei_scale_type = nat::native_scale_of(sb_dt);
                         args.C = c.data();
                         args.ldc = ldc;
                         args.accumulate = accumulate;
@@ -2241,7 +2248,8 @@ TEST(NativeBrgemmInt8GroupKernel, MatchesTheModel) {
                             args.dst_bf16 = store == store_t::bf16;
                         }
                         nat::select_native_int8_group_ukernel(
-                                mr, nv, src_u8, wide)(args);
+                                nat::native_format_t::s8, mr, nv, src_u8, wide)(
+                                args);
 
                         size_t bad = 0;
                         for (int m = 0; m < mr; ++m)

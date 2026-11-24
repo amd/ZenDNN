@@ -16,8 +16,10 @@
 
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/native_kernel_registry.hpp"
 
+#include <cassert>
 #include <cctype>
 #include <cstdlib>
+#include <iterator>
 #include <string>
 
 #include "common/zendnnl_global.hpp"
@@ -59,156 +61,108 @@ int width_index(int nr) {
     }
 }
 
-/// Largest m such that every row count 1 .. m is in mask.
-int full_rows(uint32_t mask) {
-    int m = 0;
-    while (m < 32 && ((mask >> m) & 1u) != 0)
-        ++m;
-    return m;
+/// The CPU runs kernels of isa; of base, it has AVX-512 F.
+bool runs(const UarchParams &u, native_isa_t isa) {
+    switch (isa) {
+        case native_isa_t::base: return u.avx512f;
+        case native_isa_t::avx512_bf16: return u.avx512bf16;
+        case native_isa_t::avx512_vnni: return u.avx512vnni;
+        case native_isa_t::avx512_fp16: return u.avx512fp16;
+    }
+    return false;
 }
+
+/// The kernels of a family of the INT8 tile as the registry probes them:
+/// whether every kernel a call of scheme over a weight of format takes at mr
+/// rows and nv vectors exists.
+template <native_kernel_kind_t Kind>
+struct native_call_kernels;
+
+template <>
+struct native_call_kernels<native_kernel_kind_t::int8> {
+    static bool serve(native_format_t format, native_int8_scheme_t scheme,
+            int mr, int nv) {
+        return native_int8_kernels_serve(format, scheme, mr, nv);
+    }
+};
+
+template <>
+struct native_call_kernels<native_kernel_kind_t::int4> {
+    static bool serve(native_format_t format, native_int8_scheme_t scheme,
+            int mr, int nv) {
+        return native_int4_kernels_serve(format, scheme, mr, nv);
+    }
+};
 
 } // namespace
 
-native_kernel_registry_t::native_kernel_registry_t(
-        bool bf16_isa, bool int8_isa, bool f32_isa, bool f16_ph_isa) {
-    for (int w = 0; bf16_isa && w < kWidths; ++w) {
-        native_kernel_caps_t c;
-        c.kind = native_kernel_kind_t::bf16;
-        c.nr = 16 << w;
-        uint32_t mask = 0;
-        for (int mr = 1; mr <= kMaxRows; ++mr) {
-            bf16_[w][mr] = select_bf16_brgemm_tall_kernel(mr, c.nr);
-            if (bf16_[w][mr] != nullptr) mask |= 1u << (mr - 1);
-        }
-        c.max_mr = full_rows(mask);
-        if (c.max_mr > 0) all_.push_back(c);
+template <native_kernel_kind_t Kind, typename Registry>
+auto &native_kernel_registry_t::tables(Registry &registry) noexcept {
+    if constexpr (Kind == native_kernel_kind_t::bf16) {
+        return registry.bf16_;
+    } else if constexpr (Kind == native_kernel_kind_t::f32) {
+        return registry.f32_;
+    } else if constexpr (Kind == native_kernel_kind_t::f16) {
+        return registry.f16_;
+    } else {
+        static_assert(Kind == native_kernel_kind_t::f16_ph,
+                "a family of one kernel per row count");
+        return registry.f16_ph_;
     }
-    for (int w = 0; int8_isa && w < kWidths; ++w) {
-        native_kernel_caps_t c;
-        c.kind = native_kernel_kind_t::int8;
-        c.nr = 16 << w;
-        const int nv = c.nr / 16;
-        // A call takes the signed or the unsigned kernel by its source.
-        uint32_t mask = 0;
-        for (int mr = 1; mr <= kMaxRows; ++mr) {
-            if (select_native_int8_ukernel(mr, nv, false) != nullptr
-                    && select_native_int8_ukernel(mr, nv, true) != nullptr)
-                mask |= 1u << (mr - 1);
-        }
-        c.max_mr = full_rows(mask);
-        c.int8_schemes
-                = native_int8_scheme_bit(native_int8_scheme_t::per_channel);
-        if (c.max_mr > 0) all_.push_back(c);
+}
+
+template <native_kernel_kind_t Kind>
+bool native_kernel_registry_t::probe_family(
+        const native_route_desc_t &route, int w, int mr) {
+    if constexpr (native_rows_family<Kind>()) {
+        auto &table = tables<Kind>(*this);
+        table[0][w][mr] = native_tile_kernel<Kind>::select(mr, 1 << w);
+        return table[0][w][mr] != nullptr;
+    } else {
+        return native_call_kernels<Kind>::serve(
+                route.format, native_route_scheme(route), mr, 1 << w);
     }
-    for (int w = 0; int8_isa && w < kWidths; ++w) {
-        native_kernel_caps_t c;
-        c.kind = native_kernel_kind_t::int8;
-        c.nr = 16 << w;
-        const int nv = c.nr / 16;
-        // A call takes the s8 or the u8 kernel by its source.
-        uint32_t mask = 0;
-        for (int mr = 1; mr <= kMaxRows; ++mr) {
-            if (select_native_int8_group_ukernel(mr, nv, false) != nullptr
-                    && select_native_int8_group_ukernel(mr, nv, true)
-                            != nullptr)
-                mask |= 1u << (mr - 1);
-        }
-        c.max_mr = full_rows(mask);
-        c.int8_schemes
-                = native_int8_scheme_bit(native_int8_scheme_t::per_group);
-        if (c.max_mr > 0) all_.push_back(c);
-    }
-    for (int w = 0; int8_isa && w < kWidths; ++w) {
-        native_kernel_caps_t c;
-        c.kind = native_kernel_kind_t::int4;
-        c.nr = 16 << w;
-        const int nv = c.nr / 16;
-        // A call takes the fused order (over a source scale per row or per
-        // group) or the reference order by its scales.
-        uint32_t mask = 0;
-        for (int mr = 1; mr <= kMaxRows; ++mr) {
-            if (select_native_int4_group_ukernel(
-                        mr, nv, native_int8_order_t::fused)
-                            != nullptr
-                    && select_native_int4_group_ukernel(
-                               mr, nv, native_int8_order_t::fused, true)
-                            != nullptr
-                    && select_native_int4_group_ukernel(
-                               mr, nv, native_int8_order_t::reference)
-                            != nullptr)
-                mask |= 1u << (mr - 1);
-        }
-        c.max_mr = full_rows(mask);
-        c.int8_schemes
-                = native_int8_scheme_bit(native_int8_scheme_t::per_group);
-        if (c.max_mr > 0) all_.push_back(c);
-    }
-    for (int w = 0; int8_isa && w < kWidths; ++w) {
-        native_kernel_caps_t c;
-        c.kind = native_kernel_kind_t::int4;
-        c.nr = 16 << w;
-        const int nv = c.nr / 16;
-        // A weight of one group over K: the fused or the reference order.
-        uint32_t mask = 0;
-        for (int mr = 1; mr <= kMaxRows; ++mr) {
-            if (select_native_int4_one_group_ukernel(
-                        mr, nv, native_int8_order_t::fused)
-                            != nullptr
-                    && select_native_int4_one_group_ukernel(
-                               mr, nv, native_int8_order_t::reference)
-                            != nullptr)
-                mask |= 1u << (mr - 1);
-        }
-        c.max_mr = full_rows(mask);
-        c.int8_schemes
-                = native_int8_scheme_bit(native_int8_scheme_t::per_channel);
-        if (c.max_mr > 0) all_.push_back(c);
-    }
-    for (int w = 0; f32_isa && w < kWidths; ++w) {
-        native_kernel_caps_t c;
-        c.kind = native_kernel_kind_t::f32;
-        c.nr = 16 << w;
-        uint32_t mask = 0;
-        for (int mr = 1; mr <= kMaxRows; ++mr) {
-            f32_[w][mr] = select_native_fp32_ukernel(mr, c.nr / 16);
-            if (f32_[w][mr] != nullptr) mask |= 1u << (mr - 1);
-        }
-        c.max_mr = full_rows(mask);
-        if (c.max_mr > 0) all_.push_back(c);
-    }
-    for (int w = 0; f32_isa && w < kWidths; ++w) {
-        native_kernel_caps_t c;
-        c.kind = native_kernel_kind_t::f16;
-        c.nr = 16 << w;
-        uint32_t mask = 0;
-        for (int mr = 1; mr <= kMaxRows; ++mr) {
-            f16_[w][mr] = select_native_f16_ukernel(mr, c.nr / 16);
-            if (f16_[w][mr] != nullptr) mask |= 1u << (mr - 1);
-        }
-        c.max_mr = full_rows(mask);
-        if (c.max_mr > 0) all_.push_back(c);
-    }
-    for (int w = 0; f16_ph_isa && w < kF16PhWidths; ++w) {
-        native_kernel_caps_t c;
-        c.kind = native_kernel_kind_t::f16_ph;
-        c.nr = 16 << w;
-        uint32_t mask = 0;
-        for (int mr = 1; mr <= kMaxRows; ++mr) {
-            f16_ph_[w][mr] = select_native_f16_ph_ukernel(mr, c.nr / 16);
-            if (f16_ph_[w][mr] != nullptr) mask |= 1u << (mr - 1);
-        }
-        c.max_mr = full_rows(mask);
-        if (c.max_mr > 0) all_.push_back(c);
-    }
-    // Wider tiles run the kernels of the slab width slab by slab.
-    const size_t probed = all_.size();
-    for (size_t i = 0; i < probed; ++i) {
-        const native_kernel_caps_t slab = all_[i];
-        if (slab.nr != native_slab_cols(slab.kind)) continue;
-        for (int nr = 2 * slab.nr; nr <= kNativeMaxTileCols; nr *= 2) {
-            native_kernel_caps_t c = slab;
-            c.nr = nr;
+}
+
+template <size_t... I>
+bool native_kernel_registry_t::probe_of(const native_route_desc_t &route, int w,
+        int mr, std::index_sequence<I...>) {
+    bool has = false;
+    (void)((route.family == kNativeFamilies[I].id
+                   && (has = probe_family<kNativeFamilies[I].id>(route, w, mr),
+                           true))
+            || ...);
+    return has;
+}
+
+bool native_kernel_registry_t::probe(
+        const native_route_desc_t &route, int w, int mr) {
+    return probe_of(route, w, mr,
+            std::make_index_sequence<std::size(kNativeFamilies)> {});
+}
+
+native_kernel_registry_t::native_kernel_registry_t(uint32_t families) {
+    for (const native_route_desc_t &route : kNativeRoutes) {
+        if (((families >> static_cast<int>(route.family)) & 1u) == 0) continue;
+        const int slab = native_slab_cols(route.family);
+        for (int w = 0; 16 << w <= slab; ++w) {
+            const int rows = native_route_rows(route, 1 << w);
+            assert(rows <= kMaxRows);
+            bool served = rows > 0;
+            for (int mr = 1; served && mr <= rows; ++mr)
+                served = probe(route, w, mr);
+            if (!served) continue;
+            native_kernel_caps_t c;
+            c.route = route.id;
+            c.kind = route.family;
+            c.nr = 16 << w;
+            c.max_mr = rows;
+            c.int8_schemes = route.schemes;
             all_.push_back(c);
+            // Wider tiles run the kernels of the slab width slab by slab.
+            if (c.nr != slab) continue;
+            for (c.nr = 2 * slab; c.nr <= kNativeMaxTileCols; c.nr *= 2)
+                all_.push_back(c);
         }
     }
 }
@@ -242,40 +196,33 @@ bool native_kernel_registry_t::covers(native_kernel_kind_t kind, int mr, int nr,
     return c != nullptr && mr >= 1 && mr <= c->max_mr;
 }
 
-const bf16_brgemm_fn_t *native_kernel_registry_t::bf16_table(
+template <native_kernel_kind_t Kind>
+const typename native_tile_kernel<Kind>::fn_t *native_kernel_registry_t::table(
         int nr) const noexcept {
-    constexpr native_kernel_kind_t kind = native_kernel_kind_t::bf16;
-    if (caps(kind, nr) == nullptr) return nullptr;
-    return bf16_[width_index(native_tile_slab_cols(kind, nr))];
+    if (caps(Kind, nr) == nullptr) return nullptr;
+    return tables<Kind>(*this)[0][width_index(native_tile_slab_cols(Kind, nr))];
 }
 
-const native_fp32_ukernel_fn_t *native_kernel_registry_t::f32_table(
-        int nr) const noexcept {
-    constexpr native_kernel_kind_t kind = native_kernel_kind_t::f32;
-    if (caps(kind, nr) == nullptr) return nullptr;
-    return f32_[width_index(native_tile_slab_cols(kind, nr))];
-}
+template const native_tile_kernel<native_kernel_kind_t::bf16>::fn_t *
+native_kernel_registry_t::table<native_kernel_kind_t::bf16>(int) const noexcept;
+template const native_tile_kernel<native_kernel_kind_t::f32>::fn_t *
+native_kernel_registry_t::table<native_kernel_kind_t::f32>(int) const noexcept;
+template const native_tile_kernel<native_kernel_kind_t::f16>::fn_t *
+native_kernel_registry_t::table<native_kernel_kind_t::f16>(int) const noexcept;
+template const native_tile_kernel<native_kernel_kind_t::f16_ph>::fn_t *
+native_kernel_registry_t::table<native_kernel_kind_t::f16_ph>(
+        int) const noexcept;
 
-const native_f16_ukernel_fn_t *native_kernel_registry_t::f16_table(
-        int nr) const noexcept {
-    constexpr native_kernel_kind_t kind = native_kernel_kind_t::f16;
-    if (caps(kind, nr) == nullptr) return nullptr;
-    return f16_[width_index(native_tile_slab_cols(kind, nr))];
-}
-
-const native_f16_ph_ukernel_fn_t *native_kernel_registry_t::f16_ph_table(
-        int nr) const noexcept {
-    constexpr native_kernel_kind_t kind = native_kernel_kind_t::f16_ph;
-    if (caps(kind, nr) == nullptr) return nullptr;
-    return f16_ph_[width_index(native_tile_slab_cols(kind, nr))];
+bool native_kernel_registry_t::has(native_kernel_kind_t kind) const noexcept {
+    for (const native_kernel_caps_t &c : all_) {
+        if (c.kind == kind) return true;
+    }
+    return false;
 }
 
 native_kernel_kind_t native_kernel_registry_t::f16_kind() const noexcept {
-    for (const native_kernel_caps_t &c : all_) {
-        if (c.kind == native_kernel_kind_t::f16_ph)
-            return native_kernel_kind_t::f16_ph;
-    }
-    return native_kernel_kind_t::f16;
+    return has(native_kernel_kind_t::f16_ph) ? native_kernel_kind_t::f16_ph
+                                             : native_kernel_kind_t::f16;
 }
 
 const native_kernel_registry_t &native_kernel_registry() {
@@ -284,8 +231,12 @@ const native_kernel_registry_t &native_kernel_registry() {
     static const native_kernel_registry_t *const registry = [] {
         const UarchParams &u = detect_uarch();
         const bool f16_accum = f16_accum_in_f16();
-        return new native_kernel_registry_t(u.avx512bf16, u.avx512vnni,
-                u.avx512f, u.avx512fp16 && f16_accum);
+        uint32_t families = 0;
+        for (const native_family_desc_t &f : kNativeFamilies)
+            if (runs(u, f.isa)
+                    && (f.id != native_kernel_kind_t::f16_ph || f16_accum))
+                families |= 1u << static_cast<int>(f.id);
+        return new native_kernel_registry_t(families);
     }();
     return *registry;
 }

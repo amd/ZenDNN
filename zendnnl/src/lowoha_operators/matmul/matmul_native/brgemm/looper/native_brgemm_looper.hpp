@@ -66,10 +66,10 @@ status_t native_brgemm_check(const GemmDescriptor &desc,
 
 /// The plan the paired tiles of a gated call over [gate | up] halves run
 /// (native_weight_view_t) at width (native_paired_width): planned's, with
-/// tiles width wide when that is wider (paired_wider), and for BF16 the
-/// accumulators of a tile's rows.  Where the wider tiles leave the static
-/// deal fewer units than threads, row blocks of fewer rows give back the
-/// units the plan was balanced for.
+/// tiles width wide when that is wider (paired_wider), and the accumulators
+/// of a tile's rows.  Where the wider tiles leave the static deal fewer
+/// units than threads, row blocks of fewer rows give back the units the
+/// plan was balanced for.
 native_plan_t native_paired_plan(const native_plan_t &planned,
         const native_problem_t &problem, int width);
 

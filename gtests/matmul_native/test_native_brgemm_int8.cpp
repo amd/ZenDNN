@@ -355,8 +355,9 @@ status_t prepare(const nat::GemmDescriptor &desc, const matmul_params &params,
             = nat::decide_int8_call(desc, params, nullptr);
     const status_t st = nat::check_int8_call(desc, params, d);
     if (st != status_t::success) return st;
-    return nat::prepare_int8_call(desc, params, d, src, int8_plan().copy_block,
-            int8_plan().copy_par_min, call);
+    return nat::prepare_int8_call(desc, params, d,
+            native_brgemm_test::int8_route_of(desc, params, d), src,
+            int8_plan().copy_block, int8_plan().copy_par_min, call);
 }
 
 /// Gives call the bias (of type bias_dt) the way native_brgemm_execute does
@@ -938,17 +939,23 @@ TEST(NativeBrgemmInt8Tile, KernelTable) {
         const int max_mr = nat::native_int8_ukernel_max_mr(nv);
         EXPECT_GE(max_mr, 6);
         for (bool sgn : {false, true}) {
-            EXPECT_EQ(nat::select_native_int8_ukernel(0, nv, sgn), nullptr);
-            EXPECT_EQ(nat::select_native_int8_ukernel(max_mr + 1, nv, sgn),
+            EXPECT_EQ(nat::select_native_int8_ukernel(
+                              nat::native_format_t::s8, 0, nv, sgn),
+                    nullptr);
+            EXPECT_EQ(nat::select_native_int8_ukernel(
+                              nat::native_format_t::s8, max_mr + 1, nv, sgn),
                     nullptr);
             for (int mr = 1; mr <= max_mr; ++mr)
-                EXPECT_NE(
-                        nat::select_native_int8_ukernel(mr, nv, sgn), nullptr);
+                EXPECT_NE(nat::select_native_int8_ukernel(
+                                  nat::native_format_t::s8, mr, nv, sgn),
+                        nullptr);
         }
     }
     for (int nv : {3, 4}) {
         EXPECT_EQ(nat::native_int8_ukernel_max_mr(nv), 0);
-        EXPECT_EQ(nat::select_native_int8_ukernel(1, nv, false), nullptr);
+        EXPECT_EQ(nat::select_native_int8_ukernel(
+                          nat::native_format_t::s8, 1, nv, false),
+                nullptr);
     }
 }
 
