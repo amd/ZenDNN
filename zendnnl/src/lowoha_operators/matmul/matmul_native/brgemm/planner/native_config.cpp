@@ -110,7 +110,8 @@ constexpr native_config_key_t kKeys[] = {
         {"int8_l2_pct", key_type::int32, 1, 1000, 1, false,
                 kNativeKeyPerChannel},
         {"int8_kc", key_type::int32, 4, kBig20, 4, false, kNativeKeyPerChannel},
-        {"int4_l1_pct", key_type::int32, 0, 1000, 1, false, kNativeKeyPerGroup},
+        {"int4_l1_pct", key_type::int32, -1, 1000, 1, false,
+                kNativeKeyPerGroup},
         {"direct_store", key_type::boolean, 0, 1, 1, false},
         // The bias then follows the dequantization instead of fusing with
         // it in one FMA.

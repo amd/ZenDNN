@@ -488,6 +488,46 @@ int traffic_col_groups(const native_plan_t &q, int M, int N, int K, int elem,
     return rg < slice ? g : 0;
 }
 
+/// int4_l1_pct of the built-in rule where the weight fits the L2 of the
+/// plan's threads and the source rows of its row block fit one L2.  The
+/// group span keeps whole a slab of up to twice the budget: at half of L1
+/// only a slab that fits L1 runs whole, and every batch takes at most half
+/// of it.
+constexpr int kInt4FitL1Pct = 50;
+
+/// int4_l1_pct of the built-in rule otherwise.  A thread whose share of the
+/// weight exceeds its L2 is paced by the weight stream, whose bursts the
+/// batches would cut; source rows of a row block that exceed L2 are read
+/// again from L3 by each of a thread's column tiles, in runs of one batch's
+/// K, which smaller batches cut short.  A slab of up to 2.5 L1 runs whole
+/// from L2.
+constexpr int kInt4StreamL1Pct = 125;
+
+/// The L2 caches the threads of the plan q use: one a thread, at most one a
+/// physical core, whose SMT siblings share its L2.
+int plan_l2_caches(const native_plan_t &q, const UarchParams &uarch) {
+    return uarch.physical_cores > 0 ? std::min(q.threads, uarch.physical_cores)
+                                    : q.threads;
+}
+
+/// The share of L1 the batches of the s4 plan q's groups take in a plan of
+/// at most decode_m rows: int4_l1_pct, or at -1 kInt4FitL1Pct where the
+/// weight of N x K elements of wei_elem bytes fits the L2 caches of q's
+/// threads (plan_l2_caches) and the source rows of its row block (q.mb rows
+/// of K elements of src_elem bytes) fit one L2, else kInt4StreamL1Pct.
+int int4_batch_l1_pct(const native_plan_t &q, int N, int K, int src_elem,
+        double wei_elem, const UarchParams &uarch,
+        const heuristic_params_t &hp) {
+    if (hp.int4_l1_pct >= 0) return hp.int4_l1_pct;
+    const int64_t l2 = uarch.l2_bytes;
+    const int64_t weight
+            = static_cast<int64_t>(static_cast<double>(N) * K * wei_elem);
+    const int64_t rows = static_cast<int64_t>(q.mb) * K * src_elem;
+    return weight <= l2 * plan_l2_caches(q, uarch) && rows <= l2
+            ? kInt4FitL1Pct
+            : kInt4StreamL1Pct;
+}
+
 } // namespace
 
 native_route_t native_problem_t::route() const {
@@ -802,10 +842,13 @@ native_plan_t rules_plan(const native_problem_t &p, const UarchParams &uarch,
             = static_cast<int64_t>(uarch.l2_bytes) * hp.int8_l2_pct / 100;
     // The later row calls of an s4 tile read each batch of its groups again:
     // in a plan of at most decode_m rows, batches of the int4_l1_pct share of
-    // L1.
-    if (int4 && hp.int4_l1_pct > 0 && M <= hp.decode_m)
+    // L1 (int4_batch_l1_pct).
+    const int l1_pct = int4 && M <= hp.decode_m
+            ? int4_batch_l1_pct(q, N, K, esz, wei_esz, uarch, hp)
+            : 0;
+    if (l1_pct > 0)
         q.int8_pass_budget = std::min(q.int8_pass_budget,
-                static_cast<int64_t>(uarch.l1d_bytes) * hp.int4_l1_pct / 100);
+                static_cast<int64_t>(uarch.l1d_bytes) * l1_pct / 100);
     q.int8_pass_quads
             = hp.int8_kc > 0 ? std::min(hp.int8_kc / 4, ceil_div(K, 4)) : 0;
     // The INT8 form of the L1 pass, at the tile's pass width and rows per

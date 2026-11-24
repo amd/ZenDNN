@@ -315,9 +315,36 @@ class TestInt4Choices(unittest.TestCase):
         # One group over K: the kernels of one group, 12 rows per call at both widths.
         one = int4(16, 4096, 4096, 32, 4096)
         self.assertEqual(PL.plan_log_fields(PL.builtin_plan(one, DOMAINS8, SCHEMA), one)["int8_rows"], "12/12")
-        # A decode plan's groups take batches of the int4_l1_pct share of L1.
-        self.assertEqual(q.int8_pass_budget, min(DOMAINS8.l2_bytes // 2, DOMAINS8.l1d_bytes * 125 // 100))
+        # A decode plan's groups take batches of the int4_l1_pct share of L1: by default half of L1 where the
+        # weight fits the L2 of the plan's threads (8 MiB, 32 threads) and the source rows of its row block fit
+        # one L2, else 125 percent of it (8 MiB over 4 threads, 56 MiB over 32); a set share holds whatever the
+        # weight.
+        self.assertEqual(q.int8_pass_budget, min(DOMAINS8.l2_bytes // 2, DOMAINS8.l1d_bytes * 50 // 100))
+        for other in (int4(16, 4096, 4096, 4, 128), int4(16, 28672, 4096, 32, 128)):
+            self.assertEqual(plan(DOMAINS8, other).int8_pass_budget, DOMAINS8.l1d_bytes * 125 // 100, other)
+            self.assertEqual(plan(DOMAINS8, other, "int4_l1_pct=50").int8_pass_budget,
+                             DOMAINS8.l1d_bytes * 50 // 100, other)
+        self.assertEqual(plan(DOMAINS8, p, "int4_l1_pct=125").int8_pass_budget, DOMAINS8.l1d_bytes * 125 // 100)
         self.assertEqual(plan(DOMAINS8, p, "int4_l1_pct=0").int8_pass_budget, DOMAINS8.l2_bytes // 2)
+        # The bounds, as NativeTuningRules.Int4GroupBatchesBoundedBySourceRowsAndCores: 4096 x 14336 (28 MiB
+        # over 32 threads) takes half of L1 while M x 14336 bytes of source rows fit one L2 (M at most 73); the
+        # L2 caches are the threads' cores (64 threads of 32 cores hold 32 MiB, under 28672 x 4096's 56 MiB),
+        # one a thread when the cores are unknown.
+        half, wide = DOMAINS8.l1d_bytes * 50 // 100, DOMAINS8.l1d_bytes * 125 // 100
+        for u in BOTH:
+            for m, budget in ((7, half), (32, half), (64, half), (73, half), (74, wide), (96, wide), (128, wide)):
+                q = plan(u, int4(m, 4096, 14336, 32, 128))
+                self.assertEqual((q.mb, q.int8_pass_budget), (m, budget), m)
+                self.assertEqual(plan(u.with_overrides("physical_cores=32"), int4(m, 4096, 14336, 32, 128))
+                                 .int8_pass_budget, budget, m)
+            cores = {c: u.with_overrides("physical_cores=%d" % c) for c in (16, 32, 64)}
+            for m in (7, 128):
+                self.assertEqual(plan(u, int4(m, 4096, 4096, 32, 128)).int8_pass_budget, half, m)
+                self.assertEqual(plan(u, int4(m, 28672, 4096, 64, 128)).int8_pass_budget, half, m)
+                self.assertEqual(plan(cores[64], int4(m, 28672, 4096, 64, 128)).int8_pass_budget, half, m)
+                self.assertEqual(plan(cores[32], int4(m, 28672, 4096, 64, 128)).int8_pass_budget, wide, m)
+                self.assertEqual(plan(cores[16], int4(m, 4096, 4096, 32, 128)).int8_pass_budget, half, m)
+                self.assertEqual(plan(cores[16], int4(m, 4096, 14336, 32, 128)).int8_pass_budget, wide, m)
         fields = PL.plan_log_fields(q, p)
         self.assertEqual((fields["int8_scheme"], fields["gs"], fields["pass_budget"]),
                          ("per_group", "128", str(q.int8_pass_budget)))

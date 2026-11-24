@@ -468,11 +468,12 @@ def _uarch_number(v: str) -> float:
 class Uarch:
     """The UarchParams fields the built-in heuristic and its cost model read."""
 
-    FIELDS = ("l1d_bytes", "l2_bytes", "l3_bytes", "family_l3_cores", "num_cores", "l3_domain_cores", "fma_ports")
+    FIELDS = ("l1d_bytes", "l2_bytes", "l3_bytes", "family_l3_cores", "num_cores", "l3_domain_cores",
+              "physical_cores", "fma_ports")
 
     def __init__(self, l1d_bytes: int = 32768, l2_bytes: int = 1048576,
                  l3_bytes: int = 33554432, family_l3_cores: Optional[int] = 1,
-                 num_cores: int = 1, l3_domain_cores: int = 0, fma_ports: int = 2,
+                 num_cores: int = 1, l3_domain_cores: int = 0, physical_cores: int = 0, fma_ports: int = 2,
                  dot: Optional[Dict[str, Dot]] = None, dot_source: str = "default",
                  mem_cycles: int = 0, stream_cycles: int = 0):
         self.l1d_bytes = l1d_bytes
@@ -483,6 +484,9 @@ class Uarch:
         self.num_cores = num_cores
         # Physical cores of one L3 domain; 0 when unknown (the plan then uses family_l3_cores).
         self.l3_domain_cores = l3_domain_cores
+        # Physical cores, one L2 each that their SMT siblings share; 0 when unknown (the plan then counts one L2
+        # a thread).
+        self.physical_cores = physical_cores
         # dot["bf16"].ipc rounded; the cost model reads dot.
         self.fma_ports = fma_ports
         # The compute model per path (UarchParams::dot) and where it comes from: default, env, or
@@ -531,10 +535,11 @@ class Uarch:
 
     @classmethod
     def from_hw(cls, hw: Hardware) -> "Uarch":
-        """l1d / l2 / l3 and the L3 domain from the hardware; family_l3_cores is not in it (None)."""
+        """l1d / l2 / l3, the L3 domain and the physical cores from the hardware; family_l3_cores is not in it
+        (None)."""
         domain = max(1, hw.l3_domain_threads // (hw.smt or 1)) if hw.l3_domain_threads > 0 else 0
         return cls(l1d_bytes=hw.l1d_kib * 1024, l2_bytes=hw.l2_kib * 1024, l3_bytes=hw.l3_kib * 1024,
-                   family_l3_cores=None, l3_domain_cores=domain)
+                   family_l3_cores=None, l3_domain_cores=domain, physical_cores=hw.physical_cores)
 
     def with_overrides(self, text: str) -> "Uarch":
         """A copy with "field=value,..." applied (e.g. "family_l3_cores=8"), the machine model's

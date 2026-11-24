@@ -83,7 +83,7 @@ def parse_settings(text: str, schema: Schema) -> Dict[str, Any]:
 
 def builtin_value(spec: Any) -> Any:
     """The value heuristic_params_t{} holds for a key: its default, or its auto value where
-    that is a legal setting (row_unit 12, cm_tall_pct -1, cm_mem_cycles 0, cm_fma_pipes 0):
+    that is a legal setting (row_unit 12, int4_l1_pct -1, cm_tall_pct -1, cm_mem_cycles 0, cm_fma_pipes 0):
     setting a key to it is the same as leaving it unset."""
     if spec.default is not None:
         return spec.default
@@ -227,7 +227,9 @@ def _value_rule(key: str, p: Problem, schema: Schema) -> List[Any]:
         # The narrow-N, F16_PH wide-tile and blocks rules take calls from these Ms: 1 turns
         # them on at every M, 2^30 off.
         "bf16_narrow_n_min_m": [1], "f16_wide_min_m": [1, 64, 1 << 30], "blocks": [0, 1],
-        "bf16_blocks_min_m": [1], "int8_blocks_min_m": [1], "int4_l1_pct": [0, 50, 250],
+        # int4_l1_pct: both shares of the built-in rule, so that the one it does not take is searched, the L2
+        # share (0) and a wider one.
+        "bf16_blocks_min_m": [1], "int8_blocks_min_m": [1], "int4_l1_pct": [0, 50, 125, 250],
         # The cost model: its switch, margin and inputs.
         "cost_model": [0, 1], "cm_gain_pct": [0, 2, 10], "cm_short_rows": [4, 6, 10],
         "cm_call_cycles": [400, 1600],

@@ -109,7 +109,7 @@
      "gs": "128",
      "pass_budget": "24576"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "s4-g128-n6144-k4096-m17-32-t32",
@@ -133,7 +133,7 @@
      "gs": "128",
      "pass_budget": "24576"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "s4-g128-n4096-k14336-m2049--t32",

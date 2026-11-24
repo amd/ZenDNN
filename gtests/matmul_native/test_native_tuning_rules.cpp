@@ -633,30 +633,92 @@ TEST(NativeTuningRules, Int4Weights) {
 }
 
 // The group batches of an s4 tile in a plan of at most decode_m rows take
-// the int4_l1_pct share of L1 (its later row calls read each batch again),
-// above decode_m rows and at int4_l1_pct=0 the int8_l2_pct share of L2, as
-// a per-group s8 tile does at any M; a slab of K 32768 then takes batches
-// that fit that share.
+// the int4_l1_pct share of L1 (its later row calls read each batch again):
+// by default half of L1 where the weight fits the L2 of the plan's threads
+// and the source rows of its row block fit one L2 (both hold here up to
+// M 128), else 125 percent of it; above decode_m rows and at int4_l1_pct=0 the
+// int8_l2_pct share of L2, as a per-group s8 tile does at any M; a slab of
+// K 32768 then takes batches that fit that share.  A set int4_l1_pct holds
+// whatever the weight.
 TEST(NativeTuningRules, Int4GroupBatchesInL1) {
     const nat::heuristic_params_t built_in;
-    ASSERT_EQ(built_in.int4_l1_pct, 125);
+    ASSERT_EQ(built_in.int4_l1_pct, -1);
     ASSERT_EQ(built_in.decode_m, 128);
+    // 32 threads hold 32 MiB of L2: a weight of 4096 x 4096 s4 (8 MiB) fits
+    // it, one of 5120 x 32768 (80 MiB) does not, nor does 4096 x 4096 the
+    // 4 MiB of 4 threads.
+    const struct {
+        int N, K, threads, pct;
+    } cases[] = {
+            {4096, 4096, 32, 50}, {5120, 32768, 32, 125}, {4096, 4096, 4, 125}};
+    for (const nat::UarchParams &u : {caches(32, 8), caches(128, 32)})
+        for (const auto &c : cases) {
+            const int64_t l1 = static_cast<int64_t>(u.l1d_bytes) * c.pct / 100;
+            const int64_t pinned = static_cast<int64_t>(u.l1d_bytes) * 75 / 100;
+            const int64_t l2 = static_cast<int64_t>(u.l2_bytes) * 50 / 100;
+            for (const int M : {1, 32, 128, 129, 1024}) {
+                const std::string what = std::to_string(c.N) + "x"
+                        + std::to_string(c.K) + " threads "
+                        + std::to_string(c.threads) + " M " + std::to_string(M);
+                const nat::native_problem_t s4
+                        = int4_problem(M, c.N, c.K, c.threads, 128);
+                nat::native_problem_t s8 = problem(M, c.N, c.K,
+                        nat::kNativeLayoutPackNr, c.threads, false);
+                s8.int8_scheme = nat::native_int8_scheme_t::per_group;
+                const nat::native_plan_t q
+                        = nat::heuristic_plan(s4, u, built_in);
+                ASSERT_EQ(q.threads, c.threads) << what;
+                EXPECT_EQ(q.int8_pass_budget, M <= 128 ? l1 : l2) << what;
+                EXPECT_EQ(nat::heuristic_plan(s8, u, built_in).int8_pass_budget,
+                        l2)
+                        << what;
+                EXPECT_EQ(nat::heuristic_plan(s4, u, params("int4_l1_pct=0"))
+                                  .int8_pass_budget,
+                        l2)
+                        << what;
+                EXPECT_EQ(nat::heuristic_plan(s4, u, params("int4_l1_pct=75"))
+                                  .int8_pass_budget,
+                        M <= 128 ? pinned : l2)
+                        << what;
+            }
+        }
+}
+
+// The bounds of the built-in share.  4096 x 14336 s4 (28 MiB) fits the
+// 32 MiB of L2 of 32 threads; its batches take half of L1 while the row
+// block's M x 14336 bytes of source rows fit one 1 MiB L2 (M at most 73),
+// 125 percent from M 74.  The L2 caches are those of the threads' cores:
+// 64 threads of 32 physical cores (SMT siblings) hold 32 MiB, which
+// 28672 x 4096 (56 MiB) exceeds; 32 threads of 16 cores hold 16 MiB, which
+// 4096 x 4096 (8 MiB) fits and 4096 x 14336 does not; unknown cores count
+// one L2 a thread.
+TEST(NativeTuningRules, Int4GroupBatchesBoundedBySourceRowsAndCores) {
+    const nat::heuristic_params_t built_in;
+    const auto budget = [&](nat::UarchParams u, int cores, int M, int N, int K,
+                                int threads) {
+        u.physical_cores = cores;
+        const nat::native_plan_t q = nat::heuristic_plan(
+                int4_problem(M, N, K, threads, 128), u, built_in);
+        EXPECT_EQ(q.threads, threads) << M << " " << N << "x" << K;
+        EXPECT_EQ(q.mb, M) << M << " " << N << "x" << K;
+        return q.int8_pass_budget;
+    };
     for (const nat::UarchParams &u : {caches(32, 8), caches(128, 32)}) {
-        const int64_t l1 = static_cast<int64_t>(u.l1d_bytes) * 125 / 100;
-        const int64_t l2 = static_cast<int64_t>(u.l2_bytes) * 50 / 100;
-        for (const int M : {1, 32, 128, 129, 1024}) {
-            const nat::native_problem_t s4
-                    = int4_problem(M, 5120, 32768, 32, 128);
-            nat::native_problem_t s8 = problem(
-                    M, 5120, 32768, nat::kNativeLayoutPackNr, 32, false);
-            s8.int8_scheme = nat::native_int8_scheme_t::per_group;
-            const nat::native_plan_t q = nat::heuristic_plan(s4, u, built_in);
-            EXPECT_EQ(q.int8_pass_budget, M <= 128 ? l1 : l2) << M;
-            EXPECT_EQ(nat::heuristic_plan(s8, u, built_in).int8_pass_budget, l2)
-                    << M;
-            EXPECT_EQ(nat::heuristic_plan(s4, u, params("int4_l1_pct=0"))
-                              .int8_pass_budget,
-                    l2)
+        const int64_t half = static_cast<int64_t>(u.l1d_bytes) * 50 / 100;
+        const int64_t stream = static_cast<int64_t>(u.l1d_bytes) * 125 / 100;
+        for (const int M : {7, 32, 64, 73})
+            EXPECT_EQ(budget(u, 0, M, 4096, 14336, 32), half) << M;
+        for (const int M : {74, 96, 128})
+            EXPECT_EQ(budget(u, 0, M, 4096, 14336, 32), stream) << M;
+        for (const int M : {7, 128}) {
+            EXPECT_EQ(budget(u, 0, M, 4096, 4096, 32), half) << M;
+            EXPECT_EQ(budget(u, 0, M, 28672, 4096, 64), half) << M;
+            EXPECT_EQ(budget(u, 64, M, 28672, 4096, 64), half) << M;
+            EXPECT_EQ(budget(u, 32, M, 28672, 4096, 64), stream) << M;
+            EXPECT_EQ(budget(u, 16, M, 4096, 4096, 32), half) << M;
+            EXPECT_EQ(budget(u, 16, M, 4096, 14336, 32), stream) << M;
+            EXPECT_EQ(
+                    budget(u, 32, M, 4096, 14336, 32), M <= 73 ? half : stream)
                     << M;
         }
     }

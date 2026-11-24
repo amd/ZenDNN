@@ -48,11 +48,13 @@ run time, gradient-boosted trees when present, numpy models otherwise).
    `tune.py schema --schema schema.json --compare fixtures/schema_dump.json`
    lists the differences. The heuristic reads `l1d_bytes` (the L1 passes),
    `l2_bytes`, `l3_bytes` (the L3 of one domain; 0 on a machine that reports
-   no L3, where no L3 rule applies) and the L3 domain (`l3_domain_cores`,
-   the physical cores of one L3, or `family_l3_cores` when that is 0): when
-   the dump has no `uarch` block, they come from its `hw` block (the cache
-   sizes, and the domain from `l3_domain_threads` and `smt`), or give them
-   with `--uarch l3_domain_cores=8,...`. The dump's `hw_match` holds the machine's
+   no L3, where no L3 rule applies), the L3 domain (`l3_domain_cores`,
+   the physical cores of one L3, or `family_l3_cores` when that is 0) and
+   `physical_cores` (the L2 caches a team's threads can use; 0 counts one a
+   thread): when the dump has no `uarch` block, they come from its `hw` block
+   (the cache sizes, the domain from `l3_domain_threads` and `smt`, and
+   `physical_cores`), or give them with `--uarch l3_domain_cores=8,...`. The
+   dump's `hw_match` holds the machine's
    value of every version 2 hardware key; a dump from a build without it
    gives no CPU vendor, family or model (see step 8). The cost model also
    reads the library's machine model: `uarch.dot`, per compute path (each
@@ -75,15 +77,19 @@ run time, gradient-boosted trees when present, numpy models otherwise).
    memory traffic, BF16 rows per call for aliasing source rows, BF16 tiles of
    several slabs at narrow N, the blocks schedule where one L3 domain's share
    of the source fits its L3, the batches of an s4 tile's groups in L1 at
-   decode, F16_PH tiles of two blocks from `f16_wide_min_m` rows), then the
-   cost model's choice (`cost_model`, its margin `cm_gain_pct` and its inputs
-   `cm_*`, the hardware ones derived from the L3 domain unless set).
+   decode: half of L1 where the weight fits the L2 of the plan's threads,
+   one L2 a physical core, and the source rows of its row block fit one L2,
+   else 125 percent of it, F16_PH tiles of two blocks from `f16_wide_min_m`
+   rows), then the cost model's choice (`cost_model`, its margin
+   `cm_gain_pct` and its inputs `cm_*`, the hardware ones derived from the L3
+   domain unless set).
    Each rule's switch defaults to 1 (on), and setting it to 0 leaves the rule
    out. A key whose auto value is a legal setting (`row_unit` 12,
-   `cm_tall_pct` -1, `cm_mem_cycles` 0, `cm_stream_cycles` -1, `cm_fma_pipes` 0) set to it is the
-   same as left unset, so a candidate never sets it so. The tuner's built-in
-   plan has every key at the default of the schema it is given; a rule whose
-   switch the schema lacks (an older build) is off.
+   `int4_l1_pct` -1, `cm_tall_pct` -1, `cm_mem_cycles` 0, `cm_stream_cycles`
+   -1, `cm_fma_pipes` 0) set to it is the same as left unset, so a candidate
+   never sets it so. The tuner's built-in plan has every key at the default
+   of the schema it is given; a rule whose switch the schema lacks (an older
+   build) is off.
    A key of the schema that `plan.py` does not read (a newer build's) is not
    searched, and a candidate that sets it is dropped: the tuner cannot vouch
    for its plans.

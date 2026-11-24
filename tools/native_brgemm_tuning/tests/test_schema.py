@@ -404,7 +404,10 @@ class TestLoading(unittest.TestCase):
         hw = dict(SCHEMA.doc["hw"], l3_domain_threads=64, smt=2)
         u = S.Uarch.from_hw(S.Hardware(hw))
         self.assertEqual((u.l3_domain_cores, u.plan_domain), (32, 32))
+        self.assertEqual(u.physical_cores, S.Hardware(hw).physical_cores)
         self.assertTrue(u.complete)
+        self.assertEqual(S.Uarch.from_dict({"physical_cores": 32}).physical_cores, 32)
+        self.assertEqual(S.Uarch.from_dict({}).physical_cores, 0)  # an older dump: one L2 a thread
         no_topology = S.Uarch.from_hw(S.Hardware(dict(hw, l3_domain_threads=0)))
         self.assertEqual(no_topology.l3_domain_cores, 0)
         self.assertIsNone(no_topology.plan_domain)  # neither field: the heuristic cannot run

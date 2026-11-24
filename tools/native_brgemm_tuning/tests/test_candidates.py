@@ -120,6 +120,20 @@ class TestSpace(unittest.TestCase):
         self.assertEqual(sp.keys, ["int4_l1_pct", "int8_mr"])
         self.assertIn("int8_kc", C.Space(Problem("s8", 16, 4096, 4096), SCHEMA, UARCH, ["int8_kc"]).keys)
 
+    def test_int4_l1_pct_search_reaches_both_shares_of_the_rule(self):
+        # An s4 decode plan takes half of L1 (8 MiB over 32 threads' L2, 32 rows of source) or 125 percent
+        # (the source rows of M 128 at K 14336 exceed L2; 56 MiB exceeds the threads' L2): the search tries
+        # the share the built-in plan does not take, and the L2 share.
+        half, wide = UARCH.l1d_bytes * 50 // 100, UARCH.l1d_bytes * 125 // 100
+        for n, k, m, builtin in ((4096, 4096, 32, half), (4096, 14336, 128, wide), (28672, 4096, 32, wide)):
+            p = Problem("s4", m, n, k, threads=32, group=128, scale_bytes=2)
+            sp = C.Space(p, SCHEMA, UARCH, keys=["int4_l1_pct"])
+            self.assertEqual(sp.default.plan.int8_pass_budget, builtin, p)
+            budgets = {c.plan.int8_pass_budget for c in C.unique(sp.iter_grid(1), sp)}
+            self.assertNotIn(builtin, budgets, p)
+            self.assertIn(half if builtin == wide else wide, budgets, p)
+            self.assertIn(UARCH.l2_bytes * 50 // 100, budgets, p)
+
     def test_canonical_drops_built_in_values_and_other_dtypes(self):
         sp = C.Space(Problem("bf16", 64, 4096, 4096), SCHEMA, UARCH)
         c = sp.make({"tile_rows": 6, "nr": 16, "int8_mr": 4, "schedule": "auto"})

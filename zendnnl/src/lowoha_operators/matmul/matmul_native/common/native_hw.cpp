@@ -273,6 +273,7 @@ UarchParams native_plan_uarch(const native_hw_t &hw) {
         const int cores = hw.l3_domain_threads / (hw.smt > 0 ? hw.smt : 1);
         u.l3_domain_cores = cores > 0 ? cores : 1;
     }
+    u.physical_cores = hw.physical_cores > 0 ? hw.physical_cores : 0;
     return u;
 }
 

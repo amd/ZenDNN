@@ -762,7 +762,8 @@ struct case_t {
     bool direct = false;
     /// The full tiles of the call over its plain pack take their groups in
     /// more than one batch, and with odd_batches the batches past the first
-    /// start on the high nibbles of a K octet.
+    /// start on the high nibbles of a K octet; G is then the fewest groups,
+    /// which batched raises to a count the plan takes so.
     bool batches = false, odd_batches = false;
     /// The full tiles of the call over its plain pack take its one group in
     /// more than one K pass.
@@ -1170,10 +1171,11 @@ nat::native_problem_t problem_of(const nt::call_t &c) {
             nat::decide_int8_call(desc, c.params, c.bias));
 }
 
-/// The process planner's plan of the call.
-nat::native_plan_t process_plan(const case_t &c, const operands_t &o) {
+/// The plan of the call by planner, the process planner by default.
+nat::native_plan_t process_plan(const case_t &c, const operands_t &o,
+        const nat::native_planner_t &planner = nat::native_planner()) {
     const buffer_t scale = copy_of(o.src_scale);
-    return nat::native_planner().plan(
+    return planner.plan(
             problem_of(make_call(c, o, o.wei.get(), nullptr, scale)));
 }
 
@@ -1227,6 +1229,22 @@ nat::native_plan_t process_plan(const case_t &c, const operands_t &o) {
         col += width;
     }
     return ::testing::AssertionSuccess();
+}
+
+/// The batch case c with groups that its plan by planner takes as
+/// tiles_take_batches asks: G, or the fewest more in steps of 2 (which keep
+/// in_place), up to 16 times G.  The plan's budget follows the machine's
+/// caches and K, so each count is checked under its own plan.
+case_t batched(case_t c, const nat::native_planner_t &planner) {
+    if (!c.batches) return c;
+    const int most = 16 * c.G;
+    nat::native_plan_t plan = process_plan(c, make_operands(c), planner);
+    while (!tiles_take_batches(c, plan, c.odd_batches) && c.G < most) {
+        while (!tiles_take_batches(c, plan, c.odd_batches) && c.G < most)
+            c.G += 2;
+        plan = process_plan(c, make_operands(c), planner);
+    }
+    return c;
 }
 
 /// The call on the native BRGEMM into a copy of the initial dst, calls times
@@ -1313,7 +1331,7 @@ protected:
 };
 
 TEST_P(NativeBrgemmInt4Calls, MatchTheirOrder) {
-    const case_t &c = GetParam();
+    const case_t c = batched(GetParam(), nat::native_planner());
     const operands_t o = make_operands(c);
     if (c.batches) {
         EXPECT_TRUE(tiles_take_batches(c, process_plan(c, o), c.odd_batches));
@@ -1729,14 +1747,15 @@ std::vector<case_t> call_cases() {
     // within twice the pass budget, in one batch.  Scales read in place past
     // twice the budget, in batches of whole octets (groups of 2 K quads) and
     // of an odd number of quads (groups of 3, at weight cache 2 over the
-    // image).  Scales gathered 32 groups at a time over 100 groups: the last
-    // 8 columns of N 40; and the same groups over the paired tiles of a gated
-    // call, which read them in place.
+    // image), at the groups the plan's budget takes so (batched).  Scales
+    // gathered 32 groups at a time over 100 groups: the last 8 columns of N
+    // 40; and the same groups over the paired tiles of a gated call, which
+    // read them in place.
     for (gran_t gran : {gran_t::token, gran_t::group}) {
         case_t c;
         c.gran = gran;
         c.gs = 8;
-        c.G = 600;
+        c.G = 180;
         c.M = 24;
         c.N = 64;
         add(c);
@@ -1744,7 +1763,7 @@ std::vector<case_t> call_cases() {
         c.batches = true;
         add(c);
         c.gs = 12;
-        c.G = 500;
+        c.G = 484;
         c.wc = 2;
         c.odd_batches = true;
         add(c);
@@ -1853,7 +1872,8 @@ TEST(NativeBrgemmInt4Wide, TilesMatchTheirOrder) {
             mm::clear_matmul_weight_caches();
             WeightCacheGuard global_cache(2);
             int bad = 0, taken = 0;
-            for (const case_t &c : cases) {
+            for (const case_t &listed : cases) {
+                const case_t c = batched(listed, nat::native_planner());
                 if (nat::native_padded_n(c.N, nat::kNativeLayoutPackNr) % pin.nr
                         != 0)
                     continue;
@@ -1892,8 +1912,8 @@ TEST(NativeBrgemmInt4Wide, TilesMatchTheirOrder) {
 // The calls of a tile of 64 columns take each batch of groups, or K pass of
 // one group, in turn, so it spans all their columns: on a machine of 1 MiB
 // of L2, M 40 in one block of several row calls, the slab of one call of 32
-// or 16 columns fits the budget (twice the budget for groups), that of the
-// tile does not.
+// or 16 columns fits the budget (twice the budget for groups, at
+// int4_l1_pct=125), that of the tile does not.
 TEST(NativeBrgemmInt4Wide, TilesCutOverTheirCalls) {
     if (!vnni()) GTEST_SKIP() << "no AVX-512 VNNI";
     nat::UarchParams u;
@@ -1935,12 +1955,14 @@ TEST(NativeBrgemmInt4Wide, TilesCutOverTheirCalls) {
     case_t one = groups;
     one.gs = 16384;
     one.G = 1;
-    for (const char *cfg : {"nr=64,mb=40", "nr=64,mb=40,int8_cw=16"}) {
+    for (const char *cfg : {"nr=64,mb=40,int4_l1_pct=125",
+                 "nr=64,mb=40,int8_cw=16,int4_l1_pct=125"}) {
         EXPECT_TRUE(tiles_take_batches(groups, plan_of(groups, cfg), false))
                 << cfg;
         EXPECT_TRUE(tiles_take_passes(one, plan_of(one, cfg))) << cfg;
     }
-    for (const char *cfg : {"nr=32,mb=40", "nr=32,mb=40,int8_cw=16"}) {
+    for (const char *cfg : {"nr=32,mb=40,int4_l1_pct=125",
+                 "nr=32,mb=40,int8_cw=16,int4_l1_pct=125"}) {
         EXPECT_FALSE(tiles_take_batches(groups, plan_of(groups, cfg), false))
                 << cfg;
         EXPECT_FALSE(tiles_take_passes(one, plan_of(one, cfg))) << cfg;

@@ -384,7 +384,7 @@ TEST(NativeTuningPlan, DefaultParamsAreTheBuiltInConstants) {
     EXPECT_EQ(hp.int8_cw_mask, nat::kNativeInt8CwAll);
     EXPECT_EQ(hp.int8_l2_pct, 50);
     EXPECT_EQ(hp.int8_kc, 0);
-    EXPECT_EQ(hp.int4_l1_pct, 125);
+    EXPECT_EQ(hp.int4_l1_pct, -1);
     EXPECT_TRUE(hp.direct_store);
     EXPECT_TRUE(hp.bias_in_dequant);
     EXPECT_EQ(hp.copy_block, 64);
@@ -719,6 +719,7 @@ TEST(NativeTuningPlanDomain, CoresPerL3FromTheTopology) {
                 = topology(c.l3_threads, c.smt, 128, c.family_l3_cores);
         const nat::UarchParams u = nat::native_plan_uarch(hw);
         EXPECT_EQ(u.l3_domain_cores, c.cores);
+        EXPECT_EQ(u.physical_cores, c.smt > 0 ? 512 / c.smt : 0);
         EXPECT_EQ(u.family_l3_cores, c.family_l3_cores);
         EXPECT_EQ(u.l1d_bytes, hw.uarch.l1d_bytes);
         EXPECT_EQ(u.l2_bytes, hw.uarch.l2_bytes);
@@ -734,8 +735,10 @@ TEST(NativeTuningPlanDomain, CoresPerL3FromTheTopology) {
     const nat::UarchParams &host = nat::detect_uarch();
     const nat::UarchParams &plan = nat::native_plan_uarch();
     EXPECT_EQ(host.l3_domain_cores, 0);
+    EXPECT_EQ(host.physical_cores, 0);
     EXPECT_EQ(plan.l3_domain_cores,
             nat::native_plan_uarch(nat::native_hw()).l3_domain_cores);
+    EXPECT_EQ(plan.physical_cores, nat::native_hw().physical_cores);
     EXPECT_EQ(plan.family_l3_cores, host.family_l3_cores);
     EXPECT_EQ(plan.l2_bytes, host.l2_bytes);
     EXPECT_EQ(plan.l3_domain_bytes, host.l3_domain_bytes);

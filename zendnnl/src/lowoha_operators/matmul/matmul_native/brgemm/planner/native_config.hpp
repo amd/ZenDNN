@@ -100,10 +100,12 @@ struct heuristic_params_t {
     /// Percent of L1 one batch of an s4 tile's groups (its B slab and one
     /// call's source rows) takes in a plan of at most decode_m rows, where
     /// the tile's later row calls read each batch again; 0: batches of the
-    /// int8_l2_pct share of L2.  One group over K takes K passes of that
-    /// share without the cost model; with it, of the int8_l2_pct share of
-    /// L2 (one pass where the group's slab fits it).
-    int int4_l1_pct = 125;
+    /// int8_l2_pct share of L2; -1: 50 where the weight fits the L2 of the
+    /// plan's threads (one L2 a physical core) and the source rows of its
+    /// row block fit one L2, else 125.  One group over K takes K passes of
+    /// that share without the cost model; with it, of the int8_l2_pct share
+    /// of L2 (one pass where the group's slab fits it).
+    int int4_l1_pct = -1;
     bool direct_store = true;
     bool bias_in_dequant = true;
     // Source preparation.

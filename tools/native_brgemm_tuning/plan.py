@@ -51,7 +51,7 @@ BUILTIN_PARAMS: Dict[str, Any] = {
     "min_tiles_per_thread": 1, "row_unit": 12, "tile_rows": 6, "tall_rows": 12,
     "block_rows": 192, "min_tile_cols": 16, "row_split": True, "min_pass_k": 256,
     "bf16_l2_pct": 50, "kc_split": "budget", "l3_pct": 100, "domain_threads": 0,
-    "int8_mr": 12, "int8_cw": [32, 16], "int8_l2_pct": 50, "int8_kc": 0, "int4_l1_pct": 125,
+    "int8_mr": 12, "int8_cw": [32, 16], "int8_l2_pct": 50, "int8_kc": 0, "int4_l1_pct": -1,
     "direct_store": True, "bias_in_dequant": True, "copy_block": 64,
     "bf16_copy_par_min": 0, "int8_copy_par_min": 65536,
     "makespan": 1, "min_gain_pct": 5, "idle_pct": 10, "decode_m": 128,
@@ -67,7 +67,8 @@ BUILTIN_PARAMS: Dict[str, Any] = {
 }
 AUTO_PINS = ("nr", "mr", "mb", "nb", "kc", "col_groups", "unit_tiles", "threads_cap", "domain_threads", "int8_kc")
 # Keys whose built-in value a rule or the hardware decides (an auto value in the schema).
-AUTO_KEYS = AUTO_PINS + ("row_unit", "cm_fma_pipes", "cm_tall_pct", "cm_mem_cycles", "cm_stream_cycles")
+AUTO_KEYS = AUTO_PINS + ("row_unit", "int4_l1_pct", "cm_fma_pipes", "cm_tall_pct", "cm_mem_cycles",
+                         "cm_stream_cycles")
 RULE_SWITCHES = ("makespan", "l1_pass", "traffic_groups", "bf16_alias", "bf16_narrow_n", "blocks", "cost_model")
 # Keys whose rule a build without them does not have: their value that leaves it out.
 RULE_OFF_VALUES = {"int4_l1_pct": 0, "cm_int4_min_m": 0, "f16_wide_min_m": (1 << 31) - 1, "cm_block_k": 0}
@@ -88,6 +89,13 @@ ALIAS_BYTES = 4096
 MAX_SPLITS = 6
 # Row blocks the cost model weighs for a single s4 row block: 2 to this.
 INT4_ROW_BLOCKS = 4
+# int4_l1_pct of the built-in rule where the weight fits the L2 of the plan's threads and the source rows of its
+# row block fit one L2 (the group span keeps whole a slab of up to twice the budget: at half of L1 only a slab that
+# fits L1 runs whole), and otherwise: a thread whose share of the weight exceeds its L2 is paced by the weight
+# stream, and source rows over L2 are read again from L3 by each of a thread's column tiles, in runs of one batch's
+# K; a slab of up to 2.5 L1 runs whole from L2.
+INT4_FIT_L1_PCT = 50
+INT4_STREAM_L1_PCT = 125
 INT64_MAX = (1 << 63) - 1
 
 
@@ -432,6 +440,25 @@ def traffic_col_groups(q: Plan, m: int, n: int, k: int, elem: int, wei_elem: flo
     return g if rg_a + b * de / g < slice_bytes else 0
 
 
+def plan_l2_caches(q: Plan, uarch: Any) -> int:
+    """plan_l2_caches: the L2 caches the threads of the plan q use, one a thread, at most one a physical core."""
+    cores = uarch.physical_cores
+    return min(q.threads, cores) if cores > 0 else q.threads
+
+
+def int4_batch_l1_pct(q: Plan, n: int, k: int, src_elem: int, wei_elem: float, uarch: Any,
+                      hp: Dict[str, Any]) -> int:
+    """int4_batch_l1_pct: the share of L1 the batches of the s4 plan q's groups take in a plan of at most
+    decode_m rows: int4_l1_pct, or at -1 INT4_FIT_L1_PCT where the weight of n x k elements of wei_elem bytes fits
+    the L2 caches of q's threads (plan_l2_caches) and the source rows of its row block (q.mb rows of k elements of
+    src_elem bytes) fit one L2, else INT4_STREAM_L1_PCT."""
+    if hp["int4_l1_pct"] >= 0:
+        return hp["int4_l1_pct"]
+    weight = int(float(n) * k * wei_elem)
+    fits = weight <= uarch.l2_bytes * plan_l2_caches(q, uarch) and q.mb * k * src_elem <= uarch.l2_bytes
+    return INT4_FIT_L1_PCT if fits else INT4_STREAM_L1_PCT
+
+
 def rules_plan(p: Problem, uarch: Any, hp: Dict[str, Any], schema: Any) -> Plan:
     """rules_plan(p, uarch, params): the plan of the rules."""
     if uarch.plan_domain is None:
@@ -572,9 +599,11 @@ def rules_plan(p: Problem, uarch: Any, hp: Dict[str, Any], schema: Any) -> Plan:
     q.int8_cw_mask = cw_mask(hp["int8_cw"])
     q.int8_pass_budget = uarch.l2_bytes * hp["int8_l2_pct"] // 100
     # The later row calls of an s4 tile read each batch of its groups again: in a
-    # plan of at most decode_m rows, batches of the int4_l1_pct share of L1.
-    if int4 and hp["int4_l1_pct"] > 0 and m <= hp["decode_m"]:
-        q.int8_pass_budget = min(q.int8_pass_budget, uarch.l1d_bytes * hp["int4_l1_pct"] // 100)
+    # plan of at most decode_m rows, batches of the int4_l1_pct share of L1
+    # (int4_batch_l1_pct).
+    l1_pct = int4_batch_l1_pct(q, n, k, esz, wei_esz, uarch, hp) if int4 and m <= hp["decode_m"] else 0
+    if l1_pct > 0:
+        q.int8_pass_budget = min(q.int8_pass_budget, uarch.l1d_bytes * l1_pct // 100)
     q.int8_pass_quads = min(hp["int8_kc"] // 4, ceil_div(k, 4)) if hp["int8_kc"] > 0 else 0
     # The INT8 form of the L1 pass, at the tile's pass width and rows per call;
     # equal passes in whole quads.  Only the per-channel tile reads it.

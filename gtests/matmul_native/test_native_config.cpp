@@ -303,7 +303,7 @@ const key_doc_t kKeyDocs[] = {
                 &field_value<int, &hp_t::int8_l2_pct>},
         {"int8_kc", kInt8Families, true, true, "auto",
                 &field_value<int, &hp_t::int8_kc>},
-        {"int4_l1_pct", kInt8Families, true, false, "125",
+        {"int4_l1_pct", kInt8Families, true, false, "thread_l2",
                 &field_value<int, &hp_t::int4_l1_pct>},
         {"direct_store", kInt8Families, true, false, "1",
                 &field_value<bool, &hp_t::direct_store>},
@@ -477,13 +477,15 @@ TEST(NativeConfigText, KeyDocsMatchTheKeyTable) {
                 || k.type == native_key_type_t::int64;
         if (integer && !native_text_int64(d.builtin, text_value)) {
             // -1: col_groups by the schedule, cm_tall_pct by the L3 domain,
-            // cm_stream_cycles by the machine model (0 is a rate); row_unit
-            // 12: the rules' unit, which the cost model's row groups of short
-            // calls replace by cm_short_rows.
+            // cm_stream_cycles by the machine model (0 is a rate), int4_l1_pct
+            // by the L2 of the plan's threads; row_unit 12: the rules' unit,
+            // which the cost model's row groups of short calls replace by
+            // cm_short_rows.
             const std::string name = k.name;
             const int64_t auto_value = name == "row_unit" ? 12
                     : name == "col_groups" || name == "cm_tall_pct"
                             || name == "cm_stream_cycles"
+                            || name == "int4_l1_pct"
                     ? -1
                     : 0;
             EXPECT_EQ(v, auto_value) << k.name;
@@ -2635,7 +2637,8 @@ nlohmann::ordered_json schema_json() {
     doc["uarch"] = {{"l1d_bytes", u.l1d_bytes}, {"l2_bytes", u.l2_bytes},
             {"l3_bytes", u.l3_domain_bytes}, {"num_cores", u.num_cores},
             {"family_l3_cores", u.family_l3_cores},
-            {"l3_domain_cores", u.l3_domain_cores}, {"fma_ports", u.fma_ports},
+            {"l3_domain_cores", u.l3_domain_cores},
+            {"physical_cores", u.physical_cores}, {"fma_ports", u.fma_ports},
             {"avx512f", u.avx512f}, {"avx512bf16", u.avx512bf16},
             {"avx512vnni", u.avx512vnni}, {"avx512fp16", u.avx512fp16},
             {"dot", dot},
@@ -2840,6 +2843,7 @@ TEST(NativeConfigSchema, SchemaDump) {
             detect_uarch().family_l3_cores);
     EXPECT_EQ(doc.at("uarch").at("l3_domain_cores"),
             native_plan_uarch().l3_domain_cores);
+    EXPECT_EQ(doc.at("uarch").at("physical_cores"), hw.physical_cores);
     size_t count = 0;
     const native_config_key_t *keys = native_config_keys(count);
     const json &k = doc.at("keys");
@@ -2909,11 +2913,15 @@ TEST(NativeConfigSchema, SchemaDump) {
                  {"cm_group_rows_pct", 115}, {"cm_drift_kib", 4096},
                  {"cm_pass_kib", 128}, {"cm_pass_calls", 4},
                  {"cm_block_kib", 16384}, {"cm_block_k", 2048},
-                 {"cm_int8_l1_pct", 0}, {"cm_int4_min_m", 48},
-                 {"int4_l1_pct", 125}}) {
+                 {"cm_int8_l1_pct", 0}, {"cm_int4_min_m", 48}}) {
         EXPECT_EQ(key(name).value("default", json()), value) << name;
         EXPECT_EQ(key(name).value("bits", json()), "same") << name;
     }
+    // The s4 group batches' share of L1 follows the L2 of the plan's threads.
+    EXPECT_EQ(key("int4_l1_pct").value("default", json()), "thread_l2");
+    EXPECT_EQ(key("int4_l1_pct").value("auto", json()), -1);
+    EXPECT_EQ(key("int4_l1_pct").value("min", json()), -1);
+    EXPECT_EQ(key("int4_l1_pct").value("bits", json()), "same");
     // The cost model's inputs and its row-group bounds apply to BF16 and
     // per-channel INT8 plans, its stream rules to BF16 and its INT8 rule to
     // INT8; the dot products a cycle default to the machine model's

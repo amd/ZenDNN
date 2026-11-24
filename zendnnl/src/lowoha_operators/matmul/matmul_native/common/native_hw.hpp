@@ -28,13 +28,13 @@ namespace matmul {
 namespace native {
 
 /// Hardware facts of the process.  The built-in heuristic reads
-/// native_plan_uarch(*this): uarch and the physical cores of one L3 domain
-/// (l3_domain_threads / smt).  The other topology fields feed only
-/// tuning-file matching and rule features, the CPU identity only tuning-file
-/// matching.  A count that could not be detected is 0; an identity field,
-/// empty or -1.  A cache size CPUID does not report holds detect_uarch()'s
-/// default, which tuning-file matching treats as not reported.  base_isa
-/// feeds only the ISA checks of the layout rule and of
+/// native_plan_uarch(*this): uarch, the physical cores of one L3 domain
+/// (l3_domain_threads / smt) and physical_cores.  The other topology fields
+/// feed only tuning-file matching and rule features, the CPU identity only
+/// tuning-file matching.  A count that could not be detected is 0; an
+/// identity field, empty or -1.  A cache size CPUID does not report holds
+/// detect_uarch()'s default, which tuning-file matching treats as not
+/// reported.  base_isa feeds only the ISA checks of the layout rule and of
 /// native_brgemm_execute.
 struct native_hw_t {
     UarchParams uarch; ///< detect_uarch()
@@ -57,7 +57,8 @@ const native_hw_t &native_hw();
 /// What the native BRGEMM plan reads on hw: hw.uarch with l3_domain_cores =
 /// l3_domain_threads / smt (smt 1 when unknown; at least 1), or 0 when
 /// l3_domain_threads is unknown, where the plan uses family_l3_cores
-/// instead; and l3_domain_bytes 0 when CPUID reports no L3, where the plan
+/// instead; physical_cores = hw.physical_cores (0 when unknown); and
+/// l3_domain_bytes 0 when CPUID reports no L3, where the plan
 /// has no L3.
 UarchParams native_plan_uarch(const native_hw_t &hw);
 

@@ -107,6 +107,10 @@ struct UarchParams {
     /// alone (cm_stream_cycles).
     int mem_cycles;
     int stream_cycles;
+    /// Physical cores, each with one L2 that its SMT siblings share; 0 when
+    /// unknown.  detect_uarch() leaves it 0: only the native BRGEMM plan
+    /// reads it (native_plan_uarch).
+    int physical_cores;
 
     UarchParams()
         : l1d_bytes(32768)
@@ -127,7 +131,8 @@ struct UarchParams {
         , dot {{2.0, 6}, {2.0, 6}, {2.0, 6}, {2.0, 6}, {2.0, 6}, {2.0, 6}}
         , dot_source(native_dot_source_t::class_default)
         , mem_cycles(0)
-        , stream_cycles(0) {}
+        , stream_cycles(0)
+        , physical_cores(0) {}
 };
 
 /// Whether the cost model prices kernels at u.dot's dot products a cycle: a
