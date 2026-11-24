@@ -39,6 +39,12 @@ using zendnnl::common::data_type_t;
 inline constexpr int kMaxSafeInt8AccumK
         = std::numeric_limits<int32_t>::max() / (255 * 128);
 
+/// Independent accumulator sets of the INT8 and INT4 kernels of mr rows and
+/// nv vectors, over which they split K: mr * nv * sets chains in flight.
+constexpr int native_int8_kernel_sets(int mr, int nv) {
+    return mr * nv <= 2 ? 4 : (mr * nv <= 4 ? 2 : 1);
+}
+
 /// One MR x NR tile (NR = 16 * nv) over a native-layout INT8 block.
 struct native_int8_ukernel_args_t {
     /// MR rows, k_quads * 4 readable bytes each.

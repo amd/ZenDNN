@@ -16,11 +16,15 @@
 
 #include "lowoha_operators/matmul/matmul_native/common/native_hw.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <string>
 #include <vector>
+#include <string_view>
 
 #include "common/zendnnl_cpuid_compat.hpp"
 
@@ -126,15 +130,10 @@ void cpuid_identity(native_hw_t &hw) {
     }
     hw.vendor = vendor;
     if (max_leaf < 1) return;
-    zendnnl_cpuid(1u, eax, ebx, ecx, edx);
-    const int family = static_cast<int>((eax >> 8) & 0xFu);
-    const int model = static_cast<int>((eax >> 4) & 0xFu);
-    hw.stepping = static_cast<int>(eax & 0xFu);
-    hw.family = family == 0xF ? family + static_cast<int>((eax >> 20) & 0xFFu)
-                              : family;
-    hw.model = family == 0x6 || family == 0xF
-            ? model + static_cast<int>(((eax >> 16) & 0xFu) << 4)
-            : model;
+    const native_cpuid_identity_t id = native_cpuid_identity();
+    hw.family = id.family;
+    hw.model = id.model;
+    hw.stepping = id.stepping;
 }
 
 #if defined(_WIN32)
@@ -277,9 +276,103 @@ UarchParams native_plan_uarch(const native_hw_t &hw) {
     return u;
 }
 
+namespace {
+
+std::string_view trim(std::string_view s) {
+    while (!s.empty() && (s.front() == ' ' || s.front() == '\t'))
+        s.remove_prefix(1);
+    while (!s.empty() && (s.back() == ' ' || s.back() == '\t'))
+        s.remove_suffix(1);
+    return s;
+}
+
+/// One item of a ZENDNNL_MATMUL_NATIVE_UARCH value applied to out; false
+/// for a bad item.  A value is a finite decimal number without spaces, as
+/// the tuner's --uarch reads it (schema.Uarch.with_overrides).
+bool apply_uarch_item(UarchParams &out, std::string_view item) {
+    const size_t eq = item.find('=');
+    const size_t us = item.rfind('_', eq);
+    if (eq == std::string_view::npos || us == std::string_view::npos)
+        return false;
+    const std::string_view key = item.substr(0, eq);
+    int path = -1;
+    for (int i = 0; i < kNativeDotPaths; ++i)
+        if (item.substr(0, us) == kNativeDotPathNames[i]) path = i;
+    const std::string_view field = item.substr(us + 1, eq - us - 1);
+    const std::string_view value = item.substr(eq + 1);
+    char text[32];
+    if (value.empty() || value.size() >= sizeof(text)
+            || value.find_first_not_of("0123456789.eE+-")
+                    != std::string_view::npos)
+        return false;
+    value.copy(text, value.size());
+    text[value.size()] = '\0';
+    char *end = nullptr;
+    const double v = std::strtod(text, &end);
+    if (end != text + value.size() || !std::isfinite(v)) return false;
+    const bool whole = v == std::floor(v);
+    if ((key == "mem_cycles" || key == "stream_cycles") && whole && v >= 1
+            && v <= (1 << 20))
+        (key == "mem_cycles" ? out.mem_cycles : out.stream_cycles)
+                = static_cast<int>(v);
+    else if (path >= 0 && field == "ipc" && v > 0 && v <= 64)
+        out.dot[path].ipc = v;
+    else if (path >= 0 && field == "lat" && whole && v >= 1 && v <= 64)
+        out.dot[path].latency = static_cast<int>(v);
+    else
+        return false;
+    out.dot_source = native_dot_source_t::set;
+    return true;
+}
+
+/// Why the process's ZENDNNL_MATMUL_NATIVE_UARCH was ignored.
+std::string &uarch_refusal() {
+    static std::string why;
+    return why;
+}
+
+} // namespace
+
+bool apply_native_uarch(
+        UarchParams &u, std::string_view text, std::string &why) {
+    UarchParams out = u;
+    for (size_t at = 0; at <= text.size();) {
+        size_t end = text.find(',', at);
+        if (end == std::string_view::npos) end = text.size();
+        const std::string_view item = trim(text.substr(at, end - at));
+        at = end + 1;
+        if (!apply_uarch_item(out, item)) {
+            char text[192];
+            std::snprintf(text, sizeof(text),
+                    "bad item '%.*s' (<path>_ipc=(0..64], <path>_lat=1..64, "
+                    "mem_cycles=1..2^20 or stream_cycles=1..2^20)",
+                    static_cast<int>(std::min<size_t>(item.size(), 64)),
+                    item.data());
+            why = text;
+            return false;
+        }
+    }
+    out.fma_ports = std::max(1,
+            static_cast<int>(std::lround(
+                    out.dot[static_cast<int>(native_dot_path_t::bf16)].ipc)));
+    u = out;
+    return true;
+}
+
 const UarchParams &native_plan_uarch() {
-    static const UarchParams u = native_plan_uarch(native_hw());
+    static const UarchParams u = [] {
+        UarchParams p = native_plan_uarch(native_hw());
+        const char *text = std::getenv("ZENDNNL_MATMUL_NATIVE_UARCH");
+        if (text != nullptr && *text != '\0')
+            apply_native_uarch(p, text, uarch_refusal());
+        return p;
+    }();
     return u;
+}
+
+const std::string &native_uarch_refusal() {
+    native_plan_uarch();
+    return uarch_refusal();
 }
 
 } // namespace native

@@ -35,9 +35,10 @@ formats, families and match-key names: this build's tables.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 BEGIN_MARK = "BEGIN NATIVE TUNING SCHEMA"
 END_MARK = "END NATIVE TUNING SCHEMA"
@@ -75,7 +76,11 @@ FLOAT_DTYPES = tuple(n for n, f in _FORMATS.items() if not f["quantized"])
 # The kinds of the routes of each.
 INT8_KINDS = tuple(dict.fromkeys(r["family"] for n in INT8_DTYPES for r in _FORMATS[n]["routes"]))
 FLOAT_KINDS = tuple(dict.fromkeys(r["family"] for n in FLOAT_DTYPES for r in _FORMATS[n]["routes"]))
-ISA_ORDER = ("avx512f", "avx512bf16", "avx512vnni")
+ISA_ORDER = ("avx512f", "avx512bf16", "avx512vnni", "avx512fp16")
+# The compute paths of the native kernels (native_dot_path_t), the dot product of a family's inner
+# loop, and each family's path in the fixture (for a dump of a build that names none).
+DOT_PATHS = ("fp32", "bf16", "int8", "int4", "fp16", "f16_widen")
+FIXTURE_PATHS = {f["name"]: f.get("path") for f in fixture_tables()["families"]}
 # Version 2 hardware keys, in the order the loader checks them.
 HW_KEYS = ("vendor", "family", "model", "stepping", "isa", "l1d_kib", "l2_kib", "l3_kib", "l3_cores", "smt",
            "l3_threads", "cores", "logical_cpus")
@@ -336,6 +341,8 @@ class Family:
         self.slab_cols = int(d["slab_cols"])
         self.operand_bits = int(d["operand_bits"])
         self.vector_cols = int(d["vector_cols"])
+        # The compute path of its inner loop (UarchParams::dot).
+        self.path = str(d.get("path") or FIXTURE_PATHS.get(self.name) or "fp32")
 
 
 class Route:
@@ -429,6 +436,35 @@ class Hardware:
                 or (isinstance(given[k], int) and given[k] > 0)}
 
 
+class Dot(NamedTuple):
+    """One compute path of a core (native_dot_t): dot products a cycle with enough independent
+    accumulators, and the cycles from one into an accumulator to the next that reads it."""
+
+    ipc: float
+    latency: int
+
+    @property
+    def chains(self) -> int:
+        """native_dot_chains: the independent accumulator chains that keep the path at its ipc."""
+        return max(1, int(math.ceil(self.ipc * self.latency - 1e-9)))
+
+
+# UarchParams' class default, the prices of a planner without a model: 2 dot products a cycle
+# and 6 cycles on every path (cm_fma_pipes' and cm_fma_lat's defaults).
+DEFAULT_DOT = {p: Dot(2.0, 6) for p in DOT_PATHS}
+
+# A number of a ZENDNNL_MATMUL_NATIVE_UARCH item: decimal, without spaces (apply_native_uarch).
+_UARCH_NUMBER = re.compile(r"[0-9.eE+-]+")
+
+
+def _uarch_number(v: str) -> float:
+    """v as ZENDNNL_MATMUL_NATIVE_UARCH reads a number; ValueError unless finite."""
+    value = float(v) if _UARCH_NUMBER.fullmatch(v) else math.nan
+    if not math.isfinite(value):
+        raise ValueError(v)
+    return value
+
+
 class Uarch:
     """The UarchParams fields the built-in heuristic and its cost model read."""
 
@@ -436,7 +472,9 @@ class Uarch:
 
     def __init__(self, l1d_bytes: int = 32768, l2_bytes: int = 1048576,
                  l3_bytes: int = 33554432, family_l3_cores: Optional[int] = 1,
-                 num_cores: int = 1, l3_domain_cores: int = 0, fma_ports: int = 2):
+                 num_cores: int = 1, l3_domain_cores: int = 0, fma_ports: int = 2,
+                 dot: Optional[Dict[str, Dot]] = None, dot_source: str = "default",
+                 mem_cycles: int = 0, stream_cycles: int = 0):
         self.l1d_bytes = l1d_bytes
         self.l2_bytes = l2_bytes
         self.l3_bytes = l3_bytes
@@ -445,8 +483,28 @@ class Uarch:
         self.num_cores = num_cores
         # Physical cores of one L3 domain; 0 when unknown (the plan then uses family_l3_cores).
         self.l3_domain_cores = l3_domain_cores
-        # FMA pipes of a core (cm_fma_pipes 0).
+        # dot["bf16"].ipc rounded; the cost model reads dot.
         self.fma_ports = fma_ports
+        # The compute model per path (UarchParams::dot) and where it comes from: default, env, or
+        # fma_ports for a dump of a build without the model (its pipes on every path, the class
+        # default's latencies).
+        self.dot: Dict[str, Dot] = dict(DEFAULT_DOT)
+        self.dot.update(dot or {})
+        self.dot_source = dot_source
+        # The cost model's memory terms in this machine's cycles (UarchParams::mem_cycles,
+        # stream_cycles); 0 where not set.
+        self.mem_cycles = mem_cycles
+        self.stream_cycles = stream_cycles
+
+    @property
+    def priced(self) -> bool:
+        """native_dot_prices: the cost model prices kernels at dot's dot products a cycle for a
+        model ZENDNNL_MATMUL_NATIVE_UARCH sets; otherwise at 2 a cycle on every path.  A build
+        without the model priced with its fma_ports."""
+        return self.dot_source in ("env", "fma_ports")
+
+    def dot_of(self, path: str) -> Dot:
+        return self.dot.get(path, DEFAULT_DOT.get(path, Dot(2.0, 6)))
 
     @property
     def plan_domain(self) -> Optional[int]:
@@ -459,6 +517,16 @@ class Uarch:
         for k in cls.FIELDS:
             if d.get(k) is not None:
                 setattr(u, k, int(d[k]))
+        dot = d.get("dot")
+        if isinstance(dot, dict) and dot:
+            for name, e in dot.items():
+                u.dot[str(name)] = Dot(float(e["ipc"]), int(e["latency"]))
+            u.dot_source = str(d.get("dot_source") or "default")
+            u.mem_cycles = int(d.get("mem_cycles") or 0)
+            u.stream_cycles = int(d.get("stream_cycles") or 0)
+        elif d.get("fma_ports") is not None:
+            u.dot = {p: Dot(float(u.fma_ports), v.latency) for p, v in DEFAULT_DOT.items()}
+            u.dot_source = "fma_ports"
         return u
 
     @classmethod
@@ -469,13 +537,50 @@ class Uarch:
                    family_l3_cores=None, l3_domain_cores=domain)
 
     def with_overrides(self, text: str) -> "Uarch":
-        """A copy with "field=value,..." applied (e.g. "family_l3_cores=8")."""
-        u = Uarch(**{k: getattr(self, k) for k in self.FIELDS})
-        for item in filter(None, (t.strip() for t in text.split(","))):
+        """A copy with "field=value,..." applied (e.g. "family_l3_cores=8"), the machine model's
+        "<path>_ipc=v", "<path>_lat=n", "mem_cycles=n" and "stream_cycles=n" as
+        ZENDNNL_MATMUL_NATIVE_UARCH takes them, and fma_ports, which sets every path's ipc.  As
+        the library, it refuses an empty item, a space inside an item and a number that is not
+        finite or out of its range."""
+        u = Uarch(**{k: getattr(self, k) for k in self.FIELDS}, dot=self.dot, dot_source=self.dot_source,
+                  mem_cycles=self.mem_cycles, stream_cycles=self.stream_cycles)
+        dot_set = False
+        for item in [t.strip(" \t") for t in text.split(",")] if text.strip() else []:
             k, eq, v = item.partition("=")
-            if not eq or k.strip() not in self.FIELDS:
-                raise SchemaError("bad uarch override %r (fields: %s)" % (item, ", ".join(self.FIELDS)))
-            setattr(u, k.strip(), int(v))
+            path, _, field = k.rpartition("_")
+            try:
+                if not item or any(c.isspace() for c in item):
+                    raise ValueError(item)
+                if eq and path in DOT_PATHS and field in ("ipc", "lat"):
+                    d = u.dot_of(path)
+                    value = _uarch_number(v)
+                    if field == "ipc" and not 0 < value <= 64:
+                        raise ValueError(item)
+                    if field == "lat" and not (1 <= value <= 64 and value == int(value)):
+                        raise ValueError(item)
+                    u.dot[path] = Dot(value, d.latency) if field == "ipc" else Dot(d.ipc, int(value))
+                    u.dot_source = "env"
+                    dot_set = True
+                    continue
+                if eq and k in ("mem_cycles", "stream_cycles"):
+                    value = _uarch_number(v)
+                    if not (1 <= value <= 1 << 20 and value == int(value)):
+                        raise ValueError(item)
+                    setattr(u, k, int(value))
+                    u.dot_source = "env"
+                    continue
+                if not eq or k not in self.FIELDS:
+                    raise ValueError(item)
+                setattr(u, k, int(v))
+                if k == "fma_ports":
+                    u.dot = {p: Dot(float(u.fma_ports), d.latency) for p, d in u.dot.items()}
+                    u.dot_source = "fma_ports"
+            except (ValueError, OverflowError):
+                raise SchemaError("bad uarch override %r (fields: %s, <path>_ipc, <path>_lat, mem_cycles, "
+                                  "stream_cycles; paths: %s)"
+                                  % (item, ", ".join(self.FIELDS), ", ".join(DOT_PATHS))) from None
+        if dot_set:
+            u.fma_ports = max(1, int(math.floor(u.dot_of("bf16").ipc + 0.5)))
         return u
 
     @property
@@ -485,7 +590,13 @@ class Uarch:
             getattr(self, k) is not None for k in self.FIELDS if k not in ("family_l3_cores", "l3_domain_cores"))
 
     def to_dict(self) -> Dict[str, Any]:
-        return {k: getattr(self, k) for k in self.FIELDS}
+        d = {k: getattr(self, k) for k in self.FIELDS}
+        d["dot"] = {p: {"ipc": v.ipc, "latency": v.latency, "chains": v.chains} for p, v in self.dot.items()}
+        d["dot_source"] = self.dot_source
+        d["mem_cycles"] = self.mem_cycles
+        d["stream_cycles"] = self.stream_cycles
+        d["priced"] = self.priced
+        return d
 
 
 class Schema:
@@ -578,6 +689,17 @@ class Schema:
     def route(self, p: Any) -> Route:
         """The route of problem p's tiles (a group of 0 is one group over K)."""
         return self.route_of(p.dtype, p.int8_scheme, p.group == 0 or p.group >= p.k)
+
+    def path_of(self, p: Any) -> str:
+        """The compute path of problem p's kernels."""
+        family = self.families.get(self.route(p).family)
+        return family.path if family is not None else "fp32"
+
+    def dot_of(self, p: Any) -> Dot:
+        """The machine model of problem p's kernels (UarchParams::dot), the class default without
+        a uarch."""
+        path = self.path_of(p)
+        return self.uarch.dot_of(path) if self.uarch is not None else DEFAULT_DOT.get(path, Dot(2.0, 6))
 
     def route_max_mr(self, route: Route, nv: int) -> int:
         """Rows per call of the INT8 kernels of route at nr 16 nv: its own for an INT8 route,

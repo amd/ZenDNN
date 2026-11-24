@@ -37,6 +37,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <random>
@@ -908,8 +909,8 @@ bool takes_model_plan(
 }
 
 /// A planner of setting over one cache hierarchy (48 KiB L1, 1 MiB L2,
-/// 32 MiB of L3 per 8 cores), so that the rules it runs take the same calls
-/// on any host.
+/// 32 MiB of L3 per 8 cores) and the class default's model, so that the
+/// rules it runs take the same calls on any host.
 std::unique_ptr<nat::native_planner_t> fixed_planner(const char *setting) {
     nat::UarchParams u = nat::detect_uarch();
     u.l1d_bytes = 48 << 10;
@@ -917,6 +918,11 @@ std::unique_ptr<nat::native_planner_t> fixed_planner(const char *setting) {
     u.l3_domain_bytes = 32 << 20;
     u.family_l3_cores = 8;
     u.l3_domain_cores = 8;
+    const nat::UarchParams class_default;
+    std::copy(
+            std::begin(class_default.dot), std::end(class_default.dot), u.dot);
+    u.dot_source = class_default.dot_source;
+    u.mem_cycles = u.stream_cycles = 0;
     return std::make_unique<nat::native_planner_t>(
             u, nat::make_native_override_source(setting), nullptr, nullptr);
 }

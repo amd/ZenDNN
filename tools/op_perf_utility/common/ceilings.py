@@ -20,19 +20,27 @@ version 1), and the lookups the per-op bounds read.
      "cpu":   {vendor, family, model, stepping, isa, l1d_kib, l2_kib, l3_kib, logical_cpus,
                smt, physical_cores, l3_domain_threads},        # the library's native_hw()
      "uarch": {l1d_bytes, l2_bytes, l3_domain_bytes, l3_domain_cores, family_l3_cores,
-               fma_ports, vec_width_bits},                     # native_plan_uarch()
+               fma_ports, vec_width_bits,                      # native_plan_uarch()
+               dot: {fp32 | bf16 | int8 | int4 | fp16 | f16_widen: {ipc, latency, chains}},
+               dot_source,                                     # its compute model per path
+               mem_cycles, stream_cycles, priced},             # its memory terms (0: not set)
      "run":   {threads, domain_threads, cpuset, team_cpus, team_cores, omp_proc_bind, omp_places,
                repeats, quick, hugepages},
      "clock": {ghz_1core, ghz_team, ...},                      # sustained clock, 1 and all threads
      "compute": {fp32 | bf16 | int8 | fp16 | int4 | f16_widen:
                      {flops_per_instr, instr_per_cycle, latency_cycles, gflops_core, gflops_team, ...}},
+     "chain_sweep": {chains: [4, 8, 12, 16, 24],              # one core, each path's rate
+                     instr_per_cycle: {path: [one per chain count]}},
      "bandwidth": [{level: l1 | l2 | l3 | dram, threads, bytes_per_thread, gbps, ...}],
      "write_bandwidth": [...]}                                  # as bandwidth, for stores
 
 int4 and f16_widen are the inner loops of the INT4 tile and of the F16 kernels (where the
 CPU has no AVX512-FP16), the others one dot-product instruction.  team_cores and
 write_bandwidth come with probe 1.1; without them a team takes one core a thread and
-stores are priced as reads.
+stores are priced as reads.  uarch.dot and chain_sweep come with probe 1.2: the library's
+model next to what the probe measures, and how many independent accumulator chains each path
+needs; the library prices kernels at uarch.dot's rates only where uarch.priced (a model the
+environment sets), else at 2 a cycle on every path.
 
 The file belongs to the run that measured it: it describes one machine at one
 thread count and pinning, and is never committed.
@@ -48,6 +56,8 @@ FORMAT = "op-perf-ceilings"
 VERSION = 1
 LEVELS = ("l1", "l2", "l3", "dram")
 PATHS = ("fp32", "bf16", "int8", "fp16", "int4", "f16_widen")
+# Dot products a cycle the library prices every path at where its model does not price.
+UNPRICED_IPC = 2.0
 # The cpu fields a tuning campaign's schema reports too (its "hw" block); a ceilings
 # file applies to a campaign only when every one both report agrees.
 MATCH_KEYS = ("vendor", "family", "model", "l1d_kib", "l2_kib", "l3_kib", "l3_domain_threads")
@@ -80,6 +90,21 @@ def validate(doc: Any) -> List[str]:
     uarch = doc.get("uarch")
     if not isinstance(uarch, dict) or not all(_pos(uarch.get(k)) for k in ("l1d_bytes", "l2_bytes")):
         errs.append("uarch must give positive l1d_bytes and l2_bytes")
+    elif "dot" in uarch:
+        dot = uarch["dot"]
+        if not isinstance(dot, dict) or not all(
+                p in PATHS and isinstance(d, dict) and _pos(d.get("ipc")) and _pos(d.get("latency"))
+                for p, d in dot.items()):
+            errs.append("uarch.dot must map paths of %s to positive ipc and latency" % ", ".join(PATHS))
+    sweep = doc.get("chain_sweep")
+    if sweep is not None:
+        chains = sweep.get("chains") if isinstance(sweep, dict) else None
+        rates = sweep.get("instr_per_cycle") if isinstance(sweep, dict) else None
+        if not (isinstance(chains, list) and chains and all(isinstance(c, int) and c > 0 for c in chains)
+                and isinstance(rates, dict) and all(
+                    p in PATHS and isinstance(r, list) and len(r) == len(chains) and all(_pos(x) for x in r)
+                    for p, r in rates.items())):
+            errs.append("chain_sweep must give positive chain counts and, per path, a positive rate for each")
     run = doc.get("run")
     if not isinstance(run, dict) or not isinstance(run.get("threads"), int) or run["threads"] < 1:
         errs.append("run.threads must be a positive integer")
@@ -220,6 +245,21 @@ class Ceilings:
         v = self.compute.get(path, {}).get("latency_cycles")
         return float(v) if _pos(v) else None
 
+    @property
+    def model(self) -> Dict[str, Tuple[float, int]]:
+        """path -> (ipc, latency) the library prices with: uarch.dot, at 2 a cycle where the
+        model does not price (uarch.priced false); empty before probe 1.2."""
+        dot = self.uarch.get("dot") or {}
+        priced = self.uarch.get("priced", True)
+        return {p: (float(d["ipc"]) if priced else UNPRICED_IPC, int(d["latency"])) for p, d in dot.items()}
+
+    def chain_rates(self, path: str) -> List[Tuple[int, float]]:
+        """(chains, instructions per cycle on one core) of path's chain sweep; empty without
+        one."""
+        sweep = self.doc.get("chain_sweep") or {}
+        rates = (sweep.get("instr_per_cycle") or {}).get(path) or []
+        return list(zip(sweep.get("chains") or [], (float(r) for r in rates)))
+
     # ------------------------------------------------------------ memory
 
     def has_level(self, level: str, write: bool = False) -> bool:
@@ -265,7 +305,8 @@ class Ceilings:
 
     def match(self, hw: Dict[str, Any]) -> List[str]:
         """The cpu fields that differ from a schema's hw block (every key both report, and
-        the ISA features), as "key: probe X, schema Y"."""
+        the ISA features but AVX512-FP16, which a probe or schema before 1.2 does not list:
+        its own flag compares it), as "key: probe X, schema Y"."""
         out = []
         for k in MATCH_KEYS:
             a, b = self.cpu.get(k), hw.get(k)
@@ -273,8 +314,8 @@ class Ceilings:
                 continue
             if a != b:
                 out.append("%s: probe %s, schema %s" % (k, a, b))
-        want = set(hw.get("isa") or [])
-        have = set(self.cpu.get("isa") or [])
+        want = set(hw.get("isa") or []) - {"avx512fp16"}
+        have = set(self.cpu.get("isa") or []) - {"avx512fp16"}
         if want and have and want != have:
             out.append("isa: probe %s, schema %s" % ("+".join(sorted(have)), "+".join(sorted(want))))
         return out
@@ -293,13 +334,20 @@ class Ceilings:
             + (", on %d cores" % self.team_cores if self.team_cores != self.threads else "")
             + (", buffers advised huge pages" if self.run.get("hugepages") else ""),
             "clock: %.2f GHz one core, %.2f GHz all threads" % (self.clock["ghz_1core"], self.clock["ghz_team"])]
+        model = self.model
         for path in PATHS:
             c = self.compute.get(path)
             if c:
                 lat = c.get("latency_cycles")
-                lines.append("compute %-4s: %.2f instr/cycle/core, %.1f GFLOP/s per core, %.0f GFLOP/s team%s" % (
+                m = model.get(path)
+                lines.append("compute %-4s: %.2f instr/cycle/core, %.1f GFLOP/s per core, %.0f GFLOP/s team%s%s" % (
                     path, c["instr_per_cycle"], c["gflops_core"], c["gflops_team"],
-                    ", latency %.1f cycles" % lat if _pos(lat) else ""))
+                    ", latency %.1f cycles" % lat if _pos(lat) else "",
+                    " (library model %g / %d)" % m if m else ""))
+        for path in PATHS:
+            pts = self.chain_rates(path)
+            if pts:
+                lines.append("chains  %-4s: %s" % (path, ", ".join("%d: %.2f" % pt for pt in pts)))
         for name, table in (("bandwidth", self._bw), ("write", self._wbw)):
             for lvl in levels:
                 for n, g in table.get(lvl, []):

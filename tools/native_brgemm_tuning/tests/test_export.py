@@ -559,7 +559,7 @@ class TestHardware(unittest.TestCase):
             E.hardware_block(old)
         self.assertIn("vendor, family, model", str(e.exception))
         self.assertEqual(E.hardware_block(old, keys=["isa", "l2_kib", "l3_cores"]),
-                         {"isa": ["avx512f", "avx512bf16", "avx512vnni"], "l2_kib": HW["l2_kib"],
+                         {"isa": ["avx512f", "avx512bf16", "avx512vnni", "avx512fp16"], "l2_kib": HW["l2_kib"],
                           "l3_cores": HW["l3_cores"]})
         self.assertEqual(E.hardware_mismatch({"family": {"min": 0}}, old), "family")
         self.assertEqual(E.hardware_mismatch({"smt": {"max": 2}}, machine(drop=("smt",))), "smt")

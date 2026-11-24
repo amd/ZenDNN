@@ -31,13 +31,14 @@ from op_perf_utility.common.ceilings import Ceilings, CeilingsError
 from op_perf_utility.matmul.bounds import MatmulBound, matmul_bound
 from op_perf_utility.matmul.work import from_problem
 
+from .cost_model import UNPRICED_IPC
 from .problems import Problem
 from .results import ProblemSummary
 
 CEILINGS = "ceilings.json"
 
 __all__ = ["CEILINGS", "Ceilings", "CeilingsError", "attach", "best_plan", "bounds", "cold_weights",
-           "efficiency_rows", "geomean_pct", "load", "machine_mismatch", "meta"]
+           "efficiency_rows", "geomean_pct", "library_model", "load", "machine_mismatch", "meta", "model_check"]
 
 
 def load(path: str) -> Ceilings:
@@ -66,6 +67,35 @@ def machine_mismatch(ceil: Ceilings, schema: Any, threads: int) -> List[str]:
         out.append("L3 domain: probe %d cores, campaign %d" % (probed, domain))
     if ceil.threads != threads:
         out.append("threads: probe %d, campaign %d" % (ceil.threads, threads))
+    return out
+
+
+# A path whose measured dot products a cycle differ from the library's model by more than this
+# share is flagged.
+MODEL_TOLERANCE = 0.2
+
+
+def library_model(schema: Any) -> Dict[str, Tuple[float, int]]:
+    """path -> (ipc, latency) the library prices the schema's machine with: its uarch.dot, at 2 a
+    cycle where the model does not price; empty without a uarch."""
+    uarch = getattr(schema, "uarch", None)
+    if uarch is None:
+        return {}
+    priced = getattr(uarch, "priced", True)
+    return {path: (d.ipc if priced else UNPRICED_IPC, d.latency) for path, d in uarch.dot.items()}
+
+
+def model_check(ceil: Ceilings, schema: Any) -> List[str]:
+    """The paths whose price in the library (library_model) the probe measured more than
+    MODEL_TOLERANCE away, as "int8: model 2, measured 3.50"; a flag, not a refusal: the probe
+    measured the campaign's machine, the model is what the library assumes of it."""
+    out = []
+    for path, (ipc, _) in library_model(schema).items():
+        if not ceil.has_compute(path):
+            continue
+        measured = ceil.instr_per_cycle(path)
+        if measured > 0 and abs(ipc - measured) > MODEL_TOLERANCE * measured:
+            out.append("%s: model %g, measured %.2f" % (path, ipc, measured))
     return out
 
 

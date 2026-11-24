@@ -29,7 +29,7 @@ built against a ZenDNN build.
 
 Run the probe the way the measured work runs: on the same machine, with the same
 cpuset, thread count and pinning (the tuner's `tune.py probe` does this for a campaign).
-It takes about 40 s (`--quick`: a second or two, for a smoke test; `--seconds`,
+It takes about 40 s (`--quick`: a few seconds, for a smoke test; `--seconds`,
 `--repeats` per measurement; `--threads`, `--domain-threads` to override the team and
 the L3 domain). One binary runs on every AVX-512 machine: each kernel carries its ISA
 as a function attribute and runs only where the CPU has it. It measures
@@ -46,6 +46,11 @@ as a function attribute and runs only where the CPU has it. It measures
   two planes, two source dwords broadcast a row, two `vpdpbusd` a vector) and, where
   the CPU has no AVX-512-FP16, the F16 kernels (`f16_widen`: 12 rows of 2 vectors, each
   vector widened with `vcvtph2ps`, a broadcast and an FMA a row and vector);
+- the chain sweep: on one core, each path's instructions per cycle with 4, 8, 12, 16 and
+  24 independent accumulator chains (the tiles at 2 to 12 rows of 2 vectors, the widening
+  loop on every machine), a few tens of milliseconds a point (5 ms samples, the run's
+  repeats): a path issues at its rate only with
+  about ipc x latency chains in flight, which sizes a kernel's accumulators to the machine;
 - the read and the write bandwidth of 1 thread, of one L3 domain's threads and of the
   team, each streaming its own first-touched buffer sized for L1, L2, its share of its
   domain's L3, and DRAM; the writes are whole-line stores, as an output tile's, which
@@ -57,17 +62,29 @@ as a function attribute and runs only where the CPU has it. It measures
 
 The CPU and caches come from the library's own detection (`native_hw()`,
 `native_plan_uarch()`), named as the tuner's schema names them, and the cores of the
-team from sysfs: two threads on the siblings of one core count once.
+team from sysfs: two threads on the siblings of one core count once. So does the
+library's machine model (`uarch.dot`: per path the dot products a cycle, the latency and
+the chains it implies, and where the model comes from; `uarch.mem_cycles` and
+`uarch.stream_cycles`, its memory terms, 0 where not set; `uarch.priced`, whether its
+plans price kernels at the model's rates, which takes a model `ZENDNNL_MATMUL_NATIVE_UARCH`
+sets, or else at 2 a cycle on every path): `show` prints it next to the measurement, and
+the tuner flags a path whose price is off by more than 20%.
+
+The library holds no machine's figures: without `ZENDNNL_MATMUL_NATIVE_UARCH` every CPU
+takes the class default, the prices of a planner without a model. A machine's model comes
+from this probe run on it, through `calibrate --format uarch` (below) or a tuning file
+`tune.py calibrate` exports, and stays in its run directory.
 
 ### The ceilings file
 
 | Block | Contents |
 |---|---|
 | `cpu` | vendor, family, model, stepping, the ISA features the tuning files match on, `avx512fp16`, cache sizes, logical CPUs, SMT, physical cores, threads per L3 domain |
-| `uarch` | the planner's view: L1d, L2 and L3-domain bytes, cores per L3 domain, FMA ports, vector width |
+| `uarch` | the planner's view: L1d, L2 and L3-domain bytes, cores per L3 domain, FMA ports, vector width, and (probe 1.2) the compute model per path `dot` with its `dot_source`, the memory terms `mem_cycles` and `stream_cycles`, and `priced` |
 | `run` | threads, threads per L3 domain, the process's cpuset, the team's CPUs and cores, `OMP_PROC_BIND`, `OMP_PLACES`, repeats, seconds per measurement, whether the buffers were advised huge pages |
 | `clock` | GHz on one core and on the team, with their spread |
 | `compute` | per path (`fp32`, `bf16`, `int8`, `fp16`, `int4`, `f16_widen`): FLOPs per instruction, instructions per cycle (one core, team), latency, GFLOP/s (one core, team), spread |
+| `chain_sweep` | (probe 1.2) the chain counts, and per path one core's instructions per cycle at each |
 | `bandwidth` | per level (`l1`, `l2`, `l3`, `dram`) and thread count: bytes per thread, GB/s, spread |
 | `write_bandwidth` | the same for stores |
 
@@ -145,15 +162,25 @@ runs with:
 
 | Key | The cost model's use | From the ceilings |
 |---|---|---|
-| `cm_fma_pipes` | dot-product instructions a core issues per cycle | the path's instructions per cycle on one core |
-| `cm_fma_lat` | least cycles of a K step (each accumulator is a chain) | the path's latency |
+| `cm_fma_pipes` | dot-product instructions a core issues per cycle (0: the model's, per path) | the path's instructions per cycle on one core |
+| `cm_fma_lat` | least cycles of a K step, whatever the kernel's accumulator sets (0: the path's latency over the sets) | none: its built-in 6 is fitted to timed plans; the latency goes into `--format uarch` |
 | `cm_l2_bytes` | bytes per cycle of a slab re-read from L2 | L2 bytes per cycle per thread, the team reading |
 | `cm_l3_cycles` | cycles per KiB read from L3 | L3, one domain's threads reading |
 | `cm_mem_cycles` | cycles per KiB a thread streams while its domain streams | DRAM, the team streaming |
 | `cm_stream_cycles` | cycles per KiB one core streams alone | DRAM, one thread |
 
-The first two are per path (BF16, INT8, FP16 or FP32 calls). `--format settings` gives
-a `ZENDNNL_MATMUL_NATIVE_CONFIG` of one clause per weight type. The values are inputs
+`cm_fma_pipes` is per path (BF16, INT8, the s4 tile's int4, FP16 or the F16 kernels'
+f16_widen, FP32 calls), and only for a path the probe measures more than 20% away from
+what the built-in plan prices with (`uarch.dot` where `uarch.priced`, else 2 a cycle;
+`tune.py calibrate` compares with its campaign's schema instead); a probe before 1.2
+prints no model, so every path gets it. `cm_fma_lat` is not derived: the measured
+latency as the step floor made f16 calls of 16 rows slower. `--format settings` gives a
+`ZENDNNL_MATMUL_NATIVE_CONFIG` of one clause per weight type, `--format uarch` a
+`ZENDNNL_MATMUL_NATIVE_UARCH` of the measured model, each path's rate and latency and,
+where the probe measured DRAM, the memory terms in the library's form (`mem_cycles`,
+`cm_mem_cycles` times the square root of the L3 domain's cores; `stream_cycles`),
+within the ranges the library takes: the model for every call, where the library's
+table lacks the machine. The values are inputs
 to try: the probe streams with every prefetcher helping and nothing else running, so
 `tune.py calibrate` keeps them only after an A/B against the built-in inputs. It leaves
 `cm_l2_bytes` out unless told: at the L2 streaming rate it made BF16 plans slower on

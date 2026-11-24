@@ -30,14 +30,17 @@
 ///   of the team) of the dot product the kernels use: FP32 FMA, the BF16 dot
 ///   product, the INT8 VNNI dot product and FP16 FMA (where the CPU has
 ///   AVX-512-FP16), with enough independent accumulators to hide latency, and
-///   their latency in cycles from a dependent chain;
+///   their latency in cycles from a dependent chain, and each one's rate at
+///   4, 8, 12, 16 and 24 independent chains (the chain sweep, one core);
 /// - the read bandwidth of 1 thread, one L3 domain's threads and the team,
 ///   each streaming a private buffer it touched first, sized for L1, L2, its
 ///   share of its domain's L3 and DRAM.  The buffers get the pages a plain
 ///   allocation gets, as the measured calls' buffers do; --hugepages advises
 ///   huge pages (MADV_HUGEPAGE) for them.
 /// The CPU identity and caches come from the library's own detection
-/// (native_hw()), named as the native BRGEMM tuner's schema names them.
+/// (native_hw()), named as the native BRGEMM tuner's schema names them, and
+/// so does the compute model per path its plans price kernels with
+/// (uarch.dot, native_plan_uarch()).
 
 #include <immintrin.h>
 #include <omp.h>
@@ -45,6 +48,7 @@
 #include <sys/mman.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -66,7 +70,7 @@ namespace {
 
 namespace nat = zendnnl::lowoha::matmul::native;
 
-constexpr const char *kProbeVersion = "1.1";
+constexpr const char *kProbeVersion = "1.2";
 constexpr int kAcc = 16; // accumulators of a throughput kernel (PROBE_TPUT16)
 
 // Operands the compiler cannot fold.
@@ -271,7 +275,7 @@ __attribute__((target("avx512f,avx512fp16"))) double lat_fp16(uint64_t iters) {
 // broadcast and two VPDPBUSD a vector, the high plane's on the low one's
 // accumulator.
 alignas(64) uint8_t g_nibbles[128];
-alignas(64) uint8_t g_src8[64];
+alignas(64) uint8_t g_src8[128];
 constexpr int kInt4PerIter = 24; // VPDPBUSD of one iteration
 
 #define PROBE_INT4_ROW(m, a, b) \
@@ -395,6 +399,194 @@ __attribute__((target("avx512f"))) double tput_f16_widen(uint64_t iters) {
     return static_cast<double>(_mm512_reduce_add_ps(s));
 }
 
+// ---------------------------------------------------------------- chain sweep
+
+/// Independent accumulator chains of the chain sweep: a path's rate with too
+/// few of them is its latency's, not its pipes'.
+constexpr int kSweepChains[] = {4, 8, 12, 16, 24};
+
+#define PROBE_DECL24(T, init) \
+    PROBE_DECL16(T, init); \
+    T a16 = a0, a17 = a0, a18 = a0, a19 = a0, a20 = a0, a21 = a0, a22 = a0, \
+      a23 = a0
+#define PROBE_TPUT4(insn, b0, b1, b2, b3) \
+    asm volatile(PROBE_OP(insn, 0) PROBE_OP(insn, 1) PROBE_OP(insn, 2) \
+                         PROBE_OP(insn, 3) \
+                 : [a0] "+v"(b0), [a1] "+v"(b1), [a2] "+v"(b2), [a3] "+v"(b3) \
+                 : [x] "v"(x), [y] "v"(y))
+/// N instructions acc_i = insn(acc_i, y, x) on a0 .. a<N-1>, N in kSweepChains.
+#define PROBE_CHAINS(insn) \
+    PROBE_TPUT4(insn, a0, a1, a2, a3); \
+    if constexpr (N >= 8) PROBE_TPUT4(insn, a4, a5, a6, a7); \
+    if constexpr (N >= 12) PROBE_TPUT4(insn, a8, a9, a10, a11); \
+    if constexpr (N >= 16) PROBE_TPUT4(insn, a12, a13, a14, a15); \
+    if constexpr (N >= 24) \
+    PROBE_TPUT8(insn, a16, a17, a18, a19, a20, a21, a22, a23)
+#define PROBE_SUM24(add) \
+    add(PROBE_SUM16(add), \
+            add(add(add(a16, a17), add(a18, a19)), \
+                    add(add(a20, a21), add(a22, a23))))
+
+template <int N>
+__attribute__((target("avx512f"))) double chains_fp32(uint64_t iters) {
+    PROBE_DECL24(__m512, _mm512_set1_ps(1.0f));
+    const __m512 x = _mm512_set1_ps(g_one), y = _mm512_set1_ps(g_tiny);
+    for (uint64_t it = 0; it < iters; ++it) {
+        PROBE_CHAINS("vfmadd231ps");
+    }
+    return _mm512_reduce_add_ps(PROBE_SUM24(_mm512_add_ps));
+}
+
+template <int N>
+__attribute__((target("avx512f,avx512bf16"))) double chains_bf16(
+        uint64_t iters) {
+    PROBE_DECL24(__m512, _mm512_setzero_ps());
+    const __m512i x = _mm512_set1_epi16(static_cast<short>(0x3a83 * g_byte)),
+                  y = x;
+    for (uint64_t it = 0; it < iters; ++it) {
+        PROBE_CHAINS("vdpbf16ps");
+    }
+    return _mm512_reduce_add_ps(PROBE_SUM24(_mm512_add_ps));
+}
+
+template <int N>
+__attribute__((target("avx512f,avx512vnni"))) double chains_int8(
+        uint64_t iters) {
+    PROBE_DECL24(__m512i, _mm512_setzero_si512());
+    const __m512i x = _mm512_set1_epi8(static_cast<char>(g_byte)), y = x;
+    for (uint64_t it = 0; it < iters; ++it) {
+        PROBE_CHAINS("vpdpbusd");
+    }
+    return static_cast<double>(
+            _mm512_reduce_add_epi32(PROBE_SUM24(_mm512_add_epi32)));
+}
+
+#if PROBE_HAVE_FP16
+template <int N>
+__attribute__((target("avx512f,avx512fp16"))) double chains_fp16(
+        uint64_t iters) {
+    PROBE_DECL24(__m512h, _mm512_set1_ph(static_cast<_Float16>(1.0f)));
+    const __m512h x = _mm512_set1_ph(static_cast<_Float16>(g_one));
+    const __m512h y = _mm512_set1_ph(static_cast<_Float16>(0.0f * g_tiny));
+    for (uint64_t it = 0; it < iters; ++it) {
+        PROBE_CHAINS("vfmadd231ph");
+    }
+    return static_cast<double>(
+            _mm512_reduce_add_ph(PROBE_SUM24(_mm512_add_ph)));
+}
+#endif
+
+// The INT4 and F16 tile loops of tput_int4 and tput_f16_widen at N / 2 rows of
+// two vectors, one statement a row.
+#define PROBE_INT4_ROW1(m, va, vb) \
+    asm volatile("vpbroadcastd " #m \
+                 "*8(%[src]), %[q0]\n\t" \
+                 "vpbroadcastd " #m \
+                 "*8+4(%[src]), %[q1]\n\t" \
+                 "vpdpbusd %[q0], %[lo0], %[a]\n\t" \
+                 "vpdpbusd %[q1], %[hi0], %[a]\n\t" \
+                 "vpdpbusd %[q0], %[lo1], %[b]\n\t" \
+                 "vpdpbusd %[q1], %[hi1], %[b]\n\t" \
+                 : [a] "+v"(va), [b] "+v"(vb), [q0] "=&v"(q0), [q1] "=&v"(q1) \
+                 : [lo0] "v"(lo0), [hi0] "v"(hi0), [lo1] "v"(lo1), \
+                 [hi1] "v"(hi1), [src] "r"(g_src8) \
+                 : "memory")
+#define PROBE_ROWS_OF(ROW) \
+    ROW(0, a0, a1); \
+    ROW(1, a2, a3); \
+    if constexpr (N >= 8) { \
+        ROW(2, a4, a5); \
+        ROW(3, a6, a7); \
+    } \
+    if constexpr (N >= 12) { \
+        ROW(4, a8, a9); \
+        ROW(5, a10, a11); \
+    } \
+    if constexpr (N >= 16) { \
+        ROW(6, a12, a13); \
+        ROW(7, a14, a15); \
+    } \
+    if constexpr (N >= 24) { \
+        ROW(8, a16, a17); \
+        ROW(9, a18, a19); \
+        ROW(10, a20, a21); \
+        ROW(11, a22, a23); \
+    }
+
+template <int N>
+__attribute__((target("avx512f,avx512bw,avx512vnni"))) double chains_int4(
+        uint64_t iters) {
+    const __m512i mask = _mm512_set1_epi8(0x0f);
+    PROBE_DECL24(__m512i, _mm512_setzero_si512());
+    __m512i lo0, hi0, lo1, hi1, q0, q1;
+    for (uint64_t it = 0; it < iters; ++it) {
+        asm volatile(
+                "vmovdqu64 (%[b]), %[lo0]\n\t"
+                "vpsrlw $4, %[lo0], %[hi0]\n\t"
+                "vpandd %[mask], %[lo0], %[lo0]\n\t"
+                "vpandd %[mask], %[hi0], %[hi0]\n\t"
+                "vmovdqu64 64(%[b]), %[lo1]\n\t"
+                "vpsrlw $4, %[lo1], %[hi1]\n\t"
+                "vpandd %[mask], %[lo1], %[lo1]\n\t"
+                "vpandd %[mask], %[hi1], %[hi1]\n\t"
+                : [lo0] "=&v"(lo0), [hi0] "=&v"(hi0), [lo1] "=&v"(lo1),
+                [hi1] "=&v"(hi1)
+                : [b] "r"(g_nibbles), [mask] "v"(mask)
+                : "memory");
+        PROBE_ROWS_OF(PROBE_INT4_ROW1)
+    }
+    return static_cast<double>(
+            _mm512_reduce_add_epi32(PROBE_SUM24(_mm512_add_epi32)));
+}
+
+// m: the row; its value is float m of g_rows.
+#define PROBE_F16_ROW1(m, x, y) \
+    asm volatile("vbroadcastss " #m \
+                 "*4(%[src]), %[t]\n\t" \
+                 "vfmadd231ps %[t], %[w0], %[" #x \
+                 "]\n\t" \
+                 "vfmadd231ps %[t], %[w1], %[" #y "]\n\t" \
+                 : [x] "+v"(x), [y] "+v"(y), [t] "=&v"(t) \
+                 : [w0] "v"(w0), [w1] "v"(w1), [src] "r"(g_rows) \
+                 : "memory")
+
+template <int N>
+__attribute__((target("avx512f"))) double chains_f16_widen(uint64_t iters) {
+    PROBE_DECL24(__m512, _mm512_setzero_ps());
+    __m512 w0, w1, t;
+    for (uint64_t it = 0; it < iters; ++it) {
+        asm volatile(
+                "vcvtph2ps (%[h]), %[w0]\n\t"
+                "vcvtph2ps 32(%[h]), %[w1]\n\t"
+                : [w0] "=&v"(w0), [w1] "=&v"(w1)
+                : [h] "r"(g_halves)
+                : "memory");
+        PROBE_ROWS_OF(PROBE_F16_ROW1)
+    }
+    return static_cast<double>(
+            _mm512_reduce_add_ps(PROBE_SUM24(_mm512_add_ps)));
+}
+
+using sweep_fns = std::array<kernel_fn, std::size(kSweepChains)>;
+
+template <template <int> class K>
+constexpr sweep_fns sweep_of() {
+    return {K<4>::fn, K<8>::fn, K<12>::fn, K<16>::fn, K<24>::fn};
+}
+#define PROBE_SWEEP(name) \
+    template <int N> \
+    struct sweep_##name { \
+        static constexpr kernel_fn fn = &chains_##name<N>; \
+    }
+PROBE_SWEEP(fp32);
+PROBE_SWEEP(bf16);
+PROBE_SWEEP(int8);
+PROBE_SWEEP(int4);
+PROBE_SWEEP(f16_widen);
+#if PROBE_HAVE_FP16
+PROBE_SWEEP(fp16);
+#endif
+
 /// The tile kernels' operands, read by every thread of a measurement: set once,
 /// before any runs.
 void init_tile_operands() {
@@ -412,17 +604,20 @@ struct path_t {
     kernel_fn lat;
     double flops_per_instr; // a 512-bit instruction's FLOPs (2 per multiply-add)
     int per_iter = kAcc; // instructions of one iteration of tput
+    sweep_fns sweep {}; // the chain sweep's kernels, one per kSweepChains
+    int sweep_per_chain = 1; // instructions of one sweep iteration per chain
 };
 
-/// Iterations of k that take about `seconds` on one thread.
-uint64_t calibrate(kernel_fn k, double seconds) {
+/// Iterations of k that take about `seconds` on one thread, scaled from a
+/// run of at least `sample` seconds.
+uint64_t calibrate(kernel_fn k, double seconds, double sample = 0.02) {
     uint64_t n = 4096;
     volatile double sink = 0;
     for (;;) {
         const double t0 = omp_get_wtime();
         sink = sink + k(n);
         const double dt = omp_get_wtime() - t0;
-        if (dt > 0.02 || n > (1ull << 40))
+        if (dt > sample || n > (1ull << 40))
             return std::max<uint64_t>(1,
                     static_cast<uint64_t>(
                             static_cast<double>(n) * seconds / dt));
@@ -833,18 +1028,27 @@ int main(int argc, char **argv) {
 
     // Compute.
     init_tile_operands();
-    std::vector<path_t> paths = {{"fp32", tput_fp32, lat_fp32, 32.0}};
-    if (u.avx512bf16) paths.push_back({"bf16", tput_bf16, lat_bf16, 64.0});
-    if (u.avx512vnni) paths.push_back({"int8", tput_int8, lat_int8, 128.0});
+    const path_t f16_widen {"f16_widen", tput_f16_widen, lat_fp32, 32.0,
+            kF16PerIter, sweep_of<sweep_f16_widen>()};
+    std::vector<path_t> paths = {
+            {"fp32", tput_fp32, lat_fp32, 32.0, kAcc, sweep_of<sweep_fp32>()}};
+    if (u.avx512bf16)
+        paths.push_back({"bf16", tput_bf16, lat_bf16, 64.0, kAcc,
+                sweep_of<sweep_bf16>()});
     if (u.avx512vnni)
-        paths.push_back({"int4", tput_int4, lat_int8, 128.0, kInt4PerIter});
+        paths.push_back({"int8", tput_int8, lat_int8, 128.0, kAcc,
+                sweep_of<sweep_int8>()});
+    if (u.avx512vnni)
+        paths.push_back({"int4", tput_int4, lat_int8, 128.0, kInt4PerIter,
+                sweep_of<sweep_int4>(), 2});
 #if PROBE_HAVE_FP16
-    if (u.avx512fp16) paths.push_back({"fp16", tput_fp16, lat_fp16, 64.0});
+    if (u.avx512fp16)
+        paths.push_back({"fp16", tput_fp16, lat_fp16, 64.0, kAcc,
+                sweep_of<sweep_fp16>()});
 #endif
-    // Where the CPU has AVX512-FP16, f16 calls run on the F16_PH kernels instead.
-    if (!u.avx512fp16)
-        paths.push_back(
-                {"f16_widen", tput_f16_widen, lat_fp32, 32.0, kF16PerIter});
+    // Where the CPU has AVX512-FP16, f16 calls run on the F16_PH kernels
+    // instead; the chain sweep still measures the widening loop.
+    if (!u.avx512fp16) paths.push_back(f16_widen);
     std::string compute_json;
     for (const path_t &p : paths) {
         const uint64_t it = calibrate(p.tput, secs);
@@ -874,6 +1078,33 @@ int main(int argc, char **argv) {
                 st.median * p.flops_per_instr / 1e9, st.rel_mad);
         compute_json += buf;
     }
+
+    // Chain sweep: one core, 5 ms a sample (a few tens of ms a point with
+    // the repeats).
+    std::vector<path_t> swept = paths;
+    if (u.avx512fp16) swept.push_back(f16_widen);
+    const double sweep_secs = std::min(secs, 0.005);
+    std::string sweep_json;
+    for (const path_t &p : swept) {
+        std::string rates;
+        for (size_t i = 0; i < std::size(kSweepChains); ++i) {
+            const uint64_t it
+                    = calibrate(p.sweep[i], sweep_secs, sweep_secs / 2);
+            std::vector<double> r;
+            for (int rep = 0; rep < o.repeats; ++rep)
+                r.push_back(instr_rates(p.sweep[i], it,
+                        kSweepChains[i] * p.sweep_per_chain, 1)[0]);
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%s%.4f", i == 0 ? "" : ", ",
+                    stat_of(r).median / (ghz1.median * 1e9));
+            rates += buf;
+        }
+        sweep_json += std::string(sweep_json.empty() ? "" : ", ") + "\""
+                + p.name + "\": [" + rates + "]";
+    }
+    std::string sweep_chains;
+    for (int c : kSweepChains)
+        sweep_chains += (sweep_chains.empty() ? "" : ", ") + std::to_string(c);
 
     // Bandwidth.
     std::vector<int> counts = {1, domain, threads};
@@ -921,11 +1152,22 @@ int main(int argc, char **argv) {
 
     // Output.
     std::string isa;
-    for (auto [have, name] : {
-                 std::pair<bool, const char *> {u.avx512f, "avx512f"},
-                 {u.avx512bf16, "avx512bf16"}, {u.avx512vnni, "avx512vnni"}}) {
+    for (auto [have, name] :
+            {std::pair<bool, const char *> {u.avx512f, "avx512f"},
+                    {u.avx512bf16, "avx512bf16"}, {u.avx512vnni, "avx512vnni"},
+                    {u.avx512fp16, "avx512fp16"}}) {
         if (have)
             isa += std::string(isa.empty() ? "" : ", ") + "\"" + name + "\"";
+    }
+    // The library's compute model per path, which its plans price kernels with.
+    std::string model;
+    for (int i = 0; i < nat::kNativeDotPaths; ++i) {
+        char buf[160];
+        std::snprintf(buf, sizeof(buf),
+                "%s\"%s\": {\"ipc\": %g, \"latency\": %d, \"chains\": %d}",
+                i == 0 ? "" : ", ", nat::kNativeDotPathNames[i], u.dot[i].ipc,
+                u.dot[i].latency, nat::native_dot_chains(u.dot[i]));
+        model += buf;
     }
     FILE *f = std::fopen(o.out.c_str(), "w");
     if (f == nullptr) {
@@ -956,9 +1198,13 @@ int main(int argc, char **argv) {
             "\"l3_domain_bytes\": %d, "
             "\"l3_domain_cores\": %d, \"family_l3_cores\": %d, \"fma_ports\": "
             "%d, "
-            "\"vec_width_bits\": %d},\n",
+            "\"vec_width_bits\": %d, \"dot\": {%s}, \"dot_source\": \"%s\", "
+            "\"mem_cycles\": %d, \"stream_cycles\": %d, \"priced\": %s},\n",
             u.l1d_bytes, u.l2_bytes, u.l3_domain_bytes, u.l3_domain_cores,
-            u.family_l3_cores, u.fma_ports, u.vec_width_bits);
+            u.family_l3_cores, u.fma_ports, u.vec_width_bits, model.c_str(),
+            nat::kNativeDotSourceNames[static_cast<int>(u.dot_source)],
+            u.mem_cycles, u.stream_cycles,
+            nat::native_dot_prices(u) ? "true" : "false");
     std::fprintf(f,
             " \"run\": {\"threads\": %d, \"domain_threads\": %d, \"cpuset\": "
             "%s, "
@@ -977,6 +1223,10 @@ int main(int argc, char **argv) {
             "\"spread_team\": %.4f},\n",
             ghz1.median, ghzt.median, ghz1.rel_mad, ghzt.rel_mad);
     std::fprintf(f, " \"compute\": {\n%s\n },\n", compute_json.c_str());
+    std::fprintf(f,
+            " \"chain_sweep\": {\"chains\": [%s], \"instr_per_cycle\": "
+            "{%s}},\n",
+            sweep_chains.c_str(), sweep_json.c_str());
     for (const auto &[name, list] :
             {std::pair<const char *, const std::vector<bw_t> *> {
                      "bandwidth", &bws},

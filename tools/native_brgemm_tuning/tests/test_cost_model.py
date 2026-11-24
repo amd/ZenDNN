@@ -30,7 +30,7 @@ from native_brgemm_tuning import cost_model as CM  # noqa: E402
 from native_brgemm_tuning import plan as PL  # noqa: E402
 from native_brgemm_tuning.candidates import parse_settings  # noqa: E402
 from native_brgemm_tuning.problems import Problem  # noqa: E402
-from native_brgemm_tuning.schema import Schema, Uarch  # noqa: E402
+from native_brgemm_tuning.schema import Dot, Schema, SchemaError, Uarch  # noqa: E402
 
 # The library tests' hierarchies: 48 KiB L1d, 1 MiB L2, an L3 of 32 MiB per 8 cores or of
 # 128 MiB per 32 cores.
@@ -103,6 +103,82 @@ class TestPrices(unittest.TestCase):
         for p in (Problem("f32", 32, 4096, 4096), Problem("s8", 32, 4096, 4096, int8_scheme="per_group")):
             q = PL.rules_plan(p, DOMAINS8, hp, SCHEMA)
             self.assertEqual(CM.plan_cost(q, p, DOMAINS8, hp, SCHEMA), CM.PlanCost())
+
+
+class TestMachineModel(unittest.TestCase):
+    """The prices of each family on its own path, as the library's tile_model_t."""
+
+    def test_each_family_on_its_path(self):
+        hp = params("cm_call_cycles=0,cm_tall_pct=0,cm_l2_bytes=4096")
+        b, s = bf16(64, 4096, 4096), Problem("s8", 64, 4096, 4096)
+        qb, qs = plan(DOMAINS8, b, "cm_call_cycles=0"), plan(DOMAINS8, s, "cm_call_cycles=0")
+        fast = DOMAINS8.with_overrides("int8_ipc=4")
+        self.assertEqual(CM.plan_cost(qb, b, fast, hp, SCHEMA).core, CM.plan_cost(qb, b, DOMAINS8, hp, SCHEMA).core)
+        self.assertLess(CM.plan_cost(qs, s, fast, hp, SCHEMA).core, CM.plan_cost(qs, s, DOMAINS8, hp, SCHEMA).core)
+        pinned = params("cm_call_cycles=0,cm_tall_pct=0,cm_l2_bytes=4096,cm_fma_pipes=2")
+        self.assertEqual(CM.plan_cost(qs, s, fast, pinned, SCHEMA).core,
+                         CM.plan_cost(qs, s, DOMAINS8, pinned, SCHEMA).core)
+
+    def test_step_floor_counts_the_kernels_sets(self):
+        only = "cm_call_cycles=0,cm_tall_pct=0,cm_l2_bytes=4096,cm_l3_cycles=0"
+        model = only + ",cm_fma_lat=0"
+        slow = DOMAINS8.with_overrides("int8_lat=64")
+        for m in (2, 12):
+            p = Problem("s8", m, 4096, 4096)
+            q = PL.heuristic_plan(p, slow, params(model), SCHEMA)
+            nv = CM.int8_col_width(q, q.nr) // 16
+            rows = min(m, q.mb, CM.int8_call_rows(q, nv))
+            sets = CM.int8_kernel_sets(rows, nv)
+            self.assertEqual(sets > 1, m == 2)
+            self.assertEqual(CM.plan_cost(q, p, slow, params(only + ",cm_fma_lat=64"), SCHEMA).core,
+                             sets * CM.plan_cost(q, p, slow, params(model), SCHEMA).core)
+        shapes = ((1, 1), (2, 1), (1, 2), (2, 2), (4, 1), (5, 1), (3, 2), (12, 1))
+        self.assertEqual([CM.int8_kernel_sets(r, nv) for r, nv in shapes], [4, 4, 4, 2, 2, 1, 1, 1])
+
+    def test_unpriced_models_keep_the_pinned_price(self):
+        # A model that does not price, whatever its paths: 2 dot products a cycle, so its plans and
+        # costs under the default step floor are those of the pins over a model that prices.
+        unpriced = DOMAINS8.with_overrides("")
+        unpriced.dot = {path: Dot(1.0, 9) for path in unpriced.dot}
+        priced = DOMAINS8.with_overrides("fp32_ipc=2")
+        self.assertFalse(unpriced.priced)
+        self.assertTrue(priced.priced)
+        pins = params("cm_fma_pipes=2,cm_fma_lat=6")
+        for m, dt in ((2, "s8"), (16, "bf16"), (16, "s8"), (64, "bf16"), (128, "s8")):
+            p = Problem(dt, m, 4096, 4096)
+            q = PL.heuristic_plan(p, unpriced, params(), SCHEMA)
+            self.assertEqual(q, PL.heuristic_plan(p, priced, pins, SCHEMA), (m, dt))
+            self.assertEqual(CM.plan_cost(q, p, unpriced, params(), SCHEMA).core,
+                             CM.plan_cost(q, p, priced, pins, SCHEMA).core)
+
+    def test_only_a_set_model_prices(self):
+        # The class default (the library's model of every CPU) does not price kernels by path,
+        # whatever a dump says of its paths and memory terms; a model the environment sets does,
+        # and so does a dump of a build without the model, at its fma_ports.
+        dump = Uarch.from_dict({"l1d_bytes": 49152, "dot": {"int8": {"ipc": 4.0, "latency": 4}},
+                                "dot_source": "default", "mem_cycles": 2400, "stream_cycles": 600})
+        self.assertFalse(dump.priced)
+        self.assertTrue(dump.with_overrides("int8_ipc=4").priced)
+        self.assertTrue(Uarch(dot_source="env").priced)
+        self.assertTrue(Uarch.from_dict({"fma_ports": 2}).priced)
+        self.assertFalse(Uarch().priced)
+
+    def test_memory_terms_are_the_machines(self):
+        u = DOMAINS16.with_overrides("")
+        self.assertEqual(CM.mem_cycles(u, params()), 600.0)
+        self.assertEqual(CM.stream_cycles(u, params()), 600)
+        u = DOMAINS16.with_overrides("mem_cycles=1200,stream_cycles=400")
+        self.assertEqual((u.mem_cycles, u.stream_cycles, u.dot_source), (1200, 400, "env"))
+        self.assertEqual(CM.mem_cycles(u, params()), 300.0)
+        self.assertEqual(CM.stream_cycles(u, params()), 400)
+        self.assertTrue(CM.core_streams(u, params()))
+        pinned = params("cm_mem_cycles=500,cm_stream_cycles=0")
+        self.assertEqual(CM.mem_cycles(u, pinned), 500.0)
+        self.assertEqual(CM.stream_cycles(u, pinned), 0)
+        self.assertFalse(CM.core_streams(u, pinned))
+        for bad in ("mem_cycles=0", "stream_cycles=1.5", "mem_cycles=1048577"):
+            with self.assertRaises(SchemaError):
+                DOMAINS16.with_overrides(bad)
 
 
 class TestBf16Choices(unittest.TestCase):

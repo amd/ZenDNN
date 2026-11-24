@@ -36,7 +36,8 @@ from .problems import FORMATS, Problem, format_families
 from .results import ProblemSummary
 from .rules import MIN_RULE_M, OPS
 
-KEYS = ("cm_fma_pipes", "cm_fma_lat", "cm_l2_bytes", "cm_l3_cycles", "cm_mem_cycles", "cm_stream_cycles")
+# The keys op_perf_utility.matmul.calibrate derives (its KEYS).
+KEYS = ("cm_fma_pipes", "cm_l2_bytes", "cm_l3_cycles", "cm_mem_cycles", "cm_stream_cycles")
 # The keys tune.py calibrate tries unless told otherwise: at the probe's L2 streaming rate,
 # cm_l2_bytes made BF16 plans slower on every machine it was tried on (a call's slab re-reads
 # share the core with its FMAs).
@@ -183,7 +184,7 @@ def decide(problems: Sequence[Problem], batch: Dict[str, List[Candidate]], summ:
 
 def seed_values(items: Sequence[str], cfgs: Dict[str, Dict[str, int]], schema: Any) -> List[str]:
     """The campaign's --values items with the calibrated keys' lists replaced: their values,
-    halved and doubled (one off for the pipes and the latency), and the built-in value."""
+    halved and doubled (one off for the pipes), and the built-in value."""
     keys = [k for k in KEYS if any(k in c for c in cfgs.values())]
     out = [it for it in items if it.partition("=")[0].strip().lower() not in keys]
     for k in keys:
@@ -193,7 +194,7 @@ def seed_values(items: Sequence[str], cfgs: Dict[str, Dict[str, int]], schema: A
             if k not in c:
                 continue
             v = c[k]
-            near = (v - 1, v + 1) if k in ("cm_fma_pipes", "cm_fma_lat") else (int(round(v / 2.0)), 2 * v)
+            near = (v - 1, v + 1) if k == "cm_fma_pipes" else (int(round(v / 2.0)), 2 * v)
             vals |= {v} | {x for x in near if spec.check(x) is None and x >= 1}
         b = builtin_value(spec)
         if b is not None:

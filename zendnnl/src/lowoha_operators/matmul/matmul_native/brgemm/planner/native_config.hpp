@@ -188,10 +188,14 @@ struct heuristic_params_t {
     /// tall_rows; a BF16 or INT8 call of more rows takes cm_tall_pct percent
     /// more cycles per row.
     int cm_short_rows = 8;
-    /// FMA pipes of a core; 0: UarchParams::fma_ports.
+    /// Dot products a cycle of every kernel family; 0: its compute path's
+    /// (UarchParams::dot) where the machine's model prices kernels
+    /// (native_dot_prices), else 2.
     int cm_fma_pipes = 0;
-    /// Cycles from one multiply-add into an accumulator to the next: a call
-    /// of few rows waits for it.
+    /// Cycles one step of a kernel call takes at least, whatever its
+    /// accumulator sets; 0: its compute path's latency over the sets of the
+    /// call's kernel (UarchParams::dot, native_int8_kernel_sets): a call of
+    /// few accumulators waits for its chains.
     int cm_fma_lat = 6;
     /// Cycles of one kernel call besides its multiply-adds.
     int cm_call_cycles = 800;
@@ -209,8 +213,9 @@ struct heuristic_params_t {
     /// tile in one domain.
     int cm_l3_cycles = 10;
     /// Cycles per KiB one thread streams weights from memory while every
-    /// thread of its L3 domain streams; 0: 2400 over the square root of
-    /// the threads of an L3 domain (domain_threads).
+    /// thread of its L3 domain streams; 0: the machine's
+    /// (UarchParams::mem_cycles, 2400 where not measured) over the square
+    /// root of the threads of an L3 domain (domain_threads).
     int cm_mem_cycles = 0;
     /// KiB a weight stream is fetched ahead: the calls after the first of a
     /// K pass read no new weight, and the stream idles for the part of them
@@ -224,8 +229,9 @@ struct heuristic_params_t {
     /// (cm_drift_kib), the INT8 rule of cm_int8_l1_pct and the K bound of
     /// the M blocks of cm_block_kib (cm_block_k) apply.
     /// At a tie neither holds: the derived cm_mem_cycles of 16 threads to a
-    /// domain is 600.
-    int cm_stream_cycles = 600;
+    /// domain is 600 where neither is measured.  -1: the machine's
+    /// (UarchParams::stream_cycles, 600 where not measured).
+    int cm_stream_cycles = -1;
     int cm_sync_tiles = 5;
     /// Percent of the smaller of the core and the memory time that adds to
     /// the larger.

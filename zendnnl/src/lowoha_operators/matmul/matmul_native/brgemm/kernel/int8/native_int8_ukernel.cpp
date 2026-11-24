@@ -78,7 +78,7 @@ ZENDNNL_TARGET_NOINLINE("avx512f,avx512bw,avx512vl,avx512dq,avx512vnni,fma")
 void native_int8_ukernel(const native_int8_ukernel_args_t &p) {
     // Small tiles split K over independent accumulator sets so enough
     // VPDPBUSD chains are in flight; the int32 sum is exact in any order.
-    constexpr int kSets = MR * NV <= 2 ? 4 : (MR * NV <= 4 ? 2 : 1);
+    constexpr int kSets = native_int8_kernel_sets(MR, NV);
     __m512i acc[kSets][MR][NV];
     ZENDNNL_NATIVE_INT8_UNROLL(4)
     for (int s = 0; s < kSets; ++s) {
@@ -246,7 +246,7 @@ void native_int8_group_ukernel(const native_int8_group_ukernel_args_t &p) {
     static_assert(U8 || !Wide, "only a u8 source has a zero point");
     // Small tiles split each element's K over independent accumulator sets;
     // the int32 sum is exact in any order.
-    constexpr int kSets = MR * NV <= 2 ? 4 : (MR * NV <= 4 ? 2 : 1);
+    constexpr int kSets = native_int8_kernel_sets(MR, NV);
     const size_t ldc = static_cast<size_t>(p.ldc);
     __m512 c[MR][NV];
     ZENDNNL_NATIVE_INT8_UNROLL(12)

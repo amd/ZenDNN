@@ -61,13 +61,13 @@ BUILTIN_PARAMS: Dict[str, Any] = {
     "cost_model": 1, "cm_gain_pct": 5, "cm_short_rows": 8, "cm_fma_pipes": 0, "cm_fma_lat": 6,
     "cm_call_cycles": 800, "cm_tall_pct": -1, "cm_l2_bytes": 16, "cm_l3_cycles": 10,
     "cm_mem_cycles": 0, "cm_prefetch_kib": 4, "cm_overlap_pct": 20, "cm_reuse_pct": 50,
-    "cm_stream_cycles": 600, "cm_sync_tiles": 5, "cm_group_slab_pct": 75, "cm_group_l3_pct": 75,
+    "cm_stream_cycles": -1, "cm_sync_tiles": 5, "cm_group_slab_pct": 75, "cm_group_l3_pct": 75,
     "cm_group_skew_pct": 110, "cm_group_rows_pct": 115, "cm_drift_kib": 4096, "cm_pass_kib": 128,
     "cm_pass_calls": 4, "cm_block_kib": 16384, "cm_block_k": 2048, "cm_int8_l1_pct": 0, "cm_int4_min_m": 48,
 }
 AUTO_PINS = ("nr", "mr", "mb", "nb", "kc", "col_groups", "unit_tiles", "threads_cap", "domain_threads", "int8_kc")
 # Keys whose built-in value a rule or the hardware decides (an auto value in the schema).
-AUTO_KEYS = AUTO_PINS + ("row_unit", "cm_fma_pipes", "cm_tall_pct", "cm_mem_cycles")
+AUTO_KEYS = AUTO_PINS + ("row_unit", "cm_fma_pipes", "cm_tall_pct", "cm_mem_cycles", "cm_stream_cycles")
 RULE_SWITCHES = ("makespan", "l1_pass", "traffic_groups", "bf16_alias", "bf16_narrow_n", "blocks", "cost_model")
 # Keys whose rule a build without them does not have: their value that leaves it out.
 RULE_OFF_VALUES = {"int4_l1_pct": 0, "cm_int4_min_m": 0, "f16_wide_min_m": (1 << 31) - 1, "cm_block_k": 0}

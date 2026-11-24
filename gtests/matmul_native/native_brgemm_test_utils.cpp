@@ -710,6 +710,7 @@ std::string hw_match_text(const nat::native_hw_t &hw) {
     if (hw.uarch.avx512f) isa.push_back("avx512f");
     if (hw.uarch.avx512bf16) isa.push_back("avx512bf16");
     if (hw.uarch.avx512vnni) isa.push_back("avx512vnni");
+    if (hw.uarch.avx512fp16) isa.push_back("avx512fp16");
     m["isa"] = isa;
     count("l1d_kib", hw.uarch.l1d_detected ? hw.uarch.l1d_bytes / 1024 : 0);
     count("l2_kib", hw.uarch.l2_detected ? hw.uarch.l2_bytes / 1024 : 0);

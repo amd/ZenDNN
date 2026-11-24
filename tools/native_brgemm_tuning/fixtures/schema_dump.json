@@ -6,7 +6,7 @@
     "family": 1,
     "model": 1,
     "stepping": 0,
-    "isa": ["avx512f", "avx512bf16", "avx512vnni"],
+    "isa": ["avx512f", "avx512bf16", "avx512vnni", "avx512fp16"],
     "l1d_kib": 48,
     "l2_kib": 1024,
     "l3_kib": 32768,
@@ -26,14 +26,19 @@
     "avx512f": true,
     "avx512bf16": true,
     "avx512vnni": true,
-    "avx512fp16": true
+    "avx512fp16": true,
+    "dot": {"fp32": {"ipc": 2.0, "latency": 6, "chains": 12}, "bf16": {"ipc": 2.0, "latency": 6, "chains": 12}, "int8": {"ipc": 2.0, "latency": 6, "chains": 12}, "int4": {"ipc": 2.0, "latency": 6, "chains": 12}, "fp16": {"ipc": 2.0, "latency": 6, "chains": 12}, "f16_widen": {"ipc": 2.0, "latency": 6, "chains": 12}},
+    "dot_source": "default",
+    "mem_cycles": 0,
+    "stream_cycles": 0,
+    "priced": false
   },
   "hw_match": {
     "vendor": "ExampleVendor",
     "family": 1,
     "model": 1,
     "stepping": 0,
-    "isa": ["avx512f", "avx512bf16", "avx512vnni"],
+    "isa": ["avx512f", "avx512bf16", "avx512vnni", "avx512fp16"],
     "l1d_kib": 48,
     "l2_kib": 1024,
     "l3_kib": 32768,
@@ -95,8 +100,8 @@
     {"name": "cost_model", "type": "int", "default": 1, "min": 0, "max": 1, "applies": "both", "int8_schemes": ["per_channel", "per_group"], "families": ["bf16", "int8", "f32", "int4", "f16", "f16_ph"], "bits": "same", "kind": "param"},
     {"name": "cm_gain_pct", "type": "int", "default": 5, "min": 0, "max": 100, "applies": "both", "int8_schemes": ["per_channel", "per_group"], "families": ["bf16", "int8", "f32", "int4", "f16", "f16_ph"], "bits": "same", "kind": "param"},
     {"name": "cm_short_rows", "type": "int", "default": 8, "min": 1, "max": 12, "applies": "both", "int8_schemes": ["per_channel", "per_group"], "families": ["bf16", "int8", "f32", "int4", "f16", "f16_ph"], "bits": "same", "kind": "param"},
-    {"name": "cm_fma_pipes", "type": "int", "default": "fma_ports", "auto": 0, "min": 0, "max": 16, "applies": "both", "int8_schemes": ["per_channel", "per_group"], "families": ["bf16", "int8", "f32", "int4", "f16", "f16_ph"], "bits": "same", "kind": "param"},
-    {"name": "cm_fma_lat", "type": "int", "default": 6, "min": 1, "max": 64, "applies": "both", "int8_schemes": ["per_channel", "per_group"], "families": ["bf16", "int8", "f32", "int4", "f16", "f16_ph"], "bits": "same", "kind": "param"},
+    {"name": "cm_fma_pipes", "type": "int", "default": "dot", "auto": 0, "min": 0, "max": 16, "applies": "both", "int8_schemes": ["per_channel", "per_group"], "families": ["bf16", "int8", "f32", "int4", "f16", "f16_ph"], "bits": "same", "kind": "param"},
+    {"name": "cm_fma_lat", "type": "int", "default": 6, "min": 0, "max": 64, "applies": "both", "int8_schemes": ["per_channel", "per_group"], "families": ["bf16", "int8", "f32", "int4", "f16", "f16_ph"], "bits": "same", "kind": "param"},
     {"name": "cm_call_cycles", "type": "int", "default": 800, "min": 0, "max": 1048576, "applies": "both", "int8_schemes": ["per_channel", "per_group"], "families": ["bf16", "int8", "f32", "int4", "f16", "f16_ph"], "bits": "same", "kind": "param"},
     {"name": "cm_tall_pct", "type": "int", "default": "domain_threads", "auto": -1, "min": -1, "max": 100, "applies": "both", "int8_schemes": ["per_channel", "per_group"], "families": ["bf16", "int8", "f32", "int4", "f16", "f16_ph"], "bits": "same", "kind": "param"},
     {"name": "cm_l2_bytes", "type": "int", "default": 16, "min": 1, "max": 4096, "applies": "both", "int8_schemes": ["per_channel", "per_group"], "families": ["bf16", "int8", "f32", "int4", "f16", "f16_ph"], "bits": "same", "kind": "param"},
@@ -105,7 +110,7 @@
     {"name": "cm_prefetch_kib", "type": "int", "default": 4, "min": 0, "max": 1048576, "applies": "both", "int8_schemes": ["per_channel", "per_group"], "families": ["bf16", "int8", "f32", "int4", "f16", "f16_ph"], "bits": "same", "kind": "param"},
     {"name": "cm_overlap_pct", "type": "int", "default": 20, "min": 0, "max": 100, "applies": "both", "int8_schemes": ["per_channel", "per_group"], "families": ["bf16", "int8", "f32", "int4", "f16", "f16_ph"], "bits": "same", "kind": "param"},
     {"name": "cm_reuse_pct", "type": "int", "default": 50, "min": 1, "max": 1000, "applies": "both", "int8_schemes": ["per_channel"], "families": ["bf16", "int8", "f32", "int4", "f16", "f16_ph"], "bits": "same", "kind": "param"},
-    {"name": "cm_stream_cycles", "type": "int", "default": 600, "min": 0, "max": 1048576, "applies": "both", "int8_schemes": ["per_channel", "per_group"], "families": ["bf16", "int8", "f32", "int4", "f16", "f16_ph"], "bits": "same", "kind": "param"},
+    {"name": "cm_stream_cycles", "type": "int", "default": "uarch", "auto": -1, "min": -1, "max": 1048576, "applies": "both", "int8_schemes": ["per_channel", "per_group"], "families": ["bf16", "int8", "f32", "int4", "f16", "f16_ph"], "bits": "same", "kind": "param"},
     {"name": "cm_sync_tiles", "type": "int", "default": 5, "min": 0, "max": 1048576, "applies": "both", "int8_schemes": ["per_channel", "per_group"], "families": ["bf16", "int8", "f32", "int4", "f16", "f16_ph"], "bits": "same", "kind": "param"},
     {"name": "cm_group_slab_pct", "type": "int", "default": 75, "min": 1, "max": 100000, "applies": "both", "int8_schemes": ["per_channel"], "families": ["bf16", "int8", "f32", "int4", "f16", "f16_ph"], "bits": "same", "kind": "param"},
     {"name": "cm_group_l3_pct", "type": "int", "default": 75, "min": 1, "max": 100000, "applies": "both", "int8_schemes": ["per_channel"], "families": ["bf16", "int8", "f32", "int4", "f16", "f16_ph"], "bits": "same", "kind": "param"},
@@ -150,12 +155,12 @@
     {"name": "f16", "elem_bits": 16, "k_per_word": 1, "planes": 1, "src_bits": 16, "quantized": false, "grouped": false, "scale_bytes": [], "routes": [{"family": "f16", "int8_schemes": [], "class": "rows", "priced": true, "gemv": "f16"}, {"family": "f16_ph", "int8_schemes": [], "class": "rows", "priced": true, "gemv": "f16_ph"}]}
   ],
   "families": [
-    {"name": "bf16", "isa": "avx512bf16", "k_step": 2, "slab_cols": 32, "operand_bits": 16, "vector_cols": 16},
-    {"name": "int8", "isa": "avx512vnni", "k_step": 4, "slab_cols": 32, "operand_bits": 8, "vector_cols": 16},
-    {"name": "f32", "isa": "avx512f", "k_step": 1, "slab_cols": 32, "operand_bits": 32, "vector_cols": 16},
-    {"name": "int4", "isa": "avx512vnni", "k_step": 8, "slab_cols": 32, "operand_bits": 8, "vector_cols": 16},
-    {"name": "f16", "isa": "avx512f", "k_step": 1, "slab_cols": 32, "operand_bits": 32, "vector_cols": 16},
-    {"name": "f16_ph", "isa": "avx512fp16", "k_step": 1, "slab_cols": 64, "operand_bits": 16, "vector_cols": 32}
+    {"name": "bf16", "isa": "avx512bf16", "k_step": 2, "slab_cols": 32, "operand_bits": 16, "vector_cols": 16, "path": "bf16"},
+    {"name": "int8", "isa": "avx512vnni", "k_step": 4, "slab_cols": 32, "operand_bits": 8, "vector_cols": 16, "path": "int8"},
+    {"name": "f32", "isa": "avx512f", "k_step": 1, "slab_cols": 32, "operand_bits": 32, "vector_cols": 16, "path": "fp32"},
+    {"name": "int4", "isa": "avx512vnni", "k_step": 8, "slab_cols": 32, "operand_bits": 8, "vector_cols": 16, "path": "int4"},
+    {"name": "f16", "isa": "avx512f", "k_step": 1, "slab_cols": 32, "operand_bits": 32, "vector_cols": 16, "path": "f16_widen"},
+    {"name": "f16_ph", "isa": "avx512fp16", "k_step": 1, "slab_cols": 64, "operand_bits": 16, "vector_cols": 32, "path": "fp16"}
   ],
   "kernels": [
     {"kind": "bf16", "nr": 16, "mr_mask": 63, "max_mr": 6, "k_unit": 2, "int8_schemes": []},
@@ -195,7 +200,7 @@
     "format": "zendnnl-native-brgemm-tuning",
     "version": 2,
     "hardware_keys": ["vendor", "family", "model", "stepping", "isa", "l1d_kib", "l2_kib", "l3_kib", "l3_cores", "smt", "l3_threads", "cores", "logical_cpus"],
-    "isa": ["avx512f", "avx512bf16", "avx512vnni"]
+    "isa": ["avx512f", "avx512bf16", "avx512vnni", "avx512fp16"]
   },
   "plan_line": [
     "M", "N", "K", "pack_nr", "nr", "mb", "kc", "kernels", "tiles", "threads", "col_groups", "unit_tiles", "nb",

@@ -32,9 +32,15 @@ int native_plan_domain_threads(
         const UarchParams &uarch, const heuristic_params_t &hp);
 
 /// Cycles per KiB one thread streams from memory while its L3 domain
-/// streams: cm_mem_cycles, or, at 0, 2400 over the square root of
+/// streams: cm_mem_cycles, or, at 0, the machine's UarchParams::mem_cycles
+/// (2400 where not measured) over the square root of
 /// native_plan_domain_threads.
 double native_plan_mem_cycles(
+        const UarchParams &uarch, const heuristic_params_t &hp);
+
+/// Cycles per KiB one core streams weights at most: cm_stream_cycles, or, at
+/// -1, the machine's UarchParams::stream_cycles (600 where not measured).
+int native_plan_stream_cycles(
         const UarchParams &uarch, const heuristic_params_t &hp);
 
 /// Percent more cycles per row a call of more than cm_short_rows rows
@@ -65,7 +71,8 @@ struct native_plan_cost_t {
 };
 
 /// True where one core streams weights slower than its share of its L3
-/// domain's link: native_plan_mem_cycles below cm_stream_cycles.  At a tie
+/// domain's link: native_plan_mem_cycles below native_plan_stream_cycles.
+/// At a tie
 /// (16 threads to a domain at the defaults) neither this nor the link's
 /// filling of the idle (native_plan_cost_t::memory) holds.
 bool native_plan_core_streams(

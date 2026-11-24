@@ -66,7 +66,7 @@ review comments and CI logs.
 2. Run it the way the measured work runs: the same cpuset and
    `OMP_NUM_THREADS`, with `OMP_PROC_BIND=close OMP_PLACES=cores`:
    `<probe> --out <run dir>/ceilings.json`. A full run takes about 40 s;
-   `--quick` takes a second, for a smoke test. It loads every CPU of the team,
+   `--quick` takes a few seconds, for a smoke test. It loads every CPU of the team,
    so run it where nothing else is being timed. Pass `--hugepages` only when
    the measured work advises huge pages.
 3. From `tools/`, `python3 -m op_perf_utility show <file>` summarizes the file.
@@ -125,7 +125,7 @@ tests:
 
 | The change | Update |
 |---|---|
-| A dot-product instruction or kernel kind of the native matmul kernels (kernel registry, `kernel_kind`, a new ISA path) | a probe path in `probe/probe.cpp` (kernel, ISA attribute, FLOPs per instruction), the path names in `common/ceilings.py`, `compute_path()` in `matmul/bounds.py`, the per-path pipes and latency in `matmul/calibrate.py` |
+| A dot-product instruction or kernel kind of the native matmul kernels (kernel registry, `kernel_kind`, a new ISA path) | a probe path in `probe/probe.cpp` (kernel, ISA attribute, FLOPs per instruction), the path names in `common/ceilings.py`, `compute_path()` in `matmul/bounds.py`, the per-path pipes and the uarch value (`uarch_override()`) in `matmul/calibrate.py` |
 | The narrowest tile width (`nr` values), the GEMV path's column unit, or a schedule that splits K over threads | `UNIT_COLS` and `usable_threads()` in `matmul/bounds.py` |
 | The inner loop or widest tile of the INT4 or F16 kernels (`native_int4_ukernel.cpp`, `native_f16_ukernel.cpp`), or how output tiles store | `tput_int4`, `tput_f16_widen` or `write_pass` in `probe/probe.cpp` |
 | A data type, scale granularity, bias, post-op or epilogue of the matmul API or BenchDNN | the FLOPs and bytes in `matmul/work.py`, the readers in `matmul/benchdnn_ingest.py` |

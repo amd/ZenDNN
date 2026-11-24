@@ -202,6 +202,14 @@ def _value_rule(key: str, p: Problem, schema: Schema) -> List[Any]:
     if key == "decode_m":
         # Only the side of M it falls on counts: multiply-adds at every M, or bytes up to this one.
         return [0, p.m]
+    if key in ("cm_fma_pipes", "cm_fma_lat"):
+        # Around the machine model's path of the problem's kernels: half, the same and double
+        # its dot products a cycle; the model's step floor (0: its latency over the call's
+        # accumulator sets), and its latency (a pin, whatever the sets) and one either side.
+        d = schema.dot_of(p)
+        if key == "cm_fma_pipes":
+            return sorted({max(1, int(d.ipc / 2 + 0.5)), max(1, int(d.ipc + 0.5)), min(16, int(d.ipc * 2 + 0.5))})
+        return sorted({0, max(1, d.latency - 1), d.latency, min(64, d.latency + 1)})
     fixed = {
         "nb": [64, 128, 256],
         "schedule": ["slice", "row_groups", "blocks"], "traversal": ["n_inner"], "unit_tiles": [2, 4],
@@ -222,7 +230,7 @@ def _value_rule(key: str, p: Problem, schema: Schema) -> List[Any]:
         "bf16_blocks_min_m": [1], "int8_blocks_min_m": [1], "int4_l1_pct": [0, 50, 250],
         # The cost model: its switch, margin and inputs.
         "cost_model": [0, 1], "cm_gain_pct": [0, 2, 10], "cm_short_rows": [4, 6, 10],
-        "cm_fma_pipes": [1, 4], "cm_fma_lat": [4, 8], "cm_call_cycles": [400, 1600],
+        "cm_call_cycles": [400, 1600],
         "cm_tall_pct": [0, 25, 50], "cm_l2_bytes": [8, 32], "cm_l3_cycles": [5, 20],
         "cm_mem_cycles": [300, 600, 1200], "cm_prefetch_kib": [0, 16], "cm_overlap_pct": [0, 50],
         "cm_reuse_pct": [25, 100], "cm_stream_cycles": [400, 900], "cm_sync_tiles": [1, 20],

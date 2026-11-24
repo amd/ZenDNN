@@ -98,6 +98,29 @@ class TestMachine(unittest.TestCase):
             self.assertEqual(op_perf.machine_mismatch(Ceilings(ceilings_doc(avx512fp16=not fp16)), SCHEMA, 32),
                              ["avx512fp16: probe %s, schema %s" % (not fp16, fp16)])
 
+    def test_model_check(self):
+        # The library's model against the probe per path: a flag beyond 20%, not a refusal.
+        doc = ceilings_doc()
+        self.assertEqual(op_perf.model_check(Ceilings(doc), SCHEMA), [])
+        doc["compute"]["int8"]["instr_per_cycle"] = 3.5
+        self.assertEqual(op_perf.model_check(Ceilings(doc), SCHEMA), ["int8: model 2, measured 3.50"])
+        self.assertEqual(op_perf.machine_mismatch(Ceilings(doc), SCHEMA, 32), [])
+        doc["compute"]["int8"]["instr_per_cycle"] = 2.3
+        self.assertEqual(op_perf.model_check(Ceilings(doc), SCHEMA), [])
+        # A model of 3.5 prices only where the environment sets it: a dump of the class default
+        # is priced at 2 whatever its paths say.
+        doc["compute"]["int8"]["instr_per_cycle"] = 3.5
+        quad = copy.copy(SCHEMA)
+        quad.uarch = SCHEMA.uarch.with_overrides("int8_ipc=3.5")
+        self.assertEqual(op_perf.model_check(Ceilings(doc), quad), [])
+        self.assertEqual(op_perf.library_model(quad)["int8"], (3.5, 6))
+        row = copy.copy(SCHEMA)
+        row.uarch = quad.uarch.with_overrides("")
+        row.uarch.dot_source = "default"
+        self.assertEqual(op_perf.model_check(Ceilings(doc), row), ["int8: model 2, measured 3.50"])
+        self.assertEqual(op_perf.library_model(row)["int8"], (2.0, 6))
+        self.assertEqual(op_perf.library_model(object()), {})
+
     def test_cold_weights(self):
         self.assertTrue(op_perf.cold_weights({"backend": "replay", "cold_mb": 1000.0}))
         self.assertFalse(op_perf.cold_weights({"backend": "replay", "cold_mb": 0}))
@@ -293,8 +316,7 @@ class TestHeadroom(unittest.TestCase):
 
 
 # The utility's synthetic machine calibrated for a 32-thread campaign (see TestCalibration.test_cli).
-CAL = {"cm_fma_pipes": 2, "cm_fma_lat": 6, "cm_l2_bytes": 32, "cm_l3_cycles": 64, "cm_mem_cycles": 683,
-       "cm_stream_cycles": 128}
+CAL = {"cm_l2_bytes": 32, "cm_l3_cycles": 64, "cm_mem_cycles": 683, "cm_stream_cycles": 128}
 # The tests' machine (helpers.UARCH) for a campaign, whatever machine the schema describes.
 UARCH_TEXT = "l1d_bytes=49152,l2_bytes=1048576,l3_bytes=33554432,family_l3_cores=8,num_cores=32,l3_domain_cores=8"
 # On it, the calibrated values change the plans of the bf16 M = 16 problems, not these others.
@@ -315,9 +337,11 @@ class TestCalibration(unittest.TestCase):
         plain = Space(p, SCHEMA, UARCH, HEAD_KEYS)
         self.assertIsNone(plain.base_candidate)
         self.assertEqual(sp.default.sig, plain.default.sig)
-        # cm_fma_lat=6 is the built-in value: the base leaves it out.
         self.assertEqual(sp.base_candidate.text,
-                         "cm_fma_pipes=2,cm_l2_bytes=32,cm_l3_cycles=64,cm_mem_cycles=683,cm_stream_cycles=128")
+                         "cm_l2_bytes=32,cm_l3_cycles=64,cm_mem_cycles=683,cm_stream_cycles=128")
+        # cm_fma_lat=6 is the built-in value: a base leaves it out.
+        self.assertEqual(Space(p, SCHEMA, UARCH, HEAD_KEYS, base=dict(CAL, cm_fma_lat=6)).base_candidate.text,
+                         sp.base_candidate.text)
         self.assertEqual(next(sp.iter_grid(1)).text, sp.base_candidate.text)
         c = sp.make({"nr": 16})
         self.assertEqual(c.config, dict(sp.base_candidate.config, nr=16))
@@ -360,9 +384,9 @@ class TestCalibration(unittest.TestCase):
         self.assertGreater(v["geomean_ratio"], 0.99)
 
     def test_seed_values(self):
-        cfgs = {"bf16": {"cm_fma_lat": 6, "cm_l2_bytes": 40}, "s8": {"cm_fma_lat": 4, "cm_l2_bytes": 40}}
+        cfgs = {"bf16": {"cm_fma_pipes": 2, "cm_l2_bytes": 40}, "s8": {"cm_fma_pipes": 4, "cm_l2_bytes": 40}}
         self.assertEqual(calibration.seed_values(["kc=512|1024", "cm_l2_bytes=8|32"], cfgs, SCHEMA),
-                         ["kc=512|1024", "cm_fma_lat=3|4|5|6|7", "cm_l2_bytes=16|20|40|80"])
+                         ["kc=512|1024", "cm_fma_pipes=0|1|2|3|4|5", "cm_l2_bytes=16|20|40|80"])
 
     def test_rules(self):
         from native_brgemm_tuning.rules import eval_rules
@@ -524,8 +548,9 @@ class TestCalibration(unittest.TestCase):
         self.assertEqual(run("probe", "--workdir", wd, "--ceilings", src, "--force")[0], 0)
         rc, out = run("calibrate", "--workdir", wd)
         self.assertEqual(rc, 0, out)
-        self.assertIn("bf16: cm_fma_pipes=2,cm_fma_lat=6,cm_l3_cycles=64,cm_mem_cycles=683,cm_stream_cycles=128\n",
-                      out)  # no cm_l2_bytes unless named
+        # No cm_l2_bytes unless named, and no cm_fma_pipes: the probe's 2 a cycle is what the
+        # campaign's schema prices with.
+        self.assertIn("bf16: cm_l3_cycles=64,cm_mem_cycles=683,cm_stream_cycles=128\n", out)
         with open(os.path.join(wd, "campaign.json")) as f:
             parallel = json.load(f)["parallel"]
         rc, out = run("calibrate", "--workdir", wd, "--keys", ",".join(calibration.KEYS), "--parallel", parallel + 2)
@@ -538,8 +563,8 @@ class TestCalibration(unittest.TestCase):
         cal = camp["calibration"]
         self.assertEqual((cal["problems"], cal["changed"]), (4, 2))
         # The campaign's 32 threads share the 120 GB/s DRAM saturates at: 1024 / (120 / 32 / 2.5).
-        self.assertEqual(cal["configs"]["bf16"], {"cm_fma_pipes": 2, "cm_fma_lat": 6, "cm_l2_bytes": 32,
-                                                   "cm_l3_cycles": 64, "cm_mem_cycles": 683, "cm_stream_cycles": 128})
+        self.assertEqual(cal["configs"]["bf16"], {"cm_l2_bytes": 32, "cm_l3_cycles": 64, "cm_mem_cycles": 683,
+                                                   "cm_stream_cycles": 128})
         # Whatever the synthetic A/B said, as if it kept them: the search starts from them.
         camp["calibration"]["accepted"] = True
         camp["values"] = calibration.seed_values([], cal["configs"], SCHEMA)
@@ -549,9 +574,9 @@ class TestCalibration(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         with open(os.path.join(wd, "results.jsonl")) as f:
             texts = {json.loads(line)["text"] for line in f if '"phase": "search"' in line}
-        base_text = "cm_fma_pipes=2,cm_l2_bytes=32,cm_l3_cycles=64,cm_mem_cycles=683,cm_stream_cycles=128"
+        base_text = "cm_l2_bytes=32,cm_l3_cycles=64,cm_mem_cycles=683,cm_stream_cycles=128"
         self.assertIn(base_text, texts)
-        self.assertTrue(all(base_text.split(",")[1] in t for t in texts if t))
+        self.assertTrue(all("cm_l2_bytes=32" in t for t in texts if t))
         with self.assertRaises(SystemExit):
             run("calibrate", "--workdir", wd)  # after the search
         out_file = os.path.join(wd, "t.json")

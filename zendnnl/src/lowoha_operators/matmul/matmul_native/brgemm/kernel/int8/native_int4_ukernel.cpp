@@ -26,6 +26,7 @@
 #include <immintrin.h>
 
 #include "common/zendnnl_compat.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/native_int8_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/native_decode.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/avx512_math.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_format.hpp"
@@ -270,7 +271,7 @@ void native_int4_group_ukernel(const native_int4_group_ukernel_args_t &p) {
     static_assert(Fused || !SrcGroups, "source groups are a fused order");
     // Small tiles split each group's octets over independent accumulator
     // sets; the int32 sum is exact in any order.
-    constexpr int kSets = MR * NV <= 2 ? 4 : (MR * NV <= 4 ? 2 : 1);
+    constexpr int kSets = native_int8_kernel_sets(MR, NV);
     const size_t ldc = static_cast<size_t>(p.ldc);
     __m512 c[MR][NV];
     ZENDNNL_NATIVE_INT4_UNROLL(12)

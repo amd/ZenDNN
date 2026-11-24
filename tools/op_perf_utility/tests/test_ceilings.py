@@ -59,6 +59,27 @@ class ValidateTest(unittest.TestCase):
         self.assertTrue(any("write_bandwidth[0]" in e for e in errs))
         self.assertTrue(any("team_cores" in e for e in errs))
 
+    def test_probe_1_2_fields(self):
+        doc = example_doc()
+        doc["uarch"]["dot"] = {"int8": {"ipc": 0, "latency": 4}}
+        doc["chain_sweep"] = {"chains": [4, 8], "instr_per_cycle": {"int8": [1.0]}}
+        errs = validate(doc)
+        self.assertTrue(any("uarch.dot" in e for e in errs))
+        self.assertTrue(any("chain_sweep" in e for e in errs))
+        doc["uarch"]["dot"] = {"int8": {"ipc": 3.5, "latency": 4, "chains": 14}}
+        doc["chain_sweep"]["instr_per_cycle"] = {"int8": [1.0, 2.0], "bf16": [0.67, 1.33]}
+        c = Ceilings(doc, "1.2")
+        self.assertEqual(c.model, {"int8": (3.5, 4)})
+        self.assertEqual(c.chain_rates("int8"), [(4, 1.0), (8, 2.0)])
+        self.assertEqual(c.chain_rates("fp32"), [])
+        self.assertEqual(example().model, {})
+        text = c.summary()
+        self.assertIn("(library model 3.5 / 4)", text)
+        self.assertIn("chains  bf16: 4: 0.67, 8: 1.33", text)
+        # A model whose memory terms are not measured prices at 2 a cycle.
+        doc["uarch"].update({"mem_cycles": 0, "stream_cycles": 0, "priced": False})
+        self.assertEqual(Ceilings(doc, "1.2").model, {"int8": (2.0, 4)})
+
     def test_load_missing_file(self):
         with self.assertRaises(CeilingsError):
             Ceilings.load(os.path.join(tempfile.gettempdir(), "no_such_ceilings.json"))
@@ -148,6 +169,8 @@ class MatchTest(unittest.TestCase):
         self.assertTrue(bad[1].startswith("isa:"))
         # A field one side does not report is not compared.
         self.assertEqual(c.match(dict(hw, l2_kib=0, stepping=7)), [])
+        # AVX512-FP16, which a probe or schema before 1.2 does not list, has its own flag.
+        self.assertEqual(c.match(dict(hw, isa=hw["isa"] + ["avx512fp16"])), [])
 
     def test_brief_holds_no_measurement(self):
         b = example().brief()

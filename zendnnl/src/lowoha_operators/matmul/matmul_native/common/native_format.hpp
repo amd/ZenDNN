@@ -27,6 +27,7 @@
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/f16/native_f16_ph_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/native_int4_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/native_int8_ukernel.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_int8_scheme.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_types.hpp"
@@ -371,22 +372,25 @@ struct native_family_desc_t {
     /// start of each call's K, so that a K pass of whole blocks keeps every
     /// block at the same K whatever the plan; 0 for none.
     int k_block;
+    /// The compute path of its inner loop: one instruction of it per K step,
+    /// row and vector of a call (UarchParams::dot).
+    native_dot_path_t path;
 };
 
 /// Indexed by native_kernel_kind_t.
 inline constexpr native_family_desc_t kNativeFamilies[] = {
         {native_kernel_kind_t::bf16, "bf16", native_isa_t::avx512_bf16,
-                VNNI_PAIR, 16, 16, 32, 0},
+                VNNI_PAIR, 16, 16, 32, 0, native_dot_path_t::bf16},
         {native_kernel_kind_t::int8, "int8", native_isa_t::avx512_vnni,
-                INT8_VNNI_GRP, 8, 16, 32, 0},
-        {native_kernel_kind_t::f32, "f32", native_isa_t::base, 1, 32, 16, 32,
-                0},
+                INT8_VNNI_GRP, 8, 16, 32, 0, native_dot_path_t::int8},
+        {native_kernel_kind_t::f32, "f32", native_isa_t::base, 1, 32, 16, 32, 0,
+                native_dot_path_t::fp32},
         {native_kernel_kind_t::int4, "int4", native_isa_t::avx512_vnni, 8, 8,
-                16, 32, 0},
-        {native_kernel_kind_t::f16, "f16", native_isa_t::base, 1, 32, 16, 32,
-                0},
+                16, 32, 0, native_dot_path_t::int4},
+        {native_kernel_kind_t::f16, "f16", native_isa_t::base, 1, 32, 16, 32, 0,
+                native_dot_path_t::f16_widen},
         {native_kernel_kind_t::f16_ph, "f16_ph", native_isa_t::avx512_fp16, 1,
-                16, 32, 64, kNativeF16AccumBlockK},
+                16, 32, 64, kNativeF16AccumBlockK, native_dot_path_t::fp16},
 };
 
 constexpr const native_family_desc_t &native_family(native_kernel_kind_t id) {

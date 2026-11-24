@@ -39,6 +39,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <iterator>
 #include <string>
 #include <utility>
 #include <vector>
@@ -51,6 +52,7 @@
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_planner.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_tuning_file.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_hw.hpp"
 #include "lowoha_operators/matmul/matmul_native/native_layout_policy.hpp"
 #include "matmul_native/native_brgemm_test_utils.hpp"
 
@@ -60,7 +62,8 @@ namespace nat = zendnnl::lowoha::matmul::native;
 using zendnnl::memory::data_type_t;
 
 /// 48 KiB of L1d, 1 MiB of L2 and l3_mib MiB of L3 per domain of domain
-/// cores.
+/// cores, and the class default's model, which does not price kernels by
+/// path (native_dot_prices) and has no memory terms of its own.
 nat::UarchParams caches(int l3_mib, int domain) {
     nat::UarchParams u = nat::detect_uarch();
     u.l1d_bytes = 48 << 10;
@@ -68,6 +71,11 @@ nat::UarchParams caches(int l3_mib, int domain) {
     u.l3_domain_bytes = l3_mib << 20;
     u.family_l3_cores = 1;
     u.l3_domain_cores = domain;
+    const nat::UarchParams class_default;
+    std::copy(
+            std::begin(class_default.dot), std::end(class_default.dot), u.dot);
+    u.dot_source = nat::native_dot_source_t::class_default;
+    u.mem_cycles = u.stream_cycles = 0;
     u.fma_ports = 2;
     return u;
 }
@@ -1274,6 +1282,191 @@ TEST(NativeCostModel, PlansAreLegalOverTheInputs) {
         }
     }
     EXPECT_EQ(failed, 0u) << "of " << checked;
+}
+
+double dot_ipc(const nat::UarchParams &u, nat::native_dot_path_t p) {
+    return u.dot[static_cast<int>(p)].ipc;
+}
+
+nat::native_dot_t &dot_of(nat::UarchParams &u, nat::native_dot_path_t p) {
+    return u.dot[static_cast<int>(p)];
+}
+
+/// domains8 with its class default model set, so that the cost model prices
+/// kernels by path.
+nat::UarchParams priced8() {
+    nat::UarchParams u = domains8();
+    u.dot_source = nat::native_dot_source_t::set;
+    return u;
+}
+
+// Every CPU takes the class default, whatever its CPUID: today's prices (2
+// dot products a cycle and 6 cycles on every path, no memory terms), which
+// do not price kernels by path; only ZENDNNL_MATMUL_NATIVE_UARCH sets a
+// machine's model.  fma_ports follows the BF16 path.
+TEST(NativeMachineModel, EveryCpuTakesTheClassDefault) {
+    const nat::UarchParams class_default;
+    for (const nat::UarchParams &u :
+            {nat::detect_uarch(), nat::native_plan_uarch(nat::native_hw())}) {
+        EXPECT_EQ(u.dot_source, nat::native_dot_source_t::class_default);
+        EXPECT_FALSE(nat::native_dot_prices(u));
+        EXPECT_EQ(u.mem_cycles, 0);
+        EXPECT_EQ(u.stream_cycles, 0);
+        EXPECT_EQ(u.fma_ports, 2);
+        for (int i = 0; i < nat::kNativeDotPaths; ++i) {
+            EXPECT_DOUBLE_EQ(u.dot[i].ipc, class_default.dot[i].ipc);
+            EXPECT_EQ(u.dot[i].latency, class_default.dot[i].latency);
+        }
+    }
+    for (int i = 0; i < nat::kNativeDotPaths; ++i) {
+        EXPECT_DOUBLE_EQ(class_default.dot[i].ipc, 2.0);
+        EXPECT_EQ(class_default.dot[i].latency,
+                nat::heuristic_params_t {}.cm_fma_lat);
+    }
+}
+
+TEST(NativeMachineModel, ChainsArePipesTimesLatency) {
+    EXPECT_EQ(nat::native_dot_chains({2.0, 4}), 8);
+    EXPECT_EQ(nat::native_dot_chains({2.0, 6}), 12);
+    EXPECT_EQ(nat::native_dot_chains({3.75, 4}), 15);
+    EXPECT_EQ(nat::native_dot_chains({3.8, 4}), 16);
+    EXPECT_EQ(nat::native_dot_chains({2.6, 4}), 11);
+    EXPECT_EQ(nat::native_dot_chains({1.0, 4}), 4);
+    EXPECT_EQ(nat::native_dot_chains({0.9, 4}), 4);
+    EXPECT_EQ(nat::native_dot_chains({0.1, 1}), 1);
+}
+
+// ZENDNNL_MATMUL_NATIVE_UARCH sets paths item by item; a bad item (a number
+// out of an int's range, an empty item, a space in an item) leaves
+// the model as it was.
+TEST(NativeMachineModel, EnvironmentSetsPaths) {
+    using path = nat::native_dot_path_t;
+    nat::UarchParams u;
+    std::string why;
+    ASSERT_TRUE(nat::apply_native_uarch(
+            u, "int8_ipc=4, int8_lat=5,bf16_ipc=1.5", why))
+            << why;
+    EXPECT_DOUBLE_EQ(dot_ipc(u, path::int8), 4.0);
+    EXPECT_EQ(dot_of(u, path::int8).latency, 5);
+    EXPECT_DOUBLE_EQ(dot_ipc(u, path::bf16), 1.5);
+    EXPECT_DOUBLE_EQ(dot_ipc(u, path::fp32), 2.0);
+    EXPECT_EQ(u.fma_ports, 2);
+    EXPECT_EQ(u.dot_source, nat::native_dot_source_t::set);
+    EXPECT_TRUE(nat::native_dot_prices(u));
+    ASSERT_TRUE(nat::apply_native_uarch(
+            u, "mem_cycles=1200,stream_cycles=300", why))
+            << why;
+    EXPECT_EQ(u.mem_cycles, 1200);
+    EXPECT_EQ(u.stream_cycles, 300);
+    EXPECT_DOUBLE_EQ(dot_ipc(u, path::int8), 4.0);
+    for (const char *bad : {"", "int8_ipc=0", "int8_ipc=65", "int9_ipc=2",
+                 "int8_lat=2.5", "int8_lat=0", "int8_lat=65", "int8=4",
+                 "int8_ipc", "int8_ipc=x",
+                 "fp32_ipc=2,int8_ipc=", "mem_cycles=0", "stream_cycles=1.5",
+                 "mem_cycles=1048577", "mem_ipc=2", "fp32_cycles=2",
+                 "fp32_ipc=1e10", "int8_lat=1e10", "int8_lat=-1e300",
+                 "mem_cycles=1e10", "mem_cycles=1e400", "mem_cycles=inf",
+                 "stream_cycles=nan", "int8_ipc=0x4", "int8_ipc=4,",
+                 "int8_ipc=4,,int8_lat=4", "int8_ipc =4", "int8_ipc= 4"}) {
+        nat::UarchParams v;
+        why.clear();
+        EXPECT_FALSE(nat::apply_native_uarch(v, bad, why)) << bad;
+        EXPECT_FALSE(why.empty()) << bad;
+        EXPECT_DOUBLE_EQ(dot_ipc(v, path::fp32), 2.0) << bad;
+        EXPECT_EQ(v.dot_source, nat::native_dot_source_t::class_default) << bad;
+        EXPECT_EQ(v.mem_cycles, 0) << bad;
+    }
+}
+
+// Each family is priced on its own path: a faster INT8 path makes a
+// compute-bound INT8 tile cheaper and leaves a BF16 tile alone, and a pinned
+// cm_fma_pipes prices every path alike.
+TEST(NativeCostModel, PricesEachFamilyByItsPath) {
+    const nat::heuristic_params_t hp
+            = params("cm_call_cycles=0,cm_tall_pct=0,cm_l2_bytes=4096");
+    const nat::native_problem_t b = problem(64, 4096, 4096, 32, true);
+    const nat::native_problem_t s = problem(64, 4096, 4096, 32, false);
+    const nat::UarchParams priced = priced8();
+    const nat::native_plan_t qb = nat::heuristic_plan(b, priced, hp);
+    const nat::native_plan_t qs = nat::heuristic_plan(s, priced, hp);
+    nat::UarchParams fast = priced;
+    dot_of(fast, nat::native_dot_path_t::int8).ipc = 4.0;
+    EXPECT_DOUBLE_EQ(nat::native_plan_cost(qb, b, fast, hp).core,
+            nat::native_plan_cost(qb, b, priced, hp).core);
+    EXPECT_LT(nat::native_plan_cost(qs, s, fast, hp).core,
+            nat::native_plan_cost(qs, s, priced, hp).core);
+    const nat::heuristic_params_t pinned = params(
+            "cm_call_cycles=0,cm_tall_pct=0,cm_l2_bytes=4096,cm_fma_pipes=2");
+    EXPECT_DOUBLE_EQ(nat::native_plan_cost(qs, s, fast, pinned).core,
+            nat::native_plan_cost(qs, s, priced, pinned).core);
+}
+
+// The model's step floor (cm_fma_lat 0) counts the accumulator sets of the
+// call's kernel: a call of two rows keeps more than one set and waits its
+// path's latency over them a step, while a set cm_fma_lat pins the floor
+// whatever the sets; calls of five accumulators or more keep one set.
+TEST(NativeCostModel, StepFloorCountsTheKernelsSets) {
+    const char *const only
+            = "cm_call_cycles=0,cm_tall_pct=0,cm_l2_bytes=4096,cm_l3_cycles=0";
+    nat::UarchParams slow = priced8();
+    dot_of(slow, nat::native_dot_path_t::int8).latency = 64;
+    const nat::heuristic_params_t model
+            = params(std::string(only) + ",cm_fma_lat=0");
+    const nat::heuristic_params_t pin
+            = params(std::string(only) + ",cm_fma_lat=64");
+    for (const int M : {2, 12}) {
+        SCOPED_TRACE("M " + std::to_string(M));
+        const nat::native_problem_t s = problem(M, 4096, 4096, 32, false);
+        const nat::native_plan_t q = nat::heuristic_plan(s, slow, model);
+        const int nv = nat::native_int8_col_width(q, q.nr) / 16;
+        const int rows = std::min({M, q.mb, nat::native_int8_call_rows(q, nv)});
+        ASSERT_EQ(M % rows, 0);
+        const int sets = nat::native_int8_kernel_sets(rows, nv);
+        if (M == 2) { EXPECT_GT(sets, 1); }
+        EXPECT_DOUBLE_EQ(nat::native_plan_cost(q, s, slow, pin).core,
+                sets * nat::native_plan_cost(q, s, slow, model).core);
+    }
+}
+
+// A model that does not price kernels by path, whatever its paths, prices
+// them at 2 dot products a cycle: under the default step floor its plans and
+// costs are those of these pins over a model that prices.
+TEST(NativeCostModel, UnpricedModelsKeepThePinnedPrice) {
+    nat::UarchParams unpriced = domains8();
+    for (nat::native_dot_t &d : unpriced.dot)
+        d = {1.0, 9};
+    const nat::UarchParams priced = priced8();
+    const nat::heuristic_params_t hp {};
+    const nat::heuristic_params_t pins = params("cm_fma_pipes=2,cm_fma_lat=6");
+    for (const auto &[M, bf16] : std::vector<std::pair<int, bool>> {{2, false},
+                 {16, true}, {16, false}, {64, true}, {128, false}}) {
+        SCOPED_TRACE("M " + std::to_string(M) + (bf16 ? " bf16" : " s8"));
+        const nat::native_problem_t p = problem(M, 4096, 4096, 32, bf16);
+        const nat::native_plan_t q = nat::heuristic_plan(p, unpriced, hp);
+        const nat::native_plan_t r = nat::heuristic_plan(p, priced, pins);
+        EXPECT_TRUE(same(q, r)) << text(q) << " vs " << text(r);
+        EXPECT_DOUBLE_EQ(nat::native_plan_cost(q, p, unpriced, hp).core,
+                nat::native_plan_cost(q, p, priced, pins).core);
+    }
+}
+
+// The memory terms are the machine's where it has them, the planner's
+// constants where it has none, and a set key's either way.
+TEST(NativeCostModel, MemoryTermsAreTheMachines) {
+    nat::UarchParams u = domains16();
+    const nat::heuristic_params_t hp {};
+    EXPECT_DOUBLE_EQ(nat::native_plan_mem_cycles(u, hp), 600.0);
+    EXPECT_EQ(nat::native_plan_stream_cycles(u, hp), 600);
+    u.mem_cycles = 1200;
+    u.stream_cycles = 400;
+    EXPECT_DOUBLE_EQ(nat::native_plan_mem_cycles(u, hp), 300.0);
+    EXPECT_EQ(nat::native_plan_stream_cycles(u, hp), 400);
+    EXPECT_TRUE(nat::native_plan_core_streams(u, hp));
+    const nat::heuristic_params_t set
+            = params("cm_mem_cycles=500,cm_stream_cycles=0");
+    EXPECT_DOUBLE_EQ(nat::native_plan_mem_cycles(u, set), 500.0);
+    EXPECT_EQ(nat::native_plan_stream_cycles(u, set), 0);
+    EXPECT_FALSE(nat::native_plan_core_streams(u, set));
 }
 
 } // namespace

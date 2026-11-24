@@ -55,7 +55,22 @@ run time, gradient-boosted trees when present, numpy models otherwise).
    with `--uarch l3_domain_cores=8,...`. The dump's `hw_match` holds the machine's
    value of every version 2 hardware key; a dump from a build without it
    gives no CPU vendor, family or model (see step 8). The cost model also
-   reads `fma_ports`. The built-in plan is the rules at their keys' defaults
+   reads the library's machine model: `uarch.dot`, per compute path (each
+   family's `path`: `fp32`, `bf16`, `int8`, `int4` the s4 tile's loop, `fp16`
+   the F16_PH kernels', `f16_widen` the F16 kernels') the dot products a core
+   issues a cycle (`ipc`) and their `latency`, and the memory terms
+   `uarch.mem_cycles` and `uarch.stream_cycles` in the machine's cycles (0:
+   not set, the planner's 2400 and 600). A kernel call of a step of
+   rows x vectors instructions costs max(rows x vectors / ipc, `cm_fma_lat`)
+   cycles a step, at `cm_fma_lat` 0 its path's latency over the call's
+   accumulator sets; the ipc is the path's where `uarch.priced` (a model the
+   environment sets; the library's class default, which every CPU takes
+   without one, is not), else 2, and `cm_fma_pipes` pins it. A dump of a
+   build without the model gives its `fma_ports` to every path with latency
+   6, priced;
+   `--uarch int8_ipc=4,int8_lat=4,mem_cycles=1500` sets paths and terms as
+   `ZENDNNL_MATMUL_NATIVE_UARCH` does (`fma_ports=N` sets every path's ipc).
+   The built-in plan is the rules at their keys' defaults
    (the makespan grid, the BF16 and INT8 L1-sized K passes, column groups by
    memory traffic, BF16 rows per call for aliasing source rows, BF16 tiles of
    several slabs at narrow N, the blocks schedule where one L3 domain's share
@@ -65,7 +80,7 @@ run time, gradient-boosted trees when present, numpy models otherwise).
    `cm_*`, the hardware ones derived from the L3 domain unless set).
    Each rule's switch defaults to 1 (on), and setting it to 0 leaves the rule
    out. A key whose auto value is a legal setting (`row_unit` 12,
-   `cm_tall_pct` -1, `cm_mem_cycles` 0, `cm_fma_pipes` 0) set to it is the
+   `cm_tall_pct` -1, `cm_mem_cycles` 0, `cm_stream_cycles` -1, `cm_fma_pipes` 0) set to it is the
    same as left unset, so a candidate never sets it so. The tuner's built-in
    plan has every key at the default of the schema it is given; a rule whose
    switch the schema lacks (an older build) is off.
@@ -201,7 +216,8 @@ run time, gradient-boosted trees when present, numpy models otherwise).
    `hardware` (version 2) matches CPU
    fields, each a value, a list or a `{"min", "max"}` range: by default the
    machine's `vendor`, `family`, `model`, `isa` (the features the CPU must all
-   have), `l1d_kib`, `l2_kib`, `l3_kib` and `l3_cores` (the plan's L3 domain),
+   have: `avx512f`, `avx512bf16`, `avx512vnni`, `avx512fp16`, the last one
+   telling the machines of the F16_PH kernels apart), `l1d_kib`, `l2_kib`, `l3_kib` and `l3_cores` (the plan's L3 domain),
    but not its core count or SMT setting, so the file also applies to the same
    part with other core counts or SMT on. `--hw-keys` picks the keys (for
    example add `smt` or `cores`), and `--hw-set key=value` writes a value
@@ -247,7 +263,12 @@ is optional: a campaign without ceilings tunes as before.
   model, caches, threads per L3 domain), the plan's L3 domain and its thread
   count are the campaign's (`--force` installs it anyway and records the
   differences); of several pods the first one's is installed, and the others'
-  differences above 10% are noted. A probe job writes the probe's exit status
+  differences above 10% are noted. Each compute path whose measured
+  instructions per cycle differ from the library's price (the schema's
+  `uarch.dot`, or 2 where the model does not price) by more than 20% is
+  noted too (`int8: model 2, measured 3.50`, kept as the campaign's
+  `ceilings.model`): the probe measured the machine, the model is what the
+  built-in plan assumes of it. A probe job writes the probe's exit status
   (`probe.rc`) when it ends: `collect` takes a probe once it has (`--force`
   before, as failed).
 - With ceilings, `status` gives each problem its bounding resource and the
@@ -272,7 +293,11 @@ is optional: a campaign without ceilings tunes as before.
   yet first gets `--scout` candidates (1), which time its built-in plan. All
   three are off by default.
 - `tune.py calibrate --workdir D` derives the cost model's hardware inputs
-  from the ceilings (`cm_fma_pipes` and `cm_fma_lat` per weight type,
+  from the ceilings (`cm_fma_pipes` per weight type where the probe measures
+  the path more than 20% away from what the campaign's schema prices it with,
+  its model where it prices, else 2 a cycle; every path from a probe before
+  1.2, which prints no model; no `cm_fma_lat`, a step floor fitted to timed
+  plans rather than a latency;
   `cm_l3_cycles`, `cm_mem_cycles`, `cm_stream_cycles`, and `cm_l2_bytes` when
   `--keys` names it: at the probe's L2 streaming rate it made BF16 plans
   slower on every machine it was tried on) and times every problem whose plan

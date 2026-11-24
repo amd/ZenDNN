@@ -311,14 +311,16 @@ def plan_line(p: Problem, q: Plan, valid: bool) -> str:
                 q.int8_bias_in_dequant, q.int8_scheme, q.copy_block, q.copy_par_min, valid))
 
 
-def tuner_line(c: Case, schema: Any) -> str:
-    """The dump's line for c, from plan.py and the tuner's config parser."""
+def tuner_line(c: Case, schema: Any, model: str = "") -> str:
+    """The dump's line for c, from plan.py and the tuner's config parser; model: the compute
+    model's values (as ZENDNNL_MATMUL_NATIVE_UARCH gave them to the dump)."""
     try:
         cfg = parse_settings(c.cfg, schema) if c.cfg != "-" else {}
     except ValueError:
         return "BADCFG"
     p = c.problem()
-    q = heuristic_plan(p, c.uarch(), params_from_config(cfg, schema), schema)
+    u = c.uarch().with_overrides(model) if model else c.uarch()
+    q = heuristic_plan(p, u, params_from_config(cfg, schema), schema)
     return plan_line(p, q, validate_plan(q, p, schema) is None)
 
 
@@ -355,14 +357,14 @@ def _fields(line: str) -> Dict[str, str]:
     return dict(t.partition("=")[::2] for t in normalized(line).split())
 
 
-def compare(cs: Sequence[Case], dump: Sequence[str], schema: Any) -> Tuple[int, List[str]]:
+def compare(cs: Sequence[Case], dump: Sequence[str], schema: Any, model: str = "") -> Tuple[int, List[str]]:
     """(mismatched cases, the first few as text) of plan.py against a dump's lines."""
     if len(dump) != len(cs):
         raise ValueError("%d dump lines for %d cases" % (len(dump), len(cs)))
     bad = 0
     shown: List[str] = []
     for c, lib in zip(cs, dump):
-        mine = tuner_line(c, schema)
+        mine = tuner_line(c, schema, model)
         if normalized(lib) == mine:
             continue
         bad += 1
@@ -384,9 +386,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--chunk", type=int, default=CHUNK)
     ap.add_argument("--schema", help="schema of the library (default: the fixture)")
     ap.add_argument("--machine", help="l1d,l2,l3,family_l3,dom of every case (default: drawn per case)")
+    ap.add_argument("--uarch", default="", help="compare: the compute model of every case, as the dump's "
+                    "ZENDNNL_MATMUL_NATIVE_UARCH (default: the class default)")
     a = ap.parse_args(argv)
     if a.machine and a.command == "fixture":
         ap.error("the fixture's cases draw their machines")
+    if a.uarch and a.command != "compare":
+        ap.error("--uarch is compare's")
     seed = a.seed if a.seed is not None else (NB_SEED if a.nb else SEED)
     count = a.count if a.count is not None else (NB_COUNT if a.nb else COUNT)
     cs = cases(seed, count, parse_machine(a.machine) if a.machine else None, a.nb)
@@ -400,7 +406,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     schema = schema_mod.load_schema(a.schema)
     counts = case_counts(cs)
     if a.command == "compare":
-        bad, shown = compare(cs, dump, schema)
+        bad, shown = compare(cs, dump, schema, a.uarch)
         for s in shown:
             print(s)
         blocks = sum(" unit_tiles=0 " not in normalized(x) and normalized(x) != "BADCFG" for x in dump)

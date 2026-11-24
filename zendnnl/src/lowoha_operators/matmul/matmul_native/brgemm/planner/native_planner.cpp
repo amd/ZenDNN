@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <iterator>
 #include <limits>
@@ -1461,13 +1462,30 @@ native_plan_t native_planner_t::resolve_layers(
     return plan;
 }
 
+namespace {
+
+/// Warns once of a refused ZENDNNL_MATMUL_NATIVE_UARCH.
+void warn_machine_model() {
+    const std::string &why = native_uarch_refusal();
+    if (why.empty()) return;
+    char text[256];
+    std::snprintf(text, sizeof(text),
+            "native BRGEMM: ZENDNNL_MATMUL_NATIVE_UARCH ignored: %s",
+            why.c_str());
+    apilog_warning(text);
+}
+
+} // namespace
+
 const native_planner_t &native_planner() {
     // Never destroyed: calls may still plan while static objects are
     // destroyed.
-    static const native_planner_t *const planner
-            = make_native_planner(std::getenv("ZENDNNL_MATMUL_NATIVE_CONFIG"),
-                    std::getenv("ZENDNNL_MATMUL_NATIVE_TUNING_FILE"))
-                      .release();
+    static const native_planner_t *const planner = [] {
+        warn_machine_model();
+        return make_native_planner(std::getenv("ZENDNNL_MATMUL_NATIVE_CONFIG"),
+                std::getenv("ZENDNNL_MATMUL_NATIVE_TUNING_FILE"))
+                .release();
+    }();
     return *planner;
 }
 

@@ -15,6 +15,7 @@
 # ******************************************************************************
 """Candidates: override formatting, static checks, the bits filter, legality, de-duplication."""
 
+import copy
 import itertools
 import os
 import random
@@ -253,6 +254,20 @@ class TestBf16RuleSpace(unittest.TestCase):
 
 
 class TestBlocksSpace(unittest.TestCase):
+    def test_compute_values_around_the_machine(self):
+        # Half, the same and double the path's dot products a cycle, the model's step floor (0),
+        # its latency and one either side, on each problem's path; the built-in values (0 and 6)
+        # are not choices.
+        b, s = Problem("bf16", 64, 4096, 4096), Problem("s8", 64, 4096, 4096)
+        self.assertEqual(C.value_choices("cm_fma_pipes", s, SCHEMA), [1, 2, 4])
+        self.assertEqual(C.value_choices("cm_fma_lat", s, SCHEMA), [0, 5, 7])
+        self.assertEqual(C.value_choices("cm_fma_lat", b, SCHEMA), [0, 5, 7])
+        quad = copy.copy(SCHEMA)
+        quad.uarch = SCHEMA.uarch.with_overrides("int8_ipc=3.8,int8_lat=4")
+        self.assertEqual(C.value_choices("cm_fma_pipes", s, quad), [2, 4, 8])
+        self.assertEqual(C.value_choices("cm_fma_pipes", b, quad), [1, 2, 4])
+        self.assertEqual(C.value_choices("cm_fma_lat", s, quad), [0, 3, 4, 5])
+
     def test_values(self):
         b, s = Problem("bf16", 4096, 4096, 14336), Problem("s8", 4096, 4096, 4096)
         self.assertEqual(C.value_choices("schedule", b, SCHEMA), ["slice", "row_groups", "blocks"])

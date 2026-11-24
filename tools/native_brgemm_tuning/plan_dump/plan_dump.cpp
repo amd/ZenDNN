@@ -28,8 +28,11 @@
 // call over a quantized weight quantizes its source. Prints per line the problem's N
 // and every plan field with validate_native_plan's verdict (valid=0|1),
 // "BADCFG <why>" for a config the parser rejects, or "BADLINE". The kernel
-// registry, and with it the kernels of an f16 call, is this CPU's.
+// registry, and with it the kernels of an f16 call, is this CPU's. The
+// compute model of every case is the class default (UarchParams), with
+// ZENDNNL_MATMUL_NATIVE_UARCH's values applied (apply_native_uarch).
 #include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -38,6 +41,7 @@
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_config.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_planner.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_format.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_hw.hpp"
 
 namespace mm = zendnnl::lowoha::matmul;
 namespace nat = zendnnl::lowoha::matmul::native;
@@ -71,6 +75,13 @@ bool scale_type(
 } // namespace
 
 int main() {
+    nat::UarchParams model;
+    const char *uarch = std::getenv("ZENDNNL_MATMUL_NATIVE_UARCH");
+    std::string bad;
+    if (uarch != nullptr && !nat::apply_native_uarch(model, uarch, bad)) {
+        std::fprintf(stderr, "ZENDNNL_MATMUL_NATIVE_UARCH: %s\n", bad.c_str());
+        return 2;
+    }
     std::string line;
     while (std::getline(std::cin, line)) {
         std::istringstream is(line);
@@ -102,7 +113,7 @@ int main() {
         }
         const nat::heuristic_params_t hp
                 = nat::apply_native_config(nat::heuristic_params_t {}, c);
-        nat::UarchParams u;
+        nat::UarchParams u = model;
         u.l1d_bytes = l1d;
         u.l2_bytes = l2;
         u.l3_domain_bytes = l3;

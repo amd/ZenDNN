@@ -355,7 +355,7 @@ const key_doc_t kKeyDocs[] = {
                 &field_value<int, &hp_t::cm_gain_pct>},
         {"cm_short_rows", kAllFamilies, true, false, "8",
                 &field_value<int, &hp_t::cm_short_rows>},
-        {"cm_fma_pipes", kAllFamilies, true, false, "fma_ports",
+        {"cm_fma_pipes", kAllFamilies, true, false, "dot",
                 &field_value<int, &hp_t::cm_fma_pipes>},
         {"cm_fma_lat", kAllFamilies, true, false, "6",
                 &field_value<int, &hp_t::cm_fma_lat>},
@@ -375,7 +375,7 @@ const key_doc_t kKeyDocs[] = {
                 &field_value<int, &hp_t::cm_overlap_pct>},
         {"cm_reuse_pct", kAllFamilies, true, false, "50",
                 &field_value<int, &hp_t::cm_reuse_pct>},
-        {"cm_stream_cycles", kAllFamilies, true, false, "600",
+        {"cm_stream_cycles", kAllFamilies, true, false, "uarch",
                 &field_value<int, &hp_t::cm_stream_cycles>},
         {"cm_sync_tiles", kAllFamilies, true, false, "5",
                 &field_value<int, &hp_t::cm_sync_tiles>},
@@ -476,13 +476,16 @@ TEST(NativeConfigText, KeyDocsMatchTheKeyTable) {
         const bool integer = k.type == native_key_type_t::int32
                 || k.type == native_key_type_t::int64;
         if (integer && !native_text_int64(d.builtin, text_value)) {
-            // -1: col_groups by the schedule, cm_tall_pct by the L3 domain;
-            // row_unit 12: the rules' unit, which the cost model's row groups
-            // of short calls replace by cm_short_rows.
+            // -1: col_groups by the schedule, cm_tall_pct by the L3 domain,
+            // cm_stream_cycles by the machine model (0 is a rate); row_unit
+            // 12: the rules' unit, which the cost model's row groups of short
+            // calls replace by cm_short_rows.
             const std::string name = k.name;
-            const int64_t auto_value = name == "row_unit"           ? 12
-                    : name == "col_groups" || name == "cm_tall_pct" ? -1
-                                                                    : 0;
+            const int64_t auto_value = name == "row_unit" ? 12
+                    : name == "col_groups" || name == "cm_tall_pct"
+                            || name == "cm_stream_cycles"
+                    ? -1
+                    : 0;
             EXPECT_EQ(v, auto_value) << k.name;
         } else {
             const native_config_t c
@@ -1151,6 +1154,12 @@ TEST(NativeConfigTuningFile, HardwareMatch) {
     native_hw_t no_vnni = hw;
     no_vnni.uarch.avx512vnni = false;
     EXPECT_FALSE(hardware_applies(R"({"isa": ["avx512vnni"]})", no_vnni));
+    // A file for FP16 machines.
+    EXPECT_FALSE(hardware_applies(R"({"isa": ["avx512fp16"]})", hw));
+    native_hw_t fp16 = hw;
+    fp16.uarch.avx512fp16 = true;
+    EXPECT_TRUE(hardware_applies(
+            R"({"isa": ["avx512f", "avx512vnni", "avx512fp16"]})", fp16));
     EXPECT_TRUE(
             hardware_applies(R"({"l1d_kib": 48, "l2_kib": 1024, "l3_kib": 32768,
                            "l3_threads": 16, "smt": 2, "cores": 128})",
@@ -2606,7 +2615,8 @@ nlohmann::ordered_json schema_json() {
         const std::string name = f;
         if ((name == "avx512f" && hw.uarch.avx512f)
                 || (name == "avx512bf16" && hw.uarch.avx512bf16)
-                || (name == "avx512vnni" && hw.uarch.avx512vnni))
+                || (name == "avx512vnni" && hw.uarch.avx512vnni)
+                || (name == "avx512fp16" && hw.uarch.avx512fp16))
             isa.push_back(name);
     }
     doc["hw"] = {{"vendor", hw.vendor}, {"family", hw.family},
@@ -2617,12 +2627,22 @@ nlohmann::ordered_json schema_json() {
             {"logical_cpus", hw.logical_cpus}, {"smt", hw.smt},
             {"physical_cores", hw.physical_cores},
             {"l3_domain_threads", hw.l3_domain_threads}};
+    nlohmann::ordered_json dot = nlohmann::ordered_json::object();
+    for (int i = 0; i < kNativeDotPaths; ++i)
+        dot[kNativeDotPathNames[i]]
+                = {{"ipc", u.dot[i].ipc}, {"latency", u.dot[i].latency},
+                        {"chains", native_dot_chains(u.dot[i])}};
     doc["uarch"] = {{"l1d_bytes", u.l1d_bytes}, {"l2_bytes", u.l2_bytes},
             {"l3_bytes", u.l3_domain_bytes}, {"num_cores", u.num_cores},
             {"family_l3_cores", u.family_l3_cores},
             {"l3_domain_cores", u.l3_domain_cores}, {"fma_ports", u.fma_ports},
             {"avx512f", u.avx512f}, {"avx512bf16", u.avx512bf16},
-            {"avx512vnni", u.avx512vnni}, {"avx512fp16", u.avx512fp16}};
+            {"avx512vnni", u.avx512vnni}, {"avx512fp16", u.avx512fp16},
+            {"dot", dot},
+            {"dot_source",
+                    kNativeDotSourceNames[static_cast<int>(u.dot_source)]},
+            {"mem_cycles", u.mem_cycles}, {"stream_cycles", u.stream_cycles},
+            {"priced", native_dot_prices(u)}};
     doc["hw_match"] = nlohmann::ordered_json::parse(
             native_brgemm_test::hw_match_text(hw));
 
@@ -2691,7 +2711,8 @@ nlohmann::ordered_json schema_json() {
         families.push_back({{"name", f.name}, {"isa", isa_name(f.isa)},
                 {"k_step", f.k_step}, {"slab_cols", native_slab_cols(f.id)},
                 {"operand_bits", f.operand_bits},
-                {"vector_cols", f.vector_cols}});
+                {"vector_cols", f.vector_cols},
+                {"path", kNativeDotPathNames[static_cast<int>(f.path)]}});
     doc["families"] = families;
     nlohmann::ordered_json kernels = nlohmann::ordered_json::array();
     for (const native_kernel_caps_t &c : native_kernel_registry().all())
@@ -2883,24 +2904,30 @@ TEST(NativeConfigSchema, SchemaDump) {
                  {"cm_call_cycles", 800}, {"cm_l2_bytes", 16},
                  {"cm_l3_cycles", 10}, {"cm_prefetch_kib", 4},
                  {"cm_overlap_pct", 20}, {"cm_reuse_pct", 50},
-                 {"cm_stream_cycles", 600}, {"cm_sync_tiles", 5},
-                 {"cm_group_slab_pct", 75}, {"cm_group_l3_pct", 75},
-                 {"cm_group_skew_pct", 110}, {"cm_group_rows_pct", 115},
-                 {"cm_drift_kib", 4096}, {"cm_pass_kib", 128},
-                 {"cm_pass_calls", 4}, {"cm_block_kib", 16384},
-                 {"cm_block_k", 2048}, {"cm_int8_l1_pct", 0},
-                 {"cm_int4_min_m", 48}, {"int4_l1_pct", 125}}) {
+                 {"cm_sync_tiles", 5}, {"cm_group_slab_pct", 75},
+                 {"cm_group_l3_pct", 75}, {"cm_group_skew_pct", 110},
+                 {"cm_group_rows_pct", 115}, {"cm_drift_kib", 4096},
+                 {"cm_pass_kib", 128}, {"cm_pass_calls", 4},
+                 {"cm_block_kib", 16384}, {"cm_block_k", 2048},
+                 {"cm_int8_l1_pct", 0}, {"cm_int4_min_m", 48},
+                 {"int4_l1_pct", 125}}) {
         EXPECT_EQ(key(name).value("default", json()), value) << name;
         EXPECT_EQ(key(name).value("bits", json()), "same") << name;
     }
     // The cost model's inputs and its row-group bounds apply to BF16 and
     // per-channel INT8 plans, its stream rules to BF16 and its INT8 rule to
-    // INT8; the FMA pipes default to the detected ports and the memory rate
-    // to the L3 domain.
-    EXPECT_EQ(key("cm_fma_pipes").value("default", json()), "fma_ports");
+    // INT8; the dot products a cycle default to the machine model's
+    // (uarch.dot), the step floor at 0 is its latency over the accumulator
+    // sets, the memory rate defaults to the L3 domain and the stream rate to
+    // the machine model's (uarch.stream_cycles).
+    EXPECT_EQ(key("cm_fma_pipes").value("default", json()), "dot");
     EXPECT_EQ(key("cm_fma_pipes").value("auto", json()), 0);
+    EXPECT_EQ(key("cm_fma_lat").value("min", json()), 0);
     EXPECT_EQ(key("cm_mem_cycles").value("default", json()), "domain_threads");
     EXPECT_EQ(key("cm_mem_cycles").value("auto", json()), 0);
+    EXPECT_EQ(key("cm_stream_cycles").value("default", json()), "uarch");
+    EXPECT_EQ(key("cm_stream_cycles").value("auto", json()), -1);
+    EXPECT_EQ(key("cm_stream_cycles").value("min", json()), -1);
     EXPECT_EQ(key("cm_tall_pct").value("default", json()), "domain_threads");
     EXPECT_EQ(key("cm_tall_pct").value("auto", json()), -1);
     for (const char *name : {"cost_model", "cm_gain_pct", "cm_short_rows",
@@ -3014,6 +3041,27 @@ TEST(NativeConfigSchema, SchemaDump) {
     EXPECT_EQ(key("row_unit").value("default", json()), "auto");
     EXPECT_EQ(key("row_unit").value("auto", json()), 12);
     EXPECT_EQ(doc.at("uarch").at("fma_ports"), native_plan_uarch().fma_ports);
+    // The machine model per compute path, and each family's path.
+    const json &dot = doc.at("uarch").at("dot");
+    ASSERT_EQ(dot.size(), static_cast<size_t>(kNativeDotPaths));
+    for (int i = 0; i < kNativeDotPaths; ++i) {
+        const native_dot_t &d = native_plan_uarch().dot[i];
+        const json &e = dot.at(kNativeDotPathNames[i]);
+        EXPECT_DOUBLE_EQ(e.at("ipc").get<double>(), d.ipc);
+        EXPECT_EQ(e.at("latency"), d.latency);
+        EXPECT_EQ(e.at("chains"), native_dot_chains(d));
+    }
+    EXPECT_EQ(doc.at("uarch").at("dot_source"),
+            kNativeDotSourceNames[static_cast<int>(
+                    native_plan_uarch().dot_source)]);
+    EXPECT_EQ(doc.at("uarch").at("mem_cycles"), native_plan_uarch().mem_cycles);
+    EXPECT_EQ(doc.at("uarch").at("stream_cycles"),
+            native_plan_uarch().stream_cycles);
+    EXPECT_EQ(doc.at("uarch").at("priced"),
+            native_dot_prices(native_plan_uarch()));
+    for (const json &f : doc.at("families"))
+        EXPECT_TRUE(dot.contains(f.at("path").get<std::string>()))
+                << f.at("name");
     EXPECT_EQ(doc.at("match_keys").size(), 13u);
     EXPECT_EQ(doc.at("match_keys").at("group"), "range");
     EXPECT_EQ(doc.at("match_keys").at("dtype"),
@@ -3048,7 +3096,7 @@ TEST(NativeConfigSchema, SchemaDump) {
     EXPECT_EQ(doc.at("families")[5],
             json::parse(R"({"name": "f16_ph", "isa": "avx512fp16",
                     "k_step": 1, "slab_cols": 64, "operand_bits": 16,
-                    "vector_cols": 32})"));
+                    "vector_cols": 32, "path": "fp16"})"));
     EXPECT_EQ(
             doc.at("tuning_file").at("format"), "zendnnl-native-brgemm-tuning");
     EXPECT_EQ(doc.at("tuning_file").at("version"), 2);

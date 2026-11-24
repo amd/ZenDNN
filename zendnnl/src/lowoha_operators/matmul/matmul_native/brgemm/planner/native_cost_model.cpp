@@ -33,6 +33,17 @@ namespace {
 /// Columns of one vector of an INT8 call (native_int8_call_rows' nv).
 constexpr int kVectorCols = 16;
 
+/// The least dot products a cycle the model takes.
+constexpr double kMinIpc = 1e-3;
+
+/// Dot products a cycle on every path of a machine whose model does not
+/// price kernels (native_dot_prices).
+constexpr double kUnpricedIpc = 2.0;
+
+/// The memory terms of a machine that has none measured.
+constexpr double kDefaultMemCycles = 2400.0;
+constexpr int kDefaultStreamCycles = 600;
+
 /// What one tile of rows rows costs: its core cycles and, when the worker
 /// streams its weights, the cycles its stream idles.
 struct tile_cost_t {
@@ -61,8 +72,10 @@ constexpr int kMaxDomains = 64;
 /// passes of the tile's pass width (native_int8_pass_cols).  Bytes come from
 /// the descriptions: the weight's (native_plan_weight_bytes), a step's of
 /// the weight's elements, a source element's as the family multiplies it.
-/// A per-group tile adds per group the fused order's epilogue of one FMA per
-/// row and output vector on the same pipes.
+/// A step of a call issues one instruction of the family's compute path per
+/// row and vector (UarchParams::dot where the model prices, or cm_fma_pipes
+/// a cycle).  A per-group tile adds per group the fused order's epilogue of
+/// one FP32 FMA per row and output vector.
 class tile_model_t {
 public:
     tile_model_t(const native_plan_t &q, const native_problem_t &p,
@@ -79,8 +92,17 @@ public:
         wei_bytes_ = native_plan_weight_bytes(p);
         step_bytes_ = step_k_ * elem;
         src_bytes_ = family.operand_bits / 8.0;
-        pipes_ = hp.cm_fma_pipes > 0 ? hp.cm_fma_pipes
-                                     : std::max(1, uarch.fma_ports);
+        const native_dot_t &dot = uarch.dot[static_cast<int>(family.path)];
+        const native_dot_t &fp32
+                = uarch.dot[static_cast<int>(native_dot_path_t::fp32)];
+        priced_ = native_dot_prices(uarch);
+        ipc_ = hp.cm_fma_pipes > 0 ? hp.cm_fma_pipes
+                : priced_          ? std::max(kMinIpc, dot.ipc)
+                                   : kUnpricedIpc;
+        epilogue_ipc_ = hp.cm_fma_pipes > 0 ? hp.cm_fma_pipes
+                : priced_                   ? std::max(kMinIpc, fp32.ipc)
+                                            : kUnpricedIpc;
+        latency_ = std::max(1, dot.latency);
         l1_bytes_ = static_cast<int64_t>(uarch.l1d_bytes) * hp.l1_pct;
         if (int8_) {
             slab_cols_ = native_int8_col_width(q, q.nr);
@@ -108,9 +130,10 @@ public:
         }
         slabs_ = std::max(1, q.nr / std::max(1, slab_cols_));
         vectors_ = static_cast<double>(slab_cols_) / family.vector_cols;
+        nv_ = std::max(1, slab_cols_ / family.vector_cols);
         mem_cycles_ = native_plan_mem_cycles(uarch, hp);
         tall_ = 1.0 + native_plan_tall_pct(uarch, hp) / 100.0;
-        link_bound_ = mem_cycles_ > hp.cm_stream_cycles;
+        link_bound_ = mem_cycles_ > native_plan_stream_cycles(uarch, hp);
     }
 
     double mem_cycles() const { return mem_cycles_; }
@@ -132,14 +155,23 @@ public:
     /// the call re-reads the pass's slab from L2, at most cm_l2_bytes bytes
     /// a cycle.
     double call(int rows, bool from_l2) const {
-        double fma = rows * vectors_ / pipes_;
+        double fma = rows * vectors_ / ipc_;
         if (rows > hp_.cm_short_rows) fma *= tall_;
-        double per = std::max(fma, static_cast<double>(hp_.cm_fma_lat));
+        double per = std::max(fma, step_floor(rows));
         if (from_l2)
             per = std::max(per,
                     slab_cols_ * step_bytes_ / std::max(1, hp_.cm_l2_bytes));
         return per * k_steps_
-                + static_cast<double>(groups_) * rows * vectors_ / pipes_;
+                + static_cast<double>(groups_) * rows * vectors_
+                / epilogue_ipc_;
+    }
+
+    /// Cycles a step of a call of rows rows takes at least: cm_fma_lat, or
+    /// the path's latency over the accumulator sets of the call's kernel.
+    double step_floor(int rows) const {
+        if (hp_.cm_fma_lat > 0) return hp_.cm_fma_lat;
+        const int sets = int8_ ? native_int8_kernel_sets(rows, nv_) : 1;
+        return static_cast<double>(latency_) / sets;
     }
 
     tile_cost_t tile(int rows) const {
@@ -201,7 +233,11 @@ private:
     int slabs_ = 1;
     int mr_ = 1;
     double vectors_ = 2;
-    int pipes_ = 2;
+    int nv_ = 2;
+    bool priced_ = false;
+    double ipc_ = 2;
+    double epilogue_ipc_ = 2;
+    int latency_ = 4;
     int kc_ = 1;
     int passes_ = 1;
     int groups_ = 0;
@@ -237,7 +273,15 @@ int native_plan_domain_threads(
 double native_plan_mem_cycles(
         const UarchParams &uarch, const heuristic_params_t &hp) {
     if (hp.cm_mem_cycles > 0) return hp.cm_mem_cycles;
-    return 2400.0 / std::sqrt(native_plan_domain_threads(uarch, hp));
+    const double cycles
+            = uarch.mem_cycles > 0 ? uarch.mem_cycles : kDefaultMemCycles;
+    return cycles / std::sqrt(native_plan_domain_threads(uarch, hp));
+}
+
+int native_plan_stream_cycles(
+        const UarchParams &uarch, const heuristic_params_t &hp) {
+    if (hp.cm_stream_cycles >= 0) return hp.cm_stream_cycles;
+    return uarch.stream_cycles > 0 ? uarch.stream_cycles : kDefaultStreamCycles;
 }
 
 double native_plan_tall_pct(
@@ -250,7 +294,8 @@ double native_plan_tall_pct(
 
 bool native_plan_core_streams(
         const UarchParams &uarch, const heuristic_params_t &hp) {
-    return native_plan_mem_cycles(uarch, hp) < hp.cm_stream_cycles;
+    return native_plan_mem_cycles(uarch, hp)
+            < native_plan_stream_cycles(uarch, hp);
 }
 
 bool native_plan_cost_int8(const native_problem_t &p) {

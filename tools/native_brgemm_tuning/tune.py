@@ -624,7 +624,8 @@ def cmd_calibrate(a: argparse.Namespace) -> int:
     bad = [k for k in keys if k not in calib_mod.KEYS]
     if bad:
         sys.exit("--keys: %s (calibrated keys: %s)" % (", ".join(bad), ", ".join(calib_mod.KEYS)))
-    cal = calibrate(ceil, threads=int(camp.c["backend"]["threads"]), domain_threads=camp.uarch.plan_domain)
+    cal = calibrate(ceil, threads=int(camp.c["backend"]["threads"]), domain_threads=camp.uarch.plan_domain,
+                    model=op_perf.library_model(camp.schema))
     cfgs = calib_mod.configs(cal, [p.dtype for p in camp.problems], keys)
     plain = {p.key(): cand_mod.Space(p, camp.schema, camp.uarch, [], None, camp.c["allow_bit_changing"],
                                      camp.c.get("keep_threads", False)) for p in camp.problems}
@@ -717,11 +718,14 @@ def _install_ceilings(camp: Campaign, paths: List[str], force: bool) -> bool:
     dest = os.path.join(camp.workdir, op_perf.CEILINGS)
     if path != dest:
         shutil.copyfile(path, dest)
-    camp.c["ceilings"] = dict(ceil.brief(), source=path, mismatch=bad)
+    model = op_perf.model_check(ceil, camp.schema)
+    camp.c["ceilings"] = dict(ceil.brief(), source=path, mismatch=bad, model=model)
     camp.save()
     camp._ceilings, camp._bounds = False, None
     log(camp.ceilings.summary())
     log("installed the ceilings of %s%s" % (path, " despite: " + "; ".join(bad) if bad else ""))
+    if model:
+        log("note: the library's machine model differs from the probe: %s" % "; ".join(model))
     return True
 
 

@@ -416,7 +416,7 @@ TEST(NativeTuningPlan, DefaultParamsAreTheBuiltInConstants) {
     EXPECT_EQ(hp.cm_prefetch_kib, 4);
     EXPECT_EQ(hp.cm_overlap_pct, 20);
     EXPECT_EQ(hp.cm_reuse_pct, 50);
-    EXPECT_EQ(hp.cm_stream_cycles, 600);
+    EXPECT_EQ(hp.cm_stream_cycles, -1);
     EXPECT_EQ(hp.cm_sync_tiles, 5);
     EXPECT_EQ(hp.cm_group_slab_pct, 75);
     EXPECT_EQ(hp.cm_group_l3_pct, 75);

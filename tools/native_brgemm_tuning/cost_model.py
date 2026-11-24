@@ -39,10 +39,24 @@ MAX_DOMAINS = 64
 SLAB_COLS = {f["name"]: f["slab_cols"] for f in fixture_tables()["families"]}
 # The widest tile of every kind, whole slabs (kNativeMaxTileCols).
 MAX_SLAB_TILE_COLS = 128
+# The least dot products a cycle the model takes (kMinIpc).
+MIN_IPC = 1e-3
+# Dot products a cycle on every path of a machine whose model does not price kernels
+# (Uarch.priced; kUnpricedIpc).
+UNPRICED_IPC = 2.0
+# The memory terms of a machine that has none measured (kDefaultMemCycles, kDefaultStreamCycles).
+DEFAULT_MEM_CYCLES = 2400
+DEFAULT_STREAM_CYCLES = 600
 
 
 def ceil_div(a: int, b: int) -> int:
     return -(-a // b)
+
+
+def int8_kernel_sets(mr: int, nv: int) -> int:
+    """native_int8_kernel_sets: the independent accumulator sets of an INT8 or INT4 kernel of mr
+    rows and nv vectors, over which it splits K."""
+    return 4 if mr * nv <= 2 else (2 if mr * nv <= 4 else 1)
 
 
 def tile_slab_cols(kind: str, nr: int) -> int:
@@ -107,10 +121,20 @@ def domain_threads(uarch: Any, hp: Dict[str, Any]) -> int:
 
 
 def mem_cycles(uarch: Any, hp: Dict[str, Any]) -> float:
-    """native_plan_mem_cycles."""
+    """native_plan_mem_cycles: cm_mem_cycles, else the machine's (2400 where not measured) over
+    the square root of the domain's threads."""
     if hp["cm_mem_cycles"] > 0:
         return float(hp["cm_mem_cycles"])
-    return 2400.0 / math.sqrt(domain_threads(uarch, hp))
+    cycles = getattr(uarch, "mem_cycles", 0) or DEFAULT_MEM_CYCLES
+    return float(cycles) / math.sqrt(domain_threads(uarch, hp))
+
+
+def stream_cycles(uarch: Any, hp: Dict[str, Any]) -> int:
+    """native_plan_stream_cycles: cm_stream_cycles, else (at -1) the machine's (600 where not
+    measured)."""
+    if hp["cm_stream_cycles"] >= 0:
+        return int(hp["cm_stream_cycles"])
+    return int(getattr(uarch, "stream_cycles", 0) or DEFAULT_STREAM_CYCLES)
 
 
 def tall_pct(uarch: Any, hp: Dict[str, Any]) -> float:
@@ -123,7 +147,7 @@ def tall_pct(uarch: Any, hp: Dict[str, Any]) -> float:
 
 def core_streams(uarch: Any, hp: Dict[str, Any]) -> bool:
     """native_plan_core_streams: one core streams slower than its share of the domain's link."""
-    return mem_cycles(uarch, hp) < hp["cm_stream_cycles"]
+    return mem_cycles(uarch, hp) < stream_cycles(uarch, hp)
 
 
 def cost_int8(p: Any, schema: Any) -> bool:
@@ -184,7 +208,17 @@ class TileModel:
         self.wei_bytes = weight_bytes(p, schema)
         self.step_bytes = self.step_k * elem
         self.src_bytes = family.operand_bits / 8.0
-        self.pipes = hp["cm_fma_pipes"] if hp["cm_fma_pipes"] > 0 else max(1, uarch.fma_ports)
+        dot = uarch.dot_of(family.path)
+        pinned = hp["cm_fma_pipes"]
+        self.priced = bool(getattr(uarch, "priced", True))
+        if pinned > 0:
+            self.ipc = self.epilogue_ipc = float(pinned)
+        elif self.priced:
+            self.ipc = max(MIN_IPC, dot.ipc)
+            self.epilogue_ipc = max(MIN_IPC, uarch.dot_of("fp32").ipc)
+        else:
+            self.ipc = self.epilogue_ipc = UNPRICED_IPC
+        self.latency = max(1, dot.latency)
         self.l1_bytes = uarch.l1d_bytes * hp["l1_pct"]
         self.kc = 1
         self.passes = 1
@@ -210,22 +244,31 @@ class TileModel:
             self.l2_share = float(uarch.l2_bytes) * hp["bf16_l2_pct"] / 100.0
         self.slabs = max(1, q.nr // max(1, self.slab_cols))
         self.vectors = float(self.slab_cols) / family.vector_cols
+        self.nv = max(1, self.slab_cols // family.vector_cols)
         self.mem_cycles = mem_cycles(uarch, hp)
         self.tall = 1.0 + tall_pct(uarch, hp) / 100.0
-        self.link_bound = self.mem_cycles > hp["cm_stream_cycles"]
+        self.link_bound = self.mem_cycles > stream_cycles(uarch, hp)
 
     def idle_tiles(self, tiles: int) -> float:
         return float(min(tiles, self.hp["cm_sync_tiles"])) if self.link_bound else float(tiles)
 
     def call(self, rows: int, from_l2: bool) -> float:
         hp = self.hp
-        fma = rows * self.vectors / self.pipes
+        fma = rows * self.vectors / self.ipc
         if rows > hp["cm_short_rows"]:
             fma *= self.tall
-        per = max(fma, float(hp["cm_fma_lat"]))
+        per = max(fma, self.step_floor(rows))
         if from_l2:
             per = max(per, self.slab_cols * self.step_bytes / max(1, hp["cm_l2_bytes"]))
-        return per * self.k_steps + float(self.groups) * rows * self.vectors / self.pipes
+        return per * self.k_steps + float(self.groups) * rows * self.vectors / self.epilogue_ipc
+
+    def step_floor(self, rows: int) -> float:
+        """Cycles a step of a call of rows rows takes at least: cm_fma_lat, or the path's
+        latency over the accumulator sets of the call's kernel."""
+        if self.hp["cm_fma_lat"] > 0:
+            return float(self.hp["cm_fma_lat"])
+        sets = int8_kernel_sets(rows, self.nv) if self.int8 else 1
+        return float(self.latency) / sets
 
     def tile(self, rows: int) -> "tuple[float, float]":
         """(core, idle) of a tile of rows rows."""

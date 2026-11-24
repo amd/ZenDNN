@@ -18,6 +18,7 @@
 #define MATMUL_NATIVE_COMMON_NATIVE_HW_HPP
 
 #include <string>
+#include <string_view>
 
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 
@@ -60,8 +61,25 @@ const native_hw_t &native_hw();
 /// has no L3.
 UarchParams native_plan_uarch(const native_hw_t &hw);
 
-/// native_plan_uarch(native_hw()), made once.
+/// native_plan_uarch(native_hw()) with ZENDNNL_MATMUL_NATIVE_UARCH applied
+/// (apply_native_uarch; a bad value is ignored), made once: a function of
+/// CPUID and the environment alone.  The planner warns once of an ignored
+/// value.
 const UarchParams &native_plan_uarch();
+
+/// Why native_plan_uarch() ignored ZENDNNL_MATMUL_NATIVE_UARCH; empty when it
+/// did not.
+const std::string &native_uarch_refusal();
+
+/// Applies a ZENDNNL_MATMUL_NATIVE_UARCH value to u, item by item:
+/// "<path>_ipc=v" (dot products a cycle, above 0, at most 64) and
+/// "<path>_lat=n" (cycles, 1 to 64) for a path of kNativeDotPathNames, and
+/// "mem_cycles=n" and "stream_cycles=n" (the memory terms, 1 to 2^20), comma
+/// separated; dot_source becomes set, so the cost model prices with the
+/// result (native_dot_prices).  On a bad item returns false with why and
+/// leaves u unchanged.
+bool apply_native_uarch(
+        UarchParams &u, std::string_view text, std::string &why);
 
 } // namespace native
 } // namespace matmul

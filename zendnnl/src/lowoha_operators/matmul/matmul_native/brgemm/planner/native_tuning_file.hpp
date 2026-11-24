@@ -110,7 +110,7 @@ inline constexpr const char *kNativeHardwareKeys[] = {"vendor", "family",
         "model", "stepping", "isa", "l1d_kib", "l2_kib", "l3_kib", "l3_cores",
         "smt", "l3_threads", "cores", "logical_cpus"};
 inline constexpr const char *kNativeIsaNames[]
-        = {"avx512f", "avx512bf16", "avx512vnni"};
+        = {"avx512f", "avx512bf16", "avx512vnni", "avx512fp16"};
 
 /// The clauses of a ZENDNNL_MATMUL_NATIVE_CONFIG value; bad clauses dropped
 /// with one warning each.  nullptr when no clause is left.

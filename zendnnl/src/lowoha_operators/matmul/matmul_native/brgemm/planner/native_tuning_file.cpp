@@ -630,6 +630,7 @@ bool hw_has_isa(const native_hw_t &hw, const std::string &name) {
     if (name == "avx512f") return hw.uarch.avx512f;
     if (name == "avx512bf16") return hw.uarch.avx512bf16;
     if (name == "avx512vnni") return hw.uarch.avx512vnni;
+    if (name == "avx512fp16") return hw.uarch.avx512fp16;
     return false;
 }
 

@@ -117,6 +117,8 @@ def cmd_calibrate(a: argparse.Namespace) -> int:
     cal = calibrate(c, threads=a.threads or c.threads, domain_threads=a.domain_threads or None)
     if a.format == "settings":
         _write(cal.override(), a.output)
+    elif a.format == "uarch":
+        _write(cal.uarch_override(), a.output)
     else:
         _write(report.render(cal.rows(), a.format, ["key", "path", "value", "builtin", "source"]), a.output)
     return 0
@@ -160,8 +162,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--ceilings", required=True)
     sp.add_argument("--threads", type=int, help="the tuned team (default: the probe's)")
     sp.add_argument("--domain-threads", type=int, help="threads of one L3 domain (default: the probe's)")
-    sp.add_argument("--format", choices=report.FORMATS + ("settings",), default="table",
-                    help="settings: a ZENDNNL_MATMUL_NATIVE_CONFIG of one clause per weight type")
+    sp.add_argument("--format", choices=report.FORMATS + ("settings", "uarch"), default="table",
+                    help="settings: a ZENDNNL_MATMUL_NATIVE_CONFIG of one clause per weight type; uarch: a "
+                    "ZENDNNL_MATMUL_NATIVE_UARCH of the measured paths and, where the probe measured DRAM, "
+                    "the memory terms (values to A/B, as the settings)")
     sp.add_argument("-o", "--output")
     sp.set_defaults(fn=cmd_calibrate)
     return ap

@@ -222,13 +222,50 @@ class TestFixture(unittest.TestCase):
     def test_hardware_and_uarch(self):
         # The fixture's example machine: L3 domains of 8 cores and 32 MiB, AVX512-FP16.
         self.assertEqual((SCHEMA.hw.l1d_kib, SCHEMA.hw.l2_kib, SCHEMA.hw.l3_kib), (48, 1024, 32768))
-        self.assertEqual(SCHEMA.hw.isa, ["avx512f", "avx512bf16", "avx512vnni"])
+        self.assertEqual(SCHEMA.hw.isa, ["avx512f", "avx512bf16", "avx512vnni", "avx512fp16"])
         self.assertTrue(SCHEMA.uarch.complete)
+        # Its compute model, the class default of a CPU the library's table does not hold, and
+        # each family's path.
+        self.assertEqual(SCHEMA.uarch.dot_source, "default")
+        self.assertEqual(SCHEMA.uarch.dot["bf16"], S.Dot(2.0, 6))
+        self.assertEqual(SCHEMA.uarch.dot["int8"].chains, 12)
+        self.assertEqual({n: f.path for n, f in SCHEMA.families.items()},
+                         {"bf16": "bf16", "int8": "int8", "f32": "fp32", "int4": "int4", "f16": "f16_widen",
+                          "f16_ph": "fp16"})
         self.assertEqual((SCHEMA.uarch.l3_bytes, SCHEMA.uarch.family_l3_cores, SCHEMA.uarch.l3_domain_cores),
                          (32 << 20, 8, 8))
         self.assertEqual((SCHEMA.hw.vendor, SCHEMA.hw.family, SCHEMA.hw.model, SCHEMA.hw.stepping),
                          ("ExampleVendor", 1, 1, 0))
         self.assertTrue(SCHEMA.doc["uarch"]["avx512fp16"])
+
+    def test_machine_model(self):
+        # A dump of a build without the model: its fma_ports on every path, the class default's
+        # latencies; with it, its paths (the class default for a path it lacks).
+        old = S.Uarch.from_dict({"l1d_bytes": 49152, "fma_ports": 1})
+        self.assertEqual((old.dot_source, old.dot["int8"], old.dot["bf16"]),
+                         ("fma_ports", S.Dot(1.0, 6), S.Dot(1.0, 6)))
+        new = S.Uarch.from_dict({"fma_ports": 2, "dot": {"int8": {"ipc": 3.8, "latency": 4, "chains": 16}},
+                                 "dot_source": "default"})
+        self.assertEqual((new.dot["int8"], new.dot["int8"].chains, new.dot["bf16"]),
+                         (S.Dot(3.8, 4), 16, S.Dot(2.0, 6)))
+        # --uarch takes the paths as ZENDNNL_MATMUL_NATIVE_UARCH does; fma_ports sets every path.
+        u = new.with_overrides("int8_ipc=4, int8_lat=5,\tbf16_ipc=1")
+        self.assertEqual((u.dot["int8"], u.dot["bf16"].ipc, u.fma_ports, u.dot_source), (S.Dot(4.0, 5), 1.0, 1, "env"))
+        self.assertEqual(new.dot["int8"], S.Dot(3.8, 4))
+        self.assertTrue(all(d.ipc == 1.0 for d in new.with_overrides("fma_ports=1").dot.values()))
+        # What the library refuses: a number that is not finite or out of its range, an empty item,
+        # a space inside an item.
+        for bad in ("int8_ipc=0", "int9_ipc=2", "int8_lat=2.5", "int8_lat=65", "int8_ipc=x", "dot=1",
+                    "bf16_lat=inf", "int8_lat=1e10", "int8_lat=nan", "fp32_ipc=1e400", "mem_cycles=inf",
+                    "mem_cycles=1e400", "stream_cycles=-1e300", "int8_ipc=0x4", "int8_ipc=4,", "int8_ipc=4,,bf16_ipc=1",
+                    "int8_ipc =4", "int8_ipc= 4", "family_l3_cores= 8"):
+            with self.assertRaises(S.SchemaError, msg=bad):
+                new.with_overrides(bad)
+        self.assertEqual(S.Uarch.from_dict(new.to_dict()).dot, new.dot)
+        # The path of a problem's kernels and its model.
+        self.assertEqual(SCHEMA.path_of(Problem("s4", 8, 4096, 4096, group=128, scale_bytes=2)), "int4")
+        self.assertEqual(SCHEMA.path_of(Problem("bf16", 8, 4096, 4096)), "bf16")
+        self.assertEqual(SCHEMA.dot_of(Problem("bf16", 8, 4096, 4096)), S.Dot(2.0, 6))
 
     def test_with_machine(self):
         with open(S.FIXTURE) as f:
