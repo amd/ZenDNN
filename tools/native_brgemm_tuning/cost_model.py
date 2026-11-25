@@ -109,15 +109,15 @@ def int4_pass_quads(q: Any, group_quads: int, cw: int, rows: int, max_mr: int) -
     return min(group_quads, (quads + 1) & ~1)
 
 
+def domain_cores(uarch: Any) -> int:
+    """native_plan_domain_cores: the machine's L3 domain cores, else the family's; the rules bounded by the
+    cores of an L3 domain read it, whatever domain_threads sets."""
+    return max(1, uarch.l3_domain_cores if uarch.l3_domain_cores > 0 else (uarch.family_l3_cores or 0))
+
+
 def domain_threads(uarch: Any, hp: Dict[str, Any]) -> int:
-    """native_plan_domain_threads: domain_threads, else the L3 domain's cores, else the family's."""
-    if hp["domain_threads"] > 0:
-        dt = hp["domain_threads"]
-    elif uarch.l3_domain_cores > 0:
-        dt = uarch.l3_domain_cores
-    else:
-        dt = uarch.family_l3_cores or 0
-    return max(1, dt)
+    """native_plan_domain_threads: domain_threads, else domain_cores."""
+    return hp["domain_threads"] if hp["domain_threads"] > 0 else domain_cores(uarch)
 
 
 def mem_cycles(uarch: Any, hp: Dict[str, Any]) -> float:
@@ -219,7 +219,9 @@ class TileModel:
         else:
             self.ipc = self.epilogue_ipc = UNPRICED_IPC
         self.latency = max(1, dot.latency)
-        self.l1_bytes = uarch.l1d_bytes * hp["l1_pct"]
+        # At l1_pct -1 (the planner's rule) a pass is weighed against all of L1.
+        l1_pct = hp["l1_pct"] if hp["l1_pct"] > 0 else 100
+        self.l1_bytes = uarch.l1d_bytes * l1_pct
         self.kc = 1
         self.passes = 1
         self.groups = 0
@@ -240,7 +242,7 @@ class TileModel:
             self.kc = min(max(1, q.kc), p.k)
             self.passes = ceil_div(p.k, self.kc)
             self.l1_fit = ((q.nr * elem + q.mr * self.src_bytes) * self.kc * 100
-                           <= float(uarch.l1d_bytes) * hp["l1_pct"])
+                           <= float(uarch.l1d_bytes) * l1_pct)
             self.l2_share = float(uarch.l2_bytes) * hp["bf16_l2_pct"] / 100.0
         self.slabs = max(1, q.nr // max(1, self.slab_cols))
         self.vectors = float(self.slab_cols) / family.vector_cols

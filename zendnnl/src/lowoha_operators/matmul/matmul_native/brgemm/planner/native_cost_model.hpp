@@ -26,8 +26,13 @@ namespace lowoha {
 namespace matmul {
 namespace native {
 
+/// Physical cores of one L3 domain of the machine: UarchParams::
+/// l3_domain_cores, else family_l3_cores; at least 1.  The rules bounded by
+/// the cores of an L3 domain read it, whatever domain_threads sets.
+int native_plan_domain_cores(const UarchParams &uarch);
+
 /// Threads of one L3 domain the plan of p takes: domain_threads, else
-/// UarchParams::l3_domain_cores, else family_l3_cores; at least 1.
+/// native_plan_domain_cores.
 int native_plan_domain_threads(
         const UarchParams &uarch, const heuristic_params_t &hp);
 

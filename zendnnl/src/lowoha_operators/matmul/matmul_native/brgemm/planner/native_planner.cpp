@@ -180,6 +180,116 @@ int row_byte_units(const native_problem_t &p) {
     return f.contract.src_bits / f.geometry.elem_bits;
 }
 
+/// Whether a tile of mb rows of q takes the L1 pass: one of 2 * rows ..
+/// l1_pass_max_mb rows, or the single row block of a plan of at most
+/// decode_m rows.
+bool l1_pass_rows(const native_plan_t &q, const heuristic_params_t &hp,
+        int rows, int mb) {
+    return rows > 0 && 2 * rows <= mb
+            && (mb <= hp.l1_pass_max_mb
+                    || (q.m_blocks == 1 && mb <= hp.decode_m));
+}
+
+/// K steps of one K pass of the single row block of mb rows by the weight's
+/// fit, or 0 for a pass of the l1_pct share of L1: a weight that fits three
+/// quarters of an L3 domain, or no L3.  A weight that fits the L3 of the
+/// domains of a team of team threads (dt to a domain) takes passes whose mb
+/// source rows of esz bytes an element take a quarter of L2; a larger one
+/// passes of a B slab of slab_cols columns of an eighth of L2.
+int64_t fit_pass_k(const native_problem_t &p, const UarchParams &uarch,
+        int team, int dt, int mb, int esz, int slab_cols) {
+    const int64_t domain = static_cast<int64_t>(uarch.l3_domain_bytes);
+    const int bits = native_format(p.wei_dt).geometry.elem_bits;
+    const int64_t weight_bits = static_cast<int64_t>(p.N) * p.K * bits;
+    if (domain <= 0 || weight_bits <= 6 * domain) return 0;
+    const int64_t l2 = static_cast<int64_t>(uarch.l2_bytes);
+    if (weight_bits <= 8 * domain * ceil_div(team, std::max(1, dt)))
+        return l2 / 4 / (static_cast<int64_t>(mb) * esz);
+    return l2 / (static_cast<int64_t>(slab_cols) * bits);
+}
+
+/// Words of K (the weight's K values a word) an L1 pass of the single row
+/// block of more than l1_pass_max_mb rows takes at least; a shorter pass
+/// re-reads the block's accumulators more often than it saves of the slab.
+constexpr int64_t kTallPassWords = 192;
+
+/// Whether the L1 pass of l1 K steps (fit_pass_k gave fit 0) of the tile of
+/// q, or the equal passes of equal K steps it would take, are below
+/// kTallPassWords for its single row block: the block keeps all of K.
+bool short_tall_pass(const native_problem_t &p, const native_plan_t &q,
+        const heuristic_params_t &hp, int64_t fit, int64_t l1, int64_t equal) {
+    return fit == 0 && q.mb > hp.l1_pass_max_mb
+            && std::min(l1, equal)
+            < kTallPassWords * native_format(p.wei_dt).geometry.k_per_word;
+}
+
+/// The L2 caches the threads of the plan q use: one a thread, at most one a
+/// physical core, whose SMT siblings share its L2.
+int plan_l2_caches(const native_plan_t &q, const UarchParams &uarch) {
+    return uarch.physical_cores > 0 ? std::min(q.threads, uarch.physical_cores)
+                                    : q.threads;
+}
+
+/// Percents of L1 of the L1 pass by the rule (l1_pct -1) in a decode block
+/// (decode_pass_block): a weight whose share of each L2 cache of the plan's
+/// threads (plan_l2_caches) fits that L2 (an INT8 weight) or an eighth of it
+/// (a BF16 one: the column tiles of the busiest L2), of a tile whose B slab
+/// over all of K exceeds L1; a BF16 weight that does not fit those L2
+/// caches, in a block of more than kStreamPassCalls calls of the tallest
+/// kernels, where an L3 domain holds at most kSmallDomainCores cores.  Every
+/// other block of the L1 pass takes kL1SharePct.
+constexpr int kL1FitPct = 75;
+constexpr int kL1StreamPct = 150;
+constexpr int kL1SharePct = 100;
+constexpr int kStreamPassCalls = 4;
+/// The cores of the machine's L3 domain (native_plan_domain_cores, whatever
+/// domain_threads sets) up to which a decode block's L1 pass takes
+/// kL1StreamPct, an INT8 single row block of more than l1_pass_max_mb rows K
+/// passes by the weight's fit, and an INT8 plan at int8_blocks_min_m -1 the
+/// blocks schedule from kInt8BlocksMinM rows.
+constexpr int kSmallDomainCores = 16;
+/// The rows from which an INT8 plan at int8_blocks_min_m -1 takes the blocks
+/// schedule where the tile's B slab over all of K fills L1 and an L3 domain
+/// holds at most kSmallDomainCores cores; half as many rows more otherwise.
+constexpr int kInt8BlocksMinM = 2048;
+
+/// Whether the tile of q is a decode block of the rule of l1_pct -1: the
+/// single row block of at most l1_pass_max_mb rows and of more than two
+/// calls of the tallest kernels, whose later calls read each pass's slab
+/// again, of a weight of several K values a word (BF16 pairs, INT8 quads).
+bool decode_pass_block(const native_problem_t &p, const native_plan_t &q,
+        const heuristic_params_t &hp) {
+    return hp.l1_pct <= 0 && q.m_blocks == 1 && q.mb <= hp.l1_pass_max_mb
+            && q.mb > 2 * kMaxCallRows
+            && native_format(p.wei_dt).geometry.k_per_word > 1;
+}
+
+/// The l1_pct share of the L1 pass of the tile of q, whose B slab takes
+/// slab_cols columns, or by the rule at -1 (kL1FitPct, kL1StreamPct,
+/// kL1SharePct).
+int l1_pass_pct(const native_problem_t &p, const UarchParams &uarch,
+        const heuristic_params_t &hp, const native_plan_t &q, int slab_cols,
+        bool int8) {
+    if (hp.l1_pct > 0) return hp.l1_pct;
+    if (!decode_pass_block(p, q, hp)) return kL1SharePct;
+    const int bits = native_format(p.wei_dt).geometry.elem_bits;
+    const int64_t weight_bits = static_cast<int64_t>(p.N) * p.K * bits;
+    const int l2_caches = std::max(1, plan_l2_caches(q, uarch));
+    const int64_t l2_bits = 8 * static_cast<int64_t>(uarch.l2_bytes);
+    if (weight_bits > l2_bits * l2_caches)
+        return !int8 && q.mb > kStreamPassCalls * kMaxCallRows
+                        && native_plan_domain_cores(uarch) <= kSmallDomainCores
+                ? kL1StreamPct
+                : kL1SharePct;
+    const int64_t slab_bits = static_cast<int64_t>(slab_cols) * p.K * bits;
+    const bool slab_over_l1
+            = slab_bits > 8 * static_cast<int64_t>(uarch.l1d_bytes);
+    const int64_t cache_bits
+            = static_cast<int64_t>(ceil_div(q.n_tiles, l2_caches)) * slab_bits;
+    const bool fits = int8 || 8 * cache_bits <= l2_bits;
+    return slab_over_l1 && fits ? kL1FitPct : kL1SharePct;
+}
+
 const char *dtype_name(const native_problem_t &p) {
     return native_format(p.wei_dt).name;
 }
@@ -504,13 +614,6 @@ constexpr int kInt4FitL1Pct = 50;
 /// from L2.
 constexpr int kInt4StreamL1Pct = 125;
 
-/// The L2 caches the threads of the plan q use: one a thread, at most one a
-/// physical core, whose SMT siblings share its L2.
-int plan_l2_caches(const native_plan_t &q, const UarchParams &uarch) {
-    return uarch.physical_cores > 0 ? std::min(q.threads, uarch.physical_cores)
-                                    : q.threads;
-}
-
 /// The share of L1 the batches of the s4 plan q's groups take in a plan of
 /// at most decode_m rows: int4_l1_pct, or at -1 kInt4FitL1Pct where the
 /// weight of N x K elements of wei_elem bytes fits the L2 caches of q's
@@ -700,6 +803,9 @@ native_plan_t rules_plan(const native_problem_t &p, const UarchParams &uarch,
             std::min(
                     threads, q.tiles() / std::max(1, hp.min_tiles_per_thread)));
 
+    const int dt = native_plan_domain_threads(uarch, hp);
+    const bool small_domain
+            = native_plan_domain_cores(uarch) <= kSmallDomainCores;
     // Row tiles of a block stream the same B slab; a slab over the
     // bf16_l2_pct share of L2 is split along K.
     q.kc = K;
@@ -713,18 +819,26 @@ native_plan_t rules_plan(const native_problem_t &p, const UarchParams &uarch,
             q.kc = (ceil_div(K, ceil_div(K, q.kc)) + 1) & ~1;
         // A block of a few row calls reads each pass's B slab from L1 after
         // its first call when the slab and one call's A rows fit the l1_pct
-        // share of L1; the passes are equal.
-        if (on.l1_pass && q.mr > 0 && 2 * q.mr <= q.mb
-                && q.mb <= hp.l1_pass_max_mb) {
-            const int64_t l1 = static_cast<int64_t>(uarch.l1d_bytes) * hp.l1_pct
-                    / 100 / ((q.nr + q.mr) * static_cast<int64_t>(esz));
+        // share of L1 (l1_pass_pct), a taller single row block by the
+        // weight's fit (fit_pass_k); the passes are equal.
+        if (on.l1_pass && l1_pass_rows(q, hp, q.mr, q.mb)) {
+            const int64_t fit = q.mb > hp.l1_pass_max_mb
+                    ? fit_pass_k(p, uarch, q.threads, dt, q.mb, esz, q.nr)
+                    : 0;
+            const int pct = l1_pass_pct(p, uarch, hp, q, q.nr, false);
+            const int64_t l1 = fit > 0
+                    ? fit
+                    : static_cast<int64_t>(uarch.l1d_bytes) * pct / 100
+                            / ((q.nr + q.mr) * static_cast<int64_t>(esz));
             const int64_t pass = std::max<int64_t>(std::max(2, hp.min_pass_k),
                                          std::min<int64_t>(kc, l1))
                     & ~int64_t {1};
             if (pass < K) {
                 const int64_t passes = (K + pass - 1) / pass;
-                q.kc = static_cast<int>(
-                        ((K + passes - 1) / passes + 1) & ~int64_t {1});
+                const int64_t equal
+                        = ((K + passes - 1) / passes + 1) & ~int64_t {1};
+                if (!short_tall_pass(p, q, hp, fit, l1, equal))
+                    q.kc = static_cast<int>(equal);
             }
         }
     }
@@ -741,7 +855,6 @@ native_plan_t rules_plan(const native_problem_t &p, const UarchParams &uarch,
     // row block.  There the threads of each domain take the same rows
     // instead: col_groups equal column ranges times threads / col_groups row
     // ranges.
-    const int dt = native_plan_domain_threads(uarch, hp);
     q.row_unit = hp.row_unit;
     const auto take_blocks = [&]() {
         q.col_groups = 0;
@@ -803,8 +916,11 @@ native_plan_t rules_plan(const native_problem_t &p, const UarchParams &uarch,
         // the domain reads only those source rows.  When they fit the l3_pct
         // share of its L3, it replaces the schedule of a BF16 or FP32 plan
         // whose B slab over all of K exceeds the bf16_l2_pct share of L2, and
-        // the slice of an INT8 plan.  The deal gives each domain row blocks
-        // in proportion to its workers, so a full domain's share is
+        // the slice of an INT8 plan from int8_blocks_min_m rows, at -1 from
+        // kInt8BlocksMinM rows where the tile's B slab over all of K fills L1
+        // and an L3 domain holds at most kSmallDomainCores cores, and from
+        // half as many rows more otherwise.  The deal gives each domain row
+        // blocks in proportion to its workers, so a full domain's share is
         // M * de / threads rows.
         const int domains = ceil_div(q.threads, std::max(1, dt));
         const int de = std::min(std::max(1, dt), q.threads);
@@ -813,8 +929,14 @@ native_plan_t rules_plan(const native_problem_t &p, const UarchParams &uarch,
                 * esz;
         const int64_t slab_bytes
                 = static_cast<int64_t>(static_cast<double>(q.nr) * K * wei_esz);
+        const int64_t int8_min_m = hp.int8_blocks_min_m > 0
+                ? hp.int8_blocks_min_m
+                : slab_bytes >= static_cast<int64_t>(uarch.l1d_bytes)
+                        && small_domain
+                ? kInt8BlocksMinM
+                : kInt8BlocksMinM + kInt8BlocksMinM / 2;
         if (on.blocks && domains > 1
-                && M >= (!int8 ? hp.bf16_blocks_min_m : hp.int8_blocks_min_m)
+                && M >= (!int8 ? hp.bf16_blocks_min_m : int8_min_m)
                 && (!int8 ? slab_bytes * 100
                                         > static_cast<int64_t>(uarch.l2_bytes)
                                                 * hp.bf16_l2_pct
@@ -853,15 +975,23 @@ native_plan_t rules_plan(const native_problem_t &p, const UarchParams &uarch,
     q.int8_pass_quads
             = hp.int8_kc > 0 ? std::min(hp.int8_kc / 4, ceil_div(K, 4)) : 0;
     // The INT8 form of the L1 pass, at the tile's pass width and rows per
-    // call; equal passes in whole quads.  Only the per-channel tile reads it.
+    // call; equal passes in whole quads, a taller single row block's only
+    // where an L3 domain holds at most kSmallDomainCores cores.  Only the
+    // per-channel tile reads it.
     if (int8 && !group_kernel && hp.int8_kc == 0 && on.l1_pass && q.nr > 0) {
         const int cw = native_int8_col_width(q, q.nr);
         const int rows = native_int8_call_rows(q, cw / 16);
-        if (rows > 0 && 2 * rows <= q.mb && q.mb <= hp.l1_pass_max_mb) {
-            const int64_t per_k
-                    = static_cast<int64_t>(native_int8_pass_cols(q)) + rows;
-            const int64_t l1 = static_cast<int64_t>(uarch.l1d_bytes) * hp.l1_pct
-                    / 100 / per_k;
+        if (l1_pass_rows(q, hp, rows, q.mb)
+                && (q.mb <= hp.l1_pass_max_mb || small_domain)) {
+            const int pass_cols = native_int8_pass_cols(q);
+            const int64_t per_k = static_cast<int64_t>(pass_cols) + rows;
+            const int64_t fit = q.mb > hp.l1_pass_max_mb
+                    ? fit_pass_k(p, uarch, q.threads, dt, q.mb, esz, pass_cols)
+                    : 0;
+            const int pct = l1_pass_pct(p, uarch, hp, q, pass_cols, true);
+            const int64_t l1 = fit > 0
+                    ? fit
+                    : static_cast<int64_t>(uarch.l1d_bytes) * pct / 100 / per_k;
             const int64_t pass
                     = std::max<int64_t>(hp.min_pass_k,
                               std::min(l1, q.int8_pass_budget / per_k))
@@ -869,8 +999,9 @@ native_plan_t rules_plan(const native_problem_t &p, const UarchParams &uarch,
             const int64_t k_quads = (static_cast<int64_t>(K) + 3) / 4;
             if (pass >= 1 && pass < k_quads) {
                 const int64_t passes = (k_quads + pass - 1) / pass;
-                q.int8_pass_quads
-                        = static_cast<int>((k_quads + passes - 1) / passes);
+                const int64_t equal = (k_quads + passes - 1) / passes;
+                if (!short_tall_pass(p, q, hp, fit, l1, 4 * equal))
+                    q.int8_pass_quads = static_cast<int>(equal);
             }
         }
     }

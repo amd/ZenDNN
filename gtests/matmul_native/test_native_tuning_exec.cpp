@@ -1057,8 +1057,8 @@ bool takes_model_tile(
 // five calls that computes longer than it streams takes the long K pass, one
 // of three calls that streams longer takes M blocks of 6 rows over all of K
 // (its K of 2048 with cm_block_k 0), and an INT8 block takes 6 rows per
-// call with the shorter L1 pass (cm_int8_l1_pct) or two row groups.  The
-// built-in plan of an s4 call of
+// call with the shorter L1 pass (cm_int8_l1_pct) or, at l1_pct 100, two row
+// groups.  The built-in plan of an s4 call of
 // one row block whose column tiles do not divide over its threads takes two
 // to four M blocks (cm_int4_min_m), with a per-token and with a per-group
 // source.  A planner over 8-core domains takes each setting's cases, and a
@@ -1089,7 +1089,8 @@ TEST_F(NativeTuningExec, CostModelChoicesKeepTheBits) {
                             {"bf16_long_pass", "int8_three_calls"}},
             {"cm_stream_cycles=1048576,cm_block_kib=0,cm_block_k=0",
                     {"bf16_short_blocks"}},
-            {"cm_stream_cycles=1048576,cm_mem_cycles=424,cm_group_skew_pct=100",
+            {"cm_stream_cycles=1048576,cm_mem_cycles=424,cm_group_skew_pct=100,"
+             "l1_pct=100",
                     {"int8_groups"}},
             {"cost_model=1", {"int4_row_blocks", "int4_row_blocks_groups"}}};
     int compared = 0;
@@ -1164,6 +1165,79 @@ TEST_F(NativeTuningExec, BlocksRuleKeepsTheBits) {
     for (const char *setting : {on, off})
         nt::expect_in_child({{kConfig, setting}, {kTuningFile, nullptr}},
                 [&] { return child_same_bits(f); }, setting);
+}
+
+/// Whether the plan of on takes other K passes than the plan of off.
+bool takes_other_passes(
+        const nat::native_plan_t &on, const nat::native_plan_t &off) {
+    return on.kc != off.kc || on.int8_pass_quads != off.int8_pass_quads;
+}
+
+// The K passes of a single row block of more than l1_pass_max_mb rows and of
+// a decode block, and the INT8 blocks schedule from 2048 rows, keep the bits
+// on the calls they take: a planner over the fixed caches takes each rule's
+// cases with its setting and not with the setting of the plan before it, and
+// the children of both settings give the outputs of the built-in plan.  The
+// single row block's L1 pass takes 150 percent of L1, above the 192-word
+// floor on a smaller L1d than the built-in share; the decode share is the
+// built-in plan, so only its child without it runs.  A rule's children run
+// only where the detected caches let it take a case.
+TEST_F(NativeTuningExec, PassAndBlocksRulesKeepTheBits) {
+    nt::child_buffers_t shared;
+    const fixture_t f = make_fixture(
+            {{"single_block_bf16", src_t::bf16, 96, 256, 4096, kBf16, 8},
+                    {"single_block_int8", src_t::dyn_s8, 128, 256, 4096, kBf16,
+                            8},
+                    {"decode_share_bf16", src_t::bf16, 64, 2048, 4096, kBf16,
+                            8},
+                    {"decode_share_int8", src_t::dyn_s8, 32, 1024, 4096, kBf16,
+                            8},
+                    {"blocks_int8", src_t::dyn_s8, 2048, 256, 4096, kBf16, 8}},
+            shared);
+    if (f.cases.empty()) GTEST_SKIP() << "needs AVX512-BF16 or AVX512-VNNI";
+    const struct {
+        const char *on, *off, *cases;
+        bool (*taken)(const nat::native_plan_t &, const nat::native_plan_t &);
+        bool on_is_built_in;
+    } rules[] = {{"l1_pct=150", "l1_pass=0", "single_block", takes_other_passes,
+                         false},
+            {"l1_pct=-1", "l1_pct=100", "decode_share", takes_other_passes,
+                    true},
+            {"domain_threads=2", "domain_threads=2,int8_blocks_min_m=3072",
+                    "blocks", takes_blocks, false}};
+    int compared = 0;
+    for (const auto &rule : rules) {
+        if (!nt::in_child()) {
+            const std::unique_ptr<nat::native_planner_t> on
+                    = fixed_planner(rule.on);
+            const std::unique_ptr<nat::native_planner_t> off
+                    = fixed_planner(rule.off);
+            for (size_t i = 0; i < f.cases.size(); ++i) {
+                if (std::string(f.cases[i].name).rfind(rule.cases, 0) != 0)
+                    continue;
+                const nat::native_problem_t p
+                        = problem_of(f.cases[i], f.operands[i]);
+                EXPECT_TRUE(rule.taken(on->plan(p), off->plan(p)))
+                        << f.cases[i].name << ": '" << rule.on
+                        << "' does not take the call";
+            }
+        }
+        if (taken_on_this_host(f, rule.on, rule.off, rule.taken) == 0) {
+            if (!nt::in_child())
+                std::printf(
+                        "'%s' takes no case over the detected caches: its "
+                        "children are skipped\n",
+                        rule.on);
+            continue;
+        }
+        ++compared;
+        for (const char *setting : {rule.on, rule.off})
+            if (setting != rule.on || !rule.on_is_built_in)
+                nt::expect_in_child(
+                        {{kConfig, setting}, {kTuningFile, nullptr}},
+                        [&] { return child_same_bits(f); }, setting);
+    }
+    if (compared == 0) GTEST_SKIP() << "the detected caches take no case";
 }
 
 TEST_F(NativeTuningExec, BiasInDequantOffStaysInTheBand) {

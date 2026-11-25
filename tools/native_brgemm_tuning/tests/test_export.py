@@ -194,7 +194,8 @@ class TestEntries(unittest.TestCase):
         # Each rule switch at its built-in value unless the winner sets it, so no other layer turns a
         # rule on or off.
         switches = tuple(k for k in PL.RULE_SWITCHES if k in schema.key_map and schema.key(k).applies_to("bf16"))
-        self.assertEqual([tuned[k] for k in switches + ("l1_pct",)], [int(k != "l1_pass") for k in switches] + [100])
+        self.assertEqual([tuned[k] for k in switches + ("l1_pct",)],
+                         [int(k != "l1_pass") for k in switches] + [PL.builtin_params(schema)["l1_pct"]])
         self.assertEqual([kept[k] for k in ("nr",) + switches], [16] + [1] * len(switches))
         rule = {"l1_pass": 1, "l1_pct": 50}
         doc = E.build_doc(entries, {"kind": "ordered", "list": [{"when": [], "config": rule}]}, schema)

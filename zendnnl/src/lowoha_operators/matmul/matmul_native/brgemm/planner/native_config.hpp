@@ -90,7 +90,9 @@ struct heuristic_params_t {
     /// in L3 domain w / domain_threads, as a compact binding of the team to
     /// cores gives (OMP_PROC_BIND=close with OMP_PLACES=cores, or a binding
     /// of thread w to core w): the blocks schedule and the cost model's row
-    /// groups count on it.
+    /// groups count on it.  The bounds on the cores of an L3 domain (of
+    /// l1_pct, l1_pass_max_mb and int8_blocks_min_m) read the machine's
+    /// domain, whatever this sets.
     int domain_threads = 0;
     // INT8 tile.
     int int8_mr = 12; ///< rows per call, at most
@@ -129,9 +131,25 @@ struct heuristic_params_t {
     /// also the M above which bf16_alias applies.
     int decode_m = 128;
     /// K passes of at most l1_pct percent of L1 for one pass's B slab and
-    /// one call's A rows, in tiles of 2 * mr .. l1_pass_max_mb rows.
+    /// one call's A rows, in tiles of 2 * mr .. l1_pass_max_mb rows.  A
+    /// single row block of more rows, up to decode_m (of an INT8 tile, where
+    /// an L3 domain holds at most 16 cores), takes K passes by the
+    /// weight's fit: those of the l1_pct share while the weight fits three
+    /// quarters of an L3 domain and such a pass takes at least 192 words of
+    /// K (BF16 pairs, INT8 quads, F16 or FP32 values), all of K otherwise;
+    /// while it fits the L3 of the domains of the team, passes whose rows of
+    /// the block's source take a quarter of L2;
+    /// above, passes of a B slab of an eighth of L2.  l1_pct -1 (or 0): in the
+    /// single row block of a plan of more than two calls of the tallest
+    /// kernels and at most l1_pass_max_mb rows, of a BF16 or INT8 weight, 75
+    /// where the weight's share of each L2 of the plan's threads (one a
+    /// physical core) fits it (INT8) or an eighth of it (BF16, the column
+    /// tiles of the busiest L2) and the tile's B slab over all of K exceeds
+    /// L1, 150 for a BF16 weight that exceeds those L2s in a block of more
+    /// than four such calls where an L3 domain holds at most 16 cores; 100
+    /// otherwise.  The cost model weighs a pass against all of L1 at -1 or 0.
     int l1_pass = 1;
-    int l1_pct = 100;
+    int l1_pct = -1;
     int l1_pass_max_mb = 64;
     /// col_groups by the source and weight bytes an L3 domain reads from
     /// memory, whether or not the column tiles divide over the threads.  0:
@@ -162,7 +180,9 @@ struct heuristic_params_t {
     /// tiles of 32 below.  Narrowing for the threads applies to both.
     int f16_wide_min_m = 192;
     /// The blocks schedule, on a team of more than one L3 domain, from
-    /// bf16_blocks_min_m rows (BF16) or int8_blocks_min_m rows (INT8) when
+    /// bf16_blocks_min_m rows (BF16) or int8_blocks_min_m rows (INT8; at -1,
+    /// or 0, 2048 rows where the tile's B slab over all of K fills L1 and an
+    /// L3 domain holds at most 16 cores, 3072 otherwise) when
     /// the rows of a full L3 domain's share of the source (M * domain_threads
     /// / threads) fit the l3_pct share of its L3: in place of the
     /// schedule of a BF16 plan whose B slab over all of K exceeds the
@@ -171,7 +191,7 @@ struct heuristic_params_t {
     /// the slice of an INT8 plan.
     int blocks = 1;
     int bf16_blocks_min_m = 1024;
-    int int8_blocks_min_m = 3072;
+    int int8_blocks_min_m = -1;
     /// 1: a BF16 plan of tiles of 32 columns or more and at least as many
     /// column tiles as threads gives way to the variant of the rules
     /// (cm_short_rows rows per call, two row groups for a single row block)

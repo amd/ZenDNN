@@ -90,7 +90,7 @@ class TestFixture(unittest.TestCase):
         # row_unit's auto value is the rules' unit of 12 rows, a legal setting: setting it pins nothing.
         self.assertEqual((SCHEMA.key("row_unit").default, SCHEMA.key("row_unit").auto), (None, 12))
         self.assertEqual([builtin_params(SCHEMA)[k] for k in ("nb", "unit_tiles") + BLOCKS_RULE_KEYS],
-                         [0, 0, 1, 1024, 3072])
+                         [0, 0, 1, 1024, -1])
         self.assertEqual((SCHEMA.key("nb").min, SCHEMA.key("nb").max, SCHEMA.key("nb").check(24) is None),
                          (16, 1 << 20, False))
 

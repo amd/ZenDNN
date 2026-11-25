@@ -396,7 +396,7 @@ TEST(NativeTuningPlan, DefaultParamsAreTheBuiltInConstants) {
     EXPECT_EQ(hp.idle_pct, 10);
     EXPECT_EQ(hp.decode_m, 128);
     EXPECT_EQ(hp.l1_pass, 1);
-    EXPECT_EQ(hp.l1_pct, 100);
+    EXPECT_EQ(hp.l1_pct, -1);
     EXPECT_EQ(hp.l1_pass_max_mb, 64);
     EXPECT_EQ(hp.traffic_groups, 1);
     EXPECT_EQ(hp.bf16_alias, 1);

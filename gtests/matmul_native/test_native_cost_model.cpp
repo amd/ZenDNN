@@ -581,11 +581,15 @@ TEST(NativeCostModel, LongPassForLongComputeBoundStreams) {
 // calls at M 37 and 55 of N 4608, K 8192; with cm_drift_kib 2048 the pass of
 // 2048 takes M 55 in 12-row calls of 12-row units (24 + 31 rows), while at
 // M 37 those units would split 24 + 13 rows and the groups keep their plan.
+// The rules' passes take 100 percent of L1 (at -1 the decode block of M 55
+// takes 150 percent for this weight, and the model weighs that pass).
 TEST(NativeCostModel, LongPassKeepsTheRowGroupBounds) {
     if (!bf16_kernels()) GTEST_SKIP() << "needs AVX512-BF16";
-    const nat::heuristic_params_t drift = params("cm_drift_kib=2048");
+    const nat::heuristic_params_t share = params("l1_pct=100");
+    const nat::heuristic_params_t drift
+            = params("cm_drift_kib=2048,l1_pct=100");
     const nat::native_problem_t p37 = problem(37, 4608, 8192, 32, true);
-    const nat::native_plan_t g37 = plan(domains32(), 37, 4608, 8192, 32);
+    const nat::native_plan_t g37 = nat::heuristic_plan(p37, domains32(), share);
     ASSERT_EQ(g37.col_groups, 16) << text(g37);
     ASSERT_EQ(g37.row_unit, 8);
     ASSERT_EQ(g37.mr, 8);
@@ -593,7 +597,7 @@ TEST(NativeCostModel, LongPassKeepsTheRowGroupBounds) {
     const nat::native_plan_t q37 = nat::heuristic_plan(p37, domains32(), drift);
     EXPECT_TRUE(same(q37, g37)) << text(q37);
     const nat::native_problem_t p55 = problem(55, 4608, 8192, 32, true);
-    const nat::native_plan_t g55 = plan(domains32(), 55, 4608, 8192, 32);
+    const nat::native_plan_t g55 = nat::heuristic_plan(p55, domains32(), share);
     ASSERT_EQ(g55.col_groups, 16) << text(g55);
     ASSERT_EQ(g55.row_unit, 8);
     const nat::native_plan_t q55 = nat::heuristic_plan(p55, domains32(), drift);

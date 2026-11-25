@@ -224,13 +224,15 @@ class TestRules(unittest.TestCase):
         def plan(text, m, n, k, dtype="bf16", uarch=SMALL):
             return plan_of(text, Problem(dtype, m, n, k), uarch)
 
-        # L1 pass: eight equal passes over K=4096 for M=32; INT8, four passes of 256 quads.
+        # L1 pass: eight equal passes over K=4096 for M=32; INT8, whose weight fits the L2 of the threads, five
+        # passes of 205 quads at 75 percent of L1, four of 256 at the pinned 100.
         self.assertEqual(plan(RULES_OFF, 32, 4096, 4096).kc, 4096)
         self.assertEqual(plan("", 32, 4096, 4096).kc, 512)
         self.assertEqual(plan("l1_pass=0", 32, 4096, 4096).kc, 4096)
         self.assertEqual(plan("", 32, 4096, 4096).scratch_floats, 32 * 32)
         self.assertEqual(plan(RULES_OFF, 32, 4096, 4096, "s8").int8_pass_quads, 0)
-        self.assertEqual(plan("", 32, 4096, 4096, "s8").int8_pass_quads, 256)
+        self.assertEqual(plan("", 32, 4096, 4096, "s8").int8_pass_quads, 205)
+        self.assertEqual(plan("l1_pct=100", 32, 4096, 4096, "s8").int8_pass_quads, 256)
         # One call's rows per tile: no pass.
         self.assertEqual(plan("", 8, 4096, 4096).kc, 4096)
         self.assertEqual(plan("", 8, 4096, 4096, "s8").int8_pass_quads, 0)
@@ -254,11 +256,141 @@ class TestRules(unittest.TestCase):
         self.assertEqual(plan("", 4096, 28672, 4096, uarch=LARGE).col_groups, 0)
         self.assertEqual(plan("traffic_groups=0", 4096, 28672, 4096).col_groups, 0)
 
+    def test_single_row_block_passes(self):
+        """A single row block of more than l1_pass_max_mb rows, up to decode_m, takes K passes by the
+        weight's fit (NativeTuningRules.SingleRowBlockPasses): within three quarters of an L3 domain the L1
+        pass, within the team's L3 a quarter of L2 for the block's source rows, above it a slab of an eighth
+        of L2; several row blocks, more rows than decode_m and l1_pass=0 keep all of K."""
+        def plan(text, m, n, k, dtype="bf16"):
+            return plan_of(text, Problem(dtype, m, n, k), SMALL)
+
+        self.assertEqual(plan("", 128, 2880, 4096).kc, 512)
+        self.assertEqual(plan("", 128, 4096, 4096).kc, 1024)
+        self.assertEqual(plan("", 128, 5120, 32768).kc, 2048)
+        self.assertEqual(plan("", 128, 16384, 5120).kc, 1708)
+        self.assertEqual(plan("", 96, 4096, 4096).kc, 1024)
+        self.assertEqual(plan("", 128, 4096, 4096, "s8").int8_pass_quads, 256)
+        self.assertEqual(plan("", 128, 10240, 4096, "s8").int8_pass_quads, 512)
+        self.assertEqual(plan("", 128, 5120, 32768, "s8").int8_pass_quads, 1024)
+        two = plan("", 128, 1536, 6144)
+        self.assertEqual((two.m_blocks, two.kc), (2, 6144))
+        self.assertEqual(plan("", 160, 4096, 4096).kc, 4096)
+        self.assertEqual(plan("", 160, 4096, 4096, "s8").int8_pass_quads, 0)
+        self.assertEqual(plan("l1_pass=0", 128, 4096, 4096).kc, 4096)
+        self.assertEqual(plan("l1_pass_max_mb=128", 128, 4096, 4096).kc, 512)
+        self.assertEqual(PL.fit_pass_k(Problem("bf16", 128, 4096, 4096), SMALL, 32, 8, 128, 2, 32), 1024)
+        self.assertEqual(PL.fit_pass_k(Problem("bf16", 128, 2880, 4096), SMALL, 32, 8, 128, 2, 32), 0)
+        # Two thirds of SMALL's L1d hold fewer than 192 words of the tile's pass, of bf16 and of s8: all of K; a
+        # weight past three quarters of a domain keeps its passes.
+        l1_small = SMALL.with_overrides(f"l1d_bytes={SMALL.l1d_bytes * 2 // 3}")
+        self.assertEqual(plan_of("", Problem("bf16", 128, 2880, 4096), l1_small).kc, 4096)
+        self.assertEqual(plan_of("", Problem("s8", 128, 4096, 4096), l1_small).int8_pass_quads, 0)
+        self.assertEqual(plan_of("", Problem("bf16", 128, 4096, 4096), l1_small).kc, 1024)
+        # So does a K whose equal passes come below 192 words (s8 K 1152: two of 144 quads; bf16 K 576: two of 144
+        # words); equal passes of 192 words stay.
+        self.assertEqual(plan("", 128, 4096, 1152, "s8").int8_pass_quads, 0)
+        self.assertEqual(plan("", 128, 4096, 1536, "s8").int8_pass_quads, 192)
+        self.assertEqual(plan("", 128, 4096, 576).kc, 576)
+        self.assertEqual(plan("", 128, 4096, 768).kc, 384)
+        # An INT8 tile takes these passes only where an L3 domain holds at most 16 cores; its decode block keeps
+        # its pass, and BF16 takes the L1 pass.
+        self.assertEqual(plan_of("", Problem("s8", 128, 4096, 4096), LARGE).int8_pass_quads, 0)
+        self.assertEqual(plan_of("", Problem("s8", 96, 2560, 1536), LARGE).int8_pass_quads, 0)
+        self.assertEqual(plan_of("", Problem("s8", 64, 4096, 4096), LARGE).int8_pass_quads, 205)
+        self.assertEqual(plan_of("", Problem("bf16", 128, 4096, 4096), LARGE).kc, 586)
+
+    def test_decode_pass_shares(self):
+        """At l1_pct -1 a decode block takes the L1 pass's share by the weight against the L2 of the plan's
+        threads, one a physical core (NativeTuningRules.DecodePassShares): 75 percent where an s8 weight fits
+        it or the column tiles of the busiest L2 of a bf16 one an eighth of it and the slab over all of K
+        exceeds L1, 150 percent where a bf16 one does not fit it in a block of more than four calls where an
+        L3 domain holds at most 16 cores; 100 otherwise, and for f16 and f32 weights (one K value a word)."""
+        def plan(text, m, n, k, dtype="bf16", uarch=SMALL):
+            return plan_of(text, Problem(dtype, m, n, k), uarch)
+
+        self.assertEqual(PL.builtin_params(SCHEMA)["l1_pct"], -1)
+        self.assertEqual(plan("", 32, 1024, 1536).kc, 384)
+        self.assertEqual(plan("", 32, 4096, 4096).kc, 512)
+        self.assertEqual(plan("", 32, 2560, 1536).kc, 512)
+        self.assertEqual(plan("", 32, 1280, 1536).kc, 512)
+        self.assertEqual(plan("l1_pct=75", 32, 1280, 1536).kc, 384)
+        # SMT siblings share their core's L2: 32 threads of 16 physical cores weigh the weight against 16 L2s.
+        smt = SMALL.with_overrides("physical_cores=16")
+        self.assertEqual(plan("", 64, 4096, 4096, uarch=smt).kc, 820)
+        self.assertEqual(plan("", 32, 6144, 4096, "s8", uarch=smt).int8_pass_quads, 256)
+        smt = SMALL.with_overrides("physical_cores=32")
+        self.assertEqual(plan("", 64, 4096, 4096, uarch=smt).kc, 512)
+        self.assertEqual(plan("", 32, 6144, 4096, "s8", uarch=smt).int8_pass_quads, 205)
+        self.assertEqual(plan("", 64, 4096, 4096).kc, 512)
+        self.assertEqual(plan("", 64, 6144, 4096, uarch=LARGE).kc, plan("l1_pct=100", 64, 6144, 4096, uarch=LARGE).kc)
+        self.assertNotEqual(plan("l1_pct=150", 64, 6144, 4096, uarch=LARGE).kc,
+                            plan("l1_pct=100", 64, 6144, 4096, uarch=LARGE).kc)
+        self.assertEqual(plan("", 32, 6144, 4096).kc, 512)
+        self.assertEqual(plan("", 64, 6144, 4096).kc, 820)
+        self.assertEqual(plan("", 64, 28672, 4096).kc, 820)
+        self.assertEqual(plan("", 48, 28672, 4096).kc, 512)
+        self.assertEqual(plan("", 32, 4096, 4096, "s8").int8_pass_quads, 205)
+        self.assertEqual(plan("", 32, 10240, 4096, "s8").int8_pass_quads, 256)
+        self.assertEqual(plan("", 32, 1024, 1024, "s8").int8_pass_quads, 0)
+        self.assertEqual(plan("", 24, 1024, 1536).kc, 512)
+        self.assertEqual(plan("l1_pct=100", 32, 1024, 1536).kc, 512)
+        self.assertEqual(plan("l1_pct=100", 32, 4096, 4096, "s8").int8_pass_quads, 256)
+        for dtype in ("f16", "f32"):
+            for m, n, k in ((32, 1024, 1536), (64, 1024, 1536), (32, 6144, 4096), (64, 6144, 4096)):
+                self.assertEqual(plan("", m, n, k, dtype).kc, plan("l1_pct=100", m, n, k, dtype).kc, (dtype, m, n, k))
+
+    def test_domain_bounds_read_the_machine_cores(self):
+        """The rules bounded by an L3 domain of at most 16 cores (the decode block's 150 percent share, an INT8
+        single row block's K passes by the weight's fit, the INT8 blocks schedule from 2048 rows) read the cores
+        of the machine's L3 domain, whatever domain_threads sets; domain_threads deals the work
+        (NativeTuningRules.DomainBoundsReadTheMachineCores)."""
+        def plan(text, m, n, k, dtype, uarch, threads=32):
+            return plan_of(text, Problem(dtype, m, n, k, threads=threads), uarch)
+
+        for dt in (8, 16):
+            pin = f"domain_threads={dt}"
+            self.assertEqual(plan(pin, 64, 6144, 4096, "bf16", LARGE).kc,
+                             plan(pin + ",l1_pct=100", 64, 6144, 4096, "bf16", LARGE).kc, pin)
+            self.assertEqual(plan(pin, 128, 4096, 4096, "s8", LARGE).int8_pass_quads, 0, pin)
+            self.assertEqual(plan(pin, 96, 2560, 1536, "s8", LARGE).int8_pass_quads, 0, pin)
+            self.assertEqual(plan(pin, 2048, 4096, 4096, "s8", LARGE, threads=64).unit_tiles, 0, pin)
+            q = plan(pin, 3072, 4096, 4096, "s8", LARGE, threads=64)
+            self.assertEqual((q.unit_tiles, q.domain_threads), (1, dt), pin)
+        wide = "domain_threads=32"
+        self.assertEqual(plan(wide, 64, 6144, 4096, "bf16", SMALL).kc,
+                         plan(wide + ",l1_pct=150", 64, 6144, 4096, "bf16", SMALL).kc)
+        self.assertEqual(plan(wide, 128, 4096, 4096, "s8", SMALL).int8_pass_quads, 256)
+        q = plan(wide, 2048, 4096, 4096, "s8", SMALL, threads=64)
+        self.assertEqual((q.unit_tiles, q.domain_threads), (1, 32))
+
+    def test_single_row_block_passes_of_an_older_build(self):
+        """A schema whose l1_pct has no auto value is a build without the K passes of a single row block of more
+        than l1_pass_max_mb rows, which no key of its own switches: for it the tuner plans such a block over all
+        of K, as that build does, and a block of up to l1_pass_max_mb rows takes the L1 pass of its l1_pct."""
+        keys = [dict({n: v for n, v in k.items() if n != "auto"}, default=100, min=1) if k["name"] == "l1_pct"
+                else k for k in SCHEMA.doc["keys"]]
+        older = Schema(dict(SCHEMA.doc, keys=keys), SCHEMA.source + " with l1_pct 100 and no auto value")
+        self.assertTrue(PL.single_block_passes(SCHEMA))
+        self.assertFalse(PL.single_block_passes(older))
+
+        def plan(text, m, n, k, dtype, schema):
+            return plan_of(text, Problem(dtype, m, n, k), SMALL, schema)
+
+        for m in (96, 128):
+            self.assertEqual(plan("", m, 4096, 4096, "bf16", older).kc, 4096, m)
+            self.assertEqual(plan("", m, 4096, 4096, "s8", older).int8_pass_quads, 0, m)
+            self.assertEqual(plan("", m, 4096, 4096, "bf16", SCHEMA).kc, 1024, m)
+            self.assertEqual(plan("", m, 4096, 4096, "s8", SCHEMA).int8_pass_quads, 256, m)
+        for dtype in ("bf16", "s8"):
+            for m, n, k in ((32, 4096, 4096), (64, 6144, 4096)):
+                self.assertEqual(plan("", m, n, k, dtype, older), plan("l1_pct=100", m, n, k, dtype, SCHEMA),
+                                 (dtype, m, n, k))
+
     def test_resolution_log_and_signature_of_a_rule_plan(self):
         p = Problem("s8", 32, 4096, 4096)
         q = PL.builtin_plan(p, SMALL, SCHEMA)
-        self.assertEqual(PL.plan_log_fields(q, p)["int8_pass"], "256")
-        self.assertIn(("quads", 256), PL.effective_signature(q, p))
+        self.assertEqual(PL.plan_log_fields(q, p)["int8_pass"], "205")
+        self.assertIn(("quads", 205), PL.effective_signature(q, p))
         r = PL.resolve(p, parse_settings(RULES_OFF, SCHEMA), SMALL, SCHEMA)
         self.assertTrue(r.applied)
         self.assertEqual(PL.plan_log_fields(r.plan, p)["int8_pass"], "rule")
@@ -469,8 +601,23 @@ class TestBlocks(unittest.TestCase):
         i = self.plan("", 4096, 4096, 4096, "s8")
         self.assertTrue(self.blocks(i))
         self.assertIsNone(PL.validate_plan(i, Problem("s8", 4096, 4096, 4096), SCHEMA))
+        self.assertTrue(self.blocks(self.plan("", 2048, 4096, 4096, "s8")))
+        # A tile whose B slab over all of K is below L1 (32 x 1024 bytes) takes it from half as many rows more.
+        self.assertFalse(self.blocks(self.plan("", 2048, 4096, 1024, "s8")))
+        self.assertTrue(self.blocks(self.plan("", 3072, 4096, 1024, "s8")))
+        # An L3 domain of more than 16 cores takes it from half as many rows more.
+        self.assertEqual(self.plan("", 2048, 4096, 4096, "s8", uarch=LARGE, threads=64).unit_tiles, 0)
+        q = self.plan("", 3072, 4096, 4096, "s8", uarch=LARGE, threads=64)
+        self.assertEqual((q.unit_tiles, q.domain_threads), (1, 32))
         self.assertFalse(self.blocks(self.plan("", 1024, 4096, 4096, "s8")))
+        # A set int8_blocks_min_m takes it from that many rows for every tile.
+        self.assertEqual(PL.builtin_params(SCHEMA)["int8_blocks_min_m"], -1)
         self.assertTrue(self.blocks(self.plan("int8_blocks_min_m=1024", 1024, 4096, 4096, "s8")))
+        self.assertTrue(self.blocks(self.plan("int8_blocks_min_m=2048", 2048, 4096, 1024, "s8")))
+        self.assertFalse(self.blocks(self.plan("int8_blocks_min_m=3072", 2048, 4096, 4096, "s8")))
+        self.assertTrue(self.blocks(self.plan("int8_blocks_min_m=3072", 3072, 4096, 1024, "s8")))
+        q = self.plan("int8_blocks_min_m=2048", 2048, 4096, 4096, "s8", uarch=LARGE, threads=64)
+        self.assertEqual((q.unit_tiles, q.domain_threads), (1, 32))
         self.assertFalse(self.blocks(self.plan("", 4096, 4096, 14336, "s8")))
         # A pinned schedule or col_groups keeps its own plan.
         self.assertEqual(self.plan("schedule=slice", 4096, 4096, 14336).unit_tiles, 0)

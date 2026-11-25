@@ -342,7 +342,7 @@
      "copy_block": "64",
      "kc": "1024"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "bf16-n3840-k15360-m33-64-t32",
@@ -380,7 +380,7 @@
      "copy_block": "64",
      "kc": "1024"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "bf16-n4096-k1536-m65-128-t32",
@@ -418,7 +418,7 @@
      "copy_block": "64",
      "kc": "1024"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "bf16-n4096-k12288-m65-128-t32",
@@ -437,7 +437,7 @@
      "copy_block": "64",
      "kc": "1024"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "bf16-n4096-k14336-m65-128-t32",
@@ -456,7 +456,7 @@
      "copy_block": "64",
      "kc": "1024"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "bf16-n4608-k6656-m65-128-t32",
@@ -494,7 +494,7 @@
      "copy_block": "64",
      "kc": "1024"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "bf16-n5120-k5120-m65-128-t32",
@@ -513,7 +513,7 @@
      "copy_block": "64",
      "kc": "1024"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "bf16-n5120-k17920-m33-64-t32",
@@ -589,7 +589,7 @@
      "copy_block": "64",
      "kc": "2048"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "bf16-n5632-k2048-m33-64-t32",
@@ -684,7 +684,7 @@
      "copy_block": "64",
      "kc": "1024"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "bf16-n6144-k5120-m9-16-t32",
@@ -722,7 +722,7 @@
      "copy_block": "64",
      "kc": "1024"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "bf16-n6656-k4096-m65-128-t32",
@@ -741,7 +741,7 @@
      "copy_block": "64",
      "kc": "1024"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "bf16-n6656-k19968-m9-16-t32",
@@ -855,7 +855,7 @@
      "copy_block": "64",
      "kc": "1024"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "bf16-n8192-k3840-m33-64-t32",
@@ -931,7 +931,7 @@
      "copy_block": "64",
      "kc": "2048"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "bf16-n28672-k4096-m33-64-t32",
@@ -969,7 +969,7 @@
      "copy_block": "64",
      "kc": "2048"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "bf16-n30720-k3840-m33-64-t32",
@@ -1474,7 +1474,7 @@
      "int8_cw": "32/16",
      "int8_pass": "256"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "s8-n3584-k2048-m17-32-t32",
@@ -1537,7 +1537,7 @@
      "int8_cw": "32/16",
      "int8_pass": "256"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "s8-n3840-k15360-m65-128-t32",
@@ -1600,7 +1600,7 @@
      "int8_cw": "32/16",
      "int8_pass": "256"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "s8-n4096-k12288-m65-128-t32",
@@ -1684,7 +1684,7 @@
      "int8_cw": "32/16",
      "int8_pass": "256"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "s8-n5120-k5120-m65-128-t32",
@@ -1768,7 +1768,7 @@
      "int8_cw": "32/16",
      "int8_pass": "256"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "s8-n5760-k2880-m65-128-t32",
@@ -1810,7 +1810,7 @@
      "int8_cw": "32/16",
      "int8_pass": "256"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "s8-n6144-k5120-m65-128-t32",
@@ -2417,7 +2417,7 @@
      "kc": "1024",
      "kernels": "f16"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "f16-n4096-k12288-m33-64-t32",
@@ -2457,7 +2457,7 @@
      "kc": "1024",
      "kernels": "f16"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "f16-n4096-k14336-m33-64-t32",
@@ -2497,7 +2497,7 @@
      "kc": "1024",
      "kernels": "f16"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "f16-n4608-k6656-m33-64-t32",
@@ -2597,7 +2597,7 @@
      "kc": "1024",
      "kernels": "f16"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "f16-n5120-k5120-m33-64-t32",
@@ -2637,7 +2637,7 @@
      "kc": "1024",
      "kernels": "f16"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "f16-n5120-k17920-m9-16-t32",
@@ -2917,7 +2917,7 @@
      "kc": "1024",
      "kernels": "f16"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "f16-n6144-k5120-m65-128-t32",
@@ -2937,7 +2937,7 @@
      "kc": "1024",
      "kernels": "f16"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "f16-n6656-k4096-m17-32-t32",
@@ -3217,7 +3217,7 @@
      "kc": "2048",
      "kernels": "f16"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "f16-n28672-k4096-m17-32-t32",
@@ -3277,7 +3277,7 @@
      "kc": "2048",
      "kernels": "f16"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "f16-n30720-k3840-m33-64-t32",
@@ -3557,7 +3557,7 @@
      "kc": "2048",
      "kernels": "f16"
     },
-    "builtin": false
+    "builtin": true
    },
    {
     "id": "f16-n262144-k3840-m17-32-t32",

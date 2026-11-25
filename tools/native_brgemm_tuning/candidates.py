@@ -84,8 +84,8 @@ def parse_settings(text: str, schema: Schema) -> Dict[str, Any]:
 
 def builtin_value(spec: Any) -> Any:
     """The value heuristic_params_t{} holds for a key: its default, or its auto value where
-    that is a legal setting (row_unit 12, int4_l1_pct -1, cm_tall_pct -1, cm_mem_cycles 0, cm_fma_pipes 0):
-    setting a key to it is the same as leaving it unset."""
+    that is a legal setting (row_unit 12, int4_l1_pct -1, l1_pct -1, int8_blocks_min_m -1, cm_tall_pct -1,
+    cm_mem_cycles 0, cm_fma_pipes 0): setting a key to it is the same as leaving it unset."""
     if spec.default is not None:
         return spec.default
     if spec.auto is not None and spec.check(spec.auto) is None:
@@ -227,7 +227,7 @@ def _value_rule(key: str, p: Problem, schema: Schema) -> List[Any]:
         "bf16_copy_par_min": [1 << 16, 1 << 40], "int8_copy_par_min": [0, 1 << 40],
         "makespan": [0, 1], "l1_pass": [0, 1], "traffic_groups": [0, 1],
         "min_gain_pct": [0, 2, 10, 20], "idle_pct": [5, 25, 50],
-        "l1_pct": [50, 75, 150, 200], "l1_pass_max_mb": [32, 128, 192],
+        "l1_pct": [50, 75, 100, 150, 200], "l1_pass_max_mb": [32, 128, 192],
         "bf16_alias": [0, 1], "bf16_alias_mr": [4, 6, 12], "bf16_narrow_n": [0, 1],
         # The narrow-N, F16_PH wide-tile and blocks rules take calls from these Ms: 1 turns
         # them on at every M, 2^30 off.

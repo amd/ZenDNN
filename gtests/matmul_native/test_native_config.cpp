@@ -327,7 +327,7 @@ const key_doc_t kKeyDocs[] = {
                 &field_value<int, &hp_t::decode_m>},
         {"l1_pass", kAllFamilies, true, false, "1",
                 &field_value<int, &hp_t::l1_pass>},
-        {"l1_pct", kAllFamilies, true, false, "100",
+        {"l1_pct", kAllFamilies, true, false, "thread_l2",
                 &field_value<int, &hp_t::l1_pct>},
         {"l1_pass_max_mb", kAllFamilies, true, false, "64",
                 &field_value<int, &hp_t::l1_pass_max_mb>},
@@ -347,7 +347,7 @@ const key_doc_t kKeyDocs[] = {
                 &field_value<int, &hp_t::blocks>},
         {"bf16_blocks_min_m", kFloatFamilies, true, false, "1024",
                 &field_value<int, &hp_t::bf16_blocks_min_m>},
-        {"int8_blocks_min_m", kInt8Families, true, false, "3072",
+        {"int8_blocks_min_m", kInt8Families, true, false, "slab_l1",
                 &field_value<int, &hp_t::int8_blocks_min_m>},
         {"cost_model", kAllFamilies, true, false, "1",
                 &field_value<int, &hp_t::cost_model>},
@@ -484,14 +484,16 @@ TEST(NativeConfigText, KeyDocsMatchTheKeyTable) {
         if (integer && !native_text_int64(d.builtin, text_value)) {
             // -1: col_groups by the schedule, cm_tall_pct by the L3 domain,
             // cm_stream_cycles by the machine model (0 is a rate), int4_l1_pct
-            // by the L2 of the plan's threads; row_unit 12: the rules' unit,
+            // and l1_pct by the L2 of the plan's threads, int8_blocks_min_m by
+            // the tile's slab and the L3 domain; row_unit 12: the rules' unit,
             // which the cost model's row groups of short calls replace by
             // cm_short_rows.
             const std::string name = k.name;
             const int64_t auto_value = name == "row_unit" ? 12
                     : name == "col_groups" || name == "cm_tall_pct"
                             || name == "cm_stream_cycles"
-                            || name == "int4_l1_pct"
+                            || name == "int4_l1_pct" || name == "l1_pct"
+                            || name == "int8_blocks_min_m"
                     ? -1
                     : 0;
             EXPECT_EQ(v, auto_value) << k.name;
@@ -532,7 +534,7 @@ TEST(NativeConfigText, RejectsBadTokensAndRanges) {
                  "bf16_copy_par_min=-1", "int8_copy_par_min=1099511627777",
                  "split=0", "k_split=1", "makespan=2", "makespan=-1",
                  "min_gain_pct=101", "idle_pct=0", "idle_pct=101",
-                 "decode_m=-1", "l1_pass=on", "l1_pct=0", "l1_pct=1001",
+                 "decode_m=-1", "l1_pass=on", "l1_pct=-2", "l1_pct=1001",
                  "l1_pass_max_mb=0", "l1_pass_max_mb=8193", "traffic_groups=2",
                  "bf16_alias=2", "bf16_alias=-1", "bf16_alias_mr=0",
                  "bf16_alias_mr=13", "bf16_narrow_n=2", "bf16_narrow_n=-1",
@@ -2958,21 +2960,21 @@ TEST(NativeConfigSchema, SchemaDump) {
         EXPECT_EQ(key(name).value("max", json()), 1) << name;
         EXPECT_EQ(key(name).value("bits", json()), "same") << name;
     }
-    for (const auto &[name, value] : std::vector<std::pair<const char *, int>> {
-                 {"min_gain_pct", 5}, {"idle_pct", 10}, {"decode_m", 128},
-                 {"l1_pct", 100}, {"l1_pass_max_mb", 64}, {"bf16_alias_mr", 8},
-                 {"bf16_narrow_n_min_m", 1024}, {"f16_wide_min_m", 192},
-                 {"bf16_blocks_min_m", 1024}, {"int8_blocks_min_m", 3072},
-                 {"cm_gain_pct", 5}, {"cm_short_rows", 8}, {"cm_fma_lat", 6},
-                 {"cm_call_cycles", 800}, {"cm_l2_bytes", 16},
-                 {"cm_l3_cycles", 10}, {"cm_prefetch_kib", 4},
-                 {"cm_overlap_pct", 20}, {"cm_reuse_pct", 50},
-                 {"cm_sync_tiles", 5}, {"cm_group_slab_pct", 75},
-                 {"cm_group_l3_pct", 75}, {"cm_group_skew_pct", 110},
-                 {"cm_group_rows_pct", 115}, {"cm_drift_kib", 4096},
-                 {"cm_pass_kib", 128}, {"cm_pass_calls", 4},
-                 {"cm_block_kib", 16384}, {"cm_block_k", 2048},
-                 {"cm_int8_l1_pct", 0}, {"cm_int4_min_m", 48}}) {
+    for (const auto &[name, value] :
+            std::vector<std::pair<const char *, int>> {{"min_gain_pct", 5},
+                    {"idle_pct", 10}, {"decode_m", 128}, {"l1_pass_max_mb", 64},
+                    {"bf16_alias_mr", 8}, {"bf16_narrow_n_min_m", 1024},
+                    {"f16_wide_min_m", 192}, {"bf16_blocks_min_m", 1024},
+                    {"cm_gain_pct", 5}, {"cm_short_rows", 8}, {"cm_fma_lat", 6},
+                    {"cm_call_cycles", 800}, {"cm_l2_bytes", 16},
+                    {"cm_l3_cycles", 10}, {"cm_prefetch_kib", 4},
+                    {"cm_overlap_pct", 20}, {"cm_reuse_pct", 50},
+                    {"cm_sync_tiles", 5}, {"cm_group_slab_pct", 75},
+                    {"cm_group_l3_pct", 75}, {"cm_group_skew_pct", 110},
+                    {"cm_group_rows_pct", 115}, {"cm_drift_kib", 4096},
+                    {"cm_pass_kib", 128}, {"cm_pass_calls", 4},
+                    {"cm_block_kib", 16384}, {"cm_block_k", 2048},
+                    {"cm_int8_l1_pct", 0}, {"cm_int4_min_m", 48}}) {
         EXPECT_EQ(key(name).value("default", json()), value) << name;
         EXPECT_EQ(key(name).value("bits", json()), "same") << name;
     }
@@ -2981,6 +2983,17 @@ TEST(NativeConfigSchema, SchemaDump) {
     EXPECT_EQ(key("int4_l1_pct").value("auto", json()), -1);
     EXPECT_EQ(key("int4_l1_pct").value("min", json()), -1);
     EXPECT_EQ(key("int4_l1_pct").value("bits", json()), "same");
+    // The L1 pass's share of L1 follows the L2 of the plan's threads.
+    EXPECT_EQ(key("l1_pct").value("default", json()), "thread_l2");
+    EXPECT_EQ(key("l1_pct").value("auto", json()), -1);
+    EXPECT_EQ(key("l1_pct").value("min", json()), -1);
+    EXPECT_EQ(key("l1_pct").value("bits", json()), "same");
+    // The rows of the INT8 blocks schedule follow the tile's B slab against
+    // L1 and the cores of an L3 domain.
+    EXPECT_EQ(key("int8_blocks_min_m").value("default", json()), "slab_l1");
+    EXPECT_EQ(key("int8_blocks_min_m").value("auto", json()), -1);
+    EXPECT_EQ(key("int8_blocks_min_m").value("min", json()), -1);
+    EXPECT_EQ(key("int8_blocks_min_m").value("bits", json()), "same");
     // The cost model's inputs and its row-group bounds apply to BF16 and
     // per-channel INT8 plans, its stream rules to BF16 and its INT8 rule to
     // INT8; the dot products a cycle default to the machine model's

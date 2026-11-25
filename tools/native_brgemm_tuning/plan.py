@@ -58,9 +58,9 @@ BUILTIN_PARAMS: Dict[str, Any] = {
     "direct_store": True, "bias_in_dequant": True, "copy_block": 64,
     "bf16_copy_par_min": 0, "int8_copy_par_min": 65536,
     "makespan": 1, "min_gain_pct": 5, "idle_pct": 10, "decode_m": 128,
-    "l1_pass": 1, "l1_pct": 100, "l1_pass_max_mb": 64, "traffic_groups": 1,
+    "l1_pass": 1, "l1_pct": -1, "l1_pass_max_mb": 64, "traffic_groups": 1,
     "bf16_alias": 1, "bf16_alias_mr": 8, "bf16_narrow_n": 1, "bf16_narrow_n_min_m": 1024,
-    "f16_wide_min_m": 192, "blocks": 1, "bf16_blocks_min_m": 1024, "int8_blocks_min_m": 3072,
+    "f16_wide_min_m": 192, "blocks": 1, "bf16_blocks_min_m": 1024, "int8_blocks_min_m": -1,
     "cost_model": 1, "cm_gain_pct": 5, "cm_short_rows": 8, "cm_fma_pipes": 0, "cm_fma_lat": 6,
     "cm_call_cycles": 800, "cm_tall_pct": -1, "cm_l2_bytes": 16, "cm_l3_cycles": 10,
     "cm_mem_cycles": 0, "cm_prefetch_kib": 4, "cm_overlap_pct": 20, "cm_reuse_pct": 50,
@@ -73,7 +73,7 @@ AUTO_PINS = ("nr", "mr", "mb", "nb", "kc", "col_groups", "unit_tiles", "threads_
              "gemv_blocks")
 # Keys whose built-in value a rule or the hardware decides (an auto value in the schema).
 AUTO_KEYS = AUTO_PINS + ("row_unit", "int4_l1_pct", "cm_fma_pipes", "cm_tall_pct", "cm_mem_cycles",
-                         "cm_stream_cycles")
+                         "cm_stream_cycles", "l1_pct", "int8_blocks_min_m")
 RULE_SWITCHES = ("makespan", "l1_pass", "traffic_groups", "bf16_alias", "bf16_narrow_n", "blocks", "cost_model")
 # Keys whose rule a build without them does not have: their value that leaves it out.
 RULE_OFF_VALUES = {"int4_l1_pct": 0, "cm_int4_min_m": 0, "f16_wide_min_m": (1 << 31) - 1, "cm_block_k": 0}
@@ -101,6 +101,27 @@ INT4_ROW_BLOCKS = 4
 # K; a slab of up to 2.5 L1 runs whole from L2.
 INT4_FIT_L1_PCT = 50
 INT4_STREAM_L1_PCT = 125
+# Words of K (the weight's K values a word) an L1 pass of the single row block of more than l1_pass_max_mb rows
+# takes at least (short_tall_pass).
+TALL_PASS_WORDS = 192
+# Percents of L1 of the L1 pass by the rule (l1_pct -1) in a decode block (decode_pass_block): a weight
+# whose share of each L2 cache of the plan's threads (plan_l2_caches) fits that L2 (INT8) or an eighth of it
+# (BF16: the column tiles of the busiest L2), of a tile whose B slab over all of K exceeds L1; a BF16 weight
+# that does not fit those L2 caches, in a block of more than STREAM_PASS_CALLS calls of the tallest kernels,
+# where an L3 domain holds at most SMALL_DOMAIN_CORES cores.  Every other block of the L1 pass takes
+# L1_SHARE_PCT.
+L1_FIT_PCT = 75
+L1_STREAM_PCT = 150
+L1_SHARE_PCT = 100
+STREAM_PASS_CALLS = 4
+# The cores of the machine's L3 domain (cost_model.domain_cores, whatever domain_threads sets) up to which a
+# decode block's L1 pass takes L1_STREAM_PCT, an INT8 single row block of more than l1_pass_max_mb rows K passes
+# by the weight's fit, and an INT8 plan at int8_blocks_min_m -1 the blocks schedule from INT8_BLOCKS_MIN_M rows.
+SMALL_DOMAIN_CORES = 16
+# The rows from which an INT8 plan at int8_blocks_min_m -1 takes the blocks schedule where the tile's B slab
+# over all of K fills L1 and an L3 domain holds at most SMALL_DOMAIN_CORES cores; half as many rows more
+# otherwise.
+INT8_BLOCKS_MIN_M = 2048
 INT64_MAX = (1 << 63) - 1
 # The keys of an M = 1 call on the GEMV kernels, which no other call reads.
 GEMV_KEYS = ("gemv", "gemv_blocks", "gemv_one_thread_pct")
@@ -148,6 +169,14 @@ def builtin_params(schema: Any) -> Dict[str, Any]:
         if s not in schema.key_map:
             hp[s] = off
     return hp
+
+
+def single_block_passes(schema: Any) -> bool:
+    """Whether the schema's build gives the single row block of more than l1_pass_max_mb rows, up to decode_m,
+    K passes by the weight's fit (l1_pass_rows), a rule no key of its own switches: a build whose l1_pct has an
+    auto value does, one whose l1_pct has none keeps all of K there."""
+    spec = schema.key_map.get("l1_pct")
+    return spec is not None and spec.auto is not None
 
 
 def params_from_config(config: Dict[str, Any], schema: Any) -> Dict[str, Any]:
@@ -487,6 +516,64 @@ def int4_batch_l1_pct(q: Plan, n: int, k: int, src_elem: int, wei_elem: float, u
     return INT4_FIT_L1_PCT if fits else INT4_STREAM_L1_PCT
 
 
+def l1_pass_rows(q: Plan, hp: Dict[str, Any], rows: int, mb: int, single_block: bool = True) -> bool:
+    """l1_pass_rows: a tile of 2 * rows .. l1_pass_max_mb rows, or the single row block of a plan of at
+    most decode_m rows (on a build of single_block_passes), takes the L1 pass."""
+    return rows > 0 and 2 * rows <= mb and (mb <= hp["l1_pass_max_mb"]
+                                            or (single_block and q.m_blocks == 1 and mb <= hp["decode_m"]))
+
+
+def fit_pass_k(p: Problem, uarch: Any, team: int, dt: int, mb: int, esz: int, slab_cols: int) -> int:
+    """fit_pass_k: K steps of one K pass of the single row block of mb rows by the weight's fit, or 0
+    for a pass of the l1_pct share of L1 (a weight that fits three quarters of an L3 domain, or no L3);
+    within the L3 of the team's domains, mb source rows in a quarter of L2, above, a B slab of
+    slab_cols columns in an eighth of L2."""
+    domain = uarch.l3_bytes
+    bits = FORMATS[p.dtype]["elem_bits"]
+    weight_bits = p.plan_n * p.k * bits
+    if domain <= 0 or weight_bits <= 6 * domain:
+        return 0
+    if weight_bits <= 8 * domain * ceil_div(team, max(1, dt)):
+        return uarch.l2_bytes // 4 // (mb * esz)
+    return uarch.l2_bytes // (slab_cols * bits)
+
+
+def short_tall_pass(p: Problem, q: Plan, hp: Dict[str, Any], fit: int, l1: int, equal: int) -> bool:
+    """short_tall_pass: the L1 pass of l1 K steps (fit_pass_k gave 0) of the single row block of more than
+    l1_pass_max_mb rows, or the equal passes of equal K steps it would take, are below TALL_PASS_WORDS words: the
+    block keeps all of K."""
+    return (fit == 0 and q.mb > hp["l1_pass_max_mb"]
+            and min(l1, equal) < TALL_PASS_WORDS * FORMATS[p.dtype]["k_per_word"])
+
+
+def decode_pass_block(p: Problem, q: Plan, hp: Dict[str, Any]) -> bool:
+    """decode_pass_block: the single row block of at most l1_pass_max_mb rows and of more than two calls of
+    the tallest kernels, of a weight of several K values a word (BF16 pairs, INT8 quads), at l1_pct -1."""
+    return (hp["l1_pct"] <= 0 and q.m_blocks == 1 and 2 * MAX_CALL_ROWS < q.mb <= hp["l1_pass_max_mb"]
+            and FORMATS[p.dtype]["k_per_word"] > 1)
+
+
+def l1_pass_pct(p: Problem, uarch: Any, hp: Dict[str, Any], q: Plan, slab_cols: int, int8: bool) -> int:
+    """l1_pass_pct: the l1_pct share of the L1 pass of q's tile (a B slab of slab_cols columns), or by the
+    rule at -1."""
+    if hp["l1_pct"] > 0:
+        return hp["l1_pct"]
+    if not decode_pass_block(p, q, hp):
+        return L1_SHARE_PCT
+    bits = FORMATS[p.dtype]["elem_bits"]
+    weight_bits = p.plan_n * p.k * bits
+    l2_caches = max(1, plan_l2_caches(q, uarch))
+    if weight_bits > 8 * uarch.l2_bytes * l2_caches:
+        stream = (not int8 and q.mb > STREAM_PASS_CALLS * MAX_CALL_ROWS
+                  and cm.domain_cores(uarch) <= SMALL_DOMAIN_CORES)
+        return L1_STREAM_PCT if stream else L1_SHARE_PCT
+    slab_bits = slab_cols * p.k * bits
+    slab_over_l1 = slab_bits > 8 * uarch.l1d_bytes
+    cache_bits = ceil_div(q.n_tiles, l2_caches) * slab_bits
+    fits = int8 or 8 * cache_bits <= 8 * uarch.l2_bytes
+    return L1_FIT_PCT if slab_over_l1 and fits else L1_SHARE_PCT
+
+
 def rules_plan(p: Problem, uarch: Any, hp: Dict[str, Any], schema: Any) -> Plan:
     """rules_plan(p, uarch, params): the plan of the rules."""
     if uarch.plan_domain is None:
@@ -539,6 +626,9 @@ def rules_plan(p: Problem, uarch: Any, hp: Dict[str, Any], schema: Any) -> Plan:
         q.mr = min(q.mr, hp["bf16_alias_mr"])
     q.threads = max(1, min(threads, q.tiles // max(1, hp["min_tiles_per_thread"])))
 
+    dt = cm.domain_threads(uarch, hp)
+    small_domain = cm.domain_cores(uarch) <= SMALL_DOMAIN_CORES
+    single_block = single_block_passes(schema)
     q.kc = k
     if hp["kc"] > 0:
         q.kc = min(hp["kc"], k)
@@ -548,17 +638,21 @@ def rules_plan(p: Problem, uarch: Any, hp: Dict[str, Any], schema: Any) -> Plan:
             q.kc = max(max(2, hp["min_pass_k"]), kc & ~1)
         if hp["kc_split"] == "equal" and q.kc < k:
             q.kc = (ceil_div(k, ceil_div(k, q.kc)) + 1) & ~1
-        if on.l1_pass and q.mr > 0 and 2 * q.mr <= q.mb <= hp["l1_pass_max_mb"]:
-            l1 = uarch.l1d_bytes * hp["l1_pct"] // 100 // ((q.nr + q.mr) * esz)
+        # A taller single row block's passes follow the weight's fit (fit_pass_k).
+        if on.l1_pass and l1_pass_rows(q, hp, q.mr, q.mb, single_block):
+            fit = fit_pass_k(p, uarch, q.threads, dt, q.mb, esz, q.nr) if q.mb > hp["l1_pass_max_mb"] else 0
+            pct = l1_pass_pct(p, uarch, hp, q, q.nr, False)
+            l1 = fit if fit > 0 else uarch.l1d_bytes * pct // 100 // ((q.nr + q.mr) * esz)
             k_pass = max(max(2, hp["min_pass_k"]), min(kc, l1)) & ~1
             if k_pass < k:
-                q.kc = (ceil_div(k, ceil_div(k, k_pass)) + 1) & ~1
+                equal = (ceil_div(k, ceil_div(k, k_pass)) + 1) & ~1
+                if not short_tall_pass(p, q, hp, fit, l1, equal):
+                    q.kc = equal
     # The F16_PH kernels accumulate blocks of K from the start of each call's K: K
     # passes of whole blocks keep every block at the same K whatever the plan.
     if f16_ph and q.kc < k:
         q.kc = max(F16_ACCUM_BLOCK_K, q.kc // F16_ACCUM_BLOCK_K * F16_ACCUM_BLOCK_K)
 
-    dt = cm.domain_threads(uarch, hp)
     q.row_unit = hp["row_unit"]
 
     def take_blocks() -> None:
@@ -603,12 +697,20 @@ def rules_plan(p: Problem, uarch: Any, hp: Dict[str, Any], schema: Any) -> Plan:
         # Each L3 domain's workers take the units of the domain's share of the row
         # blocks: where that share of the source fits the domain's L3 share, the
         # blocks schedule replaces the schedule of a non-INT8 plan whose B slab over
-        # all of K exceeds the bf16_l2_pct share of L2, and the slice of an INT8 plan.
+        # all of K exceeds the bf16_l2_pct share of L2, and the slice of an INT8 plan,
+        # from int8_blocks_min_m rows, at -1 from INT8_BLOCKS_MIN_M rows where the
+        # tile's B slab over all of K fills L1 and an L3 domain holds at most
+        # SMALL_DOMAIN_CORES cores, and from half as many rows more otherwise.
         domains = ceil_div(q.threads, max(1, dt))
         de = min(max(1, dt), q.threads)
         share_bytes = (m * de + q.threads - 1) // q.threads * k * esz
         slab_bytes = int(float(q.nr) * k * wei_esz)
-        if (on.blocks and domains > 1 and m >= (hp["int8_blocks_min_m"] if int8 else hp["bf16_blocks_min_m"])
+        int8_min_m = hp["int8_blocks_min_m"]
+        if int8_min_m <= 0:
+            int8_min_m = INT8_BLOCKS_MIN_M
+            if slab_bytes < uarch.l1d_bytes or not small_domain:
+                int8_min_m += INT8_BLOCKS_MIN_M // 2
+        if (on.blocks and domains > 1 and m >= (int8_min_m if int8 else hp["bf16_blocks_min_m"])
                 and (q.col_groups == 0 if int8 else slab_bytes * 100 > uarch.l2_bytes * hp["bf16_l2_pct"])
                 and share_bytes <= l3_share):
             take_blocks()
@@ -634,17 +736,24 @@ def rules_plan(p: Problem, uarch: Any, hp: Dict[str, Any], schema: Any) -> Plan:
         q.int8_pass_budget = min(q.int8_pass_budget, uarch.l1d_bytes * l1_pct // 100)
     q.int8_pass_quads = min(hp["int8_kc"] // 4, ceil_div(k, 4)) if hp["int8_kc"] > 0 else 0
     # The INT8 form of the L1 pass, at the tile's pass width and rows per call;
-    # equal passes in whole quads.  Only the per-channel tile reads it.
+    # equal passes in whole quads, a taller single row block's only where an L3
+    # domain holds at most SMALL_DOMAIN_CORES cores.  Only the per-channel tile
+    # reads it.
     if int8 and not group_kernel and hp["int8_kc"] == 0 and on.l1_pass and q.nr > 0:
         cw = int8_col_width(q, q.nr)
         rows = int8_call_rows(q, cw // 16)
-        if rows > 0 and 2 * rows <= q.mb <= hp["l1_pass_max_mb"]:
-            per_k = cm.int8_pass_cols(q) + rows
-            l1 = uarch.l1d_bytes * hp["l1_pct"] // 100 // per_k
+        if l1_pass_rows(q, hp, rows, q.mb, single_block) and (q.mb <= hp["l1_pass_max_mb"] or small_domain):
+            pass_cols = cm.int8_pass_cols(q)
+            per_k = pass_cols + rows
+            fit = fit_pass_k(p, uarch, q.threads, dt, q.mb, esz, pass_cols) if q.mb > hp["l1_pass_max_mb"] else 0
+            pct = l1_pass_pct(p, uarch, hp, q, pass_cols, True)
+            l1 = fit if fit > 0 else uarch.l1d_bytes * pct // 100 // per_k
             quads = max(hp["min_pass_k"], min(l1, q.int8_pass_budget // per_k)) // 4
             k_quads = (k + 3) // 4
             if 1 <= quads < k_quads:
-                q.int8_pass_quads = ceil_div(k_quads, ceil_div(k_quads, quads))
+                equal = ceil_div(k_quads, ceil_div(k_quads, quads))
+                if not short_tall_pass(p, q, hp, fit, l1, 4 * equal):
+                    q.int8_pass_quads = equal
     q.int8_direct_store = bool(hp["direct_store"])
     q.int8_bias_in_dequant = bool(hp["bias_in_dequant"])
     q.int8_scheme = p.int8_scheme

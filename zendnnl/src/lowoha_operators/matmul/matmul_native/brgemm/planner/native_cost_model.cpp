@@ -103,7 +103,10 @@ public:
                 : priced_                   ? std::max(kMinIpc, fp32.ipc)
                                             : kUnpricedIpc;
         latency_ = std::max(1, dot.latency);
-        l1_bytes_ = static_cast<int64_t>(uarch.l1d_bytes) * hp.l1_pct;
+        // At l1_pct -1 (the planner's rule) a pass is weighed against all
+        // of L1.
+        const int l1_pct = hp.l1_pct > 0 ? hp.l1_pct : 100;
+        l1_bytes_ = static_cast<int64_t>(uarch.l1d_bytes) * l1_pct;
         if (int8_) {
             slab_cols_ = native_int8_col_width(q, q.nr);
             pass_cols_ = native_int8_pass_cols(q);
@@ -124,7 +127,7 @@ public:
             kc_ = std::min(std::max(1, q.kc), p.K);
             passes_ = ceil_div(p.K, kc_);
             l1_fit_ = (q.nr * elem + q.mr * src_bytes_) * kc_ * 100
-                    <= static_cast<double>(uarch.l1d_bytes) * hp.l1_pct;
+                    <= static_cast<double>(uarch.l1d_bytes) * l1_pct;
             l2_share_ = static_cast<double>(uarch.l2_bytes) * hp.bf16_l2_pct
                     / 100.0;
         }
@@ -262,12 +265,16 @@ double native_plan_weight_bytes(const native_problem_t &p) {
     return elem + static_cast<double>(p.wei_scale_bytes) / std::max(1, gs);
 }
 
+int native_plan_domain_cores(const UarchParams &uarch) {
+    return std::max(1,
+            uarch.l3_domain_cores > 0 ? uarch.l3_domain_cores
+                                      : uarch.family_l3_cores);
+}
+
 int native_plan_domain_threads(
         const UarchParams &uarch, const heuristic_params_t &hp) {
-    const int dt = hp.domain_threads > 0 ? hp.domain_threads
-            : uarch.l3_domain_cores > 0  ? uarch.l3_domain_cores
-                                         : uarch.family_l3_cores;
-    return std::max(1, dt);
+    return hp.domain_threads > 0 ? hp.domain_threads
+                                 : native_plan_domain_cores(uarch);
 }
 
 double native_plan_mem_cycles(

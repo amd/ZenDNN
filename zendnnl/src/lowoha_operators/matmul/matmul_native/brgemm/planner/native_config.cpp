@@ -126,7 +126,7 @@ constexpr native_config_key_t kKeys[] = {
         {"idle_pct", key_type::int32, 1, 100, 1, false},
         {"decode_m", key_type::int32, 0, kBig30, 1, false},
         {"l1_pass", key_type::int32, 0, 1, 1, false, kNativeKeyPerChannel},
-        {"l1_pct", key_type::int32, 1, 1000, 1, false, kNativeKeyPerChannel},
+        {"l1_pct", key_type::int32, -1, 1000, 1, false, kNativeKeyPerChannel},
         {"l1_pass_max_mb", key_type::int32, 1, 8192, 1, false,
                 kNativeKeyPerChannel},
         {"traffic_groups", key_type::int32, 0, 1, 1, false},
@@ -137,7 +137,7 @@ constexpr native_config_key_t kKeys[] = {
         {"f16_wide_min_m", key_type::int32, 1, kBig30, 1, false},
         {"blocks", key_type::int32, 0, 1, 1, false},
         {"bf16_blocks_min_m", key_type::int32, 1, kBig30, 1, false},
-        {"int8_blocks_min_m", key_type::int32, 1, kBig30, 1, false},
+        {"int8_blocks_min_m", key_type::int32, -1, kBig30, 1, false},
         // The cost model's switch, margin and the inputs of its price of a
         // tile slice also apply to the per-group tile of an s4 weight.
         {"cost_model", key_type::int32, 0, 1, 1, false},

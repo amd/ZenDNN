@@ -471,9 +471,32 @@ TEST(NativeTuningRules, BlocksRuleExamples) {
                                   32, false)),
                 nullptr);
     }
+    EXPECT_TRUE(blocks(plan(domain8, "", 2048, 4096, 4096, false)));
+    // A tile whose B slab over all of K is below L1 (32 x 1024 bytes) takes it
+    // from half as many rows more.
+    EXPECT_FALSE(blocks(plan(domain8, "", 2048, 4096, 1024, false)));
+    EXPECT_TRUE(blocks(plan(domain8, "", 3072, 4096, 1024, false)));
+    // An L3 domain of more than 16 cores takes it from half as many rows more.
+    const auto plan64 = [&](int M, const char *text) {
+        return nat::heuristic_plan(
+                problem(M, 4096, 4096, nat::kNativeLayoutPackNr, 64, false),
+                domain32, params(text));
+    };
+    EXPECT_EQ(plan64(2048, "").unit_tiles, 0);
+    EXPECT_EQ(plan64(3072, "").unit_tiles, 1);
+    EXPECT_EQ(plan64(3072, "").domain_threads, 32);
     EXPECT_FALSE(blocks(plan(domain8, "", 1024, 4096, 4096, false)));
+    // A set int8_blocks_min_m takes it from that many rows for every tile.
+    EXPECT_EQ(nat::heuristic_params_t {}.int8_blocks_min_m, -1);
     EXPECT_TRUE(blocks(
             plan(domain8, "int8_blocks_min_m=1024", 1024, 4096, 4096, false)));
+    EXPECT_TRUE(blocks(
+            plan(domain8, "int8_blocks_min_m=2048", 2048, 4096, 1024, false)));
+    EXPECT_FALSE(blocks(
+            plan(domain8, "int8_blocks_min_m=3072", 2048, 4096, 4096, false)));
+    EXPECT_TRUE(blocks(
+            plan(domain8, "int8_blocks_min_m=3072", 3072, 4096, 1024, false)));
+    EXPECT_EQ(plan64(2048, "int8_blocks_min_m=2048").unit_tiles, 1);
     EXPECT_FALSE(blocks(plan(domain8, "", 4096, 4096, 14336, false)));
     // A pinned schedule or col_groups keeps its own plan.
     EXPECT_EQ(
@@ -890,6 +913,233 @@ TEST(NativeTuningRules, WorkedExamples) {
                 nullptr)
                 << describe(p);
     }
+}
+
+// A single row block of more than l1_pass_max_mb rows, up to decode_m, takes
+// K passes by the weight's fit; the 32 threads span four of the test
+// machine's L3 domains.  A weight within three quarters of a domain takes the
+// L1 pass of the l1_pct share (BF16 at M 128: that share of L1d over the 32
+// columns and 12 rows of a call gives eight equal passes of K 4096); one
+// within the team's L3 passes whose block of source rows takes a quarter of
+// L2 (1024 K steps for 128 rows of BF16); a larger one passes of a 32-column
+// slab of an eighth of L2 (2048 steps of BF16, 4096 of s8).  INT8 passes are
+// in quads.  Several row blocks, more rows than decode_m and l1_pass=0 keep
+// all of K; with l1_pass_max_mb=128 the block takes the l1_pct share whatever
+// the weight.  Two thirds of that L1d hold fewer than 192 words of a
+// 32-column tile's pass, of BF16 (pairs) and of s8 (quads): the block keeps
+// all of K, while a weight past three quarters of a domain keeps its passes.
+// So does a K whose equal passes come below 192 words (s8 K 1152: two of 144
+// quads; BF16 K 576: two of 144 words); equal passes of 192 words stay.
+TEST(NativeTuningRules, SingleRowBlockPasses) {
+    if (!has_isa()) GTEST_SKIP() << "needs AVX512-BF16 and AVX512-VNNI";
+    const nat::UarchParams domain8 = caches(32, 8);
+    const nat::heuristic_params_t rules {};
+    ASSERT_EQ(rules.l1_pass_max_mb, 64);
+    ASSERT_EQ(rules.decode_m, 128);
+    const auto plan = [&](const nat::heuristic_params_t &hp, int M, int N,
+                              int K, bool bf16) {
+        return nat::heuristic_plan(
+                problem(M, N, K, nat::kNativeLayoutPackNr, 32, bf16), domain8,
+                hp);
+    };
+    EXPECT_EQ(plan(rules, 128, 2880, 4096, true).kc, 512);
+    EXPECT_EQ(plan(rules, 128, 4096, 4096, true).kc, 1024);
+    EXPECT_EQ(plan(rules, 128, 5120, 32768, true).kc, 2048);
+    EXPECT_EQ(plan(rules, 128, 16384, 5120, true).kc, 1708);
+    EXPECT_EQ(plan(rules, 96, 4096, 4096, true).kc, 1024);
+    EXPECT_EQ(plan(rules, 128, 4096, 4096, false).int8_pass_quads, 256);
+    EXPECT_EQ(plan(rules, 128, 10240, 4096, false).int8_pass_quads, 512);
+    EXPECT_EQ(plan(rules, 128, 5120, 32768, false).int8_pass_quads, 1024);
+    const nat::native_plan_t two = plan(rules, 128, 1536, 6144, true);
+    EXPECT_EQ(two.m_blocks, 2);
+    EXPECT_EQ(two.kc, 6144);
+    EXPECT_EQ(plan(rules, 160, 4096, 4096, true).kc, 4096);
+    EXPECT_EQ(plan(rules, 160, 4096, 4096, false).int8_pass_quads, 0);
+    EXPECT_EQ(plan(params("l1_pass=0"), 128, 4096, 4096, true).kc, 4096);
+    EXPECT_EQ(
+            plan(params("l1_pass_max_mb=128"), 128, 4096, 4096, true).kc, 512);
+    EXPECT_EQ(plan(params("l1_pass_max_mb=128"), 128, 5120, 32768, true).kc,
+            plan(params("l1_pass_max_mb=128"), 128, 2880, 32768, true).kc);
+    nat::UarchParams l1_small = domain8;
+    l1_small.l1d_bytes = domain8.l1d_bytes * 2 / 3;
+    const auto small_l1 = [&](int M, int N, int K, bool bf16) {
+        return nat::heuristic_plan(
+                problem(M, N, K, nat::kNativeLayoutPackNr, 32, bf16), l1_small,
+                rules);
+    };
+    EXPECT_EQ(small_l1(128, 2880, 4096, true).kc, 4096);
+    EXPECT_EQ(small_l1(128, 4096, 4096, false).int8_pass_quads, 0);
+    EXPECT_EQ(small_l1(128, 4096, 4096, true).kc, 1024);
+    EXPECT_EQ(plan(rules, 128, 4096, 1152, false).int8_pass_quads, 0);
+    EXPECT_EQ(plan(rules, 128, 4096, 1536, false).int8_pass_quads, 192);
+    EXPECT_EQ(plan(rules, 128, 4096, 576, true).kc, 576);
+    EXPECT_EQ(plan(rules, 128, 4096, 768, true).kc, 384);
+    // An INT8 tile takes these passes only where an L3 domain holds at most
+    // 16 cores: in one domain of four of domain8's, s8 keeps all of K (its
+    // decode block keeps its pass) while BF16 takes the L1 pass.
+    nat::UarchParams wide = domain8;
+    wide.l3_domain_bytes *= 4;
+    wide.l3_domain_cores *= 4;
+    const auto on_wide = [&](int M, int N, int K, bool bf16) {
+        return nat::heuristic_plan(
+                problem(M, N, K, nat::kNativeLayoutPackNr, 32, bf16), wide,
+                rules);
+    };
+    EXPECT_EQ(on_wide(128, 4096, 4096, false).int8_pass_quads, 0);
+    EXPECT_EQ(on_wide(96, 2560, 1536, false).int8_pass_quads, 0);
+    EXPECT_EQ(on_wide(64, 4096, 4096, false).int8_pass_quads, 205);
+    EXPECT_EQ(on_wide(128, 4096, 4096, true).kc, 586);
+    for (const int M : {65, 96, 128})
+        for (const bool bf16 : {true, false})
+            for (const shape_t &s : {shape_t {2880, 4096}, shape_t {4096, 4096},
+                         shape_t {5120, 32768}}) {
+                const nat::native_problem_t p = problem(
+                        M, s.N, s.K, nat::kNativeLayoutPackNr, 32, bf16);
+                EXPECT_EQ(nat::validate_native_plan(
+                                  nat::heuristic_plan(p, domain8, rules), p),
+                        nullptr)
+                        << describe(p);
+            }
+}
+
+// A decode block (a single row block of more than two calls of the tallest
+// kernels, up to l1_pass_max_mb rows) takes the L1 pass's share of L1 by the
+// weight against the L2 of the plan's threads (the L2s of its 32 threads,
+// one a physical core) at l1_pct -1: 75 percent where an s8 weight fits it
+// or a BF16 one fits an eighth of it and the tile's B slab over all of K
+// exceeds L1 (BF16 1024 x 1536 at M 32: four equal passes of 384); 150
+// percent where a BF16 weight does not fit it in a block of more than four
+// calls, in an L3 domain of at most 16 cores (6144 x 4096 at M 64: five
+// passes of 820).  100 percent otherwise (6144 x 4096 at M 32), in a block
+// of two calls, for an F16 or FP32 weight (one K value a word), and
+// wherever l1_pct is set.
+TEST(NativeTuningRules, DecodePassShares) {
+    if (!has_isa()) GTEST_SKIP() << "needs AVX512-BF16 and AVX512-VNNI";
+    const nat::UarchParams domain8 = caches(32, 8);
+    // One L3 domain of four of domain8's: more than 16 cores.
+    nat::UarchParams domain32 = domain8;
+    domain32.l3_domain_bytes *= 4;
+    domain32.l3_domain_cores *= 4;
+    const nat::heuristic_params_t rules {};
+    ASSERT_EQ(rules.l1_pct, -1);
+    const auto plan_on
+            = [&](const nat::UarchParams &u, const nat::heuristic_params_t &hp,
+                      int M, int N, int K, bool bf16) {
+        return nat::heuristic_plan(
+                problem(M, N, K, nat::kNativeLayoutPackNr, 32, bf16), u, hp);
+    };
+    const auto plan = [&](const nat::heuristic_params_t &hp, int M, int N,
+                              int K, bool bf16) {
+        return plan_on(domain8, hp, M, N, K, bf16);
+    };
+    EXPECT_EQ(plan(rules, 32, 1024, 1536, true).kc, 384);
+    EXPECT_EQ(plan(rules, 32, 4096, 4096, true).kc, 512);
+    EXPECT_EQ(plan(rules, 32, 2560, 1536, true).kc, 512);
+    // 40 column tiles on 32 threads: the busiest thread's two tiles exceed
+    // an eighth of L2, the average share does not.
+    EXPECT_EQ(plan(rules, 32, 1280, 1536, true).kc, 512);
+    EXPECT_EQ(plan(params("l1_pct=75"), 32, 1280, 1536, true).kc, 384);
+    // SMT siblings share their core's L2: 32 threads of 16 physical cores
+    // weigh the weight against 16 L2s, as 16 threads do; of 32 cores, or of
+    // an unknown count, against 32.
+    nat::UarchParams smt = domain8;
+    smt.physical_cores = 16;
+    EXPECT_EQ(plan_on(smt, rules, 64, 4096, 4096, true).kc, 820);
+    EXPECT_EQ(plan_on(smt, rules, 32, 6144, 4096, false).int8_pass_quads, 256);
+    smt.physical_cores = 32;
+    EXPECT_EQ(plan_on(smt, rules, 64, 4096, 4096, true).kc, 512);
+    EXPECT_EQ(plan_on(smt, rules, 32, 6144, 4096, false).int8_pass_quads, 205);
+    EXPECT_EQ(plan(rules, 64, 4096, 4096, true).kc, 512);
+    EXPECT_EQ(plan_on(domain32, rules, 64, 6144, 4096, true).kc,
+            plan_on(domain32, params("l1_pct=100"), 64, 6144, 4096, true).kc);
+    EXPECT_NE(plan_on(domain32, params("l1_pct=150"), 64, 6144, 4096, true).kc,
+            plan_on(domain32, params("l1_pct=100"), 64, 6144, 4096, true).kc);
+    EXPECT_EQ(plan(rules, 32, 6144, 4096, true).kc, 512);
+    EXPECT_EQ(plan(rules, 64, 6144, 4096, true).kc, 820);
+    EXPECT_EQ(plan(rules, 64, 28672, 4096, true).kc, 820);
+    EXPECT_EQ(plan(rules, 48, 28672, 4096, true).kc, 512);
+    EXPECT_EQ(plan(rules, 32, 4096, 4096, false).int8_pass_quads, 205);
+    EXPECT_EQ(plan(rules, 32, 10240, 4096, false).int8_pass_quads, 256);
+    EXPECT_EQ(plan(rules, 32, 1024, 1024, false).int8_pass_quads, 0);
+    EXPECT_EQ(plan(rules, 24, 1024, 1536, true).kc, 512);
+    EXPECT_EQ(plan(params("l1_pct=100"), 32, 1024, 1536, true).kc, 512);
+    EXPECT_EQ(plan(params("l1_pct=100"), 64, 6144, 4096, true).kc, 512);
+    EXPECT_EQ(plan(params("l1_pct=100"), 32, 4096, 4096, false).int8_pass_quads,
+            256);
+    for (const data_type_t dt : {data_type_t::f16, data_type_t::f32})
+        for (const shape_t &s : {shape_t {1024, 1536}, shape_t {6144, 4096}})
+            for (const int M : {32, 64}) {
+                nat::native_problem_t p = problem(
+                        M, s.N, s.K, nat::kNativeLayoutPackNr, 32, true);
+                p.src_dt = p.wei_dt = p.dst_dt = dt;
+                EXPECT_EQ(nat::heuristic_plan(p, domain8, rules).kc,
+                        nat::heuristic_plan(p, domain8, params("l1_pct=100"))
+                                .kc)
+                        << describe(p);
+            }
+    for (const int M : {25, 32, 48, 64})
+        for (const bool bf16 : {true, false})
+            for (const shape_t &s : {shape_t {1024, 1536}, shape_t {6144, 4096},
+                         shape_t {5120, 32768}}) {
+                const nat::native_problem_t p = problem(
+                        M, s.N, s.K, nat::kNativeLayoutPackNr, 32, bf16);
+                EXPECT_EQ(nat::validate_native_plan(
+                                  nat::heuristic_plan(p, domain8, rules), p),
+                        nullptr)
+                        << describe(p);
+            }
+}
+
+// The rules bounded by an L3 domain of at most 16 cores (the decode block's
+// 150 percent share, an INT8 single row block's K passes by the weight's fit,
+// the INT8 blocks schedule from 2048 rows) read the cores of the machine's L3
+// domain, whatever domain_threads sets; domain_threads deals the work.  8 or
+// 16 threads to a domain on one domain of four of domain8's keep that
+// domain's plans: BF16 6144 x 4096 at M 64 the share of l1_pct=100, s8 at M
+// 96 and 128 all of K, s8 4096 x 4096 on 64 threads the slice at M 2048 and
+// blocks of the set domain_threads at M 3072.  32 threads to a domain on
+// domain8 keep domain8's: the share of l1_pct=150, s8 passes at M 128, and
+// blocks at M 2048.
+TEST(NativeTuningRules, DomainBoundsReadTheMachineCores) {
+    if (!has_isa()) GTEST_SKIP() << "needs AVX512-BF16 and AVX512-VNNI";
+    const nat::UarchParams domain8 = caches(32, 8);
+    nat::UarchParams domain32 = domain8;
+    domain32.l3_domain_bytes *= 4;
+    domain32.l3_domain_cores *= 4;
+    const auto plan = [&](const nat::UarchParams &u, const std::string &text,
+                              int M, int N, int K, int threads, bool bf16) {
+        return nat::heuristic_plan(
+                problem(M, N, K, nat::kNativeLayoutPackNr, threads, bf16), u,
+                params(text));
+    };
+    for (const int dt : {8, 16}) {
+        const std::string pin = "domain_threads=" + std::to_string(dt);
+        SCOPED_TRACE(pin);
+        EXPECT_EQ(plan(domain32, pin, 64, 6144, 4096, 32, true).kc,
+                plan(domain32, pin + ",l1_pct=100", 64, 6144, 4096, 32, true)
+                        .kc);
+        EXPECT_EQ(
+                plan(domain32, pin, 128, 4096, 4096, 32, false).int8_pass_quads,
+                0);
+        EXPECT_EQ(
+                plan(domain32, pin, 96, 2560, 1536, 32, false).int8_pass_quads,
+                0);
+        EXPECT_EQ(
+                plan(domain32, pin, 2048, 4096, 4096, 64, false).unit_tiles, 0);
+        const nat::native_plan_t b
+                = plan(domain32, pin, 3072, 4096, 4096, 64, false);
+        EXPECT_EQ(b.unit_tiles, 1);
+        EXPECT_EQ(b.domain_threads, dt);
+    }
+    const std::string wide = "domain_threads=32";
+    EXPECT_EQ(plan(domain8, wide, 64, 6144, 4096, 32, true).kc,
+            plan(domain8, wide + ",l1_pct=150", 64, 6144, 4096, 32, true).kc);
+    EXPECT_EQ(plan(domain8, wide, 128, 4096, 4096, 32, false).int8_pass_quads,
+            256);
+    const nat::native_plan_t b
+            = plan(domain8, wide, 2048, 4096, 4096, 64, false);
+    EXPECT_EQ(b.unit_tiles, 1);
+    EXPECT_EQ(b.domain_threads, 32);
 }
 
 } // namespace
