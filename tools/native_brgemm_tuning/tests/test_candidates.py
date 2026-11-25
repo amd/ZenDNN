@@ -94,9 +94,13 @@ class TestSpace(unittest.TestCase):
         for p in PROBLEMS:
             sp = C.Space(p, SCHEMA, UARCH)
             kind = SCHEMA.kind_of(p.dtype)
-            self.assertTrue(all(w <= p.pack_nr or slab_tile_width(kind, w, p.pack_nr)
-                                or (kind == "f16_ph" and w == 64) for w in sp.choices["nr"]))
-            self.assertTrue(all(1 <= v <= p.m for v in sp.choices["mb"]))
+            # An M = 1 call runs on the GEMV kernels: their keys alone, which no other M searches.
+            self.assertEqual(p.m == 1, set(sp.keys) == set(PL.GEMV_KEYS), p)
+            self.assertFalse(p.m > 1 and set(sp.keys) & set(PL.GEMV_KEYS), p)
+            if p.m > 1:
+                self.assertTrue(all(w <= p.pack_nr or slab_tile_width(kind, w, p.pack_nr)
+                                    or (kind == "f16_ph" and w == 64) for w in sp.choices["nr"]))
+                self.assertTrue(all(1 <= v <= p.m for v in sp.choices["mb"]))
             for c in itertools.islice(sp.iter_grid(2), 600):
                 self.assertIsNone(C.check_config(c.config, SCHEMA), c)
                 self.assertIsNone(validate_plan(c.plan, p, SCHEMA), c)
@@ -151,8 +155,33 @@ class TestSpace(unittest.TestCase):
             self.assertLess(len(uniq), len(level1), p)
         sp = C.Space(Problem("bf16", 1, 4096, 4096), SCHEMA, UARCH)
         texts = [c.text for c in C.unique(sp.iter_grid(1), sp)]
+        # M = 1, on the GEMV kernels of a 32 MiB layout: 32 threads' shares above half of L2 take the
+        # rule's 2 blocks, and no searched percent of L2 holds the layout, which stays on the team.
+        self.assertEqual(texts, ["gemv=0", "gemv_blocks=1", "gemv_blocks=3", "gemv_blocks=4"])
+        tiles = C.Space(Problem("bf16", 1, 4096, 4096), SCHEMA, UARCH, ["nr", "block_rows"])
+        texts = [c.text for c in C.unique(tiles.iter_grid(1), tiles)]
         self.assertNotIn("block_rows=96", texts)  # M=1: the block is one row either way
         self.assertIn("nr=16", texts)
+        # A small layout runs on the calling thread unless a percent of none takes it; its float
+        # route's share fits half of L2 (4 blocks per call).
+        small = C.Space(Problem("bf16", 1, 512, 256), SCHEMA, UARCH)
+        self.assertEqual((small.default.plan.gemv_threads, small.default.plan.gemv_call_blocks), (1, 4))
+        texts = [c.text for c in C.unique(small.iter_grid(1), small)]
+        self.assertIn("gemv_one_thread_pct=0", texts)
+        self.assertNotIn("gemv_one_thread_pct=50", texts)
+        self.assertNotIn("gemv_blocks=4", texts)
+        self.assertEqual(small.make({"gemv_one_thread_pct": 0}).plan.gemv_threads, 16)
+        # An INT8 route takes at most 2 blocks per call.
+        s8 = C.Space(Problem("s8", 1, 4096, 4096), SCHEMA, UARCH)
+        self.assertEqual([c.text for c in C.unique(s8.iter_grid(1), s8)], ["gemv=0", "gemv_blocks=1"])
+        # A gated call whose halves pair as whole blocks reads them two at a time: 1 and 3 are the
+        # built-in 2, and 4 is the one other count.
+        gated = C.Space(Problem("bf16", 1, 28672, 4096, epilogue="gated"), SCHEMA, UARCH)
+        self.assertEqual([c.text for c in C.unique(gated.iter_grid(1), gated)], ["gemv=0", "gemv_blocks=4"])
+        # A thread of two units reads them in one call whatever more the pin allows: of the pins only 1
+        # is another schedule than the built-in 4.
+        two = C.Space(Problem("bf16", 1, 2048, 4096), SCHEMA, UARCH)
+        self.assertEqual([c.text for c in C.unique(two.iter_grid(1), two)], ["gemv=0", "gemv_blocks=1"])
 
     def test_neighbors_and_sampling(self):
         sp = C.Space(Problem("s8", 64, 4096, 4096), SCHEMA, UARCH)
@@ -176,6 +205,20 @@ class TestSpace(unittest.TestCase):
         self.assertIn("nr=16", texts)
         self.assertNotIn("nr=128", texts)  # 12 tiles
         self.assertIsNone(kept.make({"threads_cap": 16}))
+
+    def test_keep_threads_at_m1(self):
+        # An M = 1 call runs on the threads of its GEMV kernels, of its tiles, or on the calling
+        # thread: the 1 MiB layout of N 512, K 1024 on 16 threads keeps out the calling thread
+        # (100 percent of L2), on either kernels, and a cap of 8; the quarter-MiB layout of K 256,
+        # on the calling thread, takes a team.
+        big = C.Space(Problem("bf16", 1, 512, 1024), SCHEMA, UARCH, keep_threads=True)
+        self.assertEqual((big.default.plan.one_thread, big.default.plan.gemv_threads), (False, 16))
+        for cfg in ({"gemv_one_thread_pct": 100}, {"gemv": False, "gemv_one_thread_pct": 100}, {"threads_cap": 8}):
+            self.assertIsNone(big.make(cfg), cfg)
+        self.assertIsNotNone(big.make({"gemv": False}))
+        small = C.Space(Problem("bf16", 1, 512, 256), SCHEMA, UARCH, keep_threads=True)
+        self.assertEqual(small.default.plan.gemv_threads, 1)
+        self.assertEqual(small.make({"gemv_one_thread_pct": 0}).plan.gemv_threads, 16)
 
     def test_value_overrides(self):
         vals = C.parse_values(["mb=8|16", "int8_cw=32/16|16"], SCHEMA)

@@ -27,6 +27,7 @@ the same checks.
 import os
 import sys
 import unittest
+from dataclasses import replace
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from helpers import SCHEMA  # noqa: E402
@@ -128,7 +129,11 @@ class TestNamesAndFeatures(unittest.TestCase):
                 for kind in ("f16", "f16_ph") if p.f16 else (s.kind_of(p.dtype),):
                     q = PL.Plan(kind=kind)
                     self.assertEqual(PL.gemv_kind(q, p), "none", (s.source, p.label()))
-                    given.add(PL.gemv_kind(q, p.with_m(1)))
+                    given.add(PL.gemv_kind(replace(q, gemv=True), p.with_m(1)))
+                # The built-in plan of M 1 runs on the GEMV kernels, gemv=0 on the tiles.
+                one = p.with_m(1)
+                self.assertTrue(PL.builtin_plan(one, s.uarch, s).gemv, (s.source, p.label()))
+                self.assertFalse(PL.resolve(one, {"gemv": False}, s.uarch, s).plan.gemv, (s.source, p.label()))
             self.assertEqual(given, set(PL.GEMV_KINDS) - {"none"}, s.source)
 
 

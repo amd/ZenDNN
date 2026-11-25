@@ -29,6 +29,7 @@ from helpers import BF16_SLABS, DESIGN, NEWER, NO_BLOCKS, OLDER, RULES_OFF, SCHE
 from native_brgemm_tuning import cost_model as cm  # noqa: E402
 from native_brgemm_tuning import plan as PL  # noqa: E402
 from native_brgemm_tuning import problems as P  # noqa: E402
+from native_brgemm_tuning.backends import synthetic  # noqa: E402
 from native_brgemm_tuning.candidates import parse_settings  # noqa: E402
 from native_brgemm_tuning.problems import Problem  # noqa: E402
 from native_brgemm_tuning.schema import Schema, Uarch  # noqa: E402
@@ -766,6 +767,133 @@ class TestOneGroupS4(unittest.TestCase):
         self.assertEqual((r.int8_rows_nv1, r.int8_rows_nv2), (12, 6))
         self.assertIsNone(PL.validate_plan(r, one, older))
         self.assertIn("no INT4 kernel", PL.validate_plan(q, one, older))
+
+
+class TestGemv(unittest.TestCase):
+    """The fields of an M = 1 call (the planner's m1_fields) and the rules of its threads and blocks
+    per GEMV kernel call (native_one_thread, native_gemv_threads, native_gemv_call_blocks)."""
+
+    def test_layout_bytes(self):
+        # native_packed_bytes: K groups of a word per column in blocks of 32 columns, s8 column sums,
+        # rounded up to 64; a weight of N not whole blocks takes its padded columns.
+        for dtype, k, n, want in (("bf16", 4096, 4096, 32 << 20), ("s8", 4096, 4096, (4096 + 4) * 32 * 128),
+                                  ("s4", 4096, 4096, 8 << 20), ("f32", 4096, 4096, 64 << 20),
+                                  ("f16", 4096, 4096, 32 << 20), ("bf16", 7, 32, 512), ("s8", 7, 100, 12 * 32 * 4),
+                                  ("s4", 12, 32, 256), ("f16", 3, 1, 192)):
+            p = Problem(dtype, 1, n, k, group=k if dtype == "s4" else 0)
+            self.assertEqual(PL.layout_bytes(p, SCHEMA), want, (dtype, k, n))
+
+    def test_builtin_rules(self):
+        # Every M = 1 call on the GEMV kernels of its route: on the calling thread for a layout of
+        # at most a quarter of L2, else on the plan's team, at most a thread per unit; two blocks
+        # per call, four for a float route whose thread's share fits half of L2.
+        l2 = UARCH.l2_bytes
+        for dtype in ("bf16", "f32", "f16", "s8", "s4"):
+            for n, k, threads in ((4096, 4096, 32), (512, 256, 32), (160, 1024, 8), (64, 64, 4), (128, 8192, 32)):
+                p = Problem(dtype, 1, n, k, threads=threads, group=k if dtype == "s4" else 0)
+                q = PL.builtin_plan(p, UARCH, SCHEMA)
+                self.assertEqual((q.gemv, q.gemv_blocks, q.gemv_one_thread_pct), (True, 0, 25), p.label())
+                nbytes = PL.layout_bytes(p, SCHEMA)
+                one = nbytes <= l2 // 4
+                workers = 1 if one else max(1, min(q.threads, -(-n // 32)))
+                self.assertEqual((q.one_thread, q.gemv_threads), (one, workers), p.label())
+                share = nbytes if workers <= 1 else nbytes // workers
+                rows = SCHEMA.route(p).cls == "rows"
+                self.assertEqual(q.gemv_call_blocks, (4 if share <= l2 // 2 else 2) if rows else 2, p.label())
+                self.assertEqual(PL.gemv_kind(q, p), PL.gemv_kind(dataclasses.replace(q, gemv=True), p))
+                two = PL.builtin_plan(p.with_m(2), UARCH, SCHEMA)
+                self.assertEqual((two.gemv, two.gemv_one_thread_pct, two.gemv_threads), (False, 0, 0), p.label())
+
+    def test_keys(self):
+        p = Problem("bf16", 1, 512, 256)
+        q = PL.builtin_plan(p, UARCH, SCHEMA)
+        self.assertEqual((q.one_thread, q.gemv_threads, q.gemv_call_blocks), (True, 1, 4))
+        off = PL.resolve(p, {"gemv": False}, UARCH, SCHEMA).plan
+        self.assertEqual((off.gemv, off.one_thread, off.gemv_threads, PL.gemv_kind(off, p)), (False, True, 0, "none"))
+        # Off the GEMV kernels the plan is the tiles' plan.
+        tiles = dataclasses.replace(q, gemv=False, gemv_threads=0, gemv_call_blocks=0)
+        self.assertEqual(off, tiles)
+        team = PL.resolve(p, {"gemv_one_thread_pct": 0}, UARCH, SCHEMA).plan
+        self.assertEqual((team.one_thread, team.gemv_threads), (False, 16))
+        alone = PL.resolve(Problem("bf16", 1, 4096, 4096), {"gemv_one_thread_pct": 1000}, UARCH, SCHEMA).plan
+        self.assertEqual((alone.one_thread, alone.gemv_threads), (False, 32))  # 32 MiB, above 10 L2s
+        for b in (1, 2, 3, 4):
+            self.assertEqual(PL.resolve(p, {"gemv_blocks": b}, UARCH, SCHEMA).plan.gemv_call_blocks, b)
+            s8 = Problem("s8", 1, 4096, 4096)
+            self.assertEqual(PL.resolve(s8, {"gemv_blocks": b}, UARCH, SCHEMA).plan.gemv_call_blocks, min(b, 2))
+
+    def test_units_of_gated_calls(self):
+        # A gated call's GEMV units: a gate block and its up block where the halves are whole blocks;
+        # runs of 16 columns where not (the INT8 and BF16 kernels), or 32-column blocks of staged rows
+        # (the f32 and f16 kernels); 32-column blocks for N not whole blocks.
+        for dtype, n, units in (("bf16", 1024, 16), ("bf16", 96, 3), ("s8", 2080, 65), ("f32", 1024, 16),
+                                ("f32", 96, 3), ("bf16", 100, 4)):
+            p = Problem(dtype, 1, n, 1024, threads=64, epilogue="gated")
+            q = PL.resolve(p, {"gemv_one_thread_pct": 0}, UARCH, SCHEMA).plan
+            self.assertEqual(PL.gemv_units(q, p), units, (dtype, n))
+            self.assertEqual(q.gemv_threads, min(q.threads, units), (dtype, n))
+
+    def test_blocks_of_a_kernel_call(self):
+        # A kernel call reads whole units: a gated call whose halves pair as whole blocks reads a gate
+        # block with its up block, 2 blocks for gemv_blocks 1, 2 or 3 and 4 for 4 (an INT8 or INT4 route
+        # 2), as its line says, so 1, 2 and 3 are one schedule there; halves of runs of 16 columns and
+        # plain calls read the pin.
+        for dtype in ("bf16", "s8", "s4"):
+            group = 128 if dtype == "s4" else 0
+            g = Problem(dtype, 1, 2048, 1024, threads=4, epilogue="gated", group=group)
+            pins = {b: PL.resolve(g, {"gemv_blocks": b}, UARCH, SCHEMA).plan for b in (1, 2, 3, 4)}
+            self.assertEqual((PL.paired_width(pins[1], g), PL.gemv_unit_blocks(pins[1], g)), (64, 2), dtype)
+            want = [2, 2, 2, 4] if dtype == "bf16" else [2, 2, 2, 2]
+            self.assertEqual([pins[b].gemv_call_blocks for b in (1, 2, 3, 4)], want, dtype)
+            self.assertEqual([PL.plan_log_fields(pins[b], g)["gemv_blocks"] for b in (1, 2, 3, 4)],
+                             [str(b) for b in want], dtype)
+            self.assertEqual(len({PL.effective_signature(pins[b], g) for b in (1, 2, 3)}), 1, dtype)
+            for n in (2080, 2048):
+                p = Problem(dtype, 1, n, 1024, threads=4, epilogue="gated" if n == 2080 else "store", group=group)
+                for b in (1, 2, 3, 4):
+                    q = PL.resolve(p, {"gemv_blocks": b}, UARCH, SCHEMA).plan
+                    self.assertEqual(PL.gemv_unit_blocks(q, p), 1, (dtype, n))
+                    self.assertEqual(q.gemv_call_blocks, min(b, 4 if dtype == "bf16" else 2), (dtype, n, b))
+
+    def test_blocks_a_kernel_call_reads(self):
+        # A thread whose units are fewer than a kernel call takes reads them in one call: the pins at or
+        # above its share run one schedule, which the signature and the synthetic price take.
+        p = Problem("bf16", 1, 2048, 4096)
+        base = PL.builtin_plan(p, UARCH, SCHEMA)
+        self.assertEqual((base.gemv_threads, PL.gemv_units(base, p), base.gemv_call_blocks), (32, 64, 4))
+        pins = {b: PL.resolve(p, {"gemv_blocks": b}, UARCH, SCHEMA).plan for b in (1, 2, 3, 4)}
+        self.assertEqual([PL.gemv_read_blocks(pins[b], p) for b in (1, 2, 3, 4)], [1, 2, 2, 2])
+        # The line names the blocks a kernel call read, not the most the plan allows.
+        self.assertEqual([PL.plan_log_fields(q, p)["gemv_blocks"] for q in (base, pins[1], pins[3], pins[4])],
+                         ["2", "1", "2", "2"])
+        sigs = {PL.effective_signature(q, p) for q in (base, pins[2], pins[3], pins[4])}
+        self.assertEqual(len(sigs), 1)
+        self.assertNotIn(PL.effective_signature(pins[1], p), sigs)
+        self.assertEqual(len({synthetic.model_cost_ms(p, q, UARCH.l2_bytes) for q in (base, pins[2], pins[4])}), 1)
+
+    def test_features_of_the_tiles_at_m1(self):
+        # gemv=0 on the calling thread or on the team: two schedules, which the surrogate's features
+        # tell apart as the signature does.
+        p = Problem("bf16", 1, 512, 256)
+        alone = PL.resolve(p, {"gemv": False}, UARCH, SCHEMA).plan
+        team = PL.resolve(p, {"gemv": False, "gemv_one_thread_pct": 0}, UARCH, SCHEMA).plan
+        self.assertEqual((alone.one_thread, team.one_thread), (True, False))
+        self.assertNotEqual(PL.effective_signature(alone, p), PL.effective_signature(team, p))
+        fa, ft = PL.plan_features(alone, p), PL.plan_features(team, p)
+        self.assertEqual({k for k in fa if fa[k] != ft[k]}, {"one_thread"})
+
+    def test_synthetic_price_of_the_tiles_at_m1(self):
+        # gemv=0 on the calling thread: one worker takes every tile and no team starts, so twice the
+        # tiles take twice the time; on the team each thread takes one tile of either.
+        price = {}
+        for n in (512, 1024):
+            p = Problem("bf16", 1, n, 256)
+            for pct in (0, 1000):
+                q = PL.resolve(p, {"gemv": False, "nr": 32, "gemv_one_thread_pct": pct}, UARCH, SCHEMA).plan
+                self.assertEqual((q.one_thread, q.tiles, q.threads), (pct > 0, n // 32, n // 32), (n, pct))
+                price[n, pct] = synthetic.model_cost_ms(p, q, UARCH.l2_bytes)
+        self.assertAlmostEqual(price[1024, 1000], 2 * price[512, 1000])
+        self.assertNotAlmostEqual(price[512, 1000], price[512, 0])
 
 
 class TestLibraryPlans(unittest.TestCase):

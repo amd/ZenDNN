@@ -359,13 +359,14 @@ class Route:
 
 
 class Format:
-    """A weight format of the dump (native_format_desc_t): its element bits, the planes of a
-    word of the layout, whether it is quantized and has group scales only, the bytes of one
-    weight scale of each type its scales take, and its routes."""
+    """A weight format of the dump (native_format_desc_t): its element bits, the elements and
+    planes of a word of the layout, whether it is quantized and has group scales only, the bytes
+    of one weight scale of each type its scales take, and its routes."""
 
     def __init__(self, d: Dict[str, Any]):
         self.name = str(d["name"])
         self.elem_bits = int(d["elem_bits"])
+        self.k_per_word = int(d["k_per_word"])
         self.planes = int(d["planes"])
         self.quantized = bool(d["quantized"])
         self.grouped = bool(d["grouped"])

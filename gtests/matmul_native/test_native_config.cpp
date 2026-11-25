@@ -401,6 +401,12 @@ const key_doc_t kKeyDocs[] = {
                 &field_value<int, &hp_t::cm_int8_l1_pct>},
         {"cm_int4_min_m", kInt8Families, true, false, "48",
                 &field_value<int, &hp_t::cm_int4_min_m>},
+        {"gemv", kAllFamilies, true, false, "1",
+                &field_value<bool, &hp_t::gemv>},
+        {"gemv_blocks", kAllFamilies, true, true, "auto",
+                &field_value<int, &hp_t::gemv_blocks>},
+        {"gemv_one_thread_pct", kAllFamilies, true, false, "25",
+                &field_value<int, &hp_t::gemv_one_thread_pct>},
 };
 
 /// The doc of key, nullptr for a key it does not list.
@@ -534,7 +540,10 @@ TEST(NativeConfigText, RejectsBadTokensAndRanges) {
                  "f16_wide_min_m=0", "f16_wide_min_m=1073741825",
                  "unit_tiles=0", "unit_tiles=4097", "nb=0", "nb=8", "nb=24",
                  "nb=-16", "nb=1048592", "blocks=2", "blocks=-1",
-                 "bf16_blocks_min_m=0", "int8_blocks_min_m=1073741825"}) {
+                 "bf16_blocks_min_m=0", "int8_blocks_min_m=1073741825",
+                 "gemv=2", "gemv=auto", "gemv=-1", "gemv_blocks=0",
+                 "gemv_blocks=5", "gemv_blocks=x", "gemv_one_thread_pct=-1",
+                 "gemv_one_thread_pct=1001", "gemv_one_thread_pct=25%"}) {
         EXPECT_FALSE(parses(bad)) << bad;
     }
     // Every integer key rejects one past each end of its range.
@@ -1468,6 +1477,44 @@ TEST(NativeConfigTuningFile, HardwareBlockOfThisCpu) {
             ++at;
         EXPECT_LT(at, std::size(kNativeHardwareKeys)) << it.key();
     }
+}
+
+// The keys of an M = 1 call in a tuning file: a value outside a key's
+// range or of another type drops its entry, as for every key; legal values
+// reach the plan of an M = 1 call.
+TEST(NativeConfigTuningFile, TakesTheKeysOfOneRowCalls) {
+    const char *bad[]
+            = {R"({"config": {"gemv": 2}})", R"({"config": {"gemv": "auto"}})",
+                    R"({"config": {"gemv_blocks": 0}})",
+                    R"({"config": {"gemv_blocks": 5}})",
+                    R"({"config": {"gemv_one_thread_pct": -1}})",
+                    R"({"config": {"gemv_one_thread_pct": 1001}})",
+                    R"({"config": {"gemv_one_thread_pct": 25.5}})"};
+    std::string list;
+    for (const char *e : bad)
+        list += std::string(e) + ", ";
+    list += R"({"id": "good", "match": {"m": {"max": 1}}, "config":
+            {"gemv": false, "gemv_blocks": 3, "gemv_one_thread_pct": 1000}})";
+    native_tuning_sources_t s;
+    EXPECT_EQ(warnings_of(
+                      [&] { s = load(tuning("\"entries\": [" + list + "]")); }),
+            shown(7));
+    ASSERT_NE(s.table, nullptr);
+    const native_config_entry_t *e = s.table->lookup(problem(1, 4096, 4096));
+    ASSERT_NE(e, nullptr);
+    EXPECT_EQ(format_native_config(e->config),
+            "gemv=0,gemv_blocks=3,gemv_one_thread_pct=1000");
+    EXPECT_EQ(s.table->lookup(problem(2, 4096, 4096)), nullptr);
+    const native_plan_t q = heuristic_plan(problem(1, 4096, 4096),
+            native_plan_uarch(test_hw()),
+            apply_native_config(heuristic_params_t {}, e->config));
+    EXPECT_FALSE(q.gemv);
+    EXPECT_EQ(q.gemv_one_thread_pct, 1000);
+    const native_plan_t on = heuristic_plan(problem(1, 4096, 4096),
+            native_plan_uarch(test_hw()),
+            apply_native_config({}, config("gemv_blocks=3")));
+    EXPECT_TRUE(on.gemv);
+    EXPECT_EQ(on.gemv_blocks, 3);
 }
 
 TEST(NativeConfigTuningFile, DropsBadEntriesWithCappedWarnings) {
@@ -2575,14 +2622,14 @@ nlohmann::ordered_json key_json(const native_config_key_t &k) {
 
 /// The fields a [MATMUL.NATIVE_BRGEMM] line prints, each for some calls:
 /// the call, the plan, the call's choices that are not plan fields (gemv,
-/// direct, dequant_bias, wei, order, team, padded_n, pairing) and the
-/// plan's provenance (source, cfg).
+/// direct, dequant_bias, wei, order, team, padded_n, pairing, gemv_threads,
+/// gemv_blocks) and the plan's provenance (source, cfg).
 const char *const kPlanLineFields[] = {"M", "N", "K", "pack_nr", "nr", "mb",
         "kc", "kernels", "tiles", "threads", "col_groups", "unit_tiles", "nb",
         "domain_threads", "transA", "gemv", "mr", "row_unit", "traversal",
         "int8_rows", "int8_cw", "int8_scheme", "direct", "wei", "gs", "order",
         "pass_budget", "int8_pass", "dequant_bias", "copy_block", "source",
-        "cfg", "team", "padded_n", "pairing"};
+        "cfg", "team", "padded_n", "pairing", "gemv_threads", "gemv_blocks"};
 
 /// The values of the plan line's gemv field: the GEMV kernels an M = 1 call
 /// runs on, by its type, and none for a call on the tiles.
@@ -2883,6 +2930,18 @@ TEST(NativeConfigSchema, SchemaDump) {
     EXPECT_EQ(key("int8_cw").value("default", json()), json::array({32, 16}));
     EXPECT_EQ(key("int8_cw").value("must_contain", json()), json::array({16}));
     EXPECT_EQ(key("bias_in_dequant").value("bits", json()), "changes");
+    // The keys of an M = 1 call apply to every family and keep the bits.
+    EXPECT_EQ(key("gemv").value("default", json()), true);
+    EXPECT_EQ(key("gemv_blocks").value("auto", json()), 0);
+    EXPECT_EQ(key("gemv_blocks").value("max", json()), 4);
+    EXPECT_EQ(key("gemv_blocks").value("kind", json()), "pin");
+    EXPECT_EQ(key("gemv_one_thread_pct").value("default", json()), 25);
+    for (const char *name : {"gemv", "gemv_blocks", "gemv_one_thread_pct"}) {
+        EXPECT_EQ(key(name).value("families", json()),
+                json::array({"bf16", "int8", "f32", "int4", "f16", "f16_ph"}))
+                << name;
+        EXPECT_EQ(key(name).value("bits", json()), "same") << name;
+    }
     EXPECT_EQ(key("threads_cap").value("default", json()), "none");
     EXPECT_EQ(
             key("domain_threads").value("default", json()), "l3_domain_cores");
@@ -3123,7 +3182,8 @@ TEST(NativeConfigSchema, PlanLineFields) {
         GTEST_SKIP() << "the native kernels need AVX512-BF16 and AVX512-VNNI";
     native_brgemm_test::expect_in_child(
             {{"ZENDNNL_API_LOG_LEVEL", "4"},
-                    {"ZENDNNL_MATMUL_NATIVE_CONFIG", "m=3:schedule=blocks"}},
+                    {"ZENDNNL_MATMUL_NATIVE_CONFIG",
+                            "m=3:schedule=blocks;m=1,n=96:gemv_blocks=1"}},
             [] {
         const line_call_t calls[] = {
                 {"bf16, padded columns", data_type_t::bf16, 8, 40, 64},
@@ -3140,7 +3200,8 @@ TEST(NativeConfigSchema, PlanLineFields) {
                 {"s8 per group, M = 1", data_type_t::s8, 1, 64, 128, 4, true},
                 {"s4, M = 1", data_type_t::s4, 1, 64, 128, 2},
                 {"f16, M = 1", data_type_t::f16, 1, 64, 64},
-                {"f32, M = 1", data_type_t::f32, 1, 64, 64}};
+                {"f32, M = 1", data_type_t::f32, 1, 64, 64},
+                {"bf16, M = 1, gemv_blocks set", data_type_t::bf16, 1, 96, 64}};
         const std::string f16_unused = native_kernel_registry().f16_kind()
                         == native_kernel_kind_t::f16_ph
                 ? "f16"

@@ -30,7 +30,7 @@ import random
 from typing import Any, Dict, List, Optional, Sequence
 
 from ..candidates import Candidate
-from ..plan import Plan, ceil_div, int8_widths, plan_log_fields
+from ..plan import Plan, ceil_div, gemv_read_blocks, int8_widths, plan_log_fields
 from ..problems import Problem
 from .common import Backend
 
@@ -39,6 +39,14 @@ def model_cost_ms(p: Problem, q: Plan, l2_bytes: int = 1 << 20) -> float:
     """Arbitrary but smooth cost of plan q for p, in ms."""
     flop_rate = 4.0e10 if p.bf16 else 8.0e10  # per thread
     bw = 6.0e9  # weight bytes per second per thread
+    if q.gemv:
+        # The GEMV kernels: each thread streams its share of the weight in calls of the blocks one
+        # of them reads (more streams help from L2, two at most from memory), after the team starts.
+        share = p.n * p.k * p.wei_esz / q.gemv_threads
+        blocks = gemv_read_blocks(q, p)
+        streams = blocks if share <= l2_bytes // 2 else min(blocks, 2)
+        team = 1.5e-6 * math.log2(q.gemv_threads + 1) if q.gemv_threads > 1 else 0.0
+        return 1e3 * (share / (bw * (1.0 + 0.1 * streams)) + team)
     rows = min(q.mb, p.m)
     if p.bf16:
         call_rows = [min(q.mr, rows)]
@@ -52,8 +60,9 @@ def model_cost_ms(p: Problem, q: Plan, l2_bytes: int = 1 << 20) -> float:
     reuse = q.m_blocks if q.traversal == "m_inner" else max(1.0, q.m_blocks / 2.0)
     tile_mem = slab / bw / max(1.0, reuse ** 0.5)
     tile_pass = passes * rows * q.nr * 8 / bw
-    per_thread = ceil_div(q.tiles, q.threads)
-    team = 1.5e-6 * math.log2(q.threads + 1) + (0.4e-6 * q.col_groups if q.col_groups else 0.0)
+    # An M = 1 call on the calling thread (one_thread): one worker takes every tile, and no team starts.
+    per_thread = q.tiles if q.one_thread else ceil_div(q.tiles, q.threads)
+    team = 0.0 if q.one_thread else 1.5e-6 * math.log2(q.threads + 1) + (0.4e-6 * q.col_groups if q.col_groups else 0.0)
     return 1e3 * (per_thread * (tile_compute + tile_mem + tile_pass) + team)
 
 

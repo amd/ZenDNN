@@ -44,10 +44,13 @@ COST_KEYS = ["cost_model", "cm_gain_pct", "cm_short_rows", "cm_fma_pipes", "cm_f
              "cm_reuse_pct", "cm_stream_cycles", "cm_sync_tiles", "cm_group_slab_pct", "cm_group_l3_pct",
              "cm_group_skew_pct", "cm_group_rows_pct", "cm_drift_kib", "cm_pass_kib", "cm_pass_calls",
              "cm_block_kib", "cm_block_k", "cm_int8_l1_pct", "cm_int4_min_m"]
+# The keys of an M = 1 call, after the cost model's.
+M1_KEYS = ["gemv", "gemv_blocks", "gemv_one_thread_pct"]
 # The keys of the planner's schema, in its order: the design's, nb after mb, unit_tiles after
-# traversal, int4_l1_pct after int8_kc, f16_wide_min_m after the narrow-N rule, then the cost model's.
+# traversal, int4_l1_pct after int8_kc, f16_wide_min_m after the narrow-N rule, then the cost model's
+# and those of an M = 1 call.
 SCHEMA_KEYS = (DESIGN_KEYS[:3] + ["nb"] + DESIGN_KEYS[3:7] + ["unit_tiles"] + DESIGN_KEYS[7:24] + ["int4_l1_pct"]
-               + DESIGN_KEYS[24:] + RULE_KEYS[:12] + ["f16_wide_min_m"] + RULE_KEYS[12:] + COST_KEYS)
+               + DESIGN_KEYS[24:] + RULE_KEYS[:12] + ["f16_wide_min_m"] + RULE_KEYS[12:] + COST_KEYS + M1_KEYS)
 DESIGN_FIXTURE = os.path.join(os.path.dirname(S.FIXTURE), "schema_design.json")
 
 

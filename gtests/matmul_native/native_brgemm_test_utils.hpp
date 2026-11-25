@@ -97,6 +97,14 @@ buffer_t random_buffer(
 float load_f32(const void *base, data_type_t dt, size_t i);
 void store_f32(void *base, data_type_t dt, size_t i, float v);
 
+/// a * b rounded to f32 on its own, as a kernel rounds a product it does not
+/// fuse: no compiler may contract it with the add that follows it into one
+/// fused multiply-add.
+inline float mul_unfused(float a, float b) {
+    const volatile float p = a * b;
+    return p;
+}
+
 /// One dense call; a leading dimension of 0 means the tight one.
 struct call_t {
     int M = 0, N = 0, K = 0;

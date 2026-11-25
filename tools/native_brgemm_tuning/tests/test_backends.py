@@ -81,8 +81,9 @@ class TestApiLog(unittest.TestCase):
 
     def test_lines_of_the_gemv_kernels(self):
         # Every M = 1 call runs on the GEMV kernels of its type, which its line names next to
-        # the plan of the tiles; the model names the same kernels, and the tuner keeps the
-        # call out.
+        # the plan of the tiles; the model names the same kernels.  The tuner keeps a candidate
+        # of the tiles' keys out, as the call took none of them, and takes the built-in run and
+        # a candidate of the GEMV kernels' keys.
         from native_brgemm_tuning import plan as PL
         lines = {
             "bf16": "M=1 N=4096 K=4096 pack_nr=32 nr=32 mb=1 kc=4096 tiles=128 threads=16 col_groups=0 transA=0 "
@@ -104,8 +105,48 @@ class TestApiLog(unittest.TestCase):
             if dtype == "f16":
                 q = replace(q, kind="f16")  # the line's CPU has no AVX512-FP16
             self.assertEqual(PL.plan_log_fields(q, p)["gemv"], f["gemv"], dtype)
-            self.assertEqual(common.applied_status(f, ""), ("gemv", "the call ran on the %s GEMV kernels" % dtype))
-            self.assertEqual(common.applied_status(f, "nr=16")[0], "gemv")
+            self.assertEqual(common.applied_status(f, ""), ("applied", ""))
+            self.assertEqual(common.applied_status(f, "nr=16"), ("gemv", "the call ran on the %s GEMV kernels" % dtype))
+
+            def expected(cfg):
+                r = PL.resolve(p, cfg, UARCH, SCHEMA).plan
+                return PL.plan_log_fields(replace(r, kind="f16") if dtype == "f16" else r, p)
+
+            # With the model's fields of the candidate's plan and of the built-in plan: a key of the
+            # tiles that leaves the GEMV kernels' schedule as built in took none of its keys; a cap
+            # on the plan's threads gives them 8 threads, another schedule.
+            narrow = dict(f, source="override", cfg="nr=16", nr="16", tiles="256")
+            self.assertEqual(common.applied_status(narrow, "nr=16", expected({"nr": 16}), expected({})),
+                             ("gemv", "the call ran on the %s GEMV kernels" % dtype))
+            capped = dict(f, source="override", cfg="threads_cap=8", threads="8")
+            self.assertEqual(common.applied_status(capped, "threads_cap=8", expected({"threads_cap": 8}),
+                                                   expected({})), ("applied", ""))
+            pinned = dict(f, source="override", cfg="gemv_blocks=1", gemv_threads="16", gemv_blocks="1")
+            self.assertEqual(common.applied_status(pinned, "gemv_blocks=1"), ("applied", ""))
+            # The line names the threads and blocks of a call of a GEMV key, which the model gives.
+            r = PL.resolve(p, {"gemv_blocks": 1}, UARCH, SCHEMA)
+            if dtype == "f16":
+                r.plan.kind = "f16"
+            want = {k: v for k, v in PL.plan_log_fields(r.plan, p).items()
+                    if k in ("gemv", "gemv_threads", "gemv_blocks")}
+            self.assertEqual(want, {"gemv": f["gemv"], "gemv_threads": "16", "gemv_blocks": "1"}, dtype)
+            self.assertEqual(PL.compare_fields(want, pinned), [], dtype)
+            self.assertEqual(PL.compare_fields(want, dict(pinned, gemv_blocks="2")),
+                             ["gemv_blocks: model 1, log 2"], dtype)
+            # A region the runtime gives fewer threads (OMP_THREAD_LIMIT) names the workers that took
+            # the units: the model's schedule did not run.
+            self.assertEqual(PL.compare_fields(want, dict(pinned, gemv_threads="4", team="4")),
+                             ["gemv_threads: model 16, log 4"], dtype)
+            # A line without them (no GEMV key set) is not compared on them, but on its team: a region
+            # of fewer threads than the model's workers did not run the model's schedule.
+            self.assertEqual(PL.compare_fields(want, f), [], dtype)
+            self.assertEqual(PL.compare_fields(want, dict(f, team="4")), ["gemv_threads: model 16, log team 4"],
+                             dtype)
+            # gemv=0: the call runs on the tiles and its line says so.
+            off = dict(f, source="override", cfg="gemv=0", gemv="none")
+            self.assertEqual(common.applied_status(off, "gemv=0"), ("applied", ""))
+            self.assertEqual(PL.plan_log_fields(PL.resolve(p, {"gemv": False}, UARCH, SCHEMA).plan, p)["gemv"],
+                             "none", dtype)
             # The same call at M = 8 runs on the tiles.
             self.assertEqual(PL.plan_log_fields(PL.builtin_plan(p.with_m(8), UARCH, SCHEMA), p.with_m(8))["gemv"],
                              "none", dtype)
@@ -137,8 +178,11 @@ class TestApiLog(unittest.TestCase):
         old = {k: v for k, v in f.items() if k not in ("source", "cfg")}
         self.assertEqual(common.applied_status(old, "nr=16")[0], "no_log")
         g = common.parse_apilog_line(GEMV_LINE)
-        self.assertEqual(common.applied_status(g, ""), ("gemv", "the call ran on the s8 GEMV kernels"))
-        self.assertEqual(common.applied_status(g, "nr=16")[0], "gemv")
+        self.assertEqual(common.applied_status(g, ""), ("applied", ""))
+        self.assertEqual(common.applied_status(g, "nr=16"), ("gemv", "the call ran on the s8 GEMV kernels"))
+        self.assertEqual(common.applied_status(g, "gemv_blocks=1")[0], "dropped")
+        self.assertEqual(common.applied_status(dict(g, source="override", cfg="gemv_blocks=1,nr=16"),
+                                               "gemv_blocks=1,nr=16")[0], "applied")
         self.assertIn("gemv", R.BAD_STATUSES)
 
     def test_padded_width(self):
@@ -679,6 +723,43 @@ class TestSession(unittest.TestCase):
                 self.assertEqual(probes[(staged.key(), "mb=4")]["model_diff"], [], (pairing, alone))
                 self.assertEqual(R.probe_status(recs)[(paired.key(), "mb=4")][0], "mismatch", (pairing, alone))
                 self.assertNotIn("mb=4", R.summarize(recs)[paired.key()].cands, (pairing, alone))
+
+    def test_an_m1_probe_is_judged_by_its_gemv_schedule(self):
+        # An M = 1 call runs on the GEMV kernels whatever the tiles' keys, and its lines name no GEMV
+        # field (no GEMV key set) but its team: a candidate that leaves their schedule as built in
+        # took none of its keys; a cap on the plan's threads gives them 8 of 32, which is judged.  A
+        # region of 4 threads ran neither the model's built-in schedule nor the cap's.
+        p = Problem("bf16", 1, 4096, 4096)
+        sp = C.Space(p, SCHEMA, UARCH, ["nr", "threads_cap"])
+        self.probs, self.spaces = [p], {p.key(): sp}
+        self.assign = {p.key(): [sp.make({"nr": 16}), sp.make({"threads_cap": 8})]}
+        self.defaults = {p.key(): sp.default}
+        self.assertEqual([sp.default.plan.gemv_threads] + [c.plan.gemv_threads for c in self.assign[p.key()]],
+                         [32, 32, 8])
+        for team in ("32", "4"):
+            s = self.session(ReplayBackend(binary="/opt/replay"), "team%s" % team)
+            s.write()
+
+            def library_line(j, q, line):
+                for k in ("gemv_threads", "gemv_blocks"):
+                    del line["fields"][k]
+                line["fields"]["team"] = team
+
+            self.outputs(s, {0: 1.0, 1: 0.9, 2: 0.8}, library_line)
+            recs = jobs.collect(s.dir)
+            status = R.probe_status(recs)
+            cands = R.summarize(recs)[p.key()].cands
+            if team == "32":
+                self.assertEqual(status[(p.key(), "")], ("applied", ""))
+                self.assertEqual(status[(p.key(), "nr=16")], ("gemv", "the call ran on the bf16 GEMV kernels"))
+                self.assertEqual(status[(p.key(), "threads_cap=8")], ("applied", ""))
+                self.assertEqual(list(cands), ["threads_cap=8"])
+                self.assertAlmostEqual(cands["threads_cap=8"].ratio, 0.8)
+            else:
+                self.assertEqual(status[(p.key(), "")], ("mismatch", "the library ran another plan than the plan "
+                                                                     "model's: gemv_threads: model 32, log team 4"))
+                self.assertEqual(status[(p.key(), "threads_cap=8")][0], "mismatch")
+                self.assertEqual(cands, {})
 
     def test_a_built_in_run_at_another_plan_than_the_models_stops_its_problem(self):
         # The library pairs the built-in tiles of the first problem at 32 where the model pairs them at

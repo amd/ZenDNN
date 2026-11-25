@@ -57,6 +57,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from . import TOOL_NAME
 from .candidates import Candidate, Space, builtin_value, check_config
+from .plan import gemv_schedule
 from .problems import MClass, Problem, class_of, rule_features
 from .results import measured_texts, summarize, utc_now
 from .rules import OPS, eval_rules
@@ -233,14 +234,24 @@ def legal_over_class(text: str, p: Problem, c: MClass, schema: Schema, uarch: An
     return all(resolve(p.with_m(m), cfg, uarch, schema).applied for m in class_ms(c))
 
 
+# M 1 alone: an M = 1 call runs on the GEMV kernels, whose keys no other M reads.
+M1_CLASS = MClass(1, 1, (1,))
+
+
 def _class_groups(problems: Sequence[Problem], classes: List[MClass], have: Any) -> List[Tuple[MClass, List[Problem]]]:
-    """(class, its problems) for every shape and class with results at one M at least."""
-    groups: Dict[Tuple[str, int], List[Problem]] = {}
+    """(class, its problems) for every shape and class with results at one M at least.  A problem at
+    M 1 of a wider class (a shape whose M range is 1 alone takes the class's representative down
+    to 1, or a problem given at M 1) is a class of M 1 alone: its winner covers M 1 only."""
+    groups: Dict[Tuple[str, int, float], Tuple[MClass, List[Problem]]] = {}
     for p in problems:
         c = class_of(p.m, classes)
-        if c is not None:
-            groups.setdefault((p.shape_key(), classes.index(c)), []).append(p)
-    return [(classes[ci], sorted(probs, key=lambda p: p.m)) for (_, ci), probs in sorted(groups.items())
+        if c is None:
+            continue
+        if p.m == 1:
+            c = M1_CLASS
+        key = (p.shape_key(), c.lo, math.inf if c.hi is None else c.hi)
+        groups.setdefault(key, (c, []))[1].append(p)
+    return [(c, sorted(probs, key=lambda p: p.m)) for _, (c, probs) in sorted(groups.items(), key=lambda kv: kv[0])
             if any(p.key() in have for p in probs)]
 
 
@@ -486,6 +497,17 @@ def full_config(w: Winner, spaces: Dict[str, Space], schema: Schema, uarch: Any)
     return cfg
 
 
+def _moves_gemv(w: Winner, spaces: Dict[str, Space]) -> bool:
+    """The winner gives a problem of its class another M = 1 schedule than the built-in plan's
+    (gemv_schedule)."""
+    for p in w.problems:
+        sp = spaces[p.key()]
+        c = sp.from_text(w.text)
+        if c is not None and gemv_schedule(c.plan, p) != gemv_schedule(sp.default.plan, p):
+            return True
+    return False
+
+
 def build_entries(winners: List[Winner], spaces: Dict[str, Space], schema: Schema, uarch: Any,
                   allow_bit_changing: bool = False,
                   require_confirm: bool = True) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
@@ -494,11 +516,13 @@ def build_entries(winners: List[Winner], spaces: Dict[str, Space], schema: Schem
     for w in winners:
         why = w.reason
         # An M = 1 call runs on the GEMV kernels, which take none of an entry's tiles: an entry
-        # starts at M 2.
-        m_lo = max(w.mclass.lo, 2)
-        if w.mclass.hi is not None and w.mclass.hi < m_lo:
+        # starts at M 2, but that of a class of M = 1 alone (a problem at M 1 always has one,
+        # _class_groups) whose winner gives the GEMV kernels another schedule than the built-in
+        # plan's (its keys, or a key of the tiles that moves the plan's threads).
+        if w.mclass.hi == 1 and w.text and not _moves_gemv(w, spaces):
             skipped.append({"id": w.entry_id(), "reason": "M = 1 calls run on the GEMV kernels"})
             continue
+        m_lo = 1 if w.mclass.hi == 1 else max(w.mclass.lo, 2)
         if w.text and w.significant and not w.confirmed and require_confirm and not why:
             why = "no confirmation run yet (tune.py confirm)"
         if w.text and w.significant and (w.confirmed or not require_confirm):

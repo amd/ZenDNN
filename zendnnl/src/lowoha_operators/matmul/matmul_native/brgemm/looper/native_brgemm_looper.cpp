@@ -862,13 +862,14 @@ status_t run_units(const execute_call_t &c, const native_plan_t &p, int threads,
     const bool pair_in_team = ep.staged_halves
             && staged_pair_units(ep, c.desc.M)
                     >= 4 * static_cast<int64_t>(threads);
-    // An M = 1 call on a layout of at most a quarter of the L2 runs its
-    // units on the calling thread: one core reads that layout in less time
-    // than a region of the call's team takes to open, and a region of fewer
-    // threads would make the runtime end and start the others again.
+    // An M = 1 call of a small layout runs its units on the calling thread
+    // (native_one_thread): a region of fewer threads would make the runtime
+    // end and start the others again.
     const bool one_thread = c.desc.M == 1
-            && native_packed_bytes(view.wei_dt, view.K, view.N, view.pack_nr)
-                    <= static_cast<size_t>(detect_uarch().l2_bytes) / 4;
+            && native_one_thread(p,
+                    native_packed_bytes(
+                            view.wei_dt, view.K, view.N, view.pack_nr),
+                    static_cast<size_t>(detect_uarch().l2_bytes));
     const status_t st = native_run_cpu_team(part,
             one_thread ? 1
                        : static_cast<int>(
@@ -936,41 +937,27 @@ status_t run_team(const execute_call_t &c, native_route_t route,
     return run_int8(c, p, threads, view, ep, tail, *int8_op, team);
 }
 
-/// The GEMV kernels of an M = 1 call: those of its route (on), or none, on
-/// the tiles.
-struct gemv_kind_t {
-    bool on = false;
-    native_route_t route = native_route_t::bf16;
+/// The threads that took the units of an M = 1 call on the GEMV kernels, at
+/// most those of its region, the blocks of one kernel call, and the units
+/// of the call's columns and the blocks of one.
+struct gemv_schedule_t {
+    int threads = 0;
+    int call_blocks = 0;
+    int units = 0;
+    int unit_blocks = 1;
 };
 
-/// The name of the call's GEMV kernels in the plan line.
-const char *gemv_name(gemv_kind_t kind) {
-    return kind.on ? native_route(kind.route).gemv : "none";
-}
-
-/// The GEMV kernels of the call: every M = 1 call runs on those of its
-/// plan's route, but a plan of the f16_ph tiles stays on them without the
-/// f16_ph GEMV kernels (ZENDNNL_NATIVE_F16_PH_KERNELS builds both or
-/// neither).
-gemv_kind_t gemv_kind_of(const execute_call_t &c, const native_plan_t &p) {
-    if (c.desc.M != 1) return {};
-    if (native_route(p.route).family == native_kernel_kind_t::f16_ph
-            && select_native_f16_ph_gemv(1) == nullptr)
-        return {};
-    return {true, p.route};
-}
-
-/// An M = 1 call on the GEMV kernels and what its workers share.  Its
-/// columns come in units a worker takes whole: blocks of 32 columns; for a
-/// gated call whose tiles pair the halves (the view is paired), a gate block
-/// and the up block paired with it, or where the halves are not whole
-/// blocks, a run of 16 gate columns and its up run.
+/// An M = 1 call on the GEMV kernels of its plan's route (native_plan_t::
+/// gemv) and what its workers share.  Its columns come in units a worker
+/// takes whole: blocks of 32 columns; for a gated call whose tiles pair the
+/// halves (the view is paired), a gate block and the up block paired with
+/// it, or where the halves are not whole blocks, a run of 16 gate columns
+/// and its up run.
 struct gemv_call_t {
     const execute_call_t &c;
     const native_plan_t &p;
     const native_weight_view_t &view;
     const native_epilogue_t &ep;
-    gemv_kind_t kind;
     const bf16_operands_t &bf16_op;
     const int8_operands_t *int8_op;
     const f32_operands_t &f32_op;
@@ -1047,7 +1034,7 @@ void gemv_units_call(
                     g.ep, c, tiles[i].nr, 0, 1, tiles[i].n0, tiles[i].cols);
     };
     const int K = w.K;
-    switch (native_route(g.kind.route).family) {
+    switch (native_route(g.p.route).family) {
         case native_kernel_kind_t::bf16:
             select_native_bf16_gemv(cols.nb, cols.runs)(
                     g.bf16_op.A, K, cols, acc);
@@ -1173,35 +1160,25 @@ void gemv_units_call(
     epilogue();
 }
 
-/// Blocks one GEMV kernel call reads side by side, each a stream of its own:
-/// two, the streams per core DRAM and the L3 serve best, unless a worker's
-/// share of a float route's layout (packed bytes) fits half its L2 (l2
-/// bytes), where four blocks give the multiply-adds the accumulators that
-/// hide their latency.  The kernels of the INT8 tile's routes split their
-/// exact sums over more accumulators of their own.
-int gemv_call_blocks(gemv_kind_t kind, size_t packed, size_t l2, int workers) {
-    if (native_route(kind.route).cls != native_route_class_t::rows)
-        return kNativeGemvMaxIntBlocks;
-    const size_t share
-            = workers <= 1 ? packed : packed / static_cast<size_t>(workers);
-    return share <= l2 / 2 ? 4 : 2;
-}
-
 /// Runs the call's units on the GEMV kernels: each worker its share of whole
-/// units, all of K each, in kernel calls of at most gemv_call_blocks blocks
-/// (packed the layout's bytes, l2 the L2's); one worker inline, else a
-/// region of the caller's team as native_run_cpu_team opens it, the workers
-/// spread over its threads.  Staged gated rows pair as run_units pairs them.
-status_t run_gemv(gemv_call_t &g, int workers, int threads, size_t packed,
-        size_t l2, int &team) {
+/// units, all of K each, in kernel calls of at most native_gemv_call_blocks
+/// blocks, on native_gemv_threads workers (packed the layout's bytes, l2 the
+/// L2's); one worker inline, else a region of the caller's team as
+/// native_run_cpu_team opens it, the workers spread over its threads.
+/// Staged gated rows pair as run_units pairs them.
+status_t run_gemv(gemv_call_t &g, int threads, size_t packed, size_t l2,
+        int &team, gemv_schedule_t &sched) {
     gemv_units(g);
     const int units = g.units;
-    workers = std::max(1, std::min(workers, units));
+    const int workers = native_gemv_threads(g.p, packed, l2, units);
     // Blocks a unit reads.
     const int unit_blocks = g.view.paired && !g.runs ? 2 : 1;
-    const int call_blocks = gemv_call_blocks(g.kind, packed, l2, workers);
-    const int per_call
-            = std::max(1, unit_blocks == 2 ? call_blocks / 2 : call_blocks);
+    const int call_blocks
+            = native_gemv_call_blocks(g.p, packed, l2, workers, unit_blocks);
+    sched.call_blocks = call_blocks;
+    sched.units = units;
+    sched.unit_blocks = unit_blocks;
+    const int per_call = call_blocks / unit_blocks;
     // A worker splits its units into fronts, as many as a kernel call
     // takes, and each call takes the next unit of every front: a front
     // walks its units in memory order, so each of a call's streams goes on
@@ -1240,6 +1217,7 @@ status_t run_gemv(gemv_call_t &g, int workers, int threads, size_t packed,
     if (workers <= 1 || threads <= 1) {
         run(0, 1);
         team = 1;
+        sched.threads = 1;
     } else {
         const int region = std::max(workers, threads);
 #pragma omp parallel num_threads(region)
@@ -1252,7 +1230,10 @@ status_t run_gemv(gemv_call_t &g, int workers, int threads, size_t packed,
             // bandwidth serving its share of the columns.
             const int64_t at = static_cast<int64_t>(tid) * n;
             if (at % given < n) run(static_cast<int>(at / given), n);
-            if (tid == 0) team = given;
+            if (tid == 0) {
+                team = given;
+                sched.threads = n;
+            }
             if (pair_in_team) {
 #pragma omp barrier
                 pair_staged_halves(ep, M, tid, given);
@@ -1297,10 +1278,12 @@ native_plan_t native_paired_plan(const native_plan_t &planned,
 namespace {
 
 /// The [MATMUL.NATIVE_BRGEMM] line of a call that ran; paired: its tiles
-/// paired the halves of a gated call.
+/// paired the halves of a gated call; gemv: the schedule of a call on the
+/// GEMV kernels, null for a call on the tiles.
 void log_plan_line(const execute_call_t &c, const native_plan_t &p,
         const native_int8_decision_t &decision, bool bias_in_dequant,
-        bool direct, int pack_nr, int team, bool paired, gemv_kind_t gemv) {
+        bool direct, int pack_nr, int team, bool paired,
+        const gemv_schedule_t *gemv) {
     const GemmDescriptor &desc = c.desc;
     // A BF16, FP32 or F16 call has a K pass; an INT8 call has call shapes
     // and, unless its weight scales are per group, a K pass, a direct store
@@ -1351,22 +1334,35 @@ void log_plan_line(const execute_call_t &c, const native_plan_t &p,
             ? " padded_n=" + std::to_string(native_padded_n(desc.N, pack_nr))
             : std::string();
     // A gated call over [gate | up] halves names the width at which its
-    // tiles paired them, or that it staged its rows.
-    const std::string pairing_field = native_gated_halves(desc.gated_act)
+    // tiles paired them, or that it staged its rows; a call on the GEMV
+    // kernels their threads and the most blocks one kernel call read (a
+    // worker's whole share where that is fewer than the call's blocks) where
+    // a layer sets gemv_blocks or gemv_one_thread_pct.
+    std::string last_fields = native_gated_halves(desc.gated_act)
             ? " pairing="
                     + (paired ? std::to_string(p.nr) : std::string("staged"))
             : std::string();
+    if (gemv != nullptr) {
+        const native_config_t cfg = native_plan_config(p);
+        if (cfg.gemv_blocks || cfg.gemv_one_thread_pct) {
+            const int read = std::min(gemv->call_blocks,
+                    ceil_div(gemv->units, gemv->threads) * gemv->unit_blocks);
+            last_fields += " gemv_threads=" + std::to_string(gemv->threads)
+                    + " gemv_blocks=" + std::to_string(read);
+        }
+    }
     apilog_verbose("[MATMUL.NATIVE_BRGEMM] M=", desc.M, " N=", desc.N,
             " K=", desc.K, " pack_nr=", pack_nr, " nr=", p.nr, " mb=", p.mb,
             kc_field, kernels_field, " tiles=", p.tiles(),
             " threads=", p.threads, " col_groups=", p.col_groups, blocks_field,
-            " transA=", desc.transA ? 1 : 0, " gemv=", gemv_name(gemv),
+            " transA=", desc.transA ? 1 : 0,
+            " gemv=", gemv != nullptr ? native_route(p.route).gemv : "none",
             " mr=", p.mr, " row_unit=", p.row_unit, " traversal=",
             p.traversal == native_traversal_t::m_inner ? "m_inner" : "n_inner",
             int8_fields, " copy_block=", p.copy_block,
             " source=", native_plan_source_names(p),
             " cfg=", native_plan_config_text(p), " team=", team, padded_field,
-            pairing_field);
+            last_fields);
 }
 
 /// The storage run_tiles may take from its caller, and whether the call
@@ -1380,9 +1376,10 @@ constexpr run_options_t kTilesOnly {true, nullptr};
 
 /// The native tiles of the call: every step up to the acquisition of the
 /// weight's layout, which is the first that may change the weight, then
-/// (without CheckOnly) the run, an M = 1 call on the GEMV kernels unless
-/// opt->tiles_only.  opt->shift_store, when given, holds the group shifts of
-/// a per-group call and outlives the run.  A null opt is neither.
+/// (without CheckOnly) the run, a call whose plan takes the GEMV kernels
+/// (an M = 1 call unless gemv is off) on them unless opt->tiles_only.
+/// opt->shift_store, when given, holds the group shifts of a per-group call
+/// and outlives the run.  A null opt is neither.
 template <bool CheckOnly>
 status_t run_tiles(const GemmDescriptor &desc,
         const native_weight_ref_t &weight, const void *src, void *dst,
@@ -1410,14 +1407,14 @@ status_t run_tiles(const GemmDescriptor &desc,
     const native_problem_t problem
             = make_native_problem(desc, params, bias, weight.pack_nr, decision);
     native_plan_t p = native_planner().plan(problem);
+    const bool gemv = p.gemv && !tiles_only;
     // The gate and up halves of a gated weight pair up in its tiles, from
     // the weight's plain layout, in whole blocks or in runs of 16 columns.
     int paired_width = 0;
     if (native_gated_halves(desc.gated_act)) {
-        // An M = 1 call of the FP32 or F16 kernels runs on their GEMV
-        // kernels, which read a block's second 16 columns right after its
-        // first: it pairs whole blocks only.
-        const bool float_gemv = desc.M == 1 && !tiles_only
+        // A call on the GEMV kernels of FP32 or F16, which read a block's
+        // second 16 columns right after its first, pairs whole blocks only.
+        const bool float_gemv = gemv
                 && (p.kind == native_kernel_kind_t::f32
                         || p.kind == native_kernel_kind_t::f16
                         || p.kind == native_kernel_kind_t::f16_ph);
@@ -1486,18 +1483,14 @@ status_t run_tiles(const GemmDescriptor &desc,
 
     int team = 1;
     const int8_operands_t *int8_ops = int8_op ? &*int8_op : nullptr;
-    const gemv_kind_t gemv = tiles_only ? gemv_kind_t {} : gemv_kind_of(c, p);
-    if (gemv.on) {
-        gemv_call_t g {c, p, view, ep, gemv, bf16_op, int8_ops, f32_op, f16_op,
-                f16_ph_op};
+    gemv_schedule_t sched;
+    if (gemv) {
+        gemv_call_t g {
+                c, p, view, ep, bf16_op, int8_ops, f32_op, f16_op, f16_ph_op};
         const size_t packed = native_packed_bytes(
                 view.wei_dt, view.K, view.N, view.pack_nr);
         const size_t l2 = static_cast<size_t>(detect_uarch().l2_bytes);
-        // An M = 1 call on a layout of at most a quarter of the L2 runs on
-        // the calling thread (see run_units).
-        const bool one_thread = packed <= l2 / 4;
-        st = run_gemv(g, one_thread ? 1 : p.threads, problem.threads, packed,
-                l2, team);
+        st = run_gemv(g, problem.threads, packed, l2, team, sched);
     } else {
         st = run_team(c, p.route, p, problem.threads, view, ep, bf16_op,
                 int8_ops, f32_op, f16_op, f16_ph_op, team);
@@ -1506,7 +1499,8 @@ status_t run_tiles(const GemmDescriptor &desc,
 
     if (s_log)
         log_plan_line(c, p, decision, bias_in_dequant,
-                int8_op && int8_op->direct, view.pack_nr, team, paired, gemv);
+                int8_op && int8_op->direct, view.pack_nr, team, paired,
+                gemv ? &sched : nullptr);
     return status_t::success;
 }
 

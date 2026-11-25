@@ -123,7 +123,10 @@
     {"name": "cm_block_kib", "type": "int", "default": 16384, "min": 0, "max": 1073741824, "applies": "bf16", "int8_schemes": [], "families": ["bf16", "f32", "f16", "f16_ph"], "bits": "same", "kind": "param"},
     {"name": "cm_block_k", "type": "int", "default": 2048, "min": 0, "max": 1073741824, "applies": "bf16", "int8_schemes": [], "families": ["bf16", "f32", "f16", "f16_ph"], "bits": "same", "kind": "param"},
     {"name": "cm_int8_l1_pct", "type": "int", "default": 0, "min": 0, "max": 1000, "applies": "int8", "int8_schemes": ["per_channel"], "families": ["int8", "int4"], "bits": "same", "kind": "param"},
-    {"name": "cm_int4_min_m", "type": "int", "default": 48, "min": 0, "max": 1073741824, "applies": "int8", "int8_schemes": ["per_group"], "families": ["int8", "int4"], "bits": "same", "kind": "param"}
+    {"name": "cm_int4_min_m", "type": "int", "default": 48, "min": 0, "max": 1073741824, "applies": "int8", "int8_schemes": ["per_group"], "families": ["int8", "int4"], "bits": "same", "kind": "param"},
+    {"name": "gemv", "type": "bool", "default": true, "applies": "both", "int8_schemes": ["per_channel", "per_group"], "families": ["bf16", "int8", "f32", "int4", "f16", "f16_ph"], "bits": "same", "kind": "param"},
+    {"name": "gemv_blocks", "type": "int", "default": "auto", "auto": 0, "min": 1, "max": 4, "applies": "both", "int8_schemes": ["per_channel", "per_group"], "families": ["bf16", "int8", "f32", "int4", "f16", "f16_ph"], "bits": "same", "kind": "pin"},
+    {"name": "gemv_one_thread_pct", "type": "int", "default": 25, "min": 0, "max": 1000, "applies": "both", "int8_schemes": ["per_channel", "per_group"], "families": ["bf16", "int8", "f32", "int4", "f16", "f16_ph"], "bits": "same", "kind": "param"}
   ],
   "match_keys": {
     "m": "range",
@@ -207,7 +210,7 @@
     "M", "N", "K", "pack_nr", "nr", "mb", "kc", "kernels", "tiles", "threads", "col_groups", "unit_tiles", "nb",
     "domain_threads", "transA", "gemv", "mr", "row_unit", "traversal", "int8_rows", "int8_cw", "int8_scheme",
     "direct", "wei", "gs", "order", "pass_budget", "int8_pass", "dequant_bias", "copy_block", "source", "cfg",
-    "team", "padded_n", "pairing"
+    "team", "padded_n", "pairing", "gemv_threads", "gemv_blocks"
   ],
   "plan_line_gemv": [
     "none", "bf16", "f32", "f16", "f16_ph", "s8", "s8_group", "s4"

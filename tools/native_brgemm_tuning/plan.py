@@ -21,7 +21,10 @@ behind makespan, l1_pass, traffic_groups, bf16_alias, bf16_narrow_n and blocks,
 the F16_PH tiles and blocks of K, the INT8 and INT4 tile fields), then with
 cost_model the model's choice among the rules' variants (model_plan for BF16
 and F16, int8_model_plan for per-channel INT8, int4_model_plan and
-int4_group_passes for s4) priced by cost_model.py.  validate_plan() is
+int4_group_passes for s4) priced by cost_model.py, then the fields of an M = 1
+call on the GEMV kernels and its threads and blocks per kernel call
+(gemv_plan, as native_gemv_threads and native_gemv_call_blocks give them for
+the units of its columns).  validate_plan() is
 validate_native_plan, and resolve() applies one override the way
 native_planner_t does with a single source: the merged plan when it is legal,
 else the built-in plan.  The built-in plan is heuristic_plan with every key at
@@ -40,7 +43,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from . import cost_model as cm
 from .cost_model import ceil_div, int4_pass_quads, int8_call_rows, int8_col_width, int8_pass_quads
-from .problems import FORMATS, Problem
+from .problems import FORMATS, LAYOUT_PACK_NR, Problem
 from .schema import route_scheme
 
 # heuristic_params_t{}: every key of the planner at its built-in value; a pin at 0
@@ -64,8 +67,10 @@ BUILTIN_PARAMS: Dict[str, Any] = {
     "cm_stream_cycles": -1, "cm_sync_tiles": 5, "cm_group_slab_pct": 75, "cm_group_l3_pct": 75,
     "cm_group_skew_pct": 110, "cm_group_rows_pct": 115, "cm_drift_kib": 4096, "cm_pass_kib": 128,
     "cm_pass_calls": 4, "cm_block_kib": 16384, "cm_block_k": 2048, "cm_int8_l1_pct": 0, "cm_int4_min_m": 48,
+    "gemv": True, "gemv_blocks": 0, "gemv_one_thread_pct": 25,
 }
-AUTO_PINS = ("nr", "mr", "mb", "nb", "kc", "col_groups", "unit_tiles", "threads_cap", "domain_threads", "int8_kc")
+AUTO_PINS = ("nr", "mr", "mb", "nb", "kc", "col_groups", "unit_tiles", "threads_cap", "domain_threads", "int8_kc",
+             "gemv_blocks")
 # Keys whose built-in value a rule or the hardware decides (an auto value in the schema).
 AUTO_KEYS = AUTO_PINS + ("row_unit", "int4_l1_pct", "cm_fma_pipes", "cm_tall_pct", "cm_mem_cycles",
                          "cm_stream_cycles")
@@ -97,6 +102,12 @@ INT4_ROW_BLOCKS = 4
 INT4_FIT_L1_PCT = 50
 INT4_STREAM_L1_PCT = 125
 INT64_MAX = (1 << 63) - 1
+# The keys of an M = 1 call on the GEMV kernels, which no other call reads.
+GEMV_KEYS = ("gemv", "gemv_blocks", "gemv_one_thread_pct")
+# Blocks of 32 columns one GEMV kernel call reads at most: the float routes', and the INT8 and
+# INT4 routes', whose exact sums take more accumulators per block.
+GEMV_MAX_BLOCKS = 4
+GEMV_MAX_INT_BLOCKS = 2
 
 
 def cw_mask(widths: List[int]) -> int:
@@ -108,6 +119,11 @@ def cw_mask(widths: List[int]) -> int:
 
 def cw_widths(mask: int) -> List[int]:
     return [w for w in (32, 16) if mask & CW_BITS[w]]
+
+
+def sets_gemv_keys(text: str) -> bool:
+    """The settings "key=value,..." set a key of the GEMV kernels (GEMV_KEYS)."""
+    return any(t.partition("=")[0].strip().lower() in GEMV_KEYS for t in text.split(","))
 
 
 def mirrored(name: str) -> bool:
@@ -178,6 +194,18 @@ class Plan:
     int8_scheme: str = "per_channel"
     copy_block: int = 64
     copy_par_min: int = 0
+    # An M = 1 call: on the GEMV kernels of its route, the blocks of their kernel call (the pin,
+    # at most the route's; 0: the rule), and the percent of L2 the layout of a call on the
+    # calling thread takes at most (0 for any other M).
+    gemv: bool = False
+    gemv_blocks: int = 0
+    gemv_one_thread_pct: int = 0
+    # Not native_plan_t's: whether the call runs on the calling thread (native_one_thread) and on
+    # the GEMV kernels its threads and blocks per kernel call (native_gemv_threads,
+    # native_gemv_call_blocks over the units of its columns), 0 on the tiles.
+    one_thread: bool = False
+    gemv_threads: int = 0
+    gemv_call_blocks: int = 0
 
     @property
     def tiles(self) -> int:
@@ -824,7 +852,107 @@ def int4_group_passes(p: Problem, uarch: Any, hp: Dict[str, Any], q: Plan) -> Pl
 
 
 def heuristic_plan(p: Problem, uarch: Any, hp: Dict[str, Any], schema: Any) -> Plan:
-    """heuristic_plan(p, uarch, params): the rules' plan and, with cost_model, the model's choice."""
+    """heuristic_plan(p, uarch, params): the rules' plan and, with cost_model, the model's choice,
+    then the fields of an M = 1 call (gemv_plan)."""
+    return gemv_plan(p, uarch, hp, schema, tile_plan(p, uarch, hp, schema))
+
+
+def layout_bytes(p: Problem, schema: Any) -> int:
+    """native_packed_bytes of p's weight: blocks of 32 columns of K groups of one word per column
+    (k_per_word elements), then the column sums of a quantized format of other than group scales
+    only (s8), rounded up to 64."""
+    f = schema.formats[p.dtype]
+    word = f.elem_bits * f.k_per_word // 8
+    sums = 4 if f.quantized and not f.grouped else 0
+    nbytes = (ceil_div(p.k, f.k_per_word) * word + sums) * LAYOUT_PACK_NR * ceil_div(p.n, LAYOUT_PACK_NR)
+    return (nbytes + 63) // 64 * 64
+
+
+def gemv_units(q: Plan, p: Problem) -> int:
+    """gemv_units: the units of the call's columns a thread takes whole: blocks of 32 columns; for
+    a gated call whose tiles pair its halves (paired_width), a gate block and its up block, or a
+    run of 16 gate columns and its up run where the halves are not whole blocks."""
+    if paired_width(q, p) == 0:
+        return ceil_div(p.n, LAYOUT_PACK_NR)
+    return p.n // (2 * LAYOUT_PACK_NR) if p.n // 2 % LAYOUT_PACK_NR == 0 else p.n // LAYOUT_PACK_NR
+
+
+def gemv_unit_blocks(q: Plan, p: Problem) -> int:
+    """The blocks of a unit of the call's columns (gemv_units): 2 for a gated call whose tiles pair
+    its halves as whole blocks (a gate block and its up block), else 1."""
+    return 2 if paired_width(q, p) and p.n // 2 % LAYOUT_PACK_NR == 0 else 1
+
+
+def gemv_read_blocks(q: Plan, p: Problem) -> int:
+    """The most blocks one GEMV kernel call of q reads: gemv_call_blocks, or a thread's units where
+    they are fewer (its share takes one kernel call whatever more q allows)."""
+    unit = gemv_unit_blocks(q, p)
+    share = ceil_div(gemv_units(q, p), max(1, q.gemv_threads))
+    return min(q.gemv_call_blocks // unit, share) * unit
+
+
+def gemv_schedule(q: Plan, p: Problem) -> Tuple:
+    """An M = 1 call's schedule: on the GEMV kernels their threads and the most blocks one of their
+    calls reads (gemv_read_blocks), on the tiles whether they run on the calling thread."""
+    return ("gemv", q.gemv_threads, gemv_read_blocks(q, p)) if q.gemv else ("tiles", q.one_thread)
+
+
+def worker_threads(q: Plan) -> int:
+    """The threads that take the call's work: an M = 1 call's on the GEMV kernels (gemv_threads) or
+    on the calling thread (one), else the plan's."""
+    if q.gemv:
+        return q.gemv_threads
+    return 1 if q.one_thread else q.threads
+
+
+def one_thread(q: Plan, p: Problem, uarch: Any, schema: Any) -> bool:
+    """native_one_thread: p's layout is at most gemv_one_thread_pct percent of L2 (0 but at M 1)."""
+    return layout_bytes(p, schema) <= uarch.l2_bytes * q.gemv_one_thread_pct // 100
+
+
+def gemv_threads(q: Plan, p: Problem, uarch: Any, schema: Any) -> int:
+    """native_gemv_threads: one where the call runs on the calling thread, else the plan's team, at
+    most one per unit of the call's columns."""
+    if one_thread(q, p, uarch, schema):
+        return 1
+    return max(1, min(q.threads, gemv_units(q, p)))
+
+
+def gemv_call_blocks(q: Plan, p: Problem, uarch: Any, schema: Any, threads: int) -> int:
+    """native_gemv_call_blocks: the plan's gemv_blocks; else 2, or 4 for a float route where a
+    thread's share of p's layout fits half of L2 (an INT8 or INT4 route 2, its most); in whole units
+    of the call's columns, one at least (a call whose halves pair as whole blocks reads 2 for 1 or 3)."""
+    blocks = q.gemv_blocks
+    if blocks == 0 and schema.route(p).cls != "rows":
+        blocks = GEMV_MAX_INT_BLOCKS
+    if blocks == 0:
+        nbytes = layout_bytes(p, schema)
+        share = nbytes if threads <= 1 else nbytes // threads
+        blocks = GEMV_MAX_BLOCKS if share <= uarch.l2_bytes // 2 else 2
+    unit = gemv_unit_blocks(q, p)
+    return max(1, blocks // unit) * unit
+
+
+def gemv_plan(p: Problem, uarch: Any, hp: Dict[str, Any], schema: Any, q: Plan) -> Plan:
+    """q with the fields of an M = 1 call (m1_fields): gemv_one_thread_pct, and on the GEMV kernels
+    of its route unless gemv is off (a build with the F16_PH tile kernels has their GEMV kernels)
+    the gemv_blocks pin at most the route's blocks; then whether the call runs on the calling
+    thread and, on the GEMV kernels, its threads and blocks per kernel call."""
+    if p.m != 1:
+        return q
+    q = replace(q, gemv_one_thread_pct=hp["gemv_one_thread_pct"])
+    q.one_thread = one_thread(q, p, uarch, schema)
+    if not hp["gemv"]:
+        return q
+    q.gemv = True
+    q.gemv_blocks = min(hp["gemv_blocks"], GEMV_MAX_BLOCKS if schema.route(p).cls == "rows" else GEMV_MAX_INT_BLOCKS)
+    q.gemv_threads = gemv_threads(q, p, uarch, schema)
+    q.gemv_call_blocks = gemv_call_blocks(q, p, uarch, schema, q.gemv_threads)
+    return q
+
+
+def tile_plan(p: Problem, uarch: Any, hp: Dict[str, Any], schema: Any) -> Plan:
+    """The rules' plan and, with cost_model, the model's choice."""
     q = rules_plan(p, uarch, hp, schema)
     if hp["cost_model"] == 0:
         return q
@@ -1076,8 +1204,13 @@ def effective_signature(q: Plan, p: Problem) -> Tuple:
     schedule, call rows above the tile rows, the source copy without trans_a,
     the INT8 store / bias gates the epilogue closes, pass budgets of
     single-call tiles).  Unknown cases keep the raw field, so two different
-    plans are never merged.
+    plans are never merged.  An M = 1 call adds the GEMV kernels' threads and
+    the most blocks one of their calls reads (gemv_read_blocks), or whether it
+    runs on the tiles on the calling thread.
     """
+    m1: List[Any] = []
+    if p.m == 1:
+        m1 = [gemv_schedule(q, p)]
     width = paired_width(q, p)
     if width > q.nr:
         q = paired_plan(q, p, width)
@@ -1093,7 +1226,7 @@ def effective_signature(q: Plan, p: Problem) -> Tuple:
         sig += [q.mr if row_groups else min(q.mr, q.mb), min(q.kc, p.k)]
         if p.trans_a:
             sig += [q.copy_block, p.m * p.k >= q.copy_par_min]
-        return tuple(sig)
+        return tuple(sig + m1)
     widths = int8_widths(q)
     runs = int8_turn_runs(q, p, width > 0)
     used = sorted({w for w, _, _ in runs})
@@ -1121,7 +1254,7 @@ def effective_signature(q: Plan, p: Problem) -> Tuple:
     if p.has_bias and p.epilogue == "store" and p.int8_scheme == "per_channel":
         sig.append(("dequant_bias", q.int8_bias_in_dequant))
     sig += [q.copy_block, p.m * p.k >= q.copy_par_min]
-    return tuple(sig)
+    return tuple(sig + m1)
 
 
 def plan_features(q: Plan, p: Problem) -> Dict[str, float]:
@@ -1147,23 +1280,26 @@ def plan_features(q: Plan, p: Problem) -> Dict[str, float]:
         "int8_cw_mask": float(q.int8_cw_mask), "direct": float(q.int8_direct_store),
         "pass_budget": float(q.int8_pass_budget) if p.int8 else 0.0,
         "copy_block": float(q.copy_block), "copy_parallel": float(p.m * p.k >= q.copy_par_min),
+        "gemv": float(q.gemv), "gemv_threads": float(q.gemv_threads), "gemv_blocks": float(q.gemv_call_blocks),
+        "one_thread": float(q.one_thread),
     }
 
 
 # The fields of the [MATMUL.NATIVE_BRGEMM] line the tuner compares with its plan: the
-# plan's, and the GEMV kernels of the call (gemv).
+# plan's, and the GEMV kernels of the call (gemv) with their threads and blocks per call.
 LOG_PLAN_FIELDS = ("nr", "mb", "kc", "kernels", "tiles", "threads", "col_groups", "unit_tiles", "nb",
-                   "domain_threads", "gemv", "mr", "row_unit", "traversal", "int8_rows", "int8_cw", "int8_scheme",
-                   "gs", "int8_pass", "pass_budget", "copy_block")
+                   "domain_threads", "gemv", "gemv_threads", "gemv_blocks", "mr", "row_unit", "traversal",
+                   "int8_rows", "int8_cw", "int8_scheme", "gs", "int8_pass", "pass_budget", "copy_block")
 # Fields the line prints only for some plans, and their value when it does not.
 LOG_OPTIONAL_FIELDS = {"unit_tiles": "0"}
 # Every field the line prints: the call, the plan, the call's choices that are not
-# plan fields (gemv, direct, dequant_bias, wei, order, team, padded_n, pairing),
-# its provenance (source, cfg) and transA.
+# plan fields (gemv, direct, dequant_bias, wei, order, team, padded_n, pairing,
+# gemv_threads, gemv_blocks), its provenance (source, cfg) and transA.
 LOG_LINE_FIELDS = ("M", "N", "K", "pack_nr", "nr", "mb", "kc", "kernels", "tiles", "threads", "col_groups",
                    "unit_tiles", "nb", "domain_threads", "transA", "gemv", "mr", "row_unit", "traversal",
                    "int8_rows", "int8_cw", "int8_scheme", "direct", "wei", "gs", "order", "pass_budget", "int8_pass",
-                   "dequant_bias", "copy_block", "source", "cfg", "team", "padded_n", "pairing")
+                   "dequant_bias", "copy_block", "source", "cfg", "team", "padded_n", "pairing", "gemv_threads",
+                   "gemv_blocks")
 
 
 def _gemv_kinds() -> Tuple[str, ...]:
@@ -1183,12 +1319,12 @@ GEMV_KINDS = _gemv_kinds()
 
 
 def gemv_kind(q: Plan, p: Problem) -> str:
-    """The GEMV kernels the call runs on (gemv_kind_of): every M = 1 call runs on those of
-    its route, the route of its format on its plan's kernels that serves its INT8 scheme
-    (the group and the one-group routes of a format of group scales only run kernels of one
-    name); none for any other M.  A GEMV kernel takes all of K for each block of columns:
+    """The GEMV kernels the call runs on (the plan's gemv): an M = 1 call, unless gemv is off,
+    runs on those of its route, the route of its format on its plan's kernels that serves its
+    INT8 scheme (the group and the one-group routes of a format of group scales only run kernels
+    of one name); none on the tiles.  A GEMV kernel takes all of K for each block of columns:
     the plan's tiles, M blocks and K passes do not apply to the call."""
-    if p.m != 1:
+    if not q.gemv:
         return "none"
     routes = [r for r in FORMATS[p.dtype]["routes"] if r["family"] == q.kind]
     return next((r for r in routes if p.int8_scheme in r["int8_schemes"]), routes[0])["gemv"]
@@ -1212,6 +1348,11 @@ def plan_log_fields(q: Plan, p: Problem) -> Dict[str, str]:
         out["unit_tiles"] = str(q.unit_tiles)
         out["nb"] = str(q.nr * q.unit_tiles)
         out["domain_threads"] = str(q.domain_threads)
+    # The threads of a call on the GEMV kernels and the most blocks one of their calls reads,
+    # which the line names when a layer sets gemv_blocks or gemv_one_thread_pct.
+    if q.gemv:
+        out["gemv_threads"] = str(q.gemv_threads)
+        out["gemv_blocks"] = str(gemv_read_blocks(q, p))
     if p.int8:
         out["int8_rows"] = "%d/%d" % (q.int8_rows_nv1, q.int8_rows_nv2)
         out["int8_cw"] = "/".join(str(w) for w in cw_widths(q.int8_cw_mask))
@@ -1228,13 +1369,17 @@ def plan_log_fields(q: Plan, p: Problem) -> Dict[str, str]:
 def compare_fields(want: Dict[str, str], logged: Dict[str, str], bf16: bool = False) -> List[str]:
     """Fields where a logged plan differs from the expected log fields; an optional field
     the line leaves out has its value when absent, and a field one side lacks is not
-    compared (bf16 is kept for older callers)."""
+    compared (bf16 is kept for older callers), but the GEMV kernels' threads, which a line
+    without them (no GEMV key set) bounds by its team: a region of fewer threads ran fewer."""
     out = []
     for f in LOG_PLAN_FIELDS:
         absent = LOG_OPTIONAL_FIELDS.get(f)
         a, b = want.get(f, absent), logged.get(f, absent)
         if a is not None and b is not None and a != b:
             out.append("%s: model %s, log %s" % (f, a, b))
+    workers, team = want.get("gemv_threads", ""), logged.get("team", "")
+    if "gemv_threads" not in logged and workers.isdigit() and team.isdigit() and int(team) < int(workers):
+        out.append("gemv_threads: model %s, log team %s" % (workers, team))
     return out
 
 

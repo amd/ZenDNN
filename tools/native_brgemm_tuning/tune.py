@@ -126,7 +126,7 @@ class Campaign:
             self._spaces = {}
             for p in self.problems:
                 keys = cand_mod.search_keys(self.schema, p.dtype, self.c["allow_bit_changing"],
-                                            self.c.get("keys") or None)
+                                            self.c.get("keys") or None, m=p.m)
                 self._spaces[p.key()] = cand_mod.Space(p, self.schema, self.uarch, keys, values,
                                                        self.c["allow_bit_changing"],
                                                        self.c.get("keep_threads", False), base.get(p.dtype))
@@ -233,7 +233,7 @@ def cmd_problems(a: argparse.Namespace) -> int:
 def cmd_space(a: argparse.Namespace) -> int:
     s = schema_mod.load_schema(a.schema, a.uarch)
     p = Problem.parse(a.problem)
-    keys = cand_mod.search_keys(s, p.dtype, a.allow_bit_changing, a.keys.split(",") if a.keys else None)
+    keys = cand_mod.search_keys(s, p.dtype, a.allow_bit_changing, a.keys.split(",") if a.keys else None, m=p.m)
     sp = cand_mod.Space(p, s, s.uarch, keys, cand_mod.parse_values(a.values or [], s), a.allow_bit_changing,
                         a.keep_threads)
     log("problem %s\nbuilt-in plan: %s" % (p.label(), plan_log_fields(sp.default.plan, p)))

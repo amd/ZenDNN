@@ -25,6 +25,7 @@
 #include <system_error>
 #include <type_traits>
 
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/gemv/native_gemv_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_tuning_keys.hpp"
 
 namespace zendnnl {
@@ -172,6 +173,11 @@ constexpr native_config_key_t kKeys[] = {
                 kNativeKeyPerChannel},
         {"cm_int4_min_m", key_type::int32, 0, kBig30, 1, false,
                 kNativeKeyPerGroup},
+        // An M = 1 call: the GEMV kernels or the tiles, the blocks of one
+        // GEMV kernel call, and the layouts the calling thread runs alone.
+        {"gemv", key_type::boolean, 0, 1, 1, false},
+        {"gemv_blocks", key_type::int32, 1, kNativeGemvMaxBlocks, 1, false},
+        {"gemv_one_thread_pct", key_type::int32, 0, 1000, 1, false},
 };
 constexpr size_t kKeyCount = sizeof(kKeys) / sizeof(kKeys[0]);
 
@@ -270,6 +276,9 @@ const field_t *fields() {
             bind(&c::cm_block_k, &p::cm_block_k),
             bind(&c::cm_int8_l1_pct, &p::cm_int8_l1_pct),
             bind(&c::cm_int4_min_m, &p::cm_int4_min_m),
+            bind(&c::gemv, &p::gemv),
+            bind(&c::gemv_blocks, &p::gemv_blocks),
+            bind(&c::gemv_one_thread_pct, &p::gemv_one_thread_pct),
     };
     static_assert(sizeof(k) / sizeof(k[0]) == kKeyCount, "one field per key");
     return k;

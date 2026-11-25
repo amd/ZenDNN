@@ -232,7 +232,11 @@ const char *const kSameBitsSettings[] = {"nr=16", "nr=32", "mr=1", "mr=4",
         "cm_block_k=0",
         "cm_group_skew_pct=100,cm_group_rows_pct=200",
         "cm_drift_kib=0,cm_pass_kib=1048576,cm_pass_calls=1",
-        "cm_int8_l1_pct=1"};
+        "cm_int8_l1_pct=1", "gemv=0", "gemv=0,gemv_one_thread_pct=0",
+        "gemv_blocks=1", "gemv_blocks=2", "gemv_blocks=3", "gemv_blocks=4",
+        "gemv_one_thread_pct=0", "gemv_one_thread_pct=1000",
+        "gemv_blocks=1,gemv_one_thread_pct=0",
+        "gemv_blocks=4,gemv_one_thread_pct=1000,nr=16"};
 
 uint32_t seed_of(const std::string &s) {
     uint32_t h = 2166136261u;

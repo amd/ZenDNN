@@ -914,11 +914,13 @@ TEST(NativeBrgemmInt8Tile, AlphaBetaFollowReferenceOrder) {
                                 || dst_dt == data_type_t::f16;
                         float v = static_cast<float>(static_cast<int32_t>(s));
                         if (ab.alpha != 1.0f) v *= ab.alpha;
-                        if (ab.beta != 0.0f && !beta_last) v += c * ab.beta;
+                        if (ab.beta != 0.0f && !beta_last)
+                            v += native_brgemm_test::mul_unfused(c, ab.beta);
                         if (z != 0) v += static_cast<float>(-z * col_sum);
                         v *= ss[m];
                         v *= ws.rounded[col];
-                        if (ab.beta != 0.0f && beta_last) v += c * ab.beta;
+                        if (ab.beta != 0.0f && beta_last)
+                            v += native_brgemm_test::mul_unfused(c, ab.beta);
                         want[static_cast<size_t>(m) * N + p] = v;
                     }
                 }
@@ -2263,7 +2265,12 @@ TEST(NativeBrgemmInt8Beta, EveryRouteAddsBetaAfterTheScales) {
     for (size_t i = 0; i < q.size(); ++i)
         src_bf16[i] = bfloat16_t(static_cast<float>(q[i]) / 64.0f);
     std::vector<int> wv(static_cast<size_t>(K) * N);
-    const auto c0 = random_floats(static_cast<size_t>(M) * N, -2.0f, 2.0f, rng);
+    // bf16 values: beta * C is exact, so the reference algorithm's bits do
+    // not depend on whether its compiler fuses that product with the add
+    // that follows it.
+    auto c0 = random_floats(static_cast<size_t>(M) * N, -2.0f, 2.0f, rng);
+    for (auto &x : c0)
+        x = static_cast<float>(bfloat16_t(x));
     const auto src_scales = random_floats(M * 4, 0.02f, 0.1f, rng);
     const auto wei_scales = random_floats(4 * N, 0.01f, 0.05f, rng);
     for (const beta_case_t &bc : cases) {

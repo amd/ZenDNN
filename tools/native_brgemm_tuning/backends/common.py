@@ -23,10 +23,13 @@ from collections import defaultdict
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..candidates import MAX_CLAUSES, problem_filters
-from ..plan import LOG_PLAN_FIELDS
+from ..plan import LOG_PLAN_FIELDS, sets_gemv_keys
 from ..problems import LAYOUT_PACK_NR, Problem
 
 LOG_TAG = "[MATMUL.NATIVE_BRGEMM]"
+# The fields of an M = 1 call's line that give its schedule on the GEMV kernels: the kernels, their
+# threads and the most blocks one of their calls reads.
+GEMV_SCHEDULE_FIELDS = ("gemv", "gemv_threads", "gemv_blocks")
 WARN_RE = re.compile(
     r"native BRGEMM: (?P<label>.*?) (?:gives an illegal plan|conflicts with a higher layer) for M=(?P<M>\d+) "
     r"N=(?P<N>\d+) K=(?P<K>\d+) threads=(?P<threads>\d+) (?P<dtype>\S+): (?P<reason>.*?); dropped")
@@ -74,18 +77,33 @@ def parse_warnings(text: str) -> Tuple[Dict[Tuple[int, int, int], str], List[str
     return reasons, lines
 
 
-def applied_status(fields: Optional[Dict[str, str]], expected: str) -> Tuple[str, str]:
-    """(status, reason) of a call whose candidate settings were expected ("" = built-in).
+def moves_gemv(expected: str, want: Optional[Dict[str, str]] = None,
+               builtin: Optional[Dict[str, str]] = None) -> bool:
+    """Whether the candidate of the settings expected gives an M = 1 call on the GEMV kernels another
+    schedule than the built-in plan's: want and builtin, the expected log fields of its plan and of
+    the built-in plan (plan_log_fields), differ in GEMV_SCHEDULE_FIELDS (a key of the tiles moves it
+    through the plan's threads, as threads_cap does); without both, it sets a key of the GEMV
+    kernels (GEMV_KEYS)."""
+    if want and builtin:
+        return any(want.get(f) != builtin.get(f) for f in GEMV_SCHEDULE_FIELDS)
+    return sets_gemv_keys(expected)
+
+
+def applied_status(fields: Optional[Dict[str, str]], expected: str, want: Optional[Dict[str, str]] = None,
+                   builtin: Optional[Dict[str, str]] = None) -> Tuple[str, str]:
+    """(status, reason) of a call whose candidate settings were expected ("" = built-in), want and
+    builtin the expected log fields of its plan and of the built-in plan, when known.
 
     applied: the override was the source and cfg equals the candidate; dropped:
     the override was not used (an illegal plan, or no clause matched); mismatch:
-    another config was applied; gemv: the call ran on the GEMV kernels (every
-    M = 1 call does), which take none of the plan's tiles, M blocks or K passes;
+    another config was applied; gemv: the call ran on the GEMV kernels (an M = 1
+    call does unless gemv is off), which take none of the plan's tiles, M blocks
+    or K passes, and the candidate leaves their schedule as built in (moves_gemv);
     no_log: the call printed no line with source=.
     """
     if fields is None:
         return "no_log", "no %s line for this problem" % LOG_TAG
-    if fields.get("gemv", "none") != "none":
+    if fields.get("gemv", "none") != "none" and expected and not moves_gemv(expected, want, builtin):
         return "gemv", "the call ran on the %s GEMV kernels" % fields["gemv"]
     src = fields.get("source")
     if src is None:

@@ -22,7 +22,7 @@ run time, gradient-boosted trees when present, numpy models otherwise).
 |---|---|
 | `schema.py` | Loads the planner's schema: config keys (type, range, default or auto value, dtype, INT8 schemes, bits), match keys, rule features and comparisons, kernel registry (BF16, FP32, an INT8 kernel family per scheme it serves, the INT4 group kernels and the INT4 kernels of one group over K, F16 and F16_PH, each with its tile widths and rows per call), hardware, uarch, the machine's value of every version 2 hardware key (`hw_match`), the fields of the `[MATMUL.NATIVE_BRGEMM]` line (`plan_line`) and the values of its `gemv` field (`plan_line_gemv`). Reads the JSON the `SchemaDump` gtest prints between `BEGIN NATIVE TUNING SCHEMA` and `END NATIVE TUNING SCHEMA` (raw or inside a gtest log), else `fixtures/schema_dump.json`, that gtest's output. `fixtures/schema_design.json`, written from the design, is the schema of an older build, without the rule keys, the blocks schedule and `hw_match`. |
 | `problems.py` | Problems (the planner's problem, `native_problem_t`: the weight type bf16, s8, f32, s4 or f16, a weight of N not a multiple of 32 planned and matched at N rounded up to whole 32-column blocks, `plan_n`, an s8 problem's INT8 scheme, an s4 problem's group size and scale bytes, the epilogue class), shape lists (TSV), M classes, the rule features as the loader computes them. |
-| `plan.py` | The built-in planner (`native_planner.cpp`) line for line: the rules' plan (the tile grid, the rules behind the switches `makespan`, `l1_pass`, `traffic_groups`, `bf16_alias`, `bf16_narrow_n` and `blocks`, the L3 rules only with an L3, BF16 tiles of 64 and 128 columns and every type's when pinned (slabs of each kernel kind's widest call, the INT8 K pass at the tile's width), the blocks schedule, the tiles of per-group INT8 and of s4 calls with their pass budget (12 rows per call at both widths for an s4 weight of one group over K), the F16_PH tiles of two blocks and K passes of whole blocks), then with `cost_model` the model's choice among the rules' variants (rows per call and row groups for BF16 and F16, the long K pass and short M blocks of long weight streams (where one core streams slower than its share of the link, the M blocks of a BF16 team that fills its L3 domains only over a K above `cm_block_k`), INT8 row groups and blocks of three calls, s4 M blocks (weighed at the group kernel's rows per call) and the K passes of one group); plan validation, single-override resolution, plan signature (the K passes the calls of each INT8 tile take, in turn or one at a time, the tail tile's among them), the plan fields of the log line (a gated call's of the tiles it runs: the width they pair its halves at, `native_paired_width`, and their plan). The built-in plan has each key at the schema's default; a rule whose switch or bound the schema lacks is one its build does not have. |
+| `plan.py` | The built-in planner (`native_planner.cpp`) line for line: the rules' plan (the tile grid, the rules behind the switches `makespan`, `l1_pass`, `traffic_groups`, `bf16_alias`, `bf16_narrow_n` and `blocks`, the L3 rules only with an L3, BF16 tiles of 64 and 128 columns and every type's when pinned (slabs of each kernel kind's widest call, the INT8 K pass at the tile's width), the blocks schedule, the tiles of per-group INT8 and of s4 calls with their pass budget (12 rows per call at both widths for an s4 weight of one group over K), the F16_PH tiles of two blocks and K passes of whole blocks), then with `cost_model` the model's choice among the rules' variants (rows per call and row groups for BF16 and F16, the long K pass and short M blocks of long weight streams (where one core streams slower than its share of the link, the M blocks of a BF16 team that fills its L3 domains only over a K above `cm_block_k`), INT8 row groups and blocks of three calls, s4 M blocks (weighed at the group kernel's rows per call) and the K passes of one group); plan validation, single-override resolution, plan signature (the K passes the calls of each INT8 tile take, in turn or one at a time, the tail tile's among them), the plan fields of the log line (a gated call's of the tiles it runs: the width they pair its halves at, `native_paired_width`, and their plan), and an M = 1 call's fields: the GEMV kernels or the tiles (`gemv`), whether it runs on the calling thread (`gemv_one_thread_pct`), and on the GEMV kernels its threads and blocks per kernel call over the units of its columns (`gemv_blocks`, the rules of `native_gemv_threads` and `native_gemv_call_blocks`). The built-in plan has each key at the schema's default; a rule whose switch or bound the schema lacks is one its build does not have. |
 | `cost_model.py` | The planner's cost model (`native_cost_model.cpp`) line for line: the modeled cycles of a plan's busiest worker, with every floating-point expression in the library's order. |
 | `candidates.py` | Override text (format, parse, clauses), static checks, the default search space, per-problem candidate spaces, de-duplication. |
 | `results.py` | Results store (JSONL) and the statistics: per-session ratios, noise, significance. |
@@ -98,9 +98,12 @@ run time, gradient-boosted trees when present, numpy models otherwise).
    `group` its group size along K, -1 for one group over K, `--s4-group`
    when the row names none) and M classes give one problem per shape and
    representative M (`--m-classes "2-16:8/16,17-64:32/64,..."`:
-   `lo-hi:rep/rep`, `lo-` is unbounded; M = 1 runs on the GEMV kernels and
-   has no plan to tune, see step 4). Rows of one (dtype, N, K, group)
-   merge; `lm_head` rows are left out. An s4 problem's scales take the bytes
+   `lo-hi:rep/rep`, `lo-` is unbounded; M = 1 runs on the GEMV kernels,
+   whose keys no other M reads: a class with M 1 among its representatives
+   covers M 1 alone, `1`, and a problem at M 1 in a wider class, such as a
+   shape whose M range is 1 alone or a `--problem` at M 1, is judged and
+   exported in a class of M 1 alone). Rows of one (dtype, N, K, group) merge;
+   `lm_head` rows are left out. An s4 problem's scales take the bytes
    of the backend's `--scale-dt`.
    N is the call's: the override filters, the table entries and the rule
    features use its padded width, as the library matches it, and the log
@@ -115,9 +118,10 @@ run time, gradient-boosted trees when present, numpy models otherwise).
    after a model-level accuracy check. A candidate is kept only if it
    passes the static checks and resolves to a legal plan (with
    `init --keep-threads`, also only if its plan's team is no smaller than
-   the built-in plan's: a call on fewer threads changes the thread team the
-   calls before and after it run on, which a session of one shape at a time
-   does not see); candidates that
+   the built-in plan's, an M = 1 call's the threads of its GEMV kernels or
+   the calling thread alone: a call on fewer threads changes the thread team
+   the calls before and after it run on, which a session of one shape at a
+   time does not see); candidates that
    resolve to the same work (same plan signature, or the built-in plan) are
    measured once. Each rule switch (`makespan`, `l1_pass`,
    `traffic_groups`, `blocks`, and for BF16 `bf16_alias` and
@@ -136,10 +140,18 @@ run time, gradient-boosted trees when present, numpy models otherwise).
    block, a pin of that schedule: the unit takes `nb` / `nr` column tiles,
    at least one, whatever `nr` the plan takes, and replaces `unit_tiles`,
    the unit in tiles, which is searched only when `--keys` names it or on
-   the schema of a build without `nb`). A constant of a rule that is off
-   changes no plan and is merged away, so with the rules off the constants
-   count together with a switch (`--keys` searches the rules alone, see
-   Usage).
+   the schema of a build without `nb`). An M = 1 problem, which runs on the
+   GEMV kernels, takes their keys alone (every other M all the others;
+   `--keys` adds others, such as `threads_cap`, whose cap on the plan's
+   threads gives the GEMV kernels fewer): `gemv` at 0 (the tiles), `gemv_blocks` from 1 to 4 (an s8 or s4 weight's
+   kernels take 2 at most, so 3 and 4 are its 2; a gated call whose halves
+   pair as whole blocks reads a gate block with its up block, so 1 and 3 are
+   its 2) and `gemv_one_thread_pct`
+   from 0 (no call on the calling thread) to 1000 (layouts of up to 10 times
+   L2 there); a value that gives the built-in schedule is merged away. A
+   constant of a rule that is off changes no plan and is merged away, so
+   with the rules off the constants count together with a switch (`--keys`
+   searches the rules alone, see Usage).
 4. **Sessions.** A round hands its candidates to the backend. For the pod
    backends, `backends/jobs.py` writes one session directory per pod claim
    (up to `--parallel` per round) and starts `--launcher` on it, for example
@@ -162,11 +174,21 @@ run time, gradient-boosted trees when present, numpy models otherwise).
    expects that width to be the one the model pairs them at, and the paired
    plan's fields at it). A call on the tiles logs
    `gemv=none`. Every M = 1 call runs on the GEMV kernels of its type
-   instead, which take all of K for each block of columns and none of the
-   plan's tiles, M blocks or K passes: its line names them (`gemv=bf16`,
-   `f32`, `f16`, `f16_ph`, `s8`, `s8_group` or `s4`, which the plan model
-   gives too) next to the plan of the tiles, and such a probe is recorded as
-   `gemv` and kept out, so M = 1 has no plan to tune.
+   instead (unless `gemv` is 0), which take all of K for each block of
+   columns and none of the plan's tiles, M blocks or K passes: its line names
+   them (`gemv=bf16`, `f32`, `f16`, `f16_ph`, `s8`, `s8_group` or `s4`, which
+   the plan model gives too) next to the plan of the tiles, and, when
+   `gemv_blocks` or `gemv_one_thread_pct` is set, the threads that took its
+   columns (at most its `team=`) and the most blocks one of their kernel
+   calls read (`gemv_threads=`, `gemv_blocks=`; a thread's whole share where
+   that is fewer than the call's blocks), which the check compares with the
+   model's: a call that ran on fewer threads than the model's is a mismatch,
+   and so is a line without them whose `team=` is below the model's threads.
+   A probe of such a call whose candidate leaves the GEMV kernels' schedule
+   (their threads and the blocks a kernel call reads) as the built-in
+   plan's is recorded as `gemv` and kept out: the call took none of its
+   keys. A key of the tiles changes that schedule only through the plan's
+   threads, as `threads_cap` does.
    Then the timed runs go A S1 .. Sk A per repeat (slots reversed on odd
    repeats), with the log off. Without `--launcher`, or with `--dry-run`,
    sessions are written and the command to run each is printed; run them,
@@ -176,9 +198,10 @@ run time, gradient-boosted trees when present, numpy models otherwise).
    median(candidate) / median(built-in); noise = z * sqrt(rel_mad(built-in)^2
    + rel_mad(candidate)^2) (MAD-based, z = 2 by default). It counts as a gain
    when 1 - ratio exceeds max(min_gain, noise) in every session. Candidates
-   whose probe was dropped, mismatched, unlogged, ran on the GEMV kernels,
-   changed the output hash (replay `--check 1`) or ran another plan than the
-   plan model's (an entry names the model's plan) are excluded. So are all
+   whose probe was dropped, mismatched, unlogged, ran on the GEMV kernels
+   at the built-in plan's schedule, changed the output hash (replay `--check 1`) or
+   ran another plan than the plan model's (an entry names the model's plan)
+   are excluded. So are all
    candidates of a problem whose built-in run mismatched, for example a
    gated call paired at another width than the model's: the model's built-in
    plan, against which candidates are de-duplicated, is not the library's,
@@ -207,8 +230,11 @@ run time, gradient-boosted trees when present, numpy models otherwise).
    written round.
 8. **Export.** `tune.py export -o tuning.json` writes an entry per class
    whose confirmation agrees: `match` holds every problem field and the M
-   range (from M 2: an M = 1 call runs on the GEMV kernels, so a class of
-   M = 1 alone has no entry), `config` the full knob set the measurement
+   range (from M 2: an M = 1 call runs on the GEMV kernels, so the entry of a
+   class of M = 1 alone, at M 1, takes a winner that gives them another
+   schedule than the built-in plan's, by their keys or a cap on the plan's
+   threads, and a winner that leaves it gets none), `config` the full knob
+   set the measurement
    fixed (the winner's keys, the built-in value of every other searched
    key, the rule switches among
    them (1 unless the winner sets one to 0), equivalent explicit values for
@@ -639,8 +665,9 @@ description (`--machine l1d,l2,l3,family_l3,dom`):
     python3 $P compare /tmp/dump.txt --seed 11 --count 200000 --machine $M --schema schema.json
 
 The N block's cases (`--nb`: every case sets `nb`, half of them the blocks
-schedule, a quarter `unit_tiles` too) have their own fixture,
-`fixtures/plan_check_nb.json`, which the refresh writes too. Each plan
+schedule, a quarter `unit_tiles` too, and a share the keys of an M = 1 call,
+most of them at M 1, whose GEMV fields the dump then adds) have their own
+fixture, `fixtures/plan_check_nb.json`, which the refresh writes too. Each plan
 fixture names the kernel kinds its plans came from, and the test plans with
 those; each holds one f16 kernel family. `plan_check.json` holds the plans of
 a machine with every kernel kind, its f16 calls on the F16_PH kernels (made
@@ -685,7 +712,9 @@ change:
    `problems.py`; a kernel kind into `schema.py`; a plan-line field into
    `plan.LOG_LINE_FIELDS` (and `plan_log_fields` when it is a plan field);
    a `gemv` value, or a change to which calls run on the GEMV kernels, into
-   `plan.GEMV_KINDS` and `plan.gemv_kind`.
+   `plan.GEMV_KINDS` and `plan.gemv_kind`; a change to an M = 1 call's
+   fields or the rules of its threads and blocks per call into
+   `plan.gemv_plan`.
 3. Refresh both fixtures (above) and run the tests here; `test_sync.py` and
    `test_plan.py` fail until the tuner follows the planner, and
    `test_tunings.py` while a shipped entry's plan has moved (step 4).

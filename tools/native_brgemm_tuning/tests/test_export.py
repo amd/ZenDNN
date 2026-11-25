@@ -29,7 +29,8 @@ from native_brgemm_tuning import candidates as C  # noqa: E402
 from native_brgemm_tuning import export as E  # noqa: E402
 from native_brgemm_tuning import plan as PL  # noqa: E402
 from native_brgemm_tuning import results as R  # noqa: E402
-from native_brgemm_tuning.problems import MClass, Problem, parse_m_classes, rule_features  # noqa: E402
+from native_brgemm_tuning.problems import (  # noqa: E402
+    MClass, Problem, Shape, parse_m_classes, problems_from_shapes, rule_features)
 
 CLASSES = parse_m_classes("1,2-16:8/16,129-512:256/512")
 SHAPES = [(4096, 4096), (6144, 4096)]
@@ -225,6 +226,76 @@ class TestEntries(unittest.TestCase):
     def test_entries_of_a_build_without_the_bf16_rules(self):
         self.check_rule_entries(OLDER)
 
+    def test_m1_class_takes_the_gemv_keys(self):
+        # The class of M = 1 alone, whose calls run on the GEMV kernels: a winner of their keys gets
+        # an entry at M 1, its config the GEMV keys at their measured or built-in values; a winner of
+        # the tiles' keys none.  A class that measures M 1 next to another M is refused.
+        def gemv(p, c):
+            return 0.8 if c.text == "gemv_blocks=1" else 0.9 if c.text == "nr=16" else 1.0
+
+        probs = [Problem("bf16", 1, 4096, 4096), Problem("bf16", 8, 4096, 4096)]
+        fx = Fixture(probs, texts=("gemv_blocks=1",), ratio=gemv)
+        w = fx.winners(parse_m_classes("1,2-16:8"))
+        fx.confirm(w)
+        entries, skipped = E.build_entries(w, fx.spaces, SCHEMA, UARCH)
+        self.assertEqual([e["id"] for e in entries], ["bf16-n4096-k4096-m1-t32"])
+        self.assertEqual(entries[0]["match"]["m"], {"min": 1, "max": 1})
+        self.assertEqual(entries[0]["config"], {"gemv": True, "gemv_blocks": 1, "gemv_one_thread_pct": 25})
+        self.assertEqual([s["id"] for s in skipped], ["bf16-n4096-k4096-m2-16-t32"])
+        doc = E.build_doc(entries, None, SCHEMA)
+        self.assertEqual(E.validate_doc(doc, SCHEMA), ([], []))
+        cfg, layers = E.resolve_config(doc, probs[0], SCHEMA, UARCH)
+        q = PL.resolve(probs[0], E.config_from_json(cfg, SCHEMA), UARCH, SCHEMA).plan
+        self.assertEqual((layers, q.gemv, q.gemv_call_blocks), (["table:bf16-n4096-k4096-m1-t32"], True, 1))
+        self.assertEqual(E.resolve_config(doc, probs[1], SCHEMA, UARCH), ({}, []))
+        tiles = Fixture(probs[:1], texts=("nr=16",), ratio=gemv)
+        w = tiles.winners(parse_m_classes("1"))
+        tiles.confirm(w)
+        self.assertEqual(E.build_entries(w, tiles.spaces, SCHEMA, UARCH),
+                         ([], [{"id": "bf16-n4096-k4096-m1-t32", "reason": "M = 1 calls run on the GEMV kernels"}]))
+        # A cap on the plan's threads gives the GEMV kernels 8 of 32, another schedule: its winner
+        # gets an entry at M 1, with the cap.
+        capped = Fixture(probs[:1], texts=("threads_cap=8",), ratio=lambda p, c: 0.8)
+        w = capped.winners(parse_m_classes("1"))
+        capped.confirm(w)
+        entries, skipped = E.build_entries(w, capped.spaces, SCHEMA, UARCH)
+        self.assertEqual(([e["id"] for e in entries], skipped), (["bf16-n4096-k4096-m1-t32"], []))
+        self.assertEqual(entries[0]["config"]["threads_cap"], 8)
+        cfg, _ = E.resolve_config(E.build_doc(entries, None, SCHEMA), probs[0], SCHEMA, UARCH)
+        self.assertEqual(PL.resolve(probs[0], E.config_from_json(cfg, SCHEMA), UARCH, SCHEMA).plan.gemv_threads, 8)
+        for text in ("1-16:1/8", "1-4:1"):
+            with self.assertRaises(ValueError, msg=text):
+                parse_m_classes(text)
+        self.assertEqual(parse_m_classes("1-16:8")[0].reps, (8,))
+
+    def test_a_problem_at_m1_is_a_class_of_its_own(self):
+        # A shape whose M range is 1 alone meets the class 1-16 at M 1 (its representative 8 taken down
+        # to 1): that problem is judged and exported as a class of M 1 alone, so a winner of the GEMV
+        # keys gets an entry at M 1, never one over M 2-16, which runs on the tiles; a problem at M 8 of
+        # the same shape keeps the class, from M 2.
+        classes = parse_m_classes("1-16:8")
+        probs = problems_from_shapes([Shape("bf16", 4096, 4096, m_lo=1, m_hi=1)], classes)
+        self.assertEqual([p.m for p in probs], [1])
+
+        def ratio(p, c):
+            return 0.8 if (c.text == "gemv_blocks=1") == (p.m == 1) else 1.0
+
+        for extra in ([], [Problem("bf16", 8, 4096, 4096)]):
+            fx = Fixture(probs + extra, texts=("gemv_blocks=1", "nr=16"), ratio=ratio)
+            w = fx.winners(classes)
+            self.assertEqual([(x.mclass.label(), [p.m for p in x.problems]) for x in w],
+                             [("1", [1])] + [("1-16", [8])] * len(extra))
+            fx.confirm(w)
+            entries, skipped = E.build_entries(w, fx.spaces, SCHEMA, UARCH)
+            self.assertEqual([(e["id"], e["match"]["m"], e["config"].get("gemv_blocks", e["config"].get("nr")))
+                              for e in entries],
+                             [("bf16-n4096-k4096-m1-t32", {"min": 1, "max": 1}, 1)]
+                             + [("bf16-n4096-k4096-m1-16-t32", {"min": 2, "max": 16}, 16)] * len(extra))
+            self.assertEqual(skipped, [])
+            doc = E.build_doc(entries, None, SCHEMA)
+            self.assertEqual(E.resolve_config(doc, probs[0].with_m(4), SCHEMA, UARCH)[1],
+                             ["table:bf16-n4096-k4096-m1-16-t32"] if extra else [])
+
     def test_noise_and_confirmation_gates(self):
         fx = Fixture(texts=("threads_cap=16", "nr=16"))
         w = fx.winners()
@@ -336,8 +407,9 @@ class TestEntries(unittest.TestCase):
         self.assertEqual(entries[0]["match"]["m"], {"min": 9, "max": 16})
 
     def test_winner_must_be_legal_over_its_class(self):
-        p = Problem("bf16", 1, 512, 4096)
-        cls = MClass(1, 512, (1,))
+        # At M 2: a problem at M 1 is a class of its own.
+        p = Problem("bf16", 2, 512, 4096)
+        cls = MClass(2, 512, (2,))
         self.assertIsNotNone(C.Space(p, SCHEMA, UARCH).from_text("col_groups=32"))
         self.assertFalse(E.legal_over_class("col_groups=32", p, cls, SCHEMA, UARCH))  # n_tiles 16 at M 256
         self.assertTrue(E.legal_over_class("threads_cap=16", p, cls, SCHEMA, UARCH))

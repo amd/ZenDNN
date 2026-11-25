@@ -178,7 +178,12 @@ class TestSearch(unittest.TestCase):
                  log=lambda m: None).run()
         summ = R.summarize(db.load())
         self.assertEqual(len(summ), len(PROBLEMS))
-        self.assertTrue(all(len(ps.cands) == 8 and ps.default_ms > 0 for ps in summ.values()))
+        # An M = 1 problem has the few distinct plans of the GEMV kernels' keys.
+        for k, ps in summ.items():
+            sp = spaces[k]
+            want = min(8, len(C.unique(sp.iter_grid(), sp))) if sp.p.m == 1 else 8
+            self.assertEqual(len(ps.cands), want, k)
+            self.assertGreater(ps.default_ms, 0, k)
 
 
 @unittest.skipUnless(HAVE_NUMPY, "numpy is not installed")

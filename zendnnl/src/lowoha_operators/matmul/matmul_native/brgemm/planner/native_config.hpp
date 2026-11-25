@@ -291,6 +291,19 @@ struct heuristic_params_t {
     /// more than cm_gain_pct percent faster: the row blocks divide the
     /// slice more evenly.  0: no such rule.
     int cm_int4_min_m = 48;
+    // M = 1 calls.
+    /// An M = 1 call runs on the GEMV kernels of its route where the build
+    /// has them; 0: on the tiles, which give the same bits.
+    bool gemv = true;
+    /// pin: the 32-column blocks one GEMV kernel call reads side by side, at
+    /// most kNativeGemvMaxBlocks (an INT8 or INT4 route
+    /// kNativeGemvMaxIntBlocks), in whole units of the call: a gated call
+    /// whose halves pair as whole blocks reads 2 for 1 or 3
+    /// (native_gemv_call_blocks); 0: native_gemv_call_blocks' rule.
+    int gemv_blocks = 0;
+    /// An M = 1 call whose layout is at most this percent of L2 runs on the
+    /// calling thread; 0: none.
+    int gemv_one_thread_pct = 25;
 };
 
 /// A partial heuristic_params_t: what one source sets.  Fields mirror
@@ -328,6 +341,8 @@ struct native_config_t {
     std::optional<int> cm_group_rows_pct, cm_drift_kib, cm_pass_kib;
     std::optional<int> cm_pass_calls, cm_block_kib, cm_block_k;
     std::optional<int> cm_int8_l1_pct, cm_int4_min_m;
+    std::optional<bool> gemv;
+    std::optional<int> gemv_blocks, gemv_one_thread_pct;
 
     bool empty() const;
     bool operator==(const native_config_t &o) const;

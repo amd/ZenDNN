@@ -32,7 +32,8 @@ import random
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 from . import cost_model as cm
-from .plan import Plan, builtin_plan, ceil_div, effective_signature, mirrored, resolve, slab_tile_width
+from .plan import (
+    GEMV_KEYS, Plan, builtin_plan, ceil_div, effective_signature, mirrored, resolve, slab_tile_width, worker_threads)
 from .problems import Problem
 from .schema import Schema
 
@@ -147,16 +148,20 @@ def parse_override(text: str, schema: Schema) -> List[Tuple[Dict[str, str], Dict
 # ---------------------------------------------------------------- search space
 
 def search_keys(schema: Schema, dtype: str, allow_bit_changing: bool = False,
-                include: Optional[Iterable[str]] = None, exclude: Iterable[str] = ()) -> List[str]:
+                include: Optional[Iterable[str]] = None, exclude: Iterable[str] = (),
+                m: Optional[int] = None) -> List[str]:
     """Keys searched for dtype: those that apply to it and keep its bits
     (decision 6).  By default only the keys the plan mirror reads: a candidate
     of any other key resolves as dropped; and the unit of the blocks schedule
     as nb, its columns whatever nr the plan takes, where the schema has nb,
-    not as unit_tiles."""
+    not as unit_tiles.  By default a problem of M m = 1, which runs on the GEMV
+    kernels, takes their keys (GEMV_KEYS) only, and any other M the others."""
     names = list(include) if include is not None else [k.name for k in schema.keys if mirrored(k.name)]
     skip = set(exclude)
     if include is None and "nb" in schema.key_map:
         skip.add("unit_tiles")
+    if include is None and m is not None:
+        skip.update(k for k in names if (k in GEMV_KEYS) != (m == 1))
     out = []
     for n in names:
         spec = schema.key(n)
@@ -240,6 +245,9 @@ def _value_rule(key: str, p: Problem, schema: Schema) -> List[Any]:
         "cm_group_rows_pct": [100, 150], "cm_drift_kib": [1024, 16384], "cm_pass_kib": [0, 64, 256],
         "cm_pass_calls": [2, 8], "cm_block_kib": [4096, 65536], "cm_block_k": [0, 1024, 4096],
         "cm_int8_l1_pct": [50, 100], "cm_int4_min_m": [0, 16, 128],
+        # An M = 1 call: the tiles, the blocks of a GEMV kernel call (an INT8 or INT4 route takes
+        # at most 2), and the layouts that run on the calling thread, from none to 10 times L2.
+        "gemv": [False], "gemv_blocks": [1, 2, 3, 4], "gemv_one_thread_pct": [0, 50, 100, 200, 400, 1000],
     }
     if key in fixed:
         return fixed[key]
@@ -307,10 +315,12 @@ class Space:
         # Settings under every candidate's own (tune.py calibrate): the built-in plan stays the
         # reference, and the base alone is a candidate the search proposes first.
         self.base = canonical(base or {}, schema, problem.dtype)
-        # Leave out plans with a smaller team than the built-in plan's: a call on
-        # fewer threads changes the thread team the calls before and after it see.
+        # Leave out plans with a smaller team than the built-in plan's (worker_threads:
+        # an M = 1 call's GEMV threads, or the calling thread alone): a call on fewer
+        # threads changes the thread team the calls before and after it see.
         self.keep_threads = keep_threads
-        keys = list(keys) if keys is not None else search_keys(schema, problem.dtype, allow_bit_changing)
+        keys = list(keys) if keys is not None else search_keys(schema, problem.dtype, allow_bit_changing,
+                                                               m=problem.m)
         self.choices: Dict[str, List[Any]] = {}
         for k in keys:
             spec = schema.key(k)
@@ -343,7 +353,7 @@ class Space:
         if not cfg:
             return self.default
         r = resolve(self.p, cfg, self.uarch, self.schema)
-        if not r.applied or (self.keep_threads and r.plan.threads < self.default.plan.threads):
+        if not r.applied or (self.keep_threads and worker_threads(r.plan) < worker_threads(self.default.plan)):
             return None
         return Candidate(cfg, format_settings(cfg, self.schema), r.plan, effective_signature(r.plan, self.p))
 

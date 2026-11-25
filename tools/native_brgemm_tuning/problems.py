@@ -387,6 +387,9 @@ def parse_m_classes(text: str) -> List[MClass]:
         rep = tuple(int(r) for r in reps.split("/")) if reps else ((hi,) if hi else (lo,))
         if any(not (r >= lo and (hi is None or r <= hi)) for r in rep):
             raise ValueError("M class %r has a representative outside its range" % item)
+        # An M = 1 call runs on the GEMV kernels, whose keys no other M reads.
+        if 1 in rep and hi != 1:
+            raise ValueError("M class %r: M 1, which runs on the GEMV kernels, takes a class of its own (1)" % item)
         out.append(MClass(lo, hi, rep))
     out.sort(key=lambda c: c.lo)
     for a, b in zip(out, out[1:]):

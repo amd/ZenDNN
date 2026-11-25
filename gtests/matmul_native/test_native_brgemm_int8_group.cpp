@@ -294,6 +294,21 @@ operands_t make_operands(const gcase_t &c) {
     return o;
 }
 
+/// The dst a call compared with the reference algorithm starts from: o's
+/// initial one, or under beta a copy of an f32 one with its values rounded to
+/// bf16.  beta * C is then exact for the betas the cases take, so the
+/// reference algorithm's bits do not depend on whether its compiler fuses
+/// that product with the add that follows it.
+buffer_t exact_beta_init(const gcase_t &c, const operands_t &o) {
+    if (c.beta == 0.0f || c.dst != kF32) return o.init;
+    buffer_t b = copy_of(o.init);
+    for (size_t i = 0; i < static_cast<size_t>(c.M) * c.N; ++i)
+        nt::store_f32(b.get(), kF32, i,
+                static_cast<float>(zendnnl::common::bfloat16_t(
+                        nt::load_f32(b.get(), kF32, i))));
+    return b;
+}
+
 /// The call on weight wei into dst; a source scale buffer per call, since a
 /// dynamic quantization writes its scales there.
 nt::call_t make_call(const gcase_t &c, const operands_t &o, const void *wei,
@@ -423,12 +438,12 @@ float model_at(const gcase_t &c, const operands_t &o, const source_t &s, int m,
     const bool beta_last = c.dst == kF32 || c.dst == kBf16;
     if (c.alpha != 1.0f) sum *= c.alpha;
     if (c.beta != 0.0f && !beta_last)
-        sum += nt::load_f32(o.init.get(), c.dst, mn) * c.beta;
+        sum += nt::mul_unfused(nt::load_f32(o.init.get(), c.dst, mn), c.beta);
     if (c.wgran == wgran_t::channel || c.wgran == wgran_t::tensor)
         sum *= nt::load_f32(o.wei_scale.get(), c.wei_scale_dt,
                 c.wgran == wgran_t::channel ? static_cast<size_t>(n) : 0);
     if (c.beta != 0.0f && beta_last)
-        sum += nt::load_f32(o.init.get(), c.dst, mn) * c.beta;
+        sum += nt::mul_unfused(nt::load_f32(o.init.get(), c.dst, mn), c.beta);
     if (c.bias != kNone) sum += nt::load_f32(o.bias.get(), c.bias, n);
     if (c.po == po_t::gelu || c.po == po_t::gelu_add)
         sum = 0.5f * sum * (1.0f + std::erf(sum * kSqrt2Over2));
@@ -668,9 +683,14 @@ TEST_P(NativeBrgemmInt8PerGroup, MatchesReferenceOrder) {
                 got.get(), c.N, model.get(), c.N, c.dst, c.M, c.N, 0))
                 << "vs the model of the reference order";
 
-    // the reference algorithm, which takes a per-group source per group
+    // the reference algorithm, which takes a per-group source per group, from
+    // exact_beta_init's dst
     if (c.gran == gran_t::group) {
-        buffer_t ref = copy_of(o.init);
+        operands_t e = o;
+        e.init = exact_beta_init(c, o);
+        const buffer_t from_e
+                = e.init.get() == o.init.get() ? got : run_native(c, e);
+        buffer_t ref = copy_of(e.init);
         const buffer_t scale = copy_of(o.src_scale);
         nt::call_t rc = make_call(c, o, raw.get(), ref.get(), scale);
         rc.params.lowoha_algo = matmul_algo_t::reference;
@@ -678,11 +698,11 @@ TEST_P(NativeBrgemmInt8PerGroup, MatchesReferenceOrder) {
         rc.params.num_threads = 0;
         ASSERT_EQ(nt::run_matmul(rc), status_t::success) << "reference";
         if (transcendental(c))
-            EXPECT_TRUE(near_gelu(c, got.get(), ref.get()))
+            EXPECT_TRUE(near_gelu(c, from_e.get(), ref.get()))
                     << "vs the reference algorithm";
         else
             EXPECT_TRUE(nt::within_steps(
-                    got.get(), c.N, ref.get(), c.N, c.dst, c.M, c.N, 0))
+                    from_e.get(), c.N, ref.get(), c.N, c.dst, c.M, c.N, 0))
                     << "vs the reference algorithm";
     }
 
@@ -1828,7 +1848,14 @@ TEST(NativeBrgemmInt8SourceGroups, MatchesTheReferenceAlgorithm) {
                 got.get(), c.N, model.get(), c.N, c.dst, c.M, c.N, 0))
                 << "vs the model of the reference order";
         if (c.src != src_t::s8) continue;
-        buffer_t want = copy_of(o.init);
+        // from exact_beta_init's dst
+        const buffer_t init = exact_beta_init(c, o);
+        if (init.get() != o.init.get()) {
+            got = copy_of(init);
+            call.dst = got.get();
+            ASSERT_EQ(run_direct(call), status_t::success);
+        }
+        buffer_t want = copy_of(init);
         call.dst = want.get();
         ASSERT_EQ(run_reference_direct(call), status_t::success);
         EXPECT_TRUE(nt::within_steps(

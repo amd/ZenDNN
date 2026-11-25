@@ -289,7 +289,7 @@ def collect(sdir: str, backend: Optional[Backend] = None) -> List[Dict[str, Any]
                 if text is None:
                     st, why = "failed", "no output (the run did not happen)"
                 else:
-                    st, why = applied_status(logged, s["text"])
+                    st, why = applied_status(logged, s["text"], s.get("expect"), gslots[0].get(k, {}).get("expect"))
                     if st == "dropped":
                         # The warning names the planner's N.
                         why = reasons.get((p.m, p.plan_n, p.k), why)

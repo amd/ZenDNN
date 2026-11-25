@@ -17,6 +17,7 @@
 #ifndef MATMUL_NATIVE_BRGEMM_PLANNER_NATIVE_PLANNER_HPP
 #define MATMUL_NATIVE_BRGEMM_PLANNER_NATIVE_PLANNER_HPP
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -24,6 +25,7 @@
 #include <string>
 
 #include "lowoha_operators/matmul/lowoha_common.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/gemv/native_gemv_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/native_kernel_registry.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_config.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
@@ -176,6 +178,16 @@ struct native_plan_t {
     // Source preparation.
     int copy_block = 64;
     int64_t copy_par_min = 0; ///< of the problem's dtype
+    // M = 1 calls.
+    /// An M = 1 call on the GEMV kernels of route; false on the tiles.
+    bool gemv = false;
+    /// > 0: the gemv_blocks pin at most the route's, which
+    /// native_gemv_call_blocks takes in whole units of the call; 0:
+    /// native_gemv_call_blocks' rule.
+    int gemv_blocks = 0;
+    /// The percent of L2 the layout of an M = 1 call that runs on the
+    /// calling thread takes at most (native_one_thread); 0 for any other M.
+    int gemv_one_thread_pct = 0;
     // Provenance.
     uint8_t sources = 0; ///< bit 1 << native_plan_source_t per layer applied
     const native_config_entry_t *rules_entry = nullptr;
@@ -188,9 +200,10 @@ struct native_plan_t {
 /// The built-in planner.  With heuristic_params_t{} it returns the built-in
 /// tile plan plus the INT8 tile's choices: the plan of the rules and, with
 /// cost_model, the cost model's choice among the rules' variants of a BF16
-/// or per-channel INT8 plan (native_cost_model.hpp).  A set pin replaces its
-/// decision, and later rules read the pinned value.  Pure: no allocation,
-/// no global state other than the kernel bounds.
+/// or per-channel INT8 plan (native_cost_model.hpp); then an M = 1 call's
+/// GEMV fields.  A set pin replaces its decision, and later rules read the
+/// pinned value.  Pure: no allocation, no global state other than the kernel
+/// bounds.
 native_plan_t heuristic_plan(const native_problem_t &p,
         const UarchParams &uarch, const heuristic_params_t &params);
 
@@ -238,6 +251,47 @@ int native_int8_pass_quads(
 /// within it, so every row call after the first reads a pass's slab again.
 int native_int4_pass_quads(
         const native_plan_t &p, int group_quads, int cw, int rows, int max_mr);
+
+/// M = 1 helpers, inline: the looper evaluates them on every M = 1 call,
+/// whose cost the smallest calls feel.  Whether a call of plan p over a
+/// layout of packed bytes, on an L2 of l2 bytes, runs on the calling thread:
+/// an M = 1 call whose layout is at most gemv_one_thread_pct percent of L2,
+/// which one core reads in less time than a region of the call's team takes
+/// to open.
+inline bool native_one_thread(
+        const native_plan_t &p, size_t packed, size_t l2) {
+    return packed <= l2 * static_cast<size_t>(p.gemv_one_thread_pct) / 100;
+}
+/// A call on the GEMV kernels (native_plan_t::gemv): the threads that take
+/// its units (the blocks of its columns a thread takes whole, units of
+/// them), one where it runs on the calling thread, else the plan's team, at
+/// most one per unit.
+inline int native_gemv_threads(
+        const native_plan_t &p, size_t packed, size_t l2, int units) {
+    if (native_one_thread(p, packed, l2)) return 1;
+    return std::max(1, std::min(p.threads, units));
+}
+/// The blocks one of its GEMV kernel calls on threads threads reads side by
+/// side, each a stream of its own: the plan's gemv_blocks; else two, the
+/// streams per core DRAM and the L3 serve best, unless a thread's share of
+/// a float route's layout fits half of L2, where four give the multiply-adds
+/// the accumulators that hide their latency.  The kernels of the INT8 tile's
+/// routes split their exact sums over more accumulators of their own.  A
+/// kernel call reads whole units of unit_blocks blocks, one at least: a
+/// gated call whose halves pair as whole blocks (a gate block and its up
+/// block, 2) reads 2 for 1, 2 or 3, and 4 for 4 on a float route.
+inline int native_gemv_call_blocks(const native_plan_t &p, size_t packed,
+        size_t l2, int threads, int unit_blocks) {
+    int blocks = p.gemv_blocks;
+    if (blocks == 0 && native_route(p.route).cls != native_route_class_t::rows)
+        blocks = kNativeGemvMaxIntBlocks;
+    if (blocks == 0) {
+        const size_t share
+                = threads <= 1 ? packed : packed / static_cast<size_t>(threads);
+        blocks = share <= l2 / 2 ? kNativeGemvMaxBlocks : 2;
+    }
+    return std::max(1, blocks / unit_blocks) * unit_blocks;
+}
 
 /// A partial config and where it came from.  Owned by its source and
 /// immutable, except for the one-warning flag.
@@ -322,8 +376,11 @@ std::unique_ptr<native_planner_t> make_native_planner(
 /// when none.
 std::string native_plan_source_names(const native_plan_t &plan);
 
-/// format_native_config of the merged config of the layers kept in plan;
-/// "-" when none.
+/// The merged config of the layers kept in plan, without the keys its INT8
+/// scheme does not apply.
+native_config_t native_plan_config(const native_plan_t &plan);
+
+/// format_native_config of native_plan_config(plan); "-" when empty.
 std::string native_plan_config_text(const native_plan_t &plan);
 
 } // namespace native

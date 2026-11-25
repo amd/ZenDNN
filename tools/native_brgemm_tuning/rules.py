@@ -16,7 +16,7 @@
 """Learned rules: a cost-sensitive decision tree over the rule features.
 
 The rules learn from, and apply to, the calls from M = 2: an M = 1 call runs on
-the GEMV kernels.  The classes are a few measured configs (the winners of most
+the GEMV kernels, whose keys come from entries.  The classes are a few measured configs (the winners of most
 problems) plus the built-in plan.  cost[i, c] is config c's time on problem i
 relative to the built-in plan (1 for the built-in plan); a cell never measured costs
 `unknown` (slightly above 1, so leaves prefer configs measured on their
@@ -110,8 +110,9 @@ class CostTree:
         return walk(self.root, 0)
 
 
-# The loader applies the rules to every call, and no entry matches M = 1: an M = 1 call runs
-# on the GEMV kernels, which take only the plan's threads, so no rule may reach it.
+# The loader applies the rules to every call, and they learn the plans of the tiles: an M = 1
+# call runs on the GEMV kernels, which take none of them (an entry of M 1 sets their keys), so
+# no rule may reach it.
 MIN_RULE_M = 2
 
 

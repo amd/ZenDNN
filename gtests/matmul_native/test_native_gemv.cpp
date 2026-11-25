@@ -30,7 +30,9 @@
 // sign in each column, is checked against an f64 model within the bound of
 // each kernel's accumulation; the plan line names the GEMV kernels, in every
 // M = 1 call of every bit case, and keeps the tiles' plan, and a weight
-// shared by M = 1 calls and calls of larger M keeps one layout.
+// shared by M = 1 calls and calls of larger M keeps one layout.  The keys of
+// an M = 1 call (gemv, gemv_blocks, gemv_one_thread_pct) resolve as the
+// built-in rules do, and every value of each keeps the bits.
 
 #include <algorithm>
 #include <cmath>
@@ -46,6 +48,7 @@
 #include "lowoha_operators/common/omp_thread_control.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/native_kernel_registry.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/native_brgemm_looper.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/planner/native_planner.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_hw.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_pack.hpp"
 #include "matmul_native/native_brgemm_test_utils.hpp"
@@ -1173,8 +1176,12 @@ TEST(NativeGemv, EveryBitCaseRunsItsGemvKernels) {
                         = ::testing::internal::GetCapturedStdout();
                 const std::string gemv = m1_field(log, "gemv");
                 const int team = std::atoi(m1_field(log, "team").c_str());
+                // No key of the GEMV kernels is set: the line names neither
+                // their threads nor their blocks per call.
                 if (st == status_t::success && gemv == gemv_kind(c.form, ph)
-                        && (!c.team || team > 1))
+                        && (!c.team || team > 1)
+                        && m1_field(log, "gemv_threads").empty()
+                        && m1_field(log, "gemv_blocks").empty())
                     continue;
                 if (bad++ < 20)
                     std::fprintf(stderr,
@@ -1334,6 +1341,312 @@ TEST(NativeGemv, WidenedF16SourceKeepsItsRow) {
     };
     nt::expect_in_child({{"ZENDNNL_MATMUL_NATIVE_F16_ACCUM", "f32"}}, body,
             "ZENDNNL_MATMUL_NATIVE_F16_ACCUM=f32");
+}
+
+// ── The keys of an M = 1 call ────────────────────────────────────────────
+
+/// The planner's problem of an M = 1 (or M) call over a weight of wei_dt,
+/// a quantized one over a bf16 source quantized per token, on threads.
+nat::native_problem_t m1_problem(
+        data_type_t wei_dt, int N, int K, int threads, int M = 1) {
+    nat::GemmDescriptor d;
+    d.M = M;
+    d.N = N;
+    d.K = K;
+    const bool int8 = wei_dt == kS8 || wei_dt == kS4;
+    d.src_dt = int8 ? kBf16 : wei_dt;
+    d.wei_dt = wei_dt;
+    d.dst_dt = int8 ? kBf16 : wei_dt;
+    d.num_threads = threads;
+    mm::matmul_params params;
+    params.dynamic_quant = int8;
+    nat::native_int8_decision_t decision;
+    if (wei_dt == kS4) {
+        decision.scheme = nat::native_int8_scheme_t::per_group;
+        decision.groups = K / kGroup;
+        params.quant_params.wei_scale.dt = kBf16;
+    }
+    return nat::make_native_problem(
+            d, params, nullptr, nat::kNativeLayoutPackNr, decision);
+}
+
+// The planner resolves the keys of an M = 1 call into its plan: by default
+// every M = 1 call on the GEMV kernels of its route with the rules of
+// today's looper (the calling thread for a layout of at most a quarter of
+// L2; two blocks per kernel call, four for a float route whose thread's
+// share of the layout fits half of L2), any other M on the tiles; gemv=0 on
+// the tiles, which keep the one-thread rule; the gemv_blocks pin at most
+// the route's blocks.
+TEST(NativeGemv, PlannerResolvesTheKeysOfOneRow) {
+    nat::UarchParams u;
+    u.l3_domain_cores = 8;
+    u.avx512f = u.avx512bf16 = u.avx512vnni = true;
+    const nat::heuristic_params_t builtin;
+    const auto plan
+            = [&](const nat::native_problem_t &p, const char *cfg = nullptr) {
+        nat::native_config_t c;
+        std::string why;
+        if (cfg != nullptr) {
+            EXPECT_TRUE(nat::parse_native_config(cfg, c, why)) << cfg << why;
+        }
+        return nat::heuristic_plan(p, u, nat::apply_native_config(builtin, c));
+    };
+    const nat::native_problem_t bf16 = m1_problem(kBf16, 4096, 4096, 32);
+    const nat::native_problem_t f32 = m1_problem(kF32, 4096, 4096, 32);
+    const nat::native_problem_t s8 = m1_problem(kS8, 4096, 4096, 32);
+    const nat::native_problem_t s4 = m1_problem(kS4, 4096, 4096, 32);
+    for (const nat::native_problem_t *p : {&bf16, &f32, &s8, &s4}) {
+        const nat::native_plan_t q = plan(*p);
+        EXPECT_TRUE(q.gemv);
+        EXPECT_EQ(q.gemv_blocks, 0);
+        EXPECT_EQ(q.gemv_one_thread_pct, 25);
+        const nat::native_plan_t off = plan(*p, "gemv=0");
+        EXPECT_FALSE(off.gemv);
+        EXPECT_EQ(off.gemv_blocks, 0);
+        EXPECT_EQ(off.gemv_one_thread_pct, 25);
+        // Every other field is the plan of the tiles.
+        EXPECT_EQ(off.nr, q.nr);
+        EXPECT_EQ(off.threads, q.threads);
+        const nat::native_plan_t two
+                = plan(m1_problem(p->wei_dt, 4096, 4096, 32, 2));
+        EXPECT_FALSE(two.gemv);
+        EXPECT_EQ(two.gemv_one_thread_pct, 0);
+        EXPECT_EQ(plan(m1_problem(p->wei_dt, 4096, 4096, 32, 2),
+                          "gemv_blocks=2,gemv_one_thread_pct=100")
+                          .gemv_one_thread_pct,
+                0);
+    }
+    for (const int b : {1, 2, 3, 4}) {
+        const std::string cfg = "gemv_blocks=" + std::to_string(b);
+        EXPECT_EQ(plan(bf16, cfg.c_str()).gemv_blocks, b);
+        EXPECT_EQ(plan(f32, cfg.c_str()).gemv_blocks, b);
+        EXPECT_EQ(plan(s8, cfg.c_str()).gemv_blocks, std::min(b, 2));
+        EXPECT_EQ(plan(s4, cfg.c_str()).gemv_blocks, std::min(b, 2));
+    }
+    EXPECT_EQ(plan(bf16, "gemv_one_thread_pct=0").gemv_one_thread_pct, 0);
+    EXPECT_EQ(plan(bf16, "gemv_one_thread_pct=1000").gemv_one_thread_pct, 1000);
+    // The rules of the built-in plan are the looper's of before: one thread
+    // for a layout of at most l2 / 4; for workers threads, 2 blocks, or 4 for
+    // a float route whose share, packed / workers (all of it for one), is at
+    // most l2 / 2.
+    const nat::native_plan_t qf = plan(bf16), qi = plan(s8);
+    uint64_t x = 88172645463325252ull;
+    for (int i = 0; i < 20000; ++i) {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        const size_t l2 = size_t {1} << (16 + x % 8);
+        const size_t packed = 64 * (1 + (x >> 8) % (l2 / 8));
+        const int units = 1 + static_cast<int>((x >> 32) % 256);
+        const bool one = packed <= l2 / 4;
+        EXPECT_EQ(nat::native_one_thread(qf, packed, l2), one);
+        const int workers = std::max(1, std::min(one ? 1 : qf.threads, units));
+        EXPECT_EQ(nat::native_gemv_threads(qf, packed, l2, units), workers);
+        const size_t share = workers <= 1 ? packed : packed / workers;
+        // Units of one block, and of a gate block with its up block.
+        for (const int unit : {1, 2}) {
+            EXPECT_EQ(
+                    nat::native_gemv_call_blocks(qf, packed, l2, workers, unit),
+                    share <= l2 / 2 ? 4 : 2);
+            EXPECT_EQ(
+                    nat::native_gemv_call_blocks(qi, packed, l2, workers, unit),
+                    2);
+        }
+    }
+    // The pins: every call on the calling thread, or none, and a fixed
+    // count of blocks, in whole units: a paired call reads 2 for 1, 2 or 3.
+    EXPECT_FALSE(nat::native_one_thread(
+            plan(bf16, "gemv_one_thread_pct=0"), 64, size_t {1} << 20));
+    EXPECT_TRUE(nat::native_one_thread(plan(bf16, "gemv_one_thread_pct=1000"),
+            size_t {10} << 20, size_t {1} << 20));
+    EXPECT_EQ(nat::native_gemv_call_blocks(
+                      plan(bf16, "gemv_blocks=3"), 64, size_t {1} << 20, 1, 1),
+            3);
+    EXPECT_EQ(nat::native_gemv_call_blocks(plan(s8, "gemv_blocks=4"),
+                      size_t {1} << 30, size_t {1} << 20, 32, 1),
+            2);
+    for (const int b : {1, 2, 3, 4}) {
+        const std::string cfg = "gemv_blocks=" + std::to_string(b);
+        EXPECT_EQ(nat::native_gemv_call_blocks(plan(bf16, cfg.c_str()),
+                          size_t {1} << 30, size_t {1} << 20, 32, 2),
+                b == 4 ? 4 : 2)
+                << cfg;
+        EXPECT_EQ(nat::native_gemv_call_blocks(plan(s8, cfg.c_str()),
+                          size_t {1} << 30, size_t {1} << 20, 32, 2),
+                2)
+                << cfg;
+    }
+}
+
+// Every bit case under each value of the keys of an M = 1 call gives the
+// tiles' bits: on the tiles (gemv=0), with 1 to 4 blocks per GEMV kernel
+// call (gemv_blocks; at most 2 for the INT8 and s4 kernels, in whole units:
+// a gated call whose halves pair as whole blocks reads 2 for 1 or 3) and
+// with every call on its team or on the calling thread
+// (gemv_one_thread_pct).  Its plan line names the kernels it ran on and,
+// only where gemv_blocks or gemv_one_thread_pct is set, their threads (at
+// most its team) and the most blocks one of their calls read (a worker's
+// whole share where the pin takes more), on the calling thread exactly where
+// the layout is at most that percent of L2 and on a team of several threads
+// where none takes it and the call has.  In a child per setting, which the
+// process planner reads once.
+TEST(NativeGemv, EveryKeyValueKeepsTheBits) {
+    if (!nat::native_base_isa()) GTEST_SKIP() << "needs AVX-512 and FMA";
+    struct setting_t {
+        const char *text;
+        bool gemv;
+        int blocks; ///< > 0: gemv_blocks
+        int pct; ///< >= 0: gemv_one_thread_pct
+    };
+    const setting_t settings[] = {{"gemv=0", false, 0, -1},
+            {"gemv_blocks=1", true, 1, -1}, {"gemv_blocks=2", true, 2, -1},
+            {"gemv_blocks=3", true, 3, -1}, {"gemv_blocks=4", true, 4, -1},
+            {"gemv_one_thread_pct=0", true, 0, 0},
+            {"gemv_one_thread_pct=1000", true, 0, 1000}};
+    for (const setting_t &s : settings) {
+        auto body = [&s] {
+            const bool ph = nat::native_kernel_registry().f16_kind()
+                    == nat::native_kernel_kind_t::f16_ph;
+            const size_t l2 = static_cast<size_t>(nat::detect_uarch().l2_bytes);
+            int bad = 0, checked = 0, paired = 0;
+            for (const gcase_t &c : bit_cases()) {
+                if (!cpu_serves(c.form)) continue;
+                ++checked;
+                const operands_t o = make_operands(c);
+                const buffer_t raw = copy_of(o.wei);
+                const buffer_t tiles = copy_of(o.init);
+                const buffer_t got = copy_of(o.init);
+                ::testing::internal::CaptureStdout();
+                const status_t ts
+                        = run_tiles(make_call(c, o, raw.get(), tiles.get()));
+                ::testing::internal::GetCapturedStdout();
+                ::testing::internal::CaptureStdout();
+                const status_t st = run_tiles(
+                        make_call(c, o, raw.get(), got.get()), true);
+                const std::string log
+                        = ::testing::internal::GetCapturedStdout();
+                const std::string gemv = m1_field(log, "gemv");
+                const std::string threads = m1_field(log, "gemv_threads");
+                const std::string blocks = m1_field(log, "gemv_blocks");
+                const int team = std::atoi(m1_field(log, "team").c_str());
+                const bool fields = s.gemv && (s.blocks > 0 || s.pct >= 0);
+                // A unit of a gated call whose halves pair as whole blocks
+                // is a gate block and its up block.
+                const std::string pairing = m1_field(log, "pairing");
+                const int unit = !pairing.empty() && pairing != "staged"
+                                && (c.N / 2) % 32 == 0
+                        ? 2
+                        : 1;
+                if (s.gemv && unit == 2) ++paired;
+                const int pin = std::min(s.blocks, int8_form(c.form) ? 2 : 4);
+                // A kernel call reads the pin in whole units, or a worker's
+                // whole share where that is fewer: units of its columns of a
+                // gate block and its up block, of a run of 16 columns of each
+                // half where the halves pair but are not whole blocks, else
+                // of a block.
+                const bool runs
+                        = unit == 1 && !pairing.empty() && pairing != "staged";
+                const int units = unit == 2 ? c.N / 64
+                        : runs              ? c.N / 32
+                                            : (c.N + 31) / 32;
+                const int workers = std::max(1, std::atoi(threads.c_str()));
+                const int share = (units + workers - 1) / workers;
+                std::string why;
+                if (st != status_t::success || ts != status_t::success)
+                    why = "status";
+                else if (std::memcmp(got.get(), tiles.get(), dst_bytes(c)))
+                    why = "not the tiles' bits";
+                else if (gemv != (s.gemv ? gemv_kind(c.form, ph) : "none"))
+                    why = "gemv=" + gemv;
+                else if (threads.empty() == fields || blocks.empty() == fields)
+                    why = "gemv_threads / gemv_blocks shown or not";
+                else if (s.blocks > 0
+                        && std::atoi(blocks.c_str())
+                                != std::min(std::max(1, pin / unit), share)
+                                        * unit)
+                    why = "gemv_blocks=" + blocks;
+                else if (fields && std::atoi(threads.c_str()) > team)
+                    why = "gemv_threads=" + threads
+                            + " above team=" + std::to_string(team);
+                else if (s.pct >= 0) {
+                    const size_t packed = nat::native_packed_bytes(
+                            o.params.dtypes.wei, c.K, c.N, 32);
+                    const bool one
+                            = packed <= l2 * static_cast<size_t>(s.pct) / 100;
+                    if ((threads == "1") != (team == 1))
+                        why = "gemv_threads=" + threads
+                                + ", team=" + std::to_string(team);
+                    else if (one && threads != "1")
+                        why = "not on the calling thread";
+                    else if (!one && c.threads > 1 && c.N > 64 && team == 1)
+                        why = "on the calling thread";
+                }
+                if (why.empty()) continue;
+                if (bad++ < 20)
+                    std::fprintf(stderr, "%s, %s: %s\n", s.text, c.name.c_str(),
+                            why.c_str());
+            }
+            if (s.gemv && paired == 0) {
+                std::fprintf(
+                        stderr, "%s: no call pairs whole blocks\n", s.text);
+                ++bad;
+            }
+            if (bad)
+                std::fprintf(
+                        stderr, "%s: %d of %d calls\n", s.text, bad, checked);
+            return bad;
+        };
+        nt::expect_in_child({{"ZENDNNL_API_LOG_LEVEL", "4"},
+                                    {"ZENDNNL_MATMUL_NATIVE_CONFIG", s.text}},
+                body, s.text);
+    }
+}
+
+// A call on the GEMV kernels names the workers that took its units: its
+// plan's threads, at most the threads of its region, which a runtime that
+// takes OMP_THREAD_LIMIT gives fewer than the call asks for (4 of 8 here);
+// and gives the tiles' bits.  In a child, whose runtime reads the limit.
+TEST(NativeGemv, LineNamesTheWorkersThatRan) {
+    if (!nat::native_base_isa()) GTEST_SKIP() << "needs AVX-512 and FMA";
+    auto body = [] {
+        gcase_t c;
+        c.form = form_t::bf16;
+        c.N = 4096;
+        c.K = 1024;
+        c.threads = 8;
+        const operands_t o = make_operands(c);
+        const buffer_t raw = copy_of(o.wei);
+        const buffer_t tiles = copy_of(o.init);
+        const buffer_t got = copy_of(o.init);
+        ::testing::internal::CaptureStdout();
+        const status_t ts = run_tiles(make_call(c, o, raw.get(), tiles.get()));
+        ::testing::internal::GetCapturedStdout();
+        ::testing::internal::CaptureStdout();
+        const status_t st
+                = run_tiles(make_call(c, o, raw.get(), got.get()), true);
+        const std::string log = ::testing::internal::GetCapturedStdout();
+        int bad = 0;
+        const auto expect = [&bad](bool ok, const std::string &what) {
+            if (ok) return;
+            std::fprintf(stderr, "%s\n", what.c_str());
+            ++bad;
+        };
+        expect(st == status_t::success && ts == status_t::success, "status");
+        expect(std::memcmp(got.get(), tiles.get(), dst_bytes(c)) == 0,
+                "not the tiles' bits");
+        const int team = std::atoi(m1_field(log, "team").c_str());
+        expect(m1_field(log, "threads") == "8",
+                "threads=" + m1_field(log, "threads"));
+        expect(team >= 1 && team <= 8, "team=" + m1_field(log, "team"));
+        expect(m1_field(log, "gemv_threads") == std::to_string(team),
+                "gemv_threads=" + m1_field(log, "gemv_threads")
+                        + ", team=" + m1_field(log, "team"));
+        return bad;
+    };
+    nt::expect_in_child(
+            {{"ZENDNNL_API_LOG_LEVEL", "4"}, {"OMP_THREAD_LIMIT", "4"},
+                    {"ZENDNNL_MATMUL_NATIVE_CONFIG", "gemv_one_thread_pct=0"}},
+            body, "OMP_THREAD_LIMIT=4");
 }
 
 } // namespace

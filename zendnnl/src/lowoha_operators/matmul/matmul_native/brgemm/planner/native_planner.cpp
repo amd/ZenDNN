@@ -30,6 +30,7 @@
 
 #include "common/hash_utils.hpp"
 #include "common/zendnnl_global.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/gemv/native_gemv_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/native_int4_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/native_int8_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/native_kernel_registry.hpp"
@@ -1195,10 +1196,9 @@ native_plan_t int4_group_passes(const native_problem_t &p,
     return one;
 }
 
-} // namespace
-
-native_plan_t heuristic_plan(const native_problem_t &p,
-        const UarchParams &uarch, const heuristic_params_t &hp) {
+/// The rules' plan and, with cost_model, the model's choice.
+native_plan_t tile_plan(const native_problem_t &p, const UarchParams &uarch,
+        const heuristic_params_t &hp) {
     const native_plan_t q = rules_plan(p, uarch, hp);
     if (hp.cost_model == 0) return q;
     const native_route_desc_t &rd = native_route(p.route());
@@ -1208,6 +1208,35 @@ native_plan_t heuristic_plan(const native_problem_t &p,
     return rd.cls != native_route_class_t::rows
             ? int8_model_plan(p, uarch, hp, q)
             : model_plan(p, uarch, hp, q);
+}
+
+/// The fields of an M = 1 call of plan q: the layouts it runs on the calling
+/// thread; on the GEMV kernels of its route unless gemv is off, but a plan
+/// of the F16_PH tiles stays on them without the F16_PH GEMV kernels
+/// (ZENDNNL_NATIVE_F16_PH_KERNELS builds both or neither), with the
+/// gemv_blocks pin at most the route's blocks.
+void m1_fields(const native_problem_t &p, const heuristic_params_t &hp,
+        native_plan_t &q) {
+    if (p.M != 1) return;
+    q.gemv_one_thread_pct = hp.gemv_one_thread_pct;
+    const native_route_desc_t &rd = native_route(q.route);
+    if (!hp.gemv
+            || (rd.family == native_kernel_kind_t::f16_ph
+                    && select_native_f16_ph_gemv(1) == nullptr))
+        return;
+    q.gemv = true;
+    q.gemv_blocks = std::min(hp.gemv_blocks,
+            rd.cls == native_route_class_t::rows ? kNativeGemvMaxBlocks
+                                                 : kNativeGemvMaxIntBlocks);
+}
+
+} // namespace
+
+native_plan_t heuristic_plan(const native_problem_t &p,
+        const UarchParams &uarch, const heuristic_params_t &hp) {
+    native_plan_t q = tile_plan(p, uarch, hp);
+    m1_fields(p, hp, q);
+    return q;
 }
 
 const char *validate_native_plan(
@@ -1555,7 +1584,7 @@ std::string native_plan_source_names(const native_plan_t &plan) {
     return names.empty() ? source_name(native_plan_source_t::heuristic) : names;
 }
 
-std::string native_plan_config_text(const native_plan_t &plan) {
+native_config_t native_plan_config(const native_plan_t &plan) {
     native_config_t cfg;
     for (const native_config_entry_t *e :
             {plan.rules_entry, plan.table_entry, plan.override_entry}) {
@@ -1563,7 +1592,11 @@ std::string native_plan_config_text(const native_plan_t &plan) {
     }
     if (plan.int8_scheme != native_int8_scheme_t::per_channel)
         cfg = native_config_for_scheme(cfg, plan.int8_scheme, nullptr);
-    const std::string text = format_native_config(cfg);
+    return cfg;
+}
+
+std::string native_plan_config_text(const native_plan_t &plan) {
+    const std::string text = format_native_config(native_plan_config(plan));
     return text.empty() ? "-" : text;
 }
 

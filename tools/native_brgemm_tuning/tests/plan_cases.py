@@ -39,7 +39,8 @@ from plan.py.
 
 --nb draws the N block's cases instead (their own seed and count): every case
 sets nb, half of them the blocks schedule, a quarter unit_tiles too (nb
-replaces it). fixtures/plan_check_nb.json holds their digests and kernel kinds
+replaces it), and a share the keys of an M = 1 call, most of them at M = 1,
+for which the dump adds the call's GEMV fields. fixtures/plan_check_nb.json holds their digests and kernel kinds
 the same way, from the F16 kernels (a dump and schema made under
 ZENDNNL_MATMUL_NATIVE_F16_ACCUM=f32, or without AVX512-FP16), while
 plan_check.json holds the F16_PH kernels' plans: one fixture per f16 kernel
@@ -65,7 +66,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from native_brgemm_tuning import schema as schema_mod  # noqa: E402
 from native_brgemm_tuning.candidates import parse_settings  # noqa: E402
 from native_brgemm_tuning.plan import (  # noqa: E402
-    RULE_SWITCHES, Plan, heuristic_plan, params_from_config, validate_plan)
+    RULE_SWITCHES, Plan, gemv_kind, heuristic_plan, params_from_config, validate_plan)
 from native_brgemm_tuning.problems import FORMATS, Problem  # noqa: E402
 
 FIXTURE = os.path.join(os.path.dirname(schema_mod.FIXTURE), "plan_check.json")
@@ -122,6 +123,11 @@ PINS = (
     ("int8_kc", ["4", "64", "1024"]), ("unit_tiles", ["1", "2", "3", "8", "4096"]),
 )
 NB_VALUES = ["16", "48", "64", "128", "256", "4096"]
+# The keys of an M = 1 call, their built-in values among them, drawn in the nb cases at M = 1 in
+# GEMV_PCT percent of them (2 percent at other Ms), each key then with half a chance.
+GEMV_KEYS = (("gemv", ["0", "1"]), ("gemv_blocks", ["1", "2", "3", "4"]),
+             ("gemv_one_thread_pct", ["0", "1", "25", "100", "400", "1000"]))
+GEMV_PCT = 60
 # Weight types of the drawn cases and their percent shares; the group sizes of a weight of
 # group scales only (0: one group over K).
 DTYPE_SHARES = (("bf16", 34), ("s8", 26), ("s4", 22), ("f16", 12), ("f32", 6))
@@ -237,6 +243,10 @@ def random_config(rng: Rng, m: int, nb: bool = False) -> str:
     elif rng.percent(6):
         cfg["schedule"] = rng.choice(SCHEDULES)
         cfg.pop("col_groups", None)
+    if nb and rng.percent(GEMV_PCT if m == 1 else 2):
+        for key, values in GEMV_KEYS:
+            if rng.percent(50):
+                cfg[key] = rng.choice(values)
     return ",".join("%s=%s" % kv for kv in cfg.items()) or "-"
 
 
@@ -301,14 +311,22 @@ def parse_machine(text: str) -> Tuple[int, int, int, int, int]:
     return v[0], v[1], v[2], v[3], v[4]
 
 
-def plan_line(p: Problem, q: Plan, valid: bool) -> str:
-    return ("n=%d nr=%d mr=%d mb=%d m_blocks=%d n_tiles=%d kc=%d kind=%s threads=%d col_groups=%d unit_tiles=%d "
+def plan_line(p: Problem, q: Plan, valid: bool, m1: bool = False) -> str:
+    """The dump's line of plan q of p; with m1 (a config that names a key of an M = 1 call) the
+    GEMV kernels of the call, whether it runs on the calling thread and on the GEMV kernels its
+    threads and blocks per kernel call."""
+    line = ("n=%d nr=%d mr=%d mb=%d m_blocks=%d n_tiles=%d kc=%d kind=%s threads=%d col_groups=%d unit_tiles=%d "
             "domain_threads=%d row_unit=%d traversal=%s scratch=%d rows=%d/%d cw=%d budget=%d quads=%d "
             "direct=%d dequant_bias=%d scheme=%s copy_block=%d copy_par_min=%d valid=%d" % (
                 p.plan_n, q.nr, q.mr, q.mb, q.m_blocks, q.n_tiles, q.kc, q.kind, q.threads, q.col_groups,
                 q.unit_tiles, q.domain_threads, q.row_unit, q.traversal, q.scratch_floats, q.int8_rows_nv1,
                 q.int8_rows_nv2, q.int8_cw_mask, q.int8_pass_budget, q.int8_pass_quads, q.int8_direct_store,
                 q.int8_bias_in_dequant, q.int8_scheme, q.copy_block, q.copy_par_min, valid))
+    if m1:
+        line += " gemv=%s one_thread=%d" % (gemv_kind(q, p), q.one_thread)
+        if q.gemv:
+            line += " gemv_threads=%d gemv_blocks=%d" % (q.gemv_threads, q.gemv_call_blocks)
+    return line
 
 
 def tuner_line(c: Case, schema: Any, model: str = "") -> str:
@@ -321,7 +339,7 @@ def tuner_line(c: Case, schema: Any, model: str = "") -> str:
     p = c.problem()
     u = c.uarch().with_overrides(model) if model else c.uarch()
     q = heuristic_plan(p, u, params_from_config(cfg, schema), schema)
-    return plan_line(p, q, validate_plan(q, p, schema) is None)
+    return plan_line(p, q, validate_plan(q, p, schema) is None, any(k in cfg for k, _ in GEMV_KEYS))
 
 
 def normalized(line: str) -> str:
