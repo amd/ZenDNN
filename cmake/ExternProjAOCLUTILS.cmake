@@ -96,12 +96,18 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
 
   message(DEBUG "${ZENDNNL_MSG_PREFIX}AU_CMAKE_ARGS=${AU_CMAKE_ARGS}")
 
+  # On Windows, build aocl-utils in the ZenDNNL configuration so the C runtimes match.
+  set(AU_CONFIG Release)
+  if(WIN32 AND CMAKE_BUILD_TYPE)
+    set(AU_CONFIG ${CMAKE_BUILD_TYPE})
+  endif()
+
   set(NPROC ${ZENDNNL_BUILD_SYS_NPROC})
   # MSBuild rejects "-j" and has no "all" target.
   if(CMAKE_GENERATOR MATCHES "^Visual Studio")
-    set(AU_BUILD_COMMAND cmake --build . --config Release --parallel ${NPROC})
+    set(AU_BUILD_COMMAND cmake --build . --config ${AU_CONFIG} --parallel ${NPROC})
   else()
-    set(AU_BUILD_COMMAND cmake --build . --config Release --target all -- -j${NPROC})
+    set(AU_BUILD_COMMAND cmake --build . --config ${AU_CONFIG} --target all -- -j${NPROC})
   endif()
   if (ZENDNNL_LOCAL_AOCLUTILS)
 
@@ -114,7 +120,7 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
       ${AU_PATCH_ARGS}
       CMAKE_ARGS ${AU_CMAKE_ARGS}
       BUILD_COMMAND ${AU_BUILD_COMMAND}
-      INSTALL_COMMAND cmake --build . --config Release --target install
+      INSTALL_COMMAND cmake --build . --config ${AU_CONFIG} --target install
       BUILD_BYPRODUCTS ${AU_BYPRODUCTS})
   else()
 
@@ -130,7 +136,7 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
       ${AU_PATCH_ARGS}
       CMAKE_ARGS ${AU_CMAKE_ARGS}
       BUILD_COMMAND ${AU_BUILD_COMMAND}
-      INSTALL_COMMAND cmake --build . --config Release --target install
+      INSTALL_COMMAND cmake --build . --config ${AU_CONFIG} --target install
       BUILD_BYPRODUCTS ${AU_BYPRODUCTS}
       UPDATE_DISCONNECTED TRUE)
   endif()

@@ -27,10 +27,16 @@
  * used to trace which functions are called in debug mode.
  */
 #ifndef NDEBUG
+// MSVC (cl) has no __PRETTY_FUNCTION__; __FUNCSIG__ is its equivalent.
+#if defined(_MSC_VER) && !defined(__clang__)
+#define ZENDNNL_PRETTY_FUNCTION __FUNCSIG__
+#else
+#define ZENDNNL_PRETTY_FUNCTION __PRETTY_FUNCTION__
+#endif
 #define LOG_DEBUG_INFO(...) \
     do \
         debuglog_verbose("[", get_relative_path(__FILE__), "], [", \
-                __PRETTY_FUNCTION__, "]: ", __VA_ARGS__); \
+                ZENDNNL_PRETTY_FUNCTION, "]: ", __VA_ARGS__); \
     while (0);
 #else
 #define LOG_DEBUG_INFO(...)

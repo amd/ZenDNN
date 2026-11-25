@@ -29,6 +29,11 @@ if(ZENDNNL_DEPENDS_AOCLDLP)
 
     list(APPEND AD_CMAKE_ARGS "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}")
     list(APPEND AD_CMAKE_ARGS "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}")
+    # Match the C runtime of a Debug ZenDNNL build on Windows.
+    string(TOUPPER "${CMAKE_BUILD_TYPE}" _ad_build_type)
+    if(WIN32 AND _ad_build_type STREQUAL "DEBUG")
+      list(APPEND AD_CMAKE_ARGS "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDebugDLL")
+    endif()
 
     # uncoment if openmp root need to be given
     # list(APPEND AD_CMAKE_ARGS "-DDLP_OPENMP_ROOT=/path/to/openmp")

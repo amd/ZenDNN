@@ -37,6 +37,12 @@ if (ZENDNNL_DEPENDS_ONEDNN)
     list(APPEND ONEDNN_CMAKE_ARGS "-DCMAKE_INSTALL_LIBDIR=lib")
     list(APPEND ONEDNN_CMAKE_ARGS "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}")
     list(APPEND ONEDNN_CMAKE_ARGS "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}")
+    # Match the C runtime of a Debug ZenDNNL build on Windows.
+    string(TOUPPER "${CMAKE_BUILD_TYPE}" _onednn_build_type)
+    if(WIN32 AND _onednn_build_type STREQUAL "DEBUG")
+      list(APPEND ONEDNN_CMAKE_ARGS "-DCMAKE_POLICY_DEFAULT_CMP0091=NEW")
+      list(APPEND ONEDNN_CMAKE_ARGS "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDebugDLL")
+    endif()
     # Not propagating parent CMAKE_C/CXX_FLAGS to oneDNN: oneDNN is a mature standalone
     # library that manages its own compilation flags; avoids flag conflicts with TensorFlow
     # builds (e.g. TensorFlow's -D_FORTIFY_SOURCE=1 vs oneDNN's -D_FORTIFY_SOURCE=2).

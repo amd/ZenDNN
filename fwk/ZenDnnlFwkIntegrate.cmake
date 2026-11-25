@@ -261,8 +261,14 @@ endif()
 # Windows (they add _static, and libaoclutils keeps its lib prefix), so list
 # them per platform.
 if(WIN32)
-  set(_znl_aoclutils_file "libaoclutils_static.lib")
-  set(_znl_aucpuid_file "au_cpuid_static.lib")
+  # Debug builds of aocl-utils use a -dbg postfix.
+  set(_znl_au_postfix "")
+  string(TOUPPER "$CACHE{ZENDNNL_BUILD_TYPE}" _znl_build_type)
+  if(_znl_build_type STREQUAL "DEBUG")
+    set(_znl_au_postfix "-dbg")
+  endif()
+  set(_znl_aoclutils_file "libaoclutils_static${_znl_au_postfix}.lib")
+  set(_znl_aucpuid_file "au_cpuid_static${_znl_au_postfix}.lib")
   set(_znl_aocldlp_file "aocl-dlp_static.lib")
 else()
   set(_znl_aoclutils_file "libaoclutils.a")
