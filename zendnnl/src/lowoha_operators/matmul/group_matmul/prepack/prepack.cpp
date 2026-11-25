@@ -851,12 +851,19 @@ inline aocl_dlp::PackStats warm_aocl_sym_quant(
 //     the strict-stable branch), AND
 //   * `stable * nr_align <= max_N` (no narrow-N escape — the
 //     planner's `FixedTeamRounds` strategy fires, not `Sequential`).
-inline aocl_dlp::PackStats warm_aocl_n_tile(
-        const PrepackRequest &p, int stable, int nr_align_eff) {
+inline aocl_dlp::PackStats warm_aocl_n_tile(const PrepackRequest &p, int stable,
+        int nr_align_eff, int group_schedule) {
     aocl_dlp::PackStats st;
+    // Single-tile in-place pack is allowed only where the weights may be
+    // mutated (mixed in-place mode, same gate as the full-weight reorder).
+    // WC=1 and every other mode keep the caller's buffer raw.  The gate
+    // needs the schedule of the prepack that is running, the same one the
+    // full-weight path uses.
     aocl_dlp::warm_aocl_weight_cache_n_tile(*p.weight, *p.K, *p.N, *p.ldb,
             *p.transB, warm_iwc(p), p.num_ops_total, p.wei_dtype, p.num_threads,
-            stable, nr_align_eff, st, p.weight_cache_type);
+            stable, nr_align_eff, st, p.weight_cache_type,
+            /*single_tile_inplace=*/
+            mixed_inplace_for_wei(p, group_schedule));
     return st;
 }
 
@@ -2151,7 +2158,8 @@ inline void cross_warm(const PrepackRequest &p, matmul_algo_t inner_kernel,
                 const bool int8_dlp = int8_sym_quant_warm_candidate(p);
                 const auto st_extra = int8_dlp
                         ? warm_aocl_n_tile_sym_quant(p, stable, nr_align_cross)
-                        : warm_aocl_n_tile(p, stable, nr_align_cross);
+                        : warm_aocl_n_tile(
+                                  p, stable, nr_align_cross, current_algo);
                 st_aocl.total_attempted += st_extra.total_attempted;
                 st_aocl.packed_ok += st_extra.packed_ok;
                 st_aocl.skipped_invalid += st_extra.skipped_invalid;
@@ -2486,7 +2494,8 @@ void prepack_n_tile(const PrepackRequest &p) {
                 st_aocl = warm_aocl_n_tile_sym_quant(p, stable, nr_align_eff);
                 primary_label = "aocl_per_tile_sym_quant";
             } else {
-                st_aocl = warm_aocl_n_tile(p, stable, nr_align_eff);
+                st_aocl = warm_aocl_n_tile(p, stable, nr_align_eff,
+                        /*group_schedule=*/3);
                 primary_label = "aocl_per_tile";
             }
         } else {

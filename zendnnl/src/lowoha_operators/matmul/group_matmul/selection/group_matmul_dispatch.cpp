@@ -159,8 +159,23 @@ bool prepare_auto_weight_cache(std::vector<matmul_params> &params,
     // buffer.  CcdExpertWaves and forced StaticExpertTeams would ask for a different
     // split; once this licence is on, n_tile_execute retargets those plans
     // onto the warmed split instead of allocating a second prompt copy.
-    const bool strict_stable_dlp_decode
-            = !custom_kernel_effective && strict_stable_decode_plan;
+    // F32 is not a custom-kernel family, so a call whose weights are all F32
+    // must not take this licence.  Enabling mixed mode for it keeps WC=2 and
+    // sends a CK-off plan down the mixed-refusal Sequential fallback.  Every
+    // other weight family keeps the licence it had before.  That includes
+    // INT8 without a declared capacity and W4A8: their packs stay out of
+    // place as well, but those layers keep the mixed WC=2 policy.
+    auto pool_has_non_f32_weight = [](const std::vector<matmul_params> *pool) {
+        if (pool == nullptr) { return false; }
+        for (const auto &p : *pool) {
+            if (p.dtypes.wei != data_type_t::f32) { return true; }
+        }
+        return false;
+    };
+    const bool call_has_non_f32_weight = pool_has_non_f32_weight(&params)
+            || pool_has_non_f32_weight(secondary_params);
+    const bool strict_stable_dlp_decode = !custom_kernel_effective
+            && strict_stable_decode_plan && call_has_non_f32_weight;
     const bool process_mixed_eligible = aocl_dlp_compiled
             && get_grp_matmul_prepack() && get_grp_matmul_cross_warm()
             && (custom_kernel_effective || strict_stable_dlp_decode)
@@ -177,7 +192,9 @@ bool prepare_auto_weight_cache(std::vector<matmul_params> &params,
                     "strict-stable AOCL DLP decode, unlimited LRU capacity): "
                     "AOCL full-weight prompt reorder mutates the weight buffer "
                     "in place; CK / AOCL per-tile decode stay out-of-place, "
-                    "pre-warmed from raw weights before the mutation.");
+                    "pre-warmed from raw weights before the mutation, except "
+                    "a single full-N BF16 AOCL tile, which may be packed in "
+                    "place.");
         }
         // Per call, a BF16/FP16 MoE layer AUTO keeps on ALGO 3
         // (`grp_matmul_auto_algo3_only`) has the custom-kernel pack as the

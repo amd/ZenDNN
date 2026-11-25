@@ -173,12 +173,19 @@ status_t warm_aocl_weight_cache(const std::vector<const void *> &weight,
 /// Per-tile reorder count = `total_count * effective_stable` vs
 /// full-weight `total_count`; the AOCL reorder primitives fast-path
 /// on duplicate keys so re-warming an already-cached tile is free.
+///
+/// `single_tile_inplace` (default false): when true, a BF16 expert whose
+/// plan is ONE full-N tile is packed in place.  The caller sets it only
+/// when the weights may be mutated (`mixed_inplace_for_wei`), so WC=1 and
+/// every other mode keep the caller's buffer raw.  All other tiles stay
+/// out of place.
 status_t warm_aocl_weight_cache_n_tile(const std::vector<const void *> &weight,
         const std::vector<int> &K, const std::vector<int> &N,
         const std::vector<int> &ldb, const std::vector<bool> &transB,
         const std::vector<bool> &is_weights_const, int total_count,
         data_type_t wei_dtype, int num_threads, int stable, int nr_align,
-        PackStats &stats, int32_t weight_cache_type = -1);
+        PackStats &stats, int32_t weight_cache_type = -1,
+        bool single_tile_inplace = false);
 
 /// DQ-INT8 symmetric-quant full-weight warmer (Gap B — int8/bf16
 /// cross-warm parity).  Sibling of `warm_aocl_weight_cache`

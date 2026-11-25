@@ -486,7 +486,7 @@ status_t warm_aocl_weight_cache_n_tile(const std::vector<const void *> &weight,
         const std::vector<int> &ldb, const std::vector<bool> &transB,
         const std::vector<bool> &is_weights_const, int total_count,
         data_type_t wei_dtype, int num_threads, int stable, int nr_align,
-        PackStats &stats, int32_t weight_cache_type) {
+        PackStats &stats, int32_t weight_cache_type, bool single_tile_inplace) {
 
     if (total_count <= 0 || num_threads <= 0 || stable <= 0 || nr_align <= 0) {
         return status_t::success;
@@ -500,11 +500,13 @@ status_t warm_aocl_weight_cache_n_tile(const std::vector<const void *> &weight,
     } else {
         weight_cache_type = effective_weight_cache_type(weight_cache_type);
     }
-    // Out-of-place warmer: also run under WC==2 in the grouped AUTO
-    // mixed-in-place mode so this layout is pre-warmed from the RAW weights
-    // before the bf16/f16 full-weight AOCL in-place mutation.  Stays
-    // OUT-OF-PLACE (the reorderAndCacheWeights call below keeps
-    // weight_cache_type=1); only the full-weight warmer mutates W.
+    // Also run under WC==2 in the grouped AUTO mixed-in-place mode so this
+    // layout is pre-warmed from the RAW weights before the bf16/f16
+    // full-weight AOCL in-place mutation.  Tiles are packed OUT-OF-PLACE
+    // (weight_cache_type=1) with one exception: a single full-N BF16 tile is
+    // packed in place when the caller passes `single_tile_inplace` (see
+    // `tile_cache_type` below).  Apart from that tile, only the full-weight
+    // warmer mutates W.
     if (!should_warm_weight_cache(weight_cache_type)) {
         return status_t::success;
     }
@@ -619,10 +621,21 @@ status_t warm_aocl_weight_cache_n_tile(const std::vector<const void *> &weight,
                     /*extra_input_hash=*/0);
 
             void *reordered_unused = nullptr;
-            // `reorderAndCacheWeights<BF16/F16 storage type>` returns `true`
-            // on the out-of-place (weight_cache_type=1) path this per-tile
-            // warmer always takes; the dead `else ++skipped` branch was
-            // dropped — see file-level counter semantics block.
+            // Per-tile packs stay out of place: their keys are slices, and
+            // the full-weight prompt reorder is the one in-place mutation.
+            // The exception is a single tile that covers all of N.  Its key
+            // is the full-weight key, so an out-of-place insert here makes
+            // the later in-place warm a cache hit and the caller buffer
+            // stays raw.  The caller passes `single_tile_inplace` only when
+            // it may mutate the weights (`mixed_inplace_for_wei`), so this
+            // BF16 single tile is written in place only in that mode.
+            // F16 stays out of place: a CK-refused f16 weight must not be
+            // rewritten while a later supported call can still read it raw.
+            const int tile_cache_type
+                    = (n_thr_e == 1 && wei_dtype == data_type_t::bf16
+                              && single_tile_inplace)
+                    ? 2
+                    : 1;
             // Honour the return, as the three sibling warmers do. It is
             // false on an allocation failure, and `skipped_invalid == 0` is
             // what the mixed-in-place path tests before it decides the
@@ -634,16 +647,14 @@ status_t warm_aocl_weight_cache_n_tile(const std::vector<const void *> &weight,
                               /*trans=*/(transB[i] ? 't' : 'n'),
                               /*mem_format_b=*/'n',
                               aocl_get_reorder_buf_size_f16f16f16of16,
-                              aocl_reorder_f16f16f16of16,
-                              /*weight_cache_type=*/1)
+                              aocl_reorder_f16f16f16of16, tile_cache_type)
                     : reorderAndCacheWeights<int16_t>(key, w_tile,
                               reordered_unused, K[i], n_tile, ldb[i],
                               /*order=*/'r',
                               /*trans=*/(transB[i] ? 't' : 'n'),
                               /*mem_format_b=*/'n',
                               aocl_get_reorder_buf_size_bf16bf16f32of32,
-                              aocl_reorder_bf16bf16f32of32,
-                              /*weight_cache_type=*/1);
+                              aocl_reorder_bf16bf16f32of32, tile_cache_type);
             if (!warmed) {
                 ++stats.skipped_invalid;
                 continue;
